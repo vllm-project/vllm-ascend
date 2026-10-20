@@ -30,8 +30,8 @@ from vllm.multimodal.utils import encode_image_url
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import (
+    RemoteEPDServer,
     RemoteOpenAIServer,
-    RemotePDServer,
     wait_until_npu_memory_free,
 )
 
@@ -49,6 +49,16 @@ STORE_PUT_LOG = "Stored encoder output in Mooncake Store"
 STORE_HIT_LOG = "encoder output(s) from Mooncake Store"
 STORE_GLOBAL_SEGMENT_SIZE = "1GB"
 STORE_LOCAL_BUFFER_SIZE = "512MB"
+STORE_ROCE_RESOURCE_CONFIG = json.dumps(
+    {
+        "store": {
+            "comm_resource_config": {
+                "protocol_desc": ["roce:device"],
+            }
+        }
+    },
+    separators=(",", ":"),
+)
 
 
 class _CapturingEPDServer(RemoteEPDServer):
@@ -499,6 +509,7 @@ def test_cross_encoder_store_put_then_remote_hit(
     baseline_outputs: dict[str, str],
     mooncake_store_config: str,
     use_fabric_mem: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """E0 publishes outputs that E1 reuses through both Store transports."""
     encoder0_port = get_open_port()
@@ -516,12 +527,26 @@ def test_cross_encoder_store_put_then_remote_hit(
         _consumer_args(pd1_port, pd1_reservation_port),
     ]
     env_dict = {
-        "ASCEND_ENABLE_USE_FABRIC_MEM": "1" if use_fabric_mem else "0",
         "MOONCAKE_CONFIG_PATH": mooncake_store_config,
         "MOONCAKE_EC_PROTOCOL": "ascend",
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_USE_V2_MODEL_RUNNER": "1",
     }
+    if use_fabric_mem:
+        env_dict["ASCEND_ENABLE_USE_FABRIC_MEM"] = "1"
+    else:
+        # Mooncake native code treats presence of this variable as true, even
+        # when its value is "0". Remove inherited values before subprocesses
+        # copy the environment, then select a Store-owned RoCE engine.
+        monkeypatch.delenv("ASCEND_ENABLE_USE_FABRIC_MEM", raising=False)
+        monkeypatch.delenv("ASCEND_BUFFER_POOL", raising=False)
+        env_dict.update(
+            {
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": STORE_ROCE_RESOURCE_CONFIG,
+                "HCCL_INTRA_PCIE_ENABLE": "0",
+                "HCCL_INTRA_ROCE_ENABLE": "1",
+            }
+        )
 
     with _CapturingEPDServer(
         vllm_serve_args=server_args,

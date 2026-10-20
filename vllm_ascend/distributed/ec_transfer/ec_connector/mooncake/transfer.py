@@ -113,9 +113,7 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                         cleanup_failed = True
 
                 if cleanup_failed:
-                    raise _RegistrationCleanupError(
-                        "Mooncake registration rollback could not be confirmed"
-                    ) from error
+                    raise _RegistrationCleanupError("Mooncake registration rollback could not be confirmed") from error
                 raise
 
         return acquired

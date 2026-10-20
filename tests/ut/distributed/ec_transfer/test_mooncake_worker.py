@@ -1,5 +1,6 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -32,12 +33,17 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
 def _make_bounce_config(
     *,
     max_num_seqs: int = 128,
+    max_num_active_seqs: int | None = None,
     extra_config: dict[str, object] | None = None,
-) -> MagicMock:
-    config = MagicMock()
-    config.scheduler_config.max_num_seqs = max_num_seqs
-    config.ec_transfer_config.ec_connector_extra_config = {} if extra_config is None else extra_config
-    return config
+) -> SimpleNamespace:
+    resolved_extra_config = {} if extra_config is None else extra_config
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=max_num_seqs,
+            max_num_active_seqs=max_num_active_seqs,
+        ),
+        ec_transfer_config=SimpleNamespace(ec_connector_extra_config=resolved_extra_config),
+    )
 
 
 def _make_push(transfer_id: str, nbytes: int = 10) -> MagicMock:
@@ -1118,24 +1124,35 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks(
 
 
 @pytest.mark.parametrize(
-    ("max_num_seqs", "expected_mib"),
+    ("max_num_seqs", "max_num_active_seqs", "expected_mib"),
     [
-        (5, 10),
-        (128, 256),
-        (256, 256),
+        (5, None, 10),
+        (256, None, 256),
+        (128, 16, 32),
+        (128, 128, 256),
+        (72, 36, 72),
     ],
 )
 def test_resolve_default_bounce_arena_size(
     max_num_seqs: int,
+    max_num_active_seqs: int | None,
     expected_mib: int,
 ):
     config = _make_bounce_config(
         max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
     )
 
     result = _resolve_bounce_arena_size(config)
 
     assert result == expected_mib * 1024 * 1024
+
+
+def test_resolve_default_bounce_arena_size_without_active_field():
+    config = _make_bounce_config(max_num_seqs=5)
+    del config.scheduler_config.max_num_active_seqs
+
+    assert _resolve_bounce_arena_size(config) == 10 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -1145,6 +1162,7 @@ def test_resolve_default_bounce_arena_size(
 )
 def test_resolve_explicit_bounce_arena_size(configured_size, expected_size):
     config = _make_bounce_config(
+        max_num_active_seqs=1,
         extra_config={
             "ascend_mooncake_bounce_arena_size": configured_size,
         },

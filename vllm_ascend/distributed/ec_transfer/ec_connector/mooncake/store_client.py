@@ -26,21 +26,19 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
     _validate_mooncake_tensor_metadata,
 )
 from vllm.distributed.mooncake_store import DEFAULT_TENANT_ID, MooncakeStoreConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
     ASCEND_DIRECT_MEMORY_ALIGNMENT,
     AscendBounceArena,
-    _RegistrationRangePlan,
     _plan_source,
+    _RegistrationRangePlan,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
     _RegistrationCleanupError,
 )
-
-logger = init_logger(__name__)
 
 # KV Pool keeps independently owned Ascend Store engines and their registered
 # KV backing alive for the worker-process lifetime.  The encoder Store follows
@@ -59,13 +57,9 @@ def use_store_independent_te() -> bool:
     try:
         config = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise ValueError(
-            "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object"
-        ) from error
+        raise ValueError("ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object") from error
     if not isinstance(config, dict):
-        raise ValueError(
-            "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object"
-        )
+        raise ValueError("ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object")
     return True
 
 
@@ -123,9 +117,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
             raise RuntimeError("A different Store-independent staging slab is already registered")
         ret = self.store.register_buffer(tensor.data_ptr(), tensor.nbytes)
         if ret != 0:
-            raise EmbeddingStoreOperationError(
-                f"Failed to register producer staging slab with Store: {ret}"
-            )
+            raise EmbeddingStoreOperationError(f"Failed to register producer staging slab with Store: {ret}")
         self._independent_staging_owner = tensor
 
     def _ensure_bounce_available(self) -> torch.Tensor:
@@ -163,9 +155,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                     for owner, address, size in buffers:
                         status = self.store.register_buffer(address, size)
                         if status != 0:
-                            raise EmbeddingStoreOperationError(
-                                f"Failed to register embedding buffer: {status}"
-                            )
+                            raise EmbeddingStoreOperationError(f"Failed to register embedding buffer: {status}")
                         addresses.append(address)
                 except BaseException as error:
                     cleanup_failed = False
@@ -173,9 +163,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                         cleanup_failed |= self.store.unregister_buffer(address) != 0
                     if cleanup_failed:
                         self._poison(owners)
-                        raise EmbeddingStoreError(
-                            "independent Store registration rollback is unconfirmed"
-                        ) from error
+                        raise EmbeddingStoreError("independent Store registration rollback is unconfirmed") from error
                     raise
             elif not self._use_fabric_mem and buffers:
                 try:
@@ -191,13 +179,9 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                     )
                 except _RegistrationCleanupError as error:
                     self._poison(owners)
-                    raise EmbeddingStoreError(
-                        "shared Store registration rollback is unconfirmed"
-                    ) from error
+                    raise EmbeddingStoreError("shared Store registration rollback is unconfirmed") from error
                 except RuntimeError as error:
-                    raise EmbeddingStoreOperationError(
-                        f"Failed to register embedding buffer: {error}"
-                    ) from error
+                    raise EmbeddingStoreOperationError(f"Failed to register embedding buffer: {error}") from error
             submitted = True
             yield confirm
         except BaseException as error:
@@ -215,15 +199,9 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                             if status != 0:
                                 cleanup_failed = True
                         if cleanup_failed:
-                            raise EmbeddingStoreError(
-                                "independent Store registration release is unconfirmed"
-                            )
-                    elif not self._registration_transfer.release_registration_ranges(
-                        addresses
-                    ):
-                        raise EmbeddingStoreError(
-                            "shared Store registration release is unconfirmed"
-                        )
+                            raise EmbeddingStoreError("independent Store registration release is unconfirmed")
+                    elif not self._registration_transfer.release_registration_ranges(addresses):
+                        raise EmbeddingStoreError("shared Store registration release is unconfirmed")
                 except BaseException:
                     self._poison(owners)
                     raise
@@ -287,11 +265,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                     lease,
                     [
                         (metadata_tensor, 0, len(metadata)),
-                        *(
-                            [(tensor, len(metadata), source.prefix_nbytes)]
-                            if source.prefix_nbytes > 0
-                            else []
-                        ),
+                        *([(tensor, len(metadata), source.prefix_nbytes)] if source.prefix_nbytes > 0 else []),
                     ],
                 )
                 addresses = [bounce_address]
@@ -351,23 +325,15 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                 [sizes],
                 self.replicate_config,
             )
-            if type(result) is not int or (
-                result < 0 and result not in _SAFE_PUT_REJECTIONS
-            ):
-                raise EmbeddingStoreError(
-                    "Mooncake I/O completion is unconfirmed; retaining buffers"
-                )
+            if type(result) is not int or (result < 0 and result not in _SAFE_PUT_REJECTIONS):
+                raise EmbeddingStoreError("Mooncake I/O completion is unconfirmed; retaining buffers")
         except EmbeddingStoreOperationError:
             raise
         except BaseException as error:
             self._poison(owners)
-            raise EmbeddingStoreError(
-                "Mooncake I/O completion is unconfirmed; retaining buffers"
-            ) from error
+            raise EmbeddingStoreError("Mooncake I/O completion is unconfirmed; retaining buffers") from error
         if result < 0:
-            raise EmbeddingStoreOperationError(
-                f"failed to put embedding tensor for {pool_key}"
-            )
+            raise EmbeddingStoreOperationError(f"failed to put embedding tensor for {pool_key}")
         logger.info("Stored encoder output in Mooncake Store")
 
     def retain_fallback_owners(self, owners: list[Any]) -> None:
@@ -501,9 +467,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
             if plan.direct_address is not None:
                 addresses.append(plan.direct_address)
                 sizes.append(plan.direct_nbytes)
-                direct_buffers.append(
-                    (target, plan.registration_address, plan.registration_nbytes)
-                )
+                direct_buffers.append((target, plan.registration_address, plan.registration_nbytes))
             all_addresses.append(addresses)
             all_sizes.append(sizes)
 
@@ -533,11 +497,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                     )
                     continue
                 header_offset = header_offsets[key]
-                metadata = bytes(
-                    bounce.narrow(0, lease.offset + header_offset, header_size)
-                    .cpu()
-                    .tolist()
-                )
+                metadata = bytes(bounce.narrow(0, lease.offset + header_offset, header_size).cpu().tolist())
                 try:
                     _validate_mooncake_tensor_metadata(key, metadata, spec)
                 except EmbeddingStoreOperationError as error:
@@ -545,9 +505,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                     continue
                 plan = plans[key]
                 if plan.prefix_nbytes > 0:
-                    target_prefix = targets[key].view(torch.uint8).view(-1).narrow(
-                        0, 0, plan.prefix_nbytes
-                    )
+                    target_prefix = targets[key].view(torch.uint8).view(-1).narrow(0, 0, plan.prefix_nbytes)
                     target_prefix.copy_(
                         bounce.narrow(
                             0,
@@ -583,9 +541,7 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
             # dual-registered slab.  The installed AscendDirect binding has
             # not demonstrated independent unregister safety; this mirrors KV
             # Pool's process-lifetime registration contract.
-            _PROCESS_LIFETIME_STORE_OWNERS.append(
-                (self.store, self._independent_staging_owner)
-            )
+            _PROCESS_LIFETIME_STORE_OWNERS.append((self.store, self._independent_staging_owner))
             self._independent_staging_owner = None
             self._retained_for_process_lifetime = True
             return
@@ -626,9 +582,7 @@ def _setup_store_owned_engine(
         **setup_kwargs,
     )
     if ret != 0:
-        raise RuntimeError(
-            f"Initialize {topology} MooncakeDistributedStore failed: {ret}"
-        )
+        raise RuntimeError(f"Initialize {topology} MooncakeDistributedStore failed: {ret}")
 
 
 def _setup_store_with_shared_engine(
@@ -669,13 +623,9 @@ def configure_non_fabric_roce() -> None:
 def _configure_shared_roce() -> None:
     """Validate configuration specific to the shared-engine RoCE path."""
     if os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
-        raise ValueError(
-            "shared EC/Store RoCE requires ASCEND_GLOBAL_RESOURCE_CONFIG to be unset"
-        )
+        raise ValueError("shared EC/Store RoCE requires ASCEND_GLOBAL_RESOURCE_CONFIG to be unset")
     if os.getenv("ASCEND_BUFFER_POOL"):
-        raise ValueError(
-            "shared EC/Store RoCE requires ASCEND_BUFFER_POOL to be unset"
-        )
+        raise ValueError("shared EC/Store RoCE requires ASCEND_BUFFER_POOL to be unset")
     configure_non_fabric_roce()
 
 
@@ -709,9 +659,7 @@ def create_ascend_mooncake_embedding_store_client(
     if use_store_independent:
         configure_non_fabric_roce()
     if not use_fabric_mem and os.getenv("ASCEND_BUFFER_POOL"):
-        raise ValueError(
-            "Ascend cross_encoder_cache does not support ASCEND_BUFFER_POOL"
-        )
+        raise ValueError("Ascend cross_encoder_cache does not support ASCEND_BUFFER_POOL")
     if use_fabric_mem:
         # Mooncake only tags a TransferEngine as Store-owned and reads the
         # FabricMem setting while Store initializes that engine. Passing the

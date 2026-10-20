@@ -254,23 +254,15 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 if use_shared_roce_engine:
                     # The validated RoCE topology attaches Store to the global
                     # engine before registering the shared NPU staging slab.
-                    producer_memory.ensure_prepared(
-                        torch.device(self._buffer_device)
-                    )
+                    producer_memory.ensure_prepared(torch.device(self._buffer_device))
                 elif use_independent_store:
-                    producer_memory.ensure_prepared(
-                        torch.device(self._buffer_device)
-                    )
+                    producer_memory.ensure_prepared(torch.device(self._buffer_device))
                     staging = producer_memory.tensor
                     if staging is None:
                         raise RuntimeError("Producer staging slab is unavailable")
                     store_client.register_staging_buffer(staging)
                     self._retain_producer_slab = True
-                backend_type = (
-                    AscendDeferredStoreBackend
-                    if not use_fabric_mem
-                    else MooncakeEmbeddingStoreBackend
-                )
+                backend_type = AscendDeferredStoreBackend if not use_fabric_mem else MooncakeEmbeddingStoreBackend
                 output_store = backend_type(
                     store_client,
                     namespace,
@@ -282,11 +274,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 raise
 
             self._output_store = output_store
-            self._deferred_store = (
-                output_store
-                if isinstance(output_store, AscendDeferredStoreBackend)
-                else None
-            )
+            self._deferred_store = output_store if isinstance(output_store, AscendDeferredStoreBackend) else None
             try:
                 super().start_services()
             except BaseException:
@@ -335,21 +323,14 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             self._deferred_store = None
         drained = True
         if self._control_server is not None:
-            drained = self._reservations.wait_for_writers(
-                self._shutdown_drain_timeout_s
-            )
+            drained = self._reservations.wait_for_writers(self._shutdown_drain_timeout_s)
             self._control_server.close()
         if drained:
             self._consumer_memory.close()
         else:
-            logger.error(
-                "Timed out waiting for Mooncake EC writers; keeping the "
-                "consumer receive pool registered"
-            )
+            logger.error("Timed out waiting for Mooncake EC writers; keeping the consumer receive pool registered")
         if getattr(self, "_retain_producer_slab", False):
-            _PROCESS_LIFETIME_EC_OWNERS.append(
-                (self._transfer, self._producer_memory)
-            )
+            _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, self._producer_memory))
         else:
             self._producer_memory.close()
             self._transfer.close()
@@ -444,9 +425,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         except Exception as error:
             try:
                 if registration_addresses:
-                    released = transfer.release_registration_ranges(
-                        registration_addresses
-                    )
+                    released = transfer.release_registration_ranges(registration_addresses)
                     if not released:
                         raise _RegistrationReleaseError(
                             "EC direct registration rollback could not be confirmed"
@@ -466,17 +445,11 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         transfer = cast(AscendMooncakeTransfer, self._transfer)
 
         try:
-            released = transfer.release_registration_ranges(
-                acquired.registration_addresses
-            )
+            released = transfer.release_registration_ranges(acquired.registration_addresses)
         except BaseException as error:
-            raise _RegistrationReleaseError(
-                "EC direct registration release raised an exception"
-            ) from error
+            raise _RegistrationReleaseError("EC direct registration release raised an exception") from error
         if not released:
-            raise _RegistrationReleaseError(
-                "EC direct registration release could not be confirmed"
-            )
+            raise _RegistrationReleaseError("EC direct registration release could not be confirmed")
         producer_memory.bounce_arena.release(acquired.bounce_lease)
 
     def _run_session_writes(
@@ -505,10 +478,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
         acquired: _AcquiredTransferWave,
     ) -> bool:
-        source_index = {
-            push.spec.transfer_id: index
-            for index, push in enumerate(pushes)
-        }
+        source_index = {push.spec.transfer_id: index for index, push in enumerate(pushes)}
         fragments_by_source: list[list[_TransferFragmentPlan]] = [[] for _ in pushes]
         for fragment in acquired.fragments:
             fragments_by_source[fragment.source_index].append(fragment)
@@ -536,10 +506,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             self._transfer.write(
                 session,
                 [fragment.source_address for fragment, _ in items],
-                [
-                    destination + fragment.destination_offset
-                    for fragment, destination in items
-                ],
+                [destination + fragment.destination_offset for fragment, destination in items],
                 [fragment.nbytes for fragment, _ in items],
             )
 
@@ -550,9 +517,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         for store_put in acquired.store_puts:
             assert deferred_store is not None
             try:
-                store_futures.append(
-                    deferred_store.submit_prepared(store_put)
-                )
+                store_futures.append(deferred_store.submit_prepared(store_put))
             except BaseException as exc:
                 error = exc
                 break
@@ -599,9 +564,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 for index, shard in enumerate(reservations)
                 if not shard.get("ready", False)
                 and not shard.get("cancelled", False)
-                and time.monotonic()
-                - float(shard.get("_received_at", started_at))
-                >= _RESERVATION_REFRESH_SECONDS
+                and time.monotonic() - float(shard.get("_received_at", started_at)) >= _RESERVATION_REFRESH_SECONDS
             ]
             if stale:
                 reservations = self._refresh_remote_reservations(
@@ -614,17 +577,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             source = push.source_tensor
             assert source is not None
             for shard in reservations:
-                if (
-                    shard.get("cached", False)
-                    or shard.get("cancelled", False)
-                    or not shard.get("write", True)
-                ):
+                if shard.get("cached", False) or shard.get("cancelled", False) or not shard.get("write", True):
                     continue
                 if int(shard["nbytes"]) != source.nbytes:
-                    raise RuntimeError(
-                        "Reserved EC size does not match tensor for "
-                        f"mm_hash={push.spec.mm_hash}"
-                    )
+                    raise RuntimeError(f"Reserved EC size does not match tensor for mm_hash={push.spec.mm_hash}")
                 ready.append((push, shard))
                 ordered.setdefault(push.spec.transfer_id, push)
         return ready, list(ordered.values())
@@ -665,9 +621,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         header_size = _MOONCAKE_TENSOR_HEADER.size
         lease = bounce_arena.acquire(header_size * len(store_saves))
         if lease is None:
-            raise RuntimeError(
-                "Store-independent staging requires a nonzero bounce arena"
-            )
+            raise RuntimeError("Store-independent staging requires a nonzero bounce arena")
 
         try:
             copies: list[tuple[torch.Tensor, int, int]] = []
@@ -677,9 +631,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 header_offsets[ticket.identifier] = offset
                 copies.append(
                     (
-                        deferred_store.store_client.prepare_put_header(
-                            ticket.tensor
-                        ),
+                        deferred_store.store_client.prepare_put_header(ticket.tensor),
                         offset,
                         header_size,
                     )
@@ -732,10 +684,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         stage_pushes = list(ordered_pushes)
         staged_ids = {push.spec.transfer_id for push in stage_pushes}
         for push in pushes:
-            if (
-                push.spec.mm_hash in prepared
-                and push.spec.transfer_id not in staged_ids
-            ):
+            if push.spec.mm_hash in prepared and push.spec.transfer_id not in staged_ids:
                 stage_pushes.append(push)
                 staged_ids.add(push.spec.transfer_id)
 
@@ -752,10 +701,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         if staged is None:
             for ticket in prepared.values():
                 deferred_store.abort_prepared(ticket)
-            raise RuntimeError(
-                "one independent-Store encoder batch is larger than the "
-                "producer staging pool"
-            )
+            raise RuntimeError("one independent-Store encoder batch is larger than the producer staging pool")
         try:
             acquired = self._acquire_staged_wave(
                 stage_pushes,
@@ -776,9 +722,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             producer_memory.poison()
             for ticket in prepared.values():
                 deferred_store.abort_prepared(ticket)
-            raise RuntimeError(
-                "joint EC/independent-Store staging completion is unconfirmed"
-            )
+            raise RuntimeError("joint EC/independent-Store staging completion is unconfirmed")
         return staged, acquired, list(prepared.values())
 
     def _write_fallback_batch(
@@ -832,9 +776,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 if reusable:
                     self._release_transfer_wave(acquired)
             if not reusable:
-                raise RuntimeError(
-                    "joint EC/Store fallback completion is unconfirmed"
-                )
+                raise RuntimeError("joint EC/Store fallback completion is unconfirmed")
             cursor = next_cursor
         assert cursor == len(ordered_pushes)
 
@@ -850,12 +792,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             )
 
             if getattr(self, "_use_store_independent_te", False):
-                staged, acquired, prepared = (
-                    self._push_store_independent_staging(
-                        pushes,
-                        ready,
-                        ordered_pushes,
-                    )
+                staged, acquired, prepared = self._push_store_independent_staging(
+                    pushes,
+                    ready,
+                    ordered_pushes,
                 )
                 fallback_store_saves = prepared
                 if staged is not None:
@@ -872,10 +812,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 return
 
             if ready:
-                tensors = [
-                    cast(torch.Tensor, push.source_tensor)
-                    for push in ordered_pushes
-                ]
+                tensors = [cast(torch.Tensor, push.source_tensor) for push in ordered_pushes]
                 staged = self._producer_memory.stage(tensors)
                 if staged is not None:
                     self._submit_original_store_outputs(pushes)
@@ -890,9 +827,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                             ready,
                             acquired,
                         ):
-                            raise RuntimeError(
-                                "EC staging completion is unconfirmed"
-                            )
+                            raise RuntimeError("EC staging completion is unconfirmed")
                     finally:
                         self._producer_memory.release(staged)
                 else:
@@ -903,23 +838,14 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                             f"disabled because {_BOUNCE_ARENA_CONFIG_KEY}=0"
                         )
                     store_saves = (
-                        [
-                            deferred_store.prepare_fallback(push.spec.mm_hash)
-                            for push in ordered_pushes
-                        ]
+                        [deferred_store.prepare_fallback(push.spec.mm_hash) for push in ordered_pushes]
                         if deferred_store is not None
                         else [None] * len(ordered_pushes)
                     )
                     fallback_store_saves = store_saves
-                    ordered_ids = {
-                        push.spec.transfer_id for push in ordered_pushes
-                    }
+                    ordered_ids = {push.spec.transfer_id for push in ordered_pushes}
                     self._submit_original_store_outputs(
-                        [
-                            push
-                            for push in pushes
-                            if push.spec.transfer_id not in ordered_ids
-                        ]
+                        [push for push in pushes if push.spec.transfer_id not in ordered_ids]
                     )
                     self._write_fallback_batch(
                         ordered_pushes,

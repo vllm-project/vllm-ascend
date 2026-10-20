@@ -25,6 +25,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
     AscendBounceArena,
 )
 
+
 class AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered-memory slab on NPU."""
 
@@ -224,10 +225,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         if not tensors:
             return [], []
         allocator = self._allocator
-        required = sum(
-            round_up(tensor.nbytes, allocator.alignment)
-            for tensor in tensors
-        )
+        required = sum(round_up(tensor.nbytes, allocator.alignment) for tensor in tensors)
         if required > self._producer_allocator.staging_capacity:
             return None
 
@@ -263,9 +261,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                     return None
                 self._space_available.wait()
                 if self._poisoned:
-                    raise RuntimeError(
-                        "Ascend producer staging pool is poisoned"
-                    )
+                    raise RuntimeError("Ascend producer staging pool is poisoned")
 
     def _copy_staged(
         self,

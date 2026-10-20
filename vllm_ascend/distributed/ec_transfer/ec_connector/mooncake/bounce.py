@@ -228,9 +228,20 @@ def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
     extra_config = ec_config.ec_connector_extra_config
 
     if _BOUNCE_ARENA_CONFIG_KEY not in extra_config:
+        scheduler_config = vllm_config.scheduler_config
+        max_num_seqs = scheduler_config.max_num_seqs
+        max_num_active_seqs = getattr(
+            scheduler_config,
+            "max_num_active_seqs",
+            None,
+        )
+        # Follow the scheduler's effective active-sequence capacity. Missing
+        # or None preserves the pre-active-cap default exactly.
+        effective_max_num_seqs = max_num_seqs if max_num_active_seqs is None else max_num_active_seqs
         quantum_count = min(
             _DEFAULT_BOUNCE_LIMIT,
-            vllm_config.scheduler_config.max_num_seqs,
+            max_num_seqs,
+            effective_max_num_seqs,
         )
         return ASCEND_DIRECT_MEMORY_ALIGNMENT * quantum_count
 
@@ -375,13 +386,10 @@ def _plan_transfer_waves(
 
     for tensor, include_store in zip(tensors, store_sources, strict=True):
         source = _plan_source(tensor)
-        required = source.prefix_nbytes + (
-            store_header_nbytes if include_store else 0
-        )
+        required = source.prefix_nbytes + (store_header_nbytes if include_store else 0)
         if required > bounce_capacity:
             raise ValueError(
-                f"fallback source requires {required} bounce bytes but arena "
-                f"capacity is {bounce_capacity} bytes"
+                f"fallback source requires {required} bounce bytes but arena capacity is {bounce_capacity} bytes"
             )
         if wave_sources and wave_bounce_nbytes + required > bounce_capacity:
             waves.append(_make_transfer_wave(wave_sources, wave_bounce_nbytes))

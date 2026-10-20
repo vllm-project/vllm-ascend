@@ -14,8 +14,8 @@ from typing import Any
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.backend import (
     MooncakeEmbeddingStoreBackend,
-    _StoreSave,
     _record_tensor_ready_event,
+    _StoreSave,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
     make_embedding_key,
@@ -24,13 +24,11 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
     EmbeddingStoreError,
     EmbeddingStoreOperationError,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import (
     AscendMooncakeEmbeddingStoreClient,
 )
-
-logger = init_logger(__name__)
 
 
 class _SaveState(Enum):
@@ -196,11 +194,7 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
     def abort_prepared(self, ticket: PreparedStoreSave) -> None:
         with self._pending_lock:
             current = self._pending.get(ticket.identifier)
-            if (
-                current is not None
-                and current[1] is ticket.save
-                and ticket.save.state is _SaveState.PREPARED
-            ):
+            if current is not None and current[1] is ticket.save and ticket.save.state is _SaveState.PREPARED:
                 self._finalize_locked(ticket.identifier, ticket.save)
 
     def _finalize_locked(self, identifier: str, save: _DeferredSave) -> None:
@@ -221,11 +215,7 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
             for identifier, (_, raw_save) in list(self._pending.items()):
                 save = raw_save
                 assert isinstance(save, _DeferredSave)
-                if (
-                    save.state is not _SaveState.SUBMITTED
-                    or save.future is None
-                    or not save.future.done()
-                ):
+                if save.state is not _SaveState.SUBMITTED or save.future is None or not save.future.done():
                     continue
                 try:
                     save.future.result()
