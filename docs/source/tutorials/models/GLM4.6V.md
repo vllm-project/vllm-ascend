@@ -96,10 +96,8 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=900
-export HCCL_DETERMINISTIC=false
 export TASK_QUEUE_ENABLE=1
 
 vllm serve /root/.cache/GLM-4.6V \
@@ -115,7 +113,6 @@ vllm serve /root/.cache/GLM-4.6V \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.90 \
-    --override-generation-config '{"repetition_penalty":1.05}' \
     --enable-auto-tool-choice \
     --tool-call-parser glm45 \
     --reasoning-parser glm45 \
@@ -131,7 +128,6 @@ The parameters are explained as follows:
 - `--mm-processor-cache-type shm`: Use shared memory for the multimodal processor cache.
 - `--enable-expert-parallel`: Enable expert parallelism for the MoE layers.
 - `--async-scheduling` and `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Enable asynchronous scheduling and full graph capture for decode.
-- `--override-generation-config '{"repetition_penalty":1.05}'`: Set the server's default repetition penalty to reduce repetitive output. Individual requests can override this value.
 - `--tool-call-parser glm45` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable tool-call and reasoning parsing.
 - `--max-model-len` and `--max-num-seqs` need to be set according to the actual usage scenario.
 
