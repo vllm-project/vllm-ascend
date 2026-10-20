@@ -899,8 +899,8 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 **Key parameters for PD disaggregation:**
 
 - `--distributed-executor-backend mp` uses multiprocessing on each node for the local workers.
-- Prefill uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
-- Decode uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 8`. This creates 1 local DP groups, each with TP8 .
+- Prefill uses `--data-parallel-size 1`, and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
+- Decode uses `--data-parallel-size 1`, and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
 - `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane.
 - `--max-num-batched-tokens` is larger on the prefill node and smaller on the decode node because prefill is prompt-token intensive while decode is latency sensitive.
 - `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on the decode node in PD mode.
