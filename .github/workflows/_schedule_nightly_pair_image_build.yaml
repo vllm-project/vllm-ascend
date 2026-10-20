@@ -15,11 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# Composes the base image build and the matching nightly image build into a single
-# reusable pipeline for one (chip, OS) pair:
+# Composes the runtime image build and the matching nightly test image build into
+# a single reusable pipeline for one (chip, OS) pair:
 #   build-base (uses _schedule_image_build.yaml) -> build-nightly (uses _nightly_image_build.yaml)
 # Callers invoke this once per (chip, OS) so a slow base image only blocks its own
 # nightly image; there is no global "wait for every base image" barrier.
+#
+# All dependency versions come from the root Dockerfiles, so this workflow only
+# selects the target and the source branch.
 name: 'Nightly image build with base'
 
 on:
@@ -45,19 +48,6 @@ on:
         required: true
         type: string
         description: "Base image tag suffix (e.g. '', 'a3', 'openeuler', 'a3-openeuler')"
-      base_os:
-        required: true
-        type: string
-        description: "Base OS used to resolve the CANN FROM tag (e.g. ubuntu22.04, openeuler24.03)"
-      build_base_os:
-        required: true
-        type: string
-        description: "BASE_OS build arg (e.g. ubuntu24.04, openeuler24.03-lts-sp4)"
-      build_type:
-        required: false
-        type: string
-        default: 'release'
-        description: "Build type: 'daily' or 'release'"
       vllm_ascend_branch:
         required: false
         type: string
@@ -78,61 +68,6 @@ on:
         type: boolean
         default: false
         description: "If true, skip the base image build and only build the nightly image (base image must already exist)."
-      cann_version:
-        required: false
-        type: string
-        default: '9.1.0_20260731131545'
-        description: "CANN version for base image tag"
-      cann_swr_url:
-        required: false
-        type: string
-        default: ''
-        description: "CANN base image URL override. Empty keeps the registry/build-type default."
-      base_image_date:
-        required: false
-        type: string
-        default: 'auto'
-        description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available."
-      memcache_version:
-        required: false
-        type: string
-        default: '1.3.0'
-        description: "Daily base image memcache version"
-      memcache_date:
-        required: false
-        type: string
-        default: '20261010.5'
-        description: "Daily base image memcache build date"
-      memfabric_version:
-        required: false
-        type: string
-        default: '1.3.0'
-        description: "Daily base image memfabric version"
-      memfabric_date:
-        required: false
-        type: string
-        default: '20261010.5'
-        description: "Daily base image memfabric build date"
-      torch_npu_version:
-        required: false
-        type: string
-        default: '26.2.0'
-        description: "Daily base image torch_npu version"
-      torch_npu_date:
-        required: false
-        type: string
-        default: '20261011.6'
-        description: "Daily base image torch_npu build date"
-      triton_ascend_version:
-        required: false
-        type: string
-        default: '20261007182438'
-        description: "Daily base image triton-ascend version"
-      triton_ascend_package_version:
-        required: false
-        type: string
-        default: '3.6.0%2Bdev20261007182438'
-        description: "Daily base image triton-ascend package version"
       swr_registry:
         required: false
         type: string
@@ -154,29 +89,11 @@ jobs:
     with:
       dockerfile: ${{ inputs.dockerfile }}
       suffix: ${{ inputs.suffix }}
-      base_os: ${{ inputs.base_os }}
       soc: ${{ inputs.soc }}
       should_push: ${{ inputs.should_push }}
-      build_type: ${{ inputs.build_type }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
       swr_registry: ${{ inputs.swr_registry }}
-      swr_repo: ${{ inputs.build_type == 'daily' && format('{0}/atlas_ci/vllm-ascend', inputs.swr_registry) || format('{0}/ascend/vllm-ascend', inputs.swr_registry) }}
-      swr_temp_repo: ${{ inputs.build_type == 'daily' && format('{0}/atlas_inference/vllm-atlas-temp', inputs.swr_registry) || format('{0}/atlas_ci/vllm-atlas-temp', inputs.swr_registry) }}
-      cann_version: ${{ inputs.cann_version }}
-      cann_image_version: ${{ inputs.build_type == 'daily' && inputs.cann_version || '9.1.0' }}
-      cann_swr_url: ${{ inputs.cann_swr_url || inputs.build_type == 'daily' && format('{0}/atlas_inference/cann', inputs.swr_registry) || format('{0}/base_image/ascend-ci/cann', inputs.swr_registry) }}
-      memcache_version: ${{ inputs.memcache_version }}
-      memcache_date: ${{ inputs.memcache_date }}
-      memfabric_version: ${{ inputs.memfabric_version }}
-      memfabric_date: ${{ inputs.memfabric_date }}
-      torch_npu_version: ${{ inputs.torch_npu_version }}
-      torch_npu_date: ${{ inputs.torch_npu_date }}
-      triton_ascend_version: ${{ inputs.triton_ascend_version }}
-      triton_ascend_package_version: ${{ inputs.triton_ascend_package_version }}
-      build_args: |
-        ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', inputs.build_base_os) || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', inputs.cann_version) || '' }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -189,15 +106,10 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: ${{ inputs.target }}
-      os_filter: ${{ inputs.os }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
-      cann_version: ${{ inputs.cann_version }}
-      base_image_date: ${{ inputs.base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
