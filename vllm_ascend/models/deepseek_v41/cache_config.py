@@ -3,6 +3,7 @@
 """Framework-side V4.1 layer-outermost cache placement and allocation."""
 
 from dataclasses import replace
+from itertools import zip_longest
 
 import torch
 from vllm.config import VllmConfig
@@ -213,9 +214,11 @@ def group_cache_specs(specs):
 
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]
     state_names = [name for name, spec in padded.items() if isinstance(spec, CircularBufferSpec)]
+    # A decoder-only PP stage has no compression state buffers.
     groups = [
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in mla_names}),
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in state_names}),
+        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names})
+        for names in (mla_names, state_names)
+        if names
     ]
 
     # Transpose the physical tuples. Each scheduler SWA group takes one layer
@@ -228,8 +231,9 @@ def group_cache_specs(specs):
         ]
         for layer_tuple in layer_tuples
     ]
-    for names in zip(*swa_columns):
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names}))
+    # Stage-local SWA counts need not be divisible by the number of KV sources.
+    for names in zip_longest(*swa_columns):
+        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names if name is not None}))
 
     draft_names = [
         name
@@ -257,8 +261,44 @@ def _specs_from_groups(groups):
     return specs
 
 
+def _get_worker_layer_tuples(groups):
+    """Keep resources sharing a scheduler block ID in distinct physical slots.
+
+    Projected PP groups retain the global grouping. A stage with three KV
+    sources can still own four SWA layers in one such group, so re-striping
+    SWA by the local source count would alias live pages within that group.
+    """
+    specs = _specs_from_groups(groups)
+    if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
+        # Preserve independent allocations for reduced SWA-only backbones,
+        # including draft layers, instead of constructing empty MLA slots.
+        return get_layer_tuples(specs)
+    _, source_tuples = get_layer_tuples(specs)
+    slots = [[name for name in names if isinstance(specs[name], AscendMLAAttentionSpec)] for names in source_tuples]
+    aliases = [
+        [name for name in group.layer_names if not isinstance(specs[name], AscendMLAAttentionSpec)] for group in groups
+    ]
+    slot_count = max(len(slots), max(map(len, aliases), default=0))
+    slots.extend([] for _ in range(slot_count - len(slots)))
+    for names in aliases:
+        for slot, name in enumerate(names):
+            slots[slot].append(name)
+    page_sizes = [
+        max(
+            sum(
+                specs[name].unpadded_page_size_bytes
+                for name in names
+                if isinstance(specs[name], AscendMLAAttentionSpec)
+            ),
+            *(specs[name].unpadded_page_size_bytes for name in names),
+        )
+        for names in slots
+    ]
+    return page_sizes, [tuple(names) for names in slots]
+
+
 def get_deepseek_v41_pool_bytes_per_block(groups):
-    page_sizes, _ = get_layer_tuples(_specs_from_groups(groups))
+    page_sizes, _ = _get_worker_layer_tuples(groups)
     return sum(page_sizes)
 
 
@@ -267,8 +307,8 @@ def get_deepseek_v41_kv_cache_config(
     groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Allocate independent layer slots backed by one global block-ID pool."""
-    page_sizes, layer_tuples = get_layer_tuples(_specs_from_groups(groups))
+    """Allocate stage-local physical slots backed by one global block-ID pool."""
+    page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
     capacity = max(available_memory // sum(page_sizes), 0)
     num_blocks = may_override_num_blocks(vllm_config, capacity)
     tensors: list[KVCacheTensor] = []

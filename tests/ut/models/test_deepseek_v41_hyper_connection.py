@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,10 +12,168 @@ pytest.importorskip(
 )
 
 import torch
+from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
+    set_eagle3_aux_hidden_state_layers,
+)
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
-from vllm_ascend.models.deepseek_v41.model import DeepseekV41DecoderLayer
+from vllm_ascend.models.deepseek_v41.model import (
+    AscendDeepseekV41LLMForCausalLM,
+    DeepseekV41DecoderLayer,
+    DeepseekV41Model,
+)
+from vllm_ascend.worker.v2.pp_transport import make_empty_intermediate_tensors
+
+
+class _PipelineLayer(torch.nn.Module):
+    def __init__(self, index):
+        super().__init__()
+        self.layer_idx = index
+        self.engram = None
+
+    def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
+        del positions, scaling, input_ids
+        hidden = (hidden.float() + pre_mix.unsqueeze(-1) * (self.layer_idx + 1)).to(hidden.dtype)
+        return hidden, pre_mix + (self.layer_idx + 1) / 8
+
+    def hc_collapse(self, hidden, pre_mix):
+        return (hidden.float() * pre_mix.unsqueeze(-1)).sum(1).to(hidden.dtype)
+
+
+def _pipeline_stage(start, end, embedding, use_sp, *, num_layers=6):
+    model = object.__new__(DeepseekV41Model)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(hidden_size=4, engram_layer_ids=())
+    model.hc_mult = 4
+    model.decoder_replay_layers = None
+    model.has_engram = False
+    model.start_layer, model.end_layer = start, end
+    model.use_sequence_parallel = use_sp
+    model.embed_tokens = embedding if start == 0 else PPMissingLayer()
+    model.layers = torch.nn.ModuleList(
+        [_PipelineLayer(i) if start <= i < end else PPMissingLayer() for i in range(num_layers)]
+    )
+    model.norm = torch.nn.Identity() if end == num_layers else PPMissingLayer()
+    model.shared_attention_state = SimpleNamespace(reset=lambda: None)
+    model._mtp_hidden_buffer = None
+    model.aux_hidden_state_layers = (1, 4)
+    return model
+
+
+@pytest.mark.parametrize("partition", [(3, 3), (1, 2, 2, 1)])
+@pytest.mark.parametrize("use_sp", [False, True])
+def test_v41_pp_preserves_hc_pre_mix_and_aux_states(monkeypatch, partition, use_sp):
+    """Splitting the same layers must preserve HC results and Eagle inputs."""
+    embedding = torch.nn.Embedding(8, 4, dtype=torch.bfloat16)
+    ids, positions = torch.full((3,), 2), torch.arange(3)
+    if use_sp:
+        # Equal rows let a single CPU process model two TP shards, including
+        # padding of the three-token batch to an even shard size.
+        monkeypatch.setattr(deepseek_v41_module, "sp_shard", lambda value: value[: (value.shape[0] + 1) // 2])
+        monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", lambda value: torch.cat((value, value)))
+    monkeypatch.setattr(
+        deepseek_v41_module, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
+    expected, expected_aux = _pipeline_stage(0, 6, embedding, use_sp)(ids, positions, None)
+    incoming, start = None, 0
+    for rank, count in enumerate(partition):
+        first, last = rank == 0, rank == len(partition) - 1
+        monkeypatch.setattr(
+            deepseek_v41_module,
+            "get_pp_group",
+            lambda first=first, last=last: SimpleNamespace(is_first_rank=first, is_last_rank=last),
+        )
+        stage = _pipeline_stage(start, start + count, embedding, use_sp)
+        incoming = stage(ids, positions, incoming)
+        if not last:
+            assert incoming["hidden_states"].shape == (3, 4, 4)
+            assert incoming["pre_mix"].shape == (3, 4)
+            assert incoming["pre_mix"].dtype == torch.float32
+        start += count
+    actual, actual_aux = incoming
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(actual_aux) == len(expected_aux) == 2
+    for actual_state, expected_state in zip(actual_aux, expected_aux):
+        torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+
+
+def test_v41_pp_receive_buffer_preserves_pre_mix_precision():
+    model = _pipeline_stage(3, 6, None, False)
+    buffers = model._make_empty_intermediate_tensors(5, torch.bfloat16, "cpu")
+    assert buffers["hidden_states"].shape == (5, 4, 4)
+    assert buffers["hidden_states"].dtype == torch.bfloat16
+    assert buffers["pre_mix"].shape == (5, 4)
+    assert buffers["pre_mix"].dtype == torch.float32
+    assert torch.isfinite(buffers["hidden_states"]).all()
+    torch.testing.assert_close(buffers["pre_mix"].sum(-1), torch.ones(5))
+
+
+@pytest.mark.parametrize("partition", [(20, 20), (8, 12, 20)])
+@pytest.mark.parametrize("use_sp", [False, True])
+def test_mrv2_checkpoint_aux_boundaries_survive_native_pp_receive_and_relay(monkeypatch, partition, use_sp):
+    """MRV2 checkpoint IDs include PP boundary 20 and final boundary 40."""
+    config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41", dspark_target_layer_ids=[1, 8, 20, 37, 40]),
+        ),
+    )
+    assert get_eagle3_aux_layers_from_config(config) == (1, 8, 20, 37, 40)
+    embedding = torch.nn.Embedding(8, 4, dtype=torch.bfloat16)
+    ids, positions = torch.full((3,), 2), torch.arange(3)
+    if use_sp:
+        monkeypatch.setattr(deepseek_v41_module, "sp_shard", lambda value: value[: (value.shape[0] + 1) // 2])
+        monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", lambda value: torch.cat((value, value)))
+    monkeypatch.setattr("vllm.distributed.parallel_state.model_parallel_is_initialized", lambda: True)
+
+    def configure(start, end, group):
+        monkeypatch.setattr(deepseek_v41_module, "get_pp_group", lambda: group)
+        monkeypatch.setattr("vllm.distributed.parallel_state.get_pp_group", lambda: group)
+        inner = _pipeline_stage(start, end, embedding, use_sp, num_layers=40)
+        inner.make_empty_intermediate_tensors = make_empty_intermediate_tensors(
+            inner, inner._make_empty_intermediate_tensors
+        )
+        model = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
+        torch.nn.Module.__init__(model)
+        model.model = inner
+        model.make_empty_intermediate_tensors = inner.make_empty_intermediate_tensors
+        set_eagle3_aux_hidden_state_layers(model, config)
+        assert inner.aux_hidden_state_layers == (1, 8, 20, 37, 40)
+        return model
+
+    baseline = configure(0, 40, SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True))
+    expected, expected_aux = baseline.model(ids, positions, None)
+    incoming, start = None, 0
+    for rank, count in enumerate(partition):
+        first, last = rank == 0, rank == len(partition) - 1
+        group = SimpleNamespace(world_size=len(partition), is_first_rank=first, is_last_rank=last)
+        model = configure(start, start + count, group)
+        if not first:
+            buffers = model.make_empty_intermediate_tensors(5, torch.bfloat16, "cpu")
+            assert buffers.tensors.keys() == incoming.tensors.keys()
+            for name, tensor in buffers.tensors.items():
+                tensor[:3].copy_(incoming[name])
+            incoming = buffers[:3]
+        output = model.model(ids, positions, incoming)
+        if not last:
+            handler = PPHandler.__new__(PPHandler)
+            handler.configure_aux_hidden_state_relay(model)
+            output = handler.relay_aux_hidden_states(incoming, output)
+            assert output["pre_mix"].dtype == torch.float32
+            expected_count = sum(layer <= start + count for layer in model.model.aux_hidden_state_layers)
+            aux_keys = [key for key in output.tensors if key.startswith(model.model.AUX_HIDDEN_STATE_KEY)]
+            assert len(aux_keys) == expected_count
+        incoming = output
+        start += count
+
+    actual, actual_aux = incoming
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(actual_aux) == len(expected_aux) == 5
+    for actual_state, expected_state in zip(actual_aux, expected_aux):
+        torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
 
 
 def _layer() -> DeepseekV41DecoderLayer:
@@ -266,7 +425,9 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     assert [x[0].tolist() for x in seen] == [[1, 0], [0, 1], [1, 0]]
 
 
-def test_v41_target_emits_input_residual_for_selected_aux_layers():
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("engram_offset", [0, 10])
+def test_v41_target_preserves_runner_specific_aux_boundaries(use_v2_model_runner, engram_offset):
     from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
@@ -276,8 +437,9 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     model.start_layer = 0
     model.end_layer = 3
     model.decoder_replay_start = 3
-    model.decoder_replay_layers = None
     model.use_sequence_parallel = False
+    model._capture_aux_after_layer = use_v2_model_runner
+    model.engram_rotated = False
     model.needs_moe_input_ids = False
     model.embed_tokens = torch.nn.Embedding(4, 3)
     model.norm = torch.nn.Identity()
@@ -293,12 +455,15 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
         def __init__(self, idx):
             super().__init__()
             self.layer_idx = idx
-            self.engram = None
+            self.engram = (
+                (lambda hidden, lookup, mask, rotation: hidden + engram_offset) if idx == 0 and engram_offset else None
+            )
 
         def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
             return hidden + 1, pre_mix
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
+    model.start_layer, model.end_layer = 0, len(model.layers)
     ids = torch.tensor([0, 1])
     with patch(
         "vllm_ascend.models.deepseek_v41.model.get_pp_group",
@@ -308,14 +473,15 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
             ids,
             torch.tensor([0, 1]),
             None,
-            engram_lookups={},
-            engram_mask=torch.empty(0, dtype=torch.bool),
+            engram_lookups={0: torch.zeros((2, 1))} if engram_offset else {},
+            engram_mask=torch.ones(2, dtype=torch.bool) if engram_offset else torch.empty(0, dtype=torch.bool),
         )
     embedded = model.embed_tokens(ids)
-    torch.testing.assert_close(output, embedded + 3)
+    torch.testing.assert_close(output, embedded + engram_offset + 3)
     assert len(aux) == 2
-    torch.testing.assert_close(aux[0], embedded)
-    torch.testing.assert_close(aux[1], embedded + 2)
+    offset = int(use_v2_model_runner)
+    torch.testing.assert_close(aux[0], embedded + offset * (engram_offset + 1))
+    torch.testing.assert_close(aux[1], embedded + engram_offset + 2 + offset)
 
 
 def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():

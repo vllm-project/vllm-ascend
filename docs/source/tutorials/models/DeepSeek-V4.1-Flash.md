@@ -42,9 +42,15 @@ configuration.
 The A3 configurations in this guide use W8A8 weights and INT8 Engram storage.
 The single-node colocated configuration uses DP4/TP4. The PD configuration
 uses DP4/TP4 on the Prefill node, DP8/TP2 on the Decode node, DSpark
-speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. The
-DeepSeek-V4.1-Flash model currently supports only model runner V1 on Ascend, so
-all A3 scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+speculative decoding, and `FULL_DECODE_ONLY` ACL Graph on Decode. Those two
+configurations explicitly set `VLLM_USE_V2_MODEL_RUNNER=0`.
+
+Section 5.1.1 provides a separate, experimental Model Runner V2 configuration
+for text-only PP2/TP8 with DSpark and target Decode graphs. It forces
+`VLLM_USE_V2_MODEL_RUNNER=1` and requires the MRV2 PP adaptation in the matching
+source checkout. This PP2 configuration has passed text generation checks
+with target FULL graph replay and DSpark token acceptance observed.
+Performance qualification remains separate.
 
 ## 3 Prerequisites
 
@@ -269,6 +275,103 @@ and use the `main` branch with the matching vLLM revision recorded in
         `enable_shared_expert_dp` enable the A3 MoE and communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
+
+#### 5.1.1 A3 MRV2 Pipeline Parallelism with DSpark and Decode Graphs
+
+This text-only configuration uses Model Runner V2, PP2/TP8 across the 16
+logical devices of one A3 server, and a `20,20` encoder/decoder split. DSpark
+uses the checkpoint's three draft layers. The target model uses
+`FULL_DECODE_ONLY`; the draft executes eagerly.
+
+Use the matching vLLM and vLLM Ascend source revisions containing the MRV2 PP
+adaptation. Check `vllm_ascend.__file__` before starting to ensure that Python
+imports that checkout. This is a validation configuration; successful unit
+tests or worker initialization do not establish real-weight generation
+correctness, graph replay correctness, or performance qualification.
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_PP_LAYER_PARTITION=20,20
+export VLLM_ENGINE_READY_TIMEOUT_S=36000
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_CONNECT_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=600
+export OMP_NUM_THREADS=1
+export ASCEND_LAUNCH_BLOCKING=0
+export TOKENIZERS_PARALLELISM=false
+
+python3 -c 'import vllm.envs as e; assert e.VLLM_USE_V2_MODEL_RUNNER is True'
+
+vllm serve "<YOUR_MODEL_PATH>" \
+    --host 127.0.0.1 --port 18560 --served-model-name dsv41-mrv2-pp-spec-graph \
+    --pipeline-parallel-size 2 --tensor-parallel-size 8 \
+    --data-parallel-size 1 --enable-expert-parallel \
+    --tokenizer-mode deepseek_v41 \
+    --reasoning-parser deepseek_v41 --tool-call-parser deepseek_v41 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+    --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 4 \
+    --block-size 128 --gpu-memory-utilization 0.85 \
+    --limit-mm-per-prompt '{"image":0}' --enable-chunked-prefill \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[24]}' \
+    --cudagraph-metrics --no-enable-prefix-caching --async-scheduling \
+    --additional-config '{
+        "enable_flashcomm1":true,
+        "multistream_engram_overlap":false,
+        "multistream_dsv4_dsa_overlap":false,
+        "multistream_overlap_shared_expert":false
+    }'
+```
+
+Keep PCP at one for this PP configuration. Do not enable `enable_dsa_cp`:
+Model Runner V2 rejects DSA-CP. Native Decode graph dispatch uses the
+compilation configuration above; `enable_npugraph_ex` is not the MRV2 graph
+dispatch selector. The draft's `enforce_eager` setting applies to the draft
+only; do not pass the target model's `--enforce-eager` flag. Enable native
+asynchronous scheduling for this MRV2 PP and speculative configuration:
+`AsyncScheduler` maintains output-token placeholders and schedules each
+request at the PP cadence required by the sampled-token and draft-token
+broadcast ring. Prefix caching and multistream overlap remain disabled while
+checking correctness.
+
+V4.1 requires original token IDs on every PP stage for hash and vision-aware
+MoE routing, even when image inputs are disabled and a stage has no local
+Engram layers. The MRV2 adaptation uses the model's
+`requires_raw_input_tokens` marker to restore the native padded input-ID
+buffer view after upstream non-first-stage input preparation clears the
+forward argument. Both runtime preparation and attention preparation for
+graph capture bind this same native buffer. The hook preserves explicitly
+provided IDs and adds no token copies or synthetic replacement IDs.
+On A3 with expandable memory segments, masked Engram history loads keep
+their addresses inside the allocated request row; missing history still
+produces `-1`.
+
+Five speculative tokens require six target verification queries per request.
+Capture size 24 aligns that width with TP8 and fits four requests. Preserve
+this bucket and sequence limit when checking correctness before tuning.
+Confirm that workers initialize the V2 runner, runtime graph statistics
+contain `FULL`, and speculative draft/accepted-token counters increase.
+
+PP boundaries must keep compressed KV, sparse index and candidate cache
+sources within their owning stage. For the 40-layer checkpoint, valid
+partitions include `20,20` and `14,26` for PP2, `8,12,20` for PP3, and
+`8,6,6,20` for PP4. Uniform PP4 `10,10,10,10` crosses cache dependencies and
+is rejected. Partition validity does not guarantee that weights fit: the
+last stage still owns all 20 decoder layers.
+
+The selected PP2 setup passed 27 real-weight text requests covering serial
+and concurrent generation, chunked prefill up to 14,155 prompt tokens,
+long-context retrieval, multi-step decoding and JSON-schema output. Runtime
+statistics recorded target FULL graph dispatch and accepted DSpark tokens.
+These checks used vLLM `ced6857afa0ea7b2e3f0846a62e1394e90f15607` with
+vLLM Ascend base `8fde6d4e335fe300e2b949aab0e31659cce0811d` plus this
+MRV2 PP adaptation.
+
+Real-weight PP4, multimodal inputs and performance require separate
+qualification. Keep the MRV2 startup logs and generation results with each
+configuration so correctness and graph/speculative activity can be checked
+together.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 
@@ -737,8 +840,11 @@ curl -sS "$SERVICE_URL/v1/models" | \
 ```
 
 The response must contain a model entry whose `id` matches the configured
-`--served-model-name`: `dsv41` for the A3 examples and `deepseek-v41` for the
-retained A2 example.
+`--served-model-name`: `dsv41` for the A3 DP and PD examples,
+`dsv41-mrv2-pp-spec-graph` for Section 5.1.1, and `deepseek-v41` for the retained
+A2 example. Use `http://127.0.0.1:18560` and the MRV2 served-model name when
+running the text verification request for Section 5.1.1; its image limit is
+zero, so the image verification request does not apply.
 
 ## 6 Functional Verification
 
@@ -840,9 +946,14 @@ For common environment, installation, and parameter issues, refer to the
   servers in 1P1D mode, with an Ascend W8A8 checkpoint and INT8 Engram storage.
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
-- DeepSeek-V4.1-Flash currently supports only model runner V1 on Ascend. Keep
-  `VLLM_USE_V2_MODEL_RUNNER=0` in every A3 serving script. Pipeline parallelism
-  is not covered by this guide.
+- The A3 DP and PD examples use model runner V1 with
+  `VLLM_USE_V2_MODEL_RUNNER=0`. Section 5.1.1 separately describes the
+  experimental MRV2 PP2/TP8 configuration and forces
+  `VLLM_USE_V2_MODEL_RUNNER=1`. Text generation checks observed target FULL
+  graph replay and accepted DSpark tokens. That configuration is text-only, uses PCP1
+  and native asynchronous scheduling, and does not enable DSA-CP. PP3/PP4
+  partition checks do not establish real-weight MRV2 support for those
+  topologies.
 - In the A3 PD example, Prefill runs in eager mode. Decode uses
   `FULL_DECODE_ONLY` ACL Graph for the target model and eager execution for the
   DSpark draft model.

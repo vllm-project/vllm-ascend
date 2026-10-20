@@ -1728,13 +1728,54 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     if (
         parallel_config.enable_elastic_ep
         or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.pipeline_parallel_size != 1
         or parallel_config.decode_context_parallel_size != 1
     ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
+        raise ValueError("Ascend Engram requires TP=1/2/4/8 with DCP=1.")
     load_format = vllm_config.load_config.load_format
     if load_format not in ("auto", "safetensors", "dummy"):
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+
+
+def _validate_deepseek_v41_pp_config(vllm_config: VllmConfig) -> None:
+    """Keep source-shared V4.1 caches and candidate indices on their owning stage."""
+    parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    if (
+        getattr(model_config, "architecture", None) != "DeepseekV41ForCausalLM"
+        or parallel_config.pipeline_parallel_size <= 1
+    ):
+        return
+
+    if not vllm_config.use_v2_model_runner:
+        raise ValueError("DeepSeek V4.1 pipeline parallelism requires Model Runner V2 (VLLM_USE_V2_MODEL_RUNNER=1).")
+    if parallel_config.prefill_context_parallel_size != 1:
+        raise ValueError("DeepSeek V4.1 pipeline parallelism requires PCP=1.")
+
+    from vllm.distributed.utils import get_pp_indices
+
+    config = model_config.hf_text_config
+    dependencies = (
+        ("compressed KV", tuple(config.kv_source_layer_ids)),
+        ("index", tuple(config.index_source_layer_ids)),
+        ("candidate", (config.candidate_source_layer_id,)),
+    )
+    pp_size = parallel_config.pipeline_parallel_size
+    for pp_rank in range(pp_size):
+        start, end = get_pp_indices(config.num_hidden_layers, pp_rank, pp_size)
+        if start >= end:
+            raise ValueError("DeepSeek V4.1 pipeline stages must own at least one decoder layer.")
+        if not any(start <= source < end for source in config.kv_source_layer_ids):
+            raise ValueError("Each DeepSeek V4.1 pipeline stage must include a compressed KV source layer.")
+        for layer_id in range(start, end):
+            for kind, sources in dependencies:
+                preceding = [source for source in sources if source <= layer_id]
+                if preceding and max(preceding) < start:
+                    raise ValueError(
+                        f"DeepSeek V4.1 {kind} dependency crosses a pipeline stage: "
+                        f"rank {pp_rank}/{pp_size} owns [{start}, {end}), but layer {layer_id} "
+                        f"uses source layer {max(preceding)}. Use a source-aligned partition, "
+                        "such as 20,20 for PP2 or 8,6,6,20 for PP4."
+                    )
 
 
 def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
@@ -1753,6 +1794,7 @@ def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
+    _validate_deepseek_v41_pp_config(vllm_config)
     if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
         raise ValueError(
             "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
