@@ -9,7 +9,6 @@ import torch
 # KDA operators from the flashserve/flash-linear-attention-npu ecosystem repository.
 # https://github.com/flashserve/flash-linear-attention-npu
 from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 KDA_CHUNK_SIZE = 64
 
@@ -73,6 +72,8 @@ def run_chunk_kda(
     lower_bound: float | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
+    from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+
     output, final_state, *_ = chunk_kda_fwd(
         l2norm_fwd(q.contiguous()),
         l2norm_fwd(k.contiguous()),
