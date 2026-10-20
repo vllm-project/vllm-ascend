@@ -28,6 +28,36 @@ DEFAULT_PACKED_NUM_BUFFERS = 2
 _UNSYNCHRONIZED_BUFFERS: list[torch.Tensor] = []
 
 
+def _drain_packed_streams(
+    streams: list[Any], packed_tensors: list[torch.Tensor], body_error: BaseException | None
+) -> None:
+    """Drain every slot, retaining failed storage and prioritizing termination."""
+    cleanup_error: BaseException | None = None
+    retained_slots: list[tuple[int, int]] = []
+    for index, stream in enumerate(streams):
+        try:
+            stream.synchronize()
+        except BaseException as exc:
+            # Empty placeholders have no payload storage to protect.
+            if packed_tensors[index].numel():
+                _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
+                retained_slots.append((index, packed_tensors[index].numel() * packed_tensors[index].element_size()))
+            if cleanup_error is None or (isinstance(cleanup_error, Exception) and not isinstance(exc, Exception)):
+                cleanup_error = exc
+    if cleanup_error is not None:
+        with suppress(Exception):
+            logger.error(
+                "Failed to drain a packed HCCL stream; "
+                "retaining buffers until process exit (slot, bytes): %s; cleanup error: %s",
+                retained_slots,
+                cleanup_error,
+            )
+        # A pending body exception propagates unless cleanup raised a higher-
+        # priority termination signal. Never skip draining other slots for it.
+        if body_error is None or (isinstance(body_error, Exception) and not isinstance(cleanup_error, Exception)):
+            raise cleanup_error
+
+
 def packed_broadcast_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     group: Any,
@@ -126,28 +156,7 @@ def packed_broadcast_producer(
         body_error = exc
         raise
     finally:
-        cleanup_error: BaseException | None = None
-        retained_slots: list[tuple[int, int]] = []
-        for index, stream in enumerate(streams):
-            try:
-                stream.synchronize()
-            except BaseException as exc:
-                # Empty placeholders have no payload storage to protect.
-                if packed_tensors[index].numel():
-                    _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
-                    retained_slots.append((index, packed_tensors[index].numel() * packed_tensors[index].element_size()))
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if cleanup_error is not None and body_error is None:
-            raise cleanup_error
-        if cleanup_error is not None and body_error is not None:
-            with suppress(Exception):
-                logger.error(
-                    "Failed to drain a packed HCCL stream while handling another exception; "
-                    "retaining buffers until process exit (slot, bytes): %s; cleanup error: %s",
-                    retained_slots,
-                    cleanup_error,
-                )
+        _drain_packed_streams(streams, packed_tensors, body_error)
 
 
 def packed_broadcast_consumer(
@@ -267,28 +276,7 @@ def packed_broadcast_consumer(
         body_error = exc
         raise
     finally:
-        cleanup_error: BaseException | None = None
-        retained_slots: list[tuple[int, int]] = []
-        for index, stream in enumerate(streams):
-            try:
-                stream.synchronize()
-            except BaseException as exc:
-                # Empty placeholders have no payload storage to protect.
-                if packed_tensors[index].numel():
-                    _UNSYNCHRONIZED_BUFFERS.append(packed_tensors[index])
-                    retained_slots.append((index, packed_tensors[index].numel() * packed_tensors[index].element_size()))
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if cleanup_error is not None and body_error is None:
-            raise cleanup_error
-        if cleanup_error is not None and body_error is not None:
-            with suppress(Exception):
-                logger.error(
-                    "Failed to drain a packed HCCL stream while handling another exception; "
-                    "retaining buffers until process exit (slot, bytes): %s; cleanup error: %s",
-                    retained_slots,
-                    cleanup_error,
-                )
+        _drain_packed_streams(streams, packed_tensors, body_error)
 
 
 # ── NPU IPC packed transfer ────────────────────────────────────────────

@@ -1261,38 +1261,65 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
 
 
 @pytest.mark.parametrize("producer", [False, True])
-def test_packed_cleanup_failure_after_success_is_raised_and_retains_storage(producer):
+@pytest.mark.parametrize(
+    "body_error,second_error",
+    [
+        (None, None),
+        (None, KeyboardInterrupt()),
+        (None, SystemExit(2)),
+        (ValueError("body failed"), KeyboardInterrupt()),
+        (ValueError("body failed"), SystemExit(2)),
+        (KeyboardInterrupt(), None),
+        (SystemExit(2), None),
+    ],
+)
+def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signals(producer, body_error, second_error):
     import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
 
     failure = RuntimeError("cleanup failed")
+    failures = [failure, second_error, None]
+    drained = []
+    armed = False
 
     class CleanupStream(_FakeNpuStream):
-        fail = False
+        def __init__(self, index):
+            self.index = index
 
         def synchronize(self):
-            if self.fail:
-                raise failure
+            if armed:
+                drained.append(self.index)
+                if failures[self.index] is not None:
+                    raise failures[self.index]
 
-    stream = CleanupStream()
+    streams = [CleanupStream(index) for index in range(3)]
     pinned: list[torch.Tensor] = []
 
     def finish(*args, **kwargs):
-        stream.fail = True
+        nonlocal armed
+        armed = True
+        if body_error is not None:
+            raise body_error
 
+    errors = [error for error in (body_error, *failures) if error is not None]
+    expected = next((error for error in errors if not isinstance(error, Exception)), errors[0])
     group = types.SimpleNamespace(broadcast=finish if producer else lambda *args, **kwargs: None)
     with (
-        patch.object(torch.npu, "Stream", return_value=stream),
+        patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
-        pytest.raises(RuntimeError, match="cleanup failed") as error,
+        patch.object(packed_module.logger, "error") as log_error,
+        pytest.raises(type(expected)) as error,
     ):
         # One tensor below the threshold reaches finally without another slot wait.
         if producer:
-            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 1)
+            packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 3)
         else:
-            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 1)
-    assert error.value is failure
+            packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 3)
+    assert error.value is expected
+    assert drained == [0, 1, 2]
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
+    log_error.assert_called_once()
+    assert log_error.call_args.args[1] == [(0, 4)]
 
 
 @pytest.mark.parametrize("producer", [False, True])
