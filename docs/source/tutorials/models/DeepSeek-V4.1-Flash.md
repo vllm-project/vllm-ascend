@@ -96,7 +96,7 @@ images.
     server.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -141,7 +141,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
