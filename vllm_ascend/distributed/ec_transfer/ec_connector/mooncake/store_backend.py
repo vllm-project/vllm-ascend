@@ -66,6 +66,8 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
     """Reserve publisher budget now and choose the PUT memory path later."""
 
     store_client: AscendMooncakeEmbeddingStoreClient
+    _closed: bool
+    _fatal_error: BaseException | None
 
     def save_output(self, identifier: str, tensor: torch.Tensor) -> None:
         if identifier in self._step_candidates:
@@ -129,6 +131,8 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
             save.state = _SaveState.CHECKING
             save.future = self._executor.submit(self.store_client.exists, save.pool_key)
             future = save.future
+
+        assert future is not None
 
         try:
             exists = future.result()

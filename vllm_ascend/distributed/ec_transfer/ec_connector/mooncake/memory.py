@@ -29,6 +29,11 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
 class AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered-memory slab on NPU."""
 
+    # Mypy checks this module with upstream imports skipped, so restate the
+    # inherited attributes used by the Ascend override.
+    tensor: torch.Tensor | None
+    _disabled: bool
+
     def prepare(self, device: torch.device, transfer: MooncakeTransfer) -> None:
         """Prepare an aligned NPU slab without relying on upstream hooks."""
         if self.tensor is not None or self._disabled:

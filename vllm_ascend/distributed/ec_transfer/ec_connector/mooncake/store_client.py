@@ -71,13 +71,17 @@ def ensure_mooncake_store_imported() -> None:
     process-wide engine that is later passed to ``MooncakeDistributedStore``.
     """
     try:
-        import mooncake.store  # noqa: F401  # type: ignore
+        import mooncake.store  # type: ignore[import-not-found]  # noqa: F401
     except ImportError as error:
         raise ImportError("Install mooncake with Store support to enable cross_encoder_cache.") from error
 
 
 class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
     """Use the Ascend producer arena with role-appropriate engines."""
+
+    # Mypy checks this module with upstream imports skipped, so restate the
+    # inherited buffer used by the Ascend-specific load path.
+    _read_buffer: torch.Tensor | None
 
     def __init__(
         self,
@@ -465,9 +469,11 @@ class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
                 sizes.append(plan.prefix_nbytes)
                 offset += plan.prefix_nbytes
             if plan.direct_address is not None:
+                registration_address = plan.registration_address
+                assert registration_address is not None
                 addresses.append(plan.direct_address)
                 sizes.append(plan.direct_nbytes)
-                direct_buffers.append((target, plan.registration_address, plan.registration_nbytes))
+                direct_buffers.append((target, registration_address, plan.registration_nbytes))
             all_addresses.append(addresses)
             all_sizes.append(sizes)
 

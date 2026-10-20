@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -204,10 +204,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._producer_pushes = ProducerPushManager(self._push_ready.set)
         self._dispatch_stop = threading.Event()
         self._dispatcher = None
-        self._failed_saves = set()
+        self._failed_saves: set[str] = set()
         self._collecting_sources = False
-        self._completed_loads = set()
-        self._failed_loads = set()
+        self._completed_loads: set[str] = set()
+        self._failed_loads: set[str] = set()
         self._shutdown = False
         self._use_store_independent_te = False
         self._retain_producer_slab = False
@@ -783,7 +783,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
     def _push_batch(self, pushes: list[ProducerPushRecord]) -> None:
         started_at = time.monotonic()
         deferred_store = getattr(self, "_deferred_store", None)
-        fallback_store_saves: list[PreparedStoreSave | None] = []
+        fallback_store_saves: Sequence[PreparedStoreSave | None] = []
         failure: Exception | None = None
         try:
             ready, ordered_pushes = self._resolve_writable_pushes(
