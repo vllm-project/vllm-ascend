@@ -217,7 +217,8 @@ def test_a5_reshape_and_cache_uses_bsnd_view_for_bnsd():
     assert call_kwargs["value_cache"].data_ptr() == value_cache.data_ptr()
 
 
-def test_kv_cache_load_makes_seq_lens_contiguous():
+@pytest.mark.parametrize("adaptor", [BaseDeviceAdaptor, A5DeviceAdaptor])
+def test_kv_cache_load_makes_seq_lens_contiguous(adaptor):
     cache_kv_c = object()
     cache_k_pe = object()
     block_table = object()
@@ -228,11 +229,8 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
 
     assert not context_seq_len_npu.is_contiguous()
 
-    with (
-        mock.patch("vllm_ascend.device.device_op.try_load_strided_mla_cache", return_value=False),
-        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather,
-    ):
-        BaseDeviceAdaptor.kv_cache_load(
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather:
+        adaptor.kv_cache_load(
             cache_kv_c,
             cache_k_pe,
             block_table,
@@ -253,6 +251,45 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
+    assert mock_gather.call_args.kwargs["is_seq_lens_cumsum"] is False
+
+
+@pytest.mark.parametrize(
+    "adaptor,token_fused",
+    [(BaseDeviceAdaptor, False), (A5DeviceAdaptor, False), (A5DeviceAdaptor, True)],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_kv_cache_load_passes_strided_views_directly_to_native(adaptor, token_fused, dtype):
+    blocks, block_size, key_dim, rope_dim = 3, 128, 512, 64
+    prefix = 256
+    page_elements = block_size * (key_dim + rope_dim) + 128
+    raw = torch.empty(prefix + blocks * page_elements, dtype=dtype)
+    key_stride = key_dim + rope_dim if token_fused else key_dim
+    rope_stride = key_dim + rope_dim if token_fused else rope_dim
+    rope_offset = prefix + (key_dim if token_fused else block_size * key_dim)
+    cache_k = raw.as_strided((blocks, block_size, 1, key_dim), (page_elements, key_stride, key_stride, 1), prefix)
+    cache_v = raw.as_strided(
+        (blocks, block_size, 1, rope_dim), (page_elements, rope_stride, rope_stride, 1), rope_offset
+    )
+    table = torch.tensor([[2, 0, 1]], dtype=torch.int32)
+    lengths = torch.tensor([127], dtype=torch.int32)
+    offsets = torch.tensor([128], dtype=torch.int32)
+    key = torch.empty(127, 1, key_dim, dtype=dtype)
+    value = torch.empty(127, 1, rope_dim, dtype=dtype)
+    assert not cache_k.is_contiguous() and not cache_v.is_contiguous()
+
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as gather:
+        adaptor.kv_cache_load(cache_k, cache_v, table, lengths, offsets, key, value)
+
+    gather.assert_called_once()
+    # Identity preserves both the physical page stride and component offset;
+    # making a dense copy of either cache would violate this contract.
+    for actual, expected in zip(gather.call_args.args, (cache_k, cache_v, table, lengths)):
+        assert actual is expected
+    assert gather.call_args.kwargs["seq_offset"] is offsets
+    assert gather.call_args.kwargs["key"] is key
+    assert gather.call_args.kwargs["value"] is value
+    assert gather.call_args.kwargs["is_seq_lens_cumsum"] is False
 
 
 @pytest.mark.parametrize(

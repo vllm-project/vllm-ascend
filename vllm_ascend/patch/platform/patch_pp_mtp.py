@@ -96,12 +96,19 @@ def _patch_engine_core() -> None:
     @wraps(original_post_step)
     def _patched_post_step(self, model_executed: bool) -> None:
         scheduler = getattr(self, "scheduler", None)
+        vllm_config = getattr(scheduler, "vllm_config", None)
+        use_pp = getattr(scheduler, "use_pp", False)
         use_pp_mtp_runtime_patch = _use_pp_mtp_runtime_patch(
-            getattr(scheduler, "vllm_config", None),
-            getattr(scheduler, "use_pp", False),
+            vllm_config,
+            use_pp,
+        )
+        # Prefill nodes do not need CPU draft-token feedback. Avoid draining
+        # later PP batches through the synchronous draft-token RPC.
+        is_mrv1_pp_prefill = (
+            use_pp and not getattr(vllm_config, "use_v2_model_runner", False) and _is_pd_prefill_node(vllm_config)
         )
         if (
-            use_pp_mtp_runtime_patch
+            (use_pp_mtp_runtime_patch or is_mrv1_pp_prefill)
             and getattr(self, "batch_queue", None) is not None
             and not getattr(self, "async_scheduling", False)
             and getattr(self, "use_spec_decode", False)

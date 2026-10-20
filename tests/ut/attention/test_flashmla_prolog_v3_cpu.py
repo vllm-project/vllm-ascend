@@ -306,9 +306,10 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
 
 
 def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
-    scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y}
+    scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y, "FLASHMLA_BLOCK_SIZE": 128}
     impl = SimpleNamespace(
         use_flashmla=True,
+        use_mla_rope=True,
         _flashmla_writer_buffers=None,
         W_UV=torch.empty(1),
         dtype=torch.bfloat16,
