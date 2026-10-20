@@ -13,10 +13,11 @@ routing:
 
 kv_pool:
   type: memcache
-  meta_service_port: 5000
-  config_store_port: 6000
+  meta_service_port: 5010
+  config_store_port: 6010
   config:
     meta:
+      ock.mmc.meta_service.metrics_url: "http://${MASTER_IP}:8002"
       ock.mmc.log_level: info
     local:
       ock.mmc.log_level: info
