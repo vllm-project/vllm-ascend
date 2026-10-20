@@ -80,6 +80,37 @@ def _entropy_partials_kernel(
 
 
 @triton.jit
+def _entropy_verify(
+    entropy_partials_ptr,
+    target_local_sumexp_stride,
+    logit_idx,
+    vocab_num_blocks,
+    target_log_prob,
+    draft_log_prob,
+    u,
+    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    POSTERIOR_THRESHOLD: tl.constexpr,
+    POSTERIOR_ALPHA: tl.constexpr,
+):
+    threshold = POSTERIOR_THRESHOLD
+    if POSTERIOR_ALPHA > 0:
+        blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
+        entropy = tl.sum(
+            tl.load(
+                entropy_partials_ptr + logit_idx * target_local_sumexp_stride + blocks,
+                mask=blocks < vocab_num_blocks,
+                other=0.0,
+            ),
+            0,
+        )
+        threshold = tl.minimum(tl.exp(-entropy * POSTERIOR_ALPHA), POSTERIOR_THRESHOLD)
+    target_prob = tl.exp(target_log_prob)
+    draft_prob = tl.exp(draft_log_prob)
+    valid_prob = draft_prob > 0.0
+    return valid_prob & (target_prob / tl.where(valid_prob, draft_prob, 1.0) >= threshold * u)
+
+
+@triton.jit
 def _probabilistic_rejection_kernel(
     # [num_reqs, num_speculative_steps + 1]
     sampled_ptr,
@@ -291,22 +322,18 @@ def _probabilistic_rejection_kernel(
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
                 elif USE_ENTROPY_VERIFY:
-                    threshold = POSTERIOR_THRESHOLD
-                    if POSTERIOR_ALPHA > 0:
-                        blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
-                        entropy = tl.sum(
-                            tl.load(
-                                entropy_partials_ptr + logit_idx * target_local_sumexp_stride + blocks,
-                                mask=blocks < vocab_num_blocks,
-                                other=0.0,
-                            ),
-                            0,
-                        )
-                        threshold = tl.minimum(tl.exp(-entropy * POSTERIOR_ALPHA), POSTERIOR_THRESHOLD)
-                    target_prob = tl.exp(target_log_prob)
-                    draft_prob = tl.exp(draft_log_prob)
-                    valid_prob = draft_prob > 0.0
-                    accepted &= valid_prob & (target_prob / tl.where(valid_prob, draft_prob, 1.0) >= threshold * u)
+                    accepted &= _entropy_verify(
+                        entropy_partials_ptr,
+                        target_local_sumexp_stride,
+                        logit_idx,
+                        vocab_num_blocks,
+                        target_log_prob,
+                        draft_log_prob,
+                        u,
+                        PADDED_VOCAB_NUM_BLOCKS,
+                        POSTERIOR_THRESHOLD,
+                        POSTERIOR_ALPHA,
+                    )
                 else:
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
@@ -380,7 +407,6 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
-    *,
     use_entropy_verify: bool | None = None,
     posterior_threshold: float = 0.95,
     posterior_alpha: float = 0.4,
