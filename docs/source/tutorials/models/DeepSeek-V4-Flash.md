@@ -17,15 +17,7 @@ DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-### Documentation and Model Validation Versions
-
-| Scope | Version | Details |
-| ----- | ------- | ------- |
-| Documentation and deployment examples | vLLM Ascend `{{ vllm_ascend_version }}` with vLLM `{{ vllm_version }}` | Includes the A3 DSpark PCP8/DP2 example in Section 5.2.1. |
-| DSpark support on A2/A3 | vLLM Ascend `v0.25.0` and later | Applies to the `DeepSeek-V4-Flash-0731-w8a8` checkpoint. This minimum version does not establish support for every deployment configuration in this guide. |
-| Reported A3 DSpark model accuracy | vLLM Ascend `v0.25.1rc` | The A3 1P1D DSpark GPQA and SWE Multilingual results in Section 7 were recorded with this version; they are not validation results for the PCP8/DP2 example. |
-
-For the remaining accuracy results, `-` in the version column means the validation version was not recorded.
+DeepSeek-V4-Flash support is largely feature-complete starting from **vLLM-Ascend v0.26.0**. This document is validated and written based on **vLLM-Ascend v0.30.0**. To use the latest features, it is recommended to use the latest release candidate or official version.
 
 ## 2 Supported Features
 
