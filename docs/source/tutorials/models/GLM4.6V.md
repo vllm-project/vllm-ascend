@@ -87,7 +87,7 @@ The output should list the `vllm-ascend` container with an `Up` status.
 
 ### 5.1 Single-Node Online Deployment
 
-The following example uses eight NPU devices on an A3 node with TP=8 and expert parallelism. The configuration was provided by the contributor for this deployment; tune the limits for your workload and available device memory.
+The following example uses eight NPU devices on an A3 node with TP=8 and expert parallelism. Tune the limits for your workload and available device memory.
 
 Run the following script to execute online inference.
 
@@ -186,18 +186,16 @@ The request should return HTTP 200 and a JSON response containing `choices`. Che
 
 ## 7 Accuracy Evaluation
 
-### 7.1 Evaluation Results
+### 7.1 Using VLMEvalKit
 
-The following GLM-4.6V accuracy results were obtained using VLMEvalKit and provided by the contributor:
+1. Refer to the [VLMEvalKit documentation](https://github.com/open-compass/VLMEvalKit) for installation and evaluation instructions.
 
-| Dataset | Score |
-| --- | --- |
-| MMBench | 88.62 |
-| MMStar | 76.13 |
+2. After execution, you can get the result.
 
-### 7.2 Using VLMEvalKit
-
-For installation and evaluation instructions, refer to the [VLMEvalKit documentation](https://github.com/open-compass/VLMEvalKit). To reproduce the reported results, use the same toolkit revision, dataset versions and splits, generation parameters, and answer extraction settings as the original evaluation.
+| dataset | version | metric | mode | result |
+| ------- | ------- | ------ | ---- | ------ |
+| MMBench | - | accuracy | gen | 88.62 |
+| MMStar | - | accuracy | gen | 76.13 |
 
 ## 8 Performance Evaluation
 
