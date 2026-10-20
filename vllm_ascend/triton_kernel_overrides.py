@@ -22,13 +22,17 @@ implementation; ``register_triton_kernels()`` hands the whole table to
 ``vllm.triton_utils.dispatcher.register_kernels``, which swaps the defining
 attribute and sweeps every ``from``-import copy by identity.
 
-Two rules when editing the table:
+Three rules when editing the table:
 
 - Keys must target the module where the kernel is *defined*
   (``func.__module__``), never a from-import copy site. The identity sweep
   matches the original object; a key pointing at a copy silently defeats it.
 - Values only need their parameter *order* to match the original kernel;
   parameter names may differ (the dispatcher reorders launch kwargs).
+- Values must be plain callables. ``KernelOverride`` drops the caller's
+  grid and invokes the value as a plain function, so a raw ``@triton.jit``
+  kernel cannot be a value; kernel entries point at launch adapters that
+  derive the grid and launch it (see ``ops/triton/v2/``).
 """
 
 from __future__ import annotations
