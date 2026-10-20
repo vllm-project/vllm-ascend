@@ -129,16 +129,50 @@ def _run(config, *, mamba_shapes=DEFAULT_MAMBA_SHAPES, mamba_dtypes=DEFAULT_MAMB
     upstream.assert_called_once_with(config)
 
 
+@pytest.mark.parametrize(
+    "cache_dtype,expected_block_size",
+    [("auto", 2048), ("fp8", 4096), ("int8", 4096)],
+)
 @pytest.mark.parametrize("block_size", [None, 128, 2048])
-def test_hybrid_config_aligns_contiguous_state_segments(block_size):
+def test_hybrid_config_aligns_contiguous_state_segments(block_size, cache_dtype, expected_block_size):
     config = _config()
     config.cache_config.block_size = block_size
+    config.cache_config.cache_dtype = cache_dtype
 
     _run(config)
 
-    assert config.cache_config.block_size == 2048
+    assert config.cache_config.block_size == expected_block_size
     assert config.cache_config.mamba_page_size_padded == 2 * 1048576 + 49152
     assert config.cache_config.mamba_block_size == 4096
+
+
+@pytest.mark.parametrize(
+    "mamba_shapes,mamba_dtypes,expected_block_size,expected_page_size",
+    [
+        # GDN with 8 value heads and no MTP.
+        (((3, 4096), (8, 128, 128)), (torch.bfloat16, torch.float32), 1024, 1024 * 1024 + 3 * 4096 * 2),
+        # GDN with 8 value heads and MTP=3 (conv state grows by three tokens).
+        (((6, 4096), (8, 128, 128)), (torch.bfloat16, torch.float32), 1024, 1024 * 1024 + 6 * 4096 * 2),
+        # GDN with 16 value heads.
+        (((6, 4096), (16, 128, 128)), (torch.bfloat16, torch.float32), 2048, 2 * 1048576 + 6 * 4096 * 2),
+        # GDN with 32 value heads.
+        (((6, 4096), (32, 128, 128)), (torch.bfloat16, torch.float32), 4096, 4 * 1048576 + 6 * 4096 * 2),
+        # Pure linear attention: one SSM state, no conv state.
+        (((16, 128, 128),), (torch.float32,), 2048, 2 * 1048576),
+    ],
+)
+def test_contiguous_hybrid_geometry_matrix(
+    mamba_shapes,
+    mamba_dtypes,
+    expected_block_size,
+    expected_page_size,
+):
+    config = _config()
+
+    _run(config, mamba_shapes=mamba_shapes, mamba_dtypes=mamba_dtypes)
+
+    assert config.cache_config.block_size == expected_block_size
+    assert config.cache_config.mamba_page_size_padded == expected_page_size
 
 
 def test_contiguous_hybrid_overrides_larger_attention_segment():
