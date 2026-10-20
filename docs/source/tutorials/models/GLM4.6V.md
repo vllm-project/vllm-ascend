@@ -188,16 +188,16 @@ The request should return HTTP 200 and a JSON response containing `choices`. Che
 
 ### 7.1 Evaluation Results
 
-The following GLM-4.6V accuracy results were provided by the contributor:
+The following GLM-4.6V accuracy results were obtained using VLMEvalKit and provided by the contributor:
 
 | Dataset | Score |
 | --- | --- |
 | MMBench | 88.62 |
 | MMStar | 76.13 |
 
-### 7.2 Using AISBench
+### 7.2 Using VLMEvalKit
 
-For evaluating MMStar with AISBench, refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) and the [MMStar dataset configuration](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets/mmstar).
+For installation and evaluation instructions, refer to the [VLMEvalKit documentation](https://github.com/open-compass/VLMEvalKit). To reproduce the reported results, use the same toolkit revision, dataset versions and splits, generation parameters, and answer extraction settings as the original evaluation.
 
 ## 8 Performance Evaluation
 
