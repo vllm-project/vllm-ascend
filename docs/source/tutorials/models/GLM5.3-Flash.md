@@ -12,7 +12,7 @@
 
 This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
-This document is based on vLLM-Ascend v0.30.0RC2, which supports GLM-5.3-Flash on A2 series and A3 series. Support for 950DT products is currently experimental; official support will be available in a future release.
+Support for 950DT products is currently experimental; official support will be available in a future release.
 
 ## 2 Supported Features
 
@@ -271,7 +271,7 @@ Select the `docker run` command for your hardware platform:
       --api-server-count 1
     ```
 
-#### Key Parameter Descriptions
+**Key Parameter Descriptions**
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
@@ -287,7 +287,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input in all deployment examples.
-- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT products and five on A3 series. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT products, while `enforce_eager: false` enables graph mode for the draft model on A3 series. GLM-5.3-Flash supports MTP draft graph execution in v0.30.0RC2; the forced-eager restriction for other GLM models does not apply to this model.
+- `--speculative-config`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. The single-node examples use three speculative tokens on 950DT products and five on A3 series. `enforce_eager: true` keeps the MTP draft model in eager mode on 950DT products, while `enforce_eager: false` enables graph mode for the draft model on A3 series. GLM-5.3-Flash supports MTP draft graph execution; the forced-eager restriction for other GLM models does not apply to this model.
 
 ### 5.2 Multi-Node Colocated Deployment
 
@@ -398,7 +398,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
     ```
 
-#### Key Parameter Descriptions
+**Key Parameter Descriptions**
 
 **Multi-node network and data parallel configuration:**
 
@@ -414,8 +414,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
 The 950DT products, A3 series and A2 series deployments use the same `launch_online_dp.py` script to
 start one vLLM process per local DP rank. Save it on every Prefill and Decode
 node before following the platform-specific instructions below.
-
-#### 5.3.1 Prepare the DP Launcher
 
 ```python
 import argparse
@@ -496,7 +494,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     ##### Prepare the Scripts
 
     1. prepare the script `launch_online_dp.py` on each node, using the
-       [shared DP launcher](#531-prepare-the-dp-launcher) above.
+       [shared DP launcher](#53-1p1d-pd-disaggregated-deployment) above.
 
     2. prepare the script `run_dp_template.sh` on each node.
 
@@ -668,7 +666,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         --decoder-ports 8000 8001 8002 8003 8004 8005 8006 8007
     ```
 
-    ##### Key Parameter Descriptions
+    **Key Parameter Descriptions**
 
     - `--data-parallel-size` and `--tensor-parallel-size` define DP1/TP8
       on Prefill and DP8/TP1 on Decode. Each role uses eight devices on
@@ -898,7 +896,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --decoder-ports $(seq "$D_PORT0" $((D_PORT0 + D_N - 1)))
     ```
 
-    ##### Key Parameter Descriptions
+    **Key Parameter Descriptions**
 
     - `--data-parallel-size` and `--tensor-parallel-size` define DP2/TP8 on
       Prefill and DP8/TP2 on Decode. Both layouts use all 16 logical devices
@@ -954,7 +952,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     two Decode nodes D0/D1. P0 serves the Prefill API endpoint; P1 is
     headless. The proxy addresses the API endpoints on both Decode nodes.
 
-    The shared `launch_online_dp.py` launcher from Section 5.3.1 starts the
+    The shared `launch_online_dp.py` launcher from Section 5.3 starts the
     engines on all four nodes. Save the common serving templates below and the
     node-specific wrapper scripts on their respective nodes. Replace all IP,
     NIC, and model-path placeholders.
