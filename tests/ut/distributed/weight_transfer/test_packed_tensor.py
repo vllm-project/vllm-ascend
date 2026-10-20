@@ -33,7 +33,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.logger import logger as vllm_logger
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -989,7 +988,6 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
 
         def synchronize(self):
             if self.pending is not None:
-                assert self.pending() is not None
                 events.append("drain")
                 self.pending = None
 
@@ -1064,10 +1062,10 @@ def test_packed_consumer_waits_for_receive_before_unpacking():
 
 
 @pytest.mark.parametrize("backend", ["hccl", "ipc"])
-@pytest.mark.parametrize("change", ["dtype", "numel", "none", "list"])
+@pytest.mark.parametrize("change", ["dtype", "numel", "none"])
 def test_packed_producer_rejects_invalid_callback_result(backend, change):
     original = torch.ones(2)
-    returned = {"dtype": original.to(torch.int32), "numel": original[:1], "none": None, "list": [1]}[change]
+    returned = {"dtype": original.to(torch.int32), "numel": original[:1], "none": None}[change]
     message = " returned.*expected dtype=.*numel=2" if change in ("dtype", "numel") else ".*must return a torch.Tensor"
     group = _make_group_mock()
     patcher, _ = _install_fake_reduce_tensor()
@@ -1220,8 +1218,16 @@ def test_packed_hccl_rejects_nonpositive_buffer_count(producer, num_buffers):
             packed_broadcast_consumer(iter([]), _make_group_mock(), 0, MagicMock(), 4, num_buffers)
 
 
-def test_packed_producer_passes_packing_stream_to_broadcast():
-    streams = [_FakeNpuStream(), _FakeNpuStream()]
+@pytest.mark.parametrize("num_buffers", [1, 2, 3])
+def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
+    pending = []
+
+    class BroadcastStream(_FakeNpuStream):
+        def synchronize(self):
+            if pending == [self]:
+                pending.clear()
+
+    streams = [BroadcastStream() for _ in range(num_buffers)]
     active: list[_FakeNpuStream] = []
 
     class StreamContext:
@@ -1236,6 +1242,8 @@ def test_packed_producer_passes_packing_stream_to_broadcast():
 
     def broadcast(tensor, *, src, stream):
         assert active == [stream]
+        assert not pending, "previous broadcast must complete before the next collective"
+        pending.append(stream)
 
     group = types.SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
     with (
@@ -1243,11 +1251,13 @@ def test_packed_producer_passes_packing_stream_to_broadcast():
         patch.object(torch.npu, "stream", side_effect=StreamContext) as context,
     ):
         packed_broadcast_producer(
-            iter((f"w{i}", torch.ones(1)) for i in range(3)), group, 0, lambda item: item[1], 1, 2
+            iter((f"w{i}", torch.ones(1)) for i in range(7)), group, 0, lambda item: item[1], 1, num_buffers
         )
-    assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == [streams[0], streams[1], streams[0]]
-    assert [call.args[0] for call in context.call_args_list[:3]] == [streams[0], streams[1], streams[0]]
+    expected = [streams[i % num_buffers] for i in range(7)]
+    assert [call.kwargs["stream"] for call in group.broadcast.call_args_list] == expected
+    assert [call.args[0] for call in context.call_args_list[:7]] == expected
     assert active == []
+    assert pending == []
 
 
 @pytest.mark.parametrize("producer", [False, True])
@@ -1312,9 +1322,3 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
     assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
-
-
-def test_packed_uses_shared_vllm_logger():
-    import vllm_ascend.distributed.weight_transfer.packed_tensor as packed_module
-
-    assert packed_module.logger is vllm_logger

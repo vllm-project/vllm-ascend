@@ -63,6 +63,7 @@ def packed_broadcast_producer(
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
+    previous_broadcast_stream = None
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
@@ -106,9 +107,14 @@ def packed_broadcast_producer(
                 if len(packing_tensor_list[buffer_idx]) > 0:
                     # Pack the tensors
                     packed_tensors[buffer_idx] = torch.cat(packing_tensor_list[buffer_idx], dim=0)
+                    # Packing can overlap the previous transfer, but collectives
+                    # on this communicator must not overlap across streams.
+                    if previous_broadcast_stream is not None and previous_broadcast_stream is not streams[buffer_idx]:
+                        previous_broadcast_stream.synchronize()
                     # Match the active packing stream and the explicit native
                     # HCCL stream; wait for both before reusing this slot.
                     group.broadcast(packed_tensors[buffer_idx], src=src, stream=streams[buffer_idx])
+                    previous_broadcast_stream = streams[buffer_idx]
 
             if len(packing_tensor_list[buffer_idx]) == 0:
                 # No more tensors — nothing left to broadcast
