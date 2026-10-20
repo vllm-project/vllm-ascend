@@ -72,6 +72,10 @@ def run_chunk_kda(
     lower_bound: float | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Consume preprocessed beta and return output plus the final VK state."""
+    # FLA's import-time capability queries can create an unwanted NPU context
+    # during operator discovery, before the worker selects its device.
+    # TODO: Restore the top-level import once supported vLLM FLA or Triton
+    # Ascend versions make these queries safe before device selection.
     from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
     output, final_state, *_ = chunk_kda_fwd(

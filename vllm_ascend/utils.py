@@ -960,6 +960,10 @@ def register_ascend_fla_customop():
     Registration happens once inside the imported module, under Python's
     module import lock. Repeated calls keep the same class and registry key.
     """
+    # Separate this from general registration to avoid FLA initializing an NPU
+    # context during plugin discovery in the API process.
+    # TODO: Merge back into register_ascend_customop once supported vLLM FLA or
+    # Triton Ascend versions fix import-time NPU initialization.
     from vllm_ascend.ops.fused_rms_norm_gated import AscendFusedRMSNormGated
 
     REGISTERED_ASCEND_OPS["FusedRMSNormGated"] = AscendFusedRMSNormGated

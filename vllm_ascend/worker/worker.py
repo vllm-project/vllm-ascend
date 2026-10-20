@@ -549,6 +549,8 @@ class NPUWorker(WorkerBase):
         self.device = self._init_device()
         # FLA import-time capability queries must run on the selected worker
         # device, and registration must finish before any model is constructed.
+        # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
+        # versions fix import-time NPU init and general registration is restored.
         register_ascend_fla_customop()
         # Initialize workspace manager
         num_ubatches = 1

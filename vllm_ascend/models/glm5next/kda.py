@@ -245,7 +245,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        # Resolve FLA only when building the model, after device initialization.
+        # FLA imports can initialize an NPU context through capability queries.
+        # Resolve and register the Ascend subclass after worker device selection.
+        # TODO: Restore eager import/registration once supported vLLM FLA or
+        # Triton Ascend versions make these queries safe before device selection.
         from vllm_ascend.utils import register_ascend_fla_customop
 
         register_ascend_fla_customop()

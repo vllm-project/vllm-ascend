@@ -216,6 +216,8 @@ class AscendRMSNormGated(RMSNormGated):
 def __getattr__(name: str):
     # Keep the existing class import available without loading FLA during
     # ordinary layernorm discovery. Python serializes the lazy module import.
+    # TODO: Remove this lazy accessor when the class moves back here after
+    # supported vLLM FLA or Triton Ascend versions fix import-time NPU init.
     if name == "AscendFusedRMSNormGated":
         from vllm_ascend.utils import register_ascend_fla_customop
 

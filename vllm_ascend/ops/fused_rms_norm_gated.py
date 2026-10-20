@@ -7,6 +7,10 @@ requesting the FLA class. Module import locking serializes registration and
 the module cache preserves class identity across repeated requests.
 """
 
+# Keep the FLA base class out of layernorm discovery: importing its package
+# can initialize an unwanted NPU context through capability queries.
+# TODO: Move this class back to layernorm.py and restore eager registration
+# once supported vLLM FLA or Triton Ascend versions fix that import side effect.
 from vllm.model_executor.custom_op import CustomOp
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
