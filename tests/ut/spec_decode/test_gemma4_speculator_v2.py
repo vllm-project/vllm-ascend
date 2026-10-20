@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 )
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
@@ -124,3 +125,46 @@ def test_sync_kv_sharing_target_to_impl():
 def test_sync_kv_sharing_target_to_impl_without_layers():
     speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
     speculator._sync_kv_sharing_target_to_impl(SimpleNamespace(model=SimpleNamespace(layers=[])))
+
+
+def test_prefill_rebinds_prefill_nocache_state():
+    # The Gemma4 window is Q-only and reads the KV shared with the target, so
+    # a target PrefillNoCache run must be rebound to a cache-reading state on
+    # a metadata copy; the target's metadata itself must stay untouched.
+    speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
+    original = {
+        "shared": SimpleNamespace(attn_state=AscendAttentionState.PrefillNoCache),
+        "other": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly),
+    }
+    with patch.object(AscendAutoRegressiveSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(2, 8, original, None)
+
+    passed = parent_prefill.call_args[0][2]
+    assert passed is not original
+    assert passed["shared"].attn_state is AscendAttentionState.PrefillCacheHit
+    assert passed["other"].attn_state is AscendAttentionState.DecodeOnly
+    assert original["shared"].attn_state is AscendAttentionState.PrefillNoCache
+
+
+def test_prefill_keeps_cache_reading_states():
+    # Metadata that already reads the KV cache passes through unchanged.
+    speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
+    original = {"shared": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)}
+    with patch.object(AscendAutoRegressiveSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(2, 8, original, None)
+
+    assert parent_prefill.call_args[0][2] is original
+
+
+def test_calc_next_seq_lens_cpu_honors_advance_draft_positions():
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.max_model_len = 128
+    seq_lens_cpu = torch.tensor([10, 20, 30], dtype=torch.int32)
+
+    advancing = PropertyMock(return_value=True)
+    with patch.object(AscendAutoRegressiveSpeculator, "advance_draft_positions", advancing):
+        assert speculator._calc_next_seq_lens_cpu(seq_lens_cpu.clone(), 2, 3, 2).tolist() == [12, 22, 0]
+
+    fixed = PropertyMock(return_value=False)
+    with patch.object(AscendAutoRegressiveSpeculator, "advance_draft_positions", fixed):
+        assert speculator._calc_next_seq_lens_cpu(seq_lens_cpu.clone(), 2, 3, 2).tolist() == [10, 20, 0]
