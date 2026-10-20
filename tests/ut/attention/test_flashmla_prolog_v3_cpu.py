@@ -299,6 +299,47 @@ def test_prolog_writer_stages_interleaved_cache_and_preserves_guards(interleaved
         torch.testing.assert_close(raw[~changed], before[~changed])
 
 
+@pytest.mark.parametrize("page_size", [128, 768])
+@pytest.mark.parametrize("use_flashmla", [False, True])
+@pytest.mark.parametrize("quantized_kv", [False, True])
+@pytest.mark.parametrize("quantize_query", [False, True])
+def test_prolog_tile_size_is_independent_of_writer_pages(page_size, use_flashmla, quantized_kv, quantize_query):
+    operator = Mock(return_value=object())
+    scope = {"torch": torch, "torch_npu": SimpleNamespace(npu_mla_prolog_v3=operator)}
+    run = load(MLA, "_run_prolog_v3", scope, "AscendMLAImpl")
+    cache = (torch.empty(1, page_size, 1, 512), torch.empty(1, page_size, 1, 64))
+    slots = torch.tensor([0, 1, page_size - 1], dtype=torch.int64)
+    weights = dict.fromkeys(("weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr"), object())
+    norm = SimpleNamespace(weight=SimpleNamespace(data=object()), variance_epsilon=1e-6)
+    impl = SimpleNamespace(
+        use_flashmla=use_flashmla,
+        fa_quant_layer=quantized_kv,
+        support_fp8_attention=False,
+        quant_kscale=torch.ones(1, 1),
+        q_a_layernorm=norm,
+        kv_a_layernorm=norm,
+        _prepare_prolog_v3_token=lambda x: (x, {}, weights),
+        _flatten_prolog_rope_table=lambda x, _: x,
+        _prolog_v3_writer_workspace=lambda *_: (cache, slots, False),
+    )
+
+    assert run(impl, torch.zeros(3, 16), object(), object(), cache, slots, quantize_query=quantize_query) is (
+        operator.return_value
+    )
+
+    operator.assert_called_once()
+    passed = operator.call_args.kwargs
+    assert passed["tile_size"] == 128
+    assert passed["kv_cache_quant_mode"] == int(quantized_kv)
+    assert passed["query_quant_mode"] == int(quantize_query and quantized_kv)
+    assert passed["cache_mode"] == "PA_BSND"
+    assert passed["kv_cache"] is cache[0]
+    assert passed["kr_cache"] is cache[1]
+    assert cache[0].shape == (1, page_size, 1, 512)
+    assert cache[1].shape == (1, page_size, 1, 64)
+    torch.testing.assert_close(passed["cache_index"], slots)
+
+
 def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
     scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y}
     impl = SimpleNamespace(
