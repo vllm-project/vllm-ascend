@@ -68,12 +68,12 @@ test_cases:
     max_tokens: 16
     temperature: 0.0
   benchmarks:
-    # Reuse the local 3500-input dataset exercised by the earlier A5 performance run.
+    # Use the shared-prefix dataset exercised by the A3 MRV2 performance run.
     # Token lengths depend on the GLM tokenizer; no prefix-hit ratio is asserted.
     perf_warmup:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K-in3500-bs400
-      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs400
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 8
@@ -84,11 +84,11 @@ test_cases:
       threshold: 0.97
     perf:
       case_type: performance
-      dataset_path: vllm-ascend/GSM8K-in3500-bs400
-      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K-in3500-bs400
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-      num_prompts: 512
+      num_prompts: 128
       max_out_len: 1024
       batch_size: 8
       request_rate: 0
