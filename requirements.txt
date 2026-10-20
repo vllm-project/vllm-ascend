@@ -33,6 +33,7 @@ numba
 # Required for kvpool supports memcache backend
 memfabric_hybrid==1.2.0
 memcache_hybrid==1.2.0
+mooncake-transfer-engine-npu==0.3.13.post1
 
 arctic-inference==0.1.1
 transformers==5.14.1
