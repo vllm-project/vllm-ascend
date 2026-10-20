@@ -40,6 +40,10 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.context_parallel.dsv4_indexer import (
+    gather_dcp_indexer_cache,
+    gather_dcp_topk,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -144,6 +148,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
         ratio_kwargs = {"tokens_per_state": self.compress_ratio}
+        # C4 Indexer and main KV share the same compressed-page ownership.
+        # Keeping the ordinary spec lets both caches share scheduler block IDs
+        # without enlarging the uniform pool block or adding another group.
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
@@ -235,8 +242,17 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
+        dcp_size = getattr(metadata, "compressor_dcp_size", 1)
+        dcp_decode = getattr(metadata, "dcp_indexer_decode", False)
+        block_table = metadata.block_table
+        if dcp_size > 1:
+            if dcp_decode:
+                block_table = metadata.dcp_local_block_table
+            else:
+                key_cache, scale_cache = gather_dcp_indexer_cache(key_cache, scale_cache, metadata)
+                block_table = metadata.dcp_prefill_kv_gather_block_table
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        topk_idxs, topk_scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
             weights=self.device_operator.prepare_dsa_indexer_weights(weights),
@@ -247,14 +263,22 @@ class AscendIndexerOps:
             cu_seqlens_q=metadata.qli_cu_seqlens_q,
             seqused_k=metadata.qli_seqused_k,
             cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
+            block_table=block_table,
             metadata=metadata.qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
-            mask_mode=3,
+            mask_mode=0 if dcp_decode else 3,
             cmp_ratio=4,
-            return_value=0,
+            return_value=2 if dcp_decode else 0,
         )
+        if dcp_decode:
+            topk_idxs = gather_dcp_topk(
+                topk_idxs,
+                topk_scores,
+                key_cache.shape[1],
+                dcp_size,
+                metadata.compressor_dcp_rank,
+            )
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(

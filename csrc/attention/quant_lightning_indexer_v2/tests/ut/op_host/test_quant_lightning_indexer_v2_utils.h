@@ -64,6 +64,7 @@ struct CaseParam {
     int64_t maskMode = 0;
     int64_t cmpRatio = 1;
     int64_t returnValue = 0;
+    int64_t candidateMode = 3;
 };
 
 inline gert::StorageShape ToStorageShape(const std::vector<int64_t> &dims)
@@ -91,12 +92,13 @@ inline void RunTilingCase(const CaseParam &p, ge::graphStatus expect)
     struct QLIV2CompileInfo {
     } compileInfo;
     gert::TilingContextPara para(
-        "QuantLightningIndexerV2",
+        "VllmAscendQuantLightningIndexerV2",
         {Desc(p.qShape, p.qType), Desc(p.kShape, p.kType), Desc(p.wShape, p.wType), Desc(p.qScaleShape, p.qScaleType),
          Desc(p.kScaleShape, p.kScaleType), Desc(p.cuSeqQ, p.cuSeqQType), Desc(p.cuSeqK, p.cuSeqKType),
          Desc(p.sequsedQ, p.sequsedQType), Desc(p.sequsedK, p.sequsedKType), Desc(p.cmpResidual, p.cmpResidualType),
-         Desc(p.blockTable, p.blockTableType), Desc(p.idxOffset, p.idxOffsetType), Desc(p.metadata, ge::DT_INT32)},
-        {Desc(p.outShape, p.outType), Desc(p.valuesShape, p.valuesType)},
+         Desc(p.blockTable, p.blockTableType), Desc(p.idxOffset, p.idxOffsetType), Desc(p.metadata, ge::DT_INT32),
+         Desc({}, ge::DT_INT32)},
+        {Desc(p.outShape, p.outType), Desc(p.valuesShape, p.valuesType), Desc({0}, ge::DT_INT32)},
         {{"topk", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.topk)},
          {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.quantMode)},
          {"max_seqlen_q", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.maxSeqlenQ)},
@@ -104,7 +106,12 @@ inline void RunTilingCase(const CaseParam &p, ge::graphStatus expect)
          {"layout_k", Ops::Transformer::AnyValue::CreateFrom<std::string>(p.layoutK)},
          {"mask_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.maskMode)},
          {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cmpRatio)},
-         {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.returnValue)}},
+         {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.returnValue)},
+         {"candidate_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.candidateMode)},
+         {"candidate_topk_blocks", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2048)},
+         {"candidate_block_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
+         {"key_stride0", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"key_dequant_scale_stride0", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, p.soc, p.coreNum, p.ubSize, p.l2Size);
     ExecuteTestCase(para, expect, SKIP_TILING_KEY);
 }

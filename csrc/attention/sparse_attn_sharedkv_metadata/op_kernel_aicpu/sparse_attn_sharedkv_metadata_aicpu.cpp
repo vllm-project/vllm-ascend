@@ -460,7 +460,7 @@ void SparseAttnSharedkvMetadataCpuKernel::CalcBatchCache(
 void SparseAttnSharedkvMetadataCpuKernel::CalcWinS1GCache(S1GCache &s1GCache, const SplitInfo &splitInfo)
 {
     // 处理win部分block信息
-    if (s1GCache.winS2Start >= s1GCache.winS2End) {
+    if (!hasOriKv_ || s1GCache.winS2Start >= s1GCache.winS2End) {
         // win范围无效, 则整个s1g行等效为空行
         s1GCache.winS1GBlock = 0;
         s1GCache.winS1GCost = 0;
@@ -989,6 +989,10 @@ bool SparseAttnSharedkvMetadataCpuKernel::BalanceSchedule(SplitResult &splitRes)
 
 bool SparseAttnSharedkvMetadataCpuKernel::GenMetaData(SplitResult &splitRes) {
     optiling::detail::SasMetaData* metaDataPtr = (optiling::detail::SasMetaData*)metaData_->GetData();
+    // A2 SCFA still receives a valid ori cache as an op-host placeholder.
+    // Publish the existing has_ori_kv semantic in the reserved metadata tail
+    // so the device loop can skip ori work for every row handled by a core.
+    metaDataPtr->cmpOnlyFlag = hasOriKv_ ? 0U : optiling::SAS_CMP_ONLY_FLAG_VALUE;
     // FA Metadata Generate
     for (size_t i = 0; i < aicCoreNum_; ++i) {
         if (i >= splitRes.usedCoreNum) {

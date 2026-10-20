@@ -59,6 +59,8 @@ public:
         this->Attr("slotMappingFormat").Int();
         this->Attr("cmpRatio").Int();
         this->Attr("actualNumReqs").Int();
+        this->Attr("dcpSize").Int();
+        this->Attr("dcpRank").Int();
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");

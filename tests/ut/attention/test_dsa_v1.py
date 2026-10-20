@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -29,6 +29,8 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSACPImpl,
     AscendDSACPLayerMetadata,
     AscendDSACPMetadataBuilder,
+    AscendDSADCPImpl,
+    AscendDSADCPMetadataBuilder,
     AscendDSAPCPImpl,
     AscendDSAPCPMetadata,
     AscendDSAPCPMetadataBuilder,
@@ -693,7 +695,8 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
-def test_build_compressor_metadata_out_uses_fixed_outputs():
+@pytest.mark.parametrize("dcp_args", [(), (2, 1)])
+def test_build_compressor_metadata_out_uses_fixed_outputs(dcp_args):
     metadata = SimpleNamespace(
         full_compress_cos=torch.ones((8, 1, 1, 4)),
         full_compress_sin=torch.zeros((8, 1, 1, 4)),
@@ -703,6 +706,8 @@ def test_build_compressor_metadata_out_uses_fixed_outputs():
         storage_block_size=128,
         num_actual_reqs=1,
     )
+    if dcp_args:
+        metadata.compressor_dcp_size, metadata.compressor_dcp_rank = dcp_args
     outputs = (
         torch.empty((2, 1, 1, 4)),
         torch.empty((2, 1, 1, 4)),
@@ -717,7 +722,7 @@ def test_build_compressor_metadata_out_uses_fixed_outputs():
     ):
         build_compressor_metadata_out(metadata, 4, outputs, vllm_config)
 
-    assert metadata_out.call_args.args[-3:] == outputs
+    assert metadata_out.call_args.args[9:] == (*outputs, *dcp_args)
     assert metadata_out.call_args.args[6] == 2
 
 
@@ -2111,6 +2116,7 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
 def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
     with (
         patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=False),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
     ):
         assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
@@ -2125,6 +2131,7 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
 
     with (
         patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=False),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
     ):
         for get_backend_cls in (
@@ -2132,6 +2139,30 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
             AscendDSABackend.get_impl_cls,
         ):
             with pytest.raises(ValueError, match="cannot be enabled at the same time"):
+                get_backend_cls()
+
+
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_dsa_backend_selects_dcp_without_changing_default_backend(use_dcp):
+    with (
+        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=use_dcp),
+        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
+    ):
+        expected_builder = AscendDSADCPMetadataBuilder if use_dcp else AscendDSAMetadataBuilder
+        expected_impl = AscendDSADCPImpl if use_dcp else AscendDSAImpl
+        assert AscendDSABackend.get_builder_cls() is expected_builder
+        assert AscendDSABackend.get_impl_cls() is expected_impl
+
+
+def test_dsa_backend_rejects_pcp_with_dcp():
+    with (
+        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.enable_dcp", return_value=True),
+        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
+    ):
+        for get_backend_cls in (AscendDSABackend.get_builder_cls, AscendDSABackend.get_impl_cls):
+            with pytest.raises(NotImplementedError, match="PCP and DCP cannot be enabled at the same time"):
                 get_backend_cls()
 
 
@@ -2952,3 +2983,142 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
     assert metadata_op.call_args.kwargs["seqused_kv"].tolist() == [261 if compressed_tq else 133]
     assert (metadata.dspark_swa_indices is None) == compressed_tq
     assert metadata.ori_win_left == (127 if compressed_tq else 132)
+
+
+def test_dcp_sas_overrides_preserve_the_default_metadata_buffer():
+    builder = _make_builder(compressor_ratio=4)
+    builder.sas_metadata_buffer.fill_(-1)
+    local_buffer = torch.empty_like(builder.sas_metadata_buffer)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={},
+    )
+    with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan) as planner:
+        result = builder._build_sas_metadata(
+            metadata_cache={},
+            layer_name="dcp_c4_local",
+            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8, 12], dtype=torch.int32),
+            max_seqlen_q=1,
+            max_seqlen_kv=12,
+            cu_seqlens_ori_kv=None,
+            cu_seqlens_cmp_kv=None,
+            output_buffer=local_buffer,
+            num_heads_q=8,
+            cmp_topk=256,
+            cmp_ratio=4,
+            has_ori_kv=False,
+            has_cmp_kv=True,
+        )
+    assert result is local_buffer
+    torch.testing.assert_close(result, generated_metadata)
+    assert builder.sas_metadata_buffer.eq(-1).all()
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["num_heads_q"] == 8
+    assert kwargs["cmp_topk"] == 256
+    assert kwargs["cmp_ratio"] == 4
+    assert kwargs["has_ori_kv"] is False
+    assert kwargs["has_cmp_kv"] is True
+    assert kwargs["ori_mask_mode"] == 4
+    planner.assert_any_call(builder.vllm_config, 4)
+
+
+def test_dcp_qli_shared_lengths_refresh_when_tiling_metadata_is_reused():
+    builders = []
+    for _ in range(2):
+        builder = AscendDSADCPMetadataBuilder.__new__(AscendDSADCPMetadataBuilder)
+        builder.__dict__.update(_make_builder().__dict__)
+        builder.shard_c4_cache = False
+        builder.qli_seqused_k.fill_(-1)
+        builder.qli_cmp_residual_k.fill_(-1)
+        builders.append(builder)
+    cached_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_cache = {"qli": cached_metadata}
+    for index, lengths in enumerate(([1965, 130], [1968, 133])):
+        seq_lens = torch.tensor(lengths, dtype=torch.int64)
+        builder = builders[index]
+        result = builder._build_qli_metadata(
+            metadata_cache=metadata_cache,
+            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+            seq_lens=seq_lens,
+            max_seqlen_q=1,
+            max_seqlen_kv=max(lengths),
+        )
+        compressed_lengths, residuals = builder._get_qli_length_buffers(metadata_cache, 2)
+        assert compressed_lengths.data_ptr() == builders[0].qli_seqused_k.data_ptr()
+        assert residuals.data_ptr() == builders[0].qli_cmp_residual_k.data_ptr()
+        torch.testing.assert_close(compressed_lengths, (seq_lens // 4).int())
+        torch.testing.assert_close(residuals, (seq_lens % 4).int())
+        torch.testing.assert_close(result, cached_metadata)
+    assert builders[1].qli_seqused_k.eq(-1).all()
+    assert builders[1].qli_cmp_residual_k.eq(-1).all()
+
+
+@pytest.mark.parametrize("use_turboquant", [False, True])
+def test_attention_hook_preserves_turboquant_and_transfer_window(use_turboquant):
+    impl = _make_impl()
+    impl.compress_ratio = 4
+    events = []
+    q = torch.ones((2, 1, 2))
+    request = _make_req_metadata()
+    metadata = AscendDSAMetadata(2, 2, 2, 0, req_metadata=request)
+    layer_metadata = AscendDSALayerMetadata(metadata, metadata)
+    topk = torch.zeros((2, 1, 1), dtype=torch.int32)
+
+    def rotate(query):
+        events.append("rotate")
+        return query + 10
+
+    def inverse(result):
+        events.append("inverse")
+        return result - 10
+
+    def attention(query, **kwargs):
+        events.append("attention")
+        torch.testing.assert_close(query, q + (10 if use_turboquant else 0))
+        assert kwargs["cmp_sparse_indices"] is topk
+        return query, None
+
+    @contextmanager
+    def transfer_window():
+        events.append("window_start")
+        yield
+        events.append("window_finish")
+
+    impl.turboquant = SimpleNamespace(forward=rotate, inverse=inverse) if use_turboquant else None
+    plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_op=attention, get_dsa_sparse_attn_base_kwargs={})
+    impl.get_kv_plan = MagicMock(return_value=plan)
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_device_metadata"),
+        patch("vllm_ascend.attention.dsa_v1.attention_transfer_window", transfer_window),
+    ):
+        result = impl._execute_attention(q, torch.empty(0), torch.empty(0), topk, layer_metadata)
+    torch.testing.assert_close(result, q)
+    assert events == (
+        ["rotate", "window_start", "attention", "window_finish", "inverse"]
+        if use_turboquant
+        else ["window_start", "attention", "window_finish"]
+    )
+
+
+def test_c4_dcp_rejects_turboquant_before_executing_unsupported_operator():
+    def initialize_base(self):
+        self.vllm_config = _make_vllm_config()
+        self.compress_ratio = 4
+        self.turboquant = object()
+
+    group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
+    plan = _mock_dsa_kv_plan()
+    plan.uses_sparse_flash_mla = plan.uses_kv_compress_epilog = False
+    with (
+        patch.object(AscendDSAImpl, "__init__", initialize_base),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=group),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_pcp_group", return_value=group),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group", return_value=group),
+        patch("vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan", return_value=plan),
+        pytest.raises(NotImplementedError, match="TurboQuant KV cache is not supported"),
+    ):
+        AscendDSADCPImpl()

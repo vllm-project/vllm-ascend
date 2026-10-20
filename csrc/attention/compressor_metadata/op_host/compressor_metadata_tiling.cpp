@@ -145,10 +145,14 @@ static ge::graphStatus CompressorMetadataTilingFunc(gert::TilingContext* context
     const int64_t* slotMappingFormatPtr = attrs->GetInt(1);
     const int64_t* cmpRatioPtr = attrs->GetInt(2);
     const int64_t* actualNumReqsPtr = attrs->GetInt(3);
+    const int64_t* dcpSizePtr = attrs->GetInt(4);
+    const int64_t* dcpRankPtr = attrs->GetInt(5);
     OP_CHECK_NULL_WITH_CONTEXT(context, kvBlockSizePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, slotMappingFormatPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, cmpRatioPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, actualNumReqsPtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, dcpSizePtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, dcpRankPtr);
     if (*kvBlockSizePtr <= 0 || *kvBlockSizePtr > MAX_INT32_VALUE) {
         OP_LOGE(context->GetNodeName(), "kvBlockSize should be in (0, INT32_MAX].");
         return ge::GRAPH_FAILED;
@@ -159,6 +163,11 @@ static ge::graphStatus CompressorMetadataTilingFunc(gert::TilingContext* context
     }
     if (*slotMappingFormatPtr != SLOT_MAPPING_FLAT && *slotMappingFormatPtr != SLOT_MAPPING_BLOCK_OFFSET) {
         OP_LOGE(context->GetNodeName(), "slotMappingFormat should be 1(flat) or 2(block_offset).");
+        return ge::GRAPH_FAILED;
+    }
+    if (*dcpSizePtr <= 0 || *dcpSizePtr > MAX_UINT32_VALUE ||
+        *dcpRankPtr < 0 || *dcpRankPtr >= *dcpSizePtr) {
+        OP_LOGE(context->GetNodeName(), "DCP compressor metadata attributes are invalid.");
         return ge::GRAPH_FAILED;
     }
     auto slotMappingDimNum = slotMappingShape->GetStorageShape().GetDimNum();
@@ -188,6 +197,8 @@ static ge::graphStatus CompressorMetadataTilingFunc(gert::TilingContext* context
     tilingData.set_kvBlockSize(static_cast<uint32_t>(*kvBlockSizePtr));
     tilingData.set_slotMappingFormat(static_cast<uint32_t>(*slotMappingFormatPtr));
     tilingData.set_cmpRatio(static_cast<uint32_t>(*cmpRatioPtr));
+    tilingData.set_dcpSize(static_cast<uint32_t>(*dcpSizePtr));
+    tilingData.set_dcpRank(static_cast<uint32_t>(*dcpRankPtr));
 
     auto ropeDesc = context->GetInputDesc(ROPE_COS_INDEX);
     auto ropeSinDesc = context->GetInputDesc(ROPE_SIN_INDEX);
@@ -237,8 +248,7 @@ static ge::graphStatus CompressorMetadataTilingFunc(gert::TilingContext* context
     uint32_t slotCols = (*slotMappingFormatPtr == SLOT_MAPPING_FLAT) ? 1U : 2U;
     uint32_t reqTableBytes = AlignUp((static_cast<uint64_t>(actualNumReqs) + 1) * sizeof(int32_t), ALIGN_BYTES);
     uint64_t fixedUbBytes = static_cast<uint64_t>(reqTableBytes) * 3 + ALIGN_BYTES + UB_RESERVED_BYTES;
-    uint64_t rowUbBytes =
-        static_cast<uint64_t>(BUFFER_NUM) * ropeRowBytesAligned * 2 + slotCols * sizeof(int32_t) + sizeof(int32_t);
+    uint64_t rowUbBytes = static_cast<uint64_t>(BUFFER_NUM) * ropeRowBytesAligned * 2 + slotCols * sizeof(int32_t);
     if (rowUbBytes > MAX_UINT32_VALUE) {
         OP_LOGE(context->GetNodeName(), "row UB footprint exceeds UINT32_MAX.");
         return ge::GRAPH_FAILED;

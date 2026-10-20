@@ -409,7 +409,8 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
     }
 
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(*opParamInfo_.returnValue, OP_LOGE(opName_, "input attr returnValue only supported False."),
+        OP_CHECK_IF((*opParamInfo_.returnValue != 0) && (*opParamInfo_.returnValue != 2),
+                    OP_LOGE(opName_, "input attr returnValue only supports 0 or 2 (FP32 DCP scores)."),
                     return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510) {
         OP_CHECK_IF((*opParamInfo_.returnValue != 0) && (*opParamInfo_.returnValue != 1),
@@ -432,6 +433,9 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "candidate_mode",
                                                       std::to_string(candidateMode),
                                                       "Candidate_mode only supports 1(source), 2(consumer) or 3(off)"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*opParamInfo_.returnValue == 2 && candidateMode != CANDIDATE_MODE_OFF,
+                OP_LOGE(opName_, "FP32 DCP scores require candidate_mode=3 (off)."),
                 return ge::GRAPH_FAILED);
     if (candidateMode != CANDIDATE_MODE_OFF) {
         // candidate 功能当前仅在 arch22 (910b/910_93) 实现
@@ -579,10 +583,12 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
                                                       QLIV2DataTypeToSerialString(outputType_).c_str(),
                                                       "The dtype of sparse_indices must be int32"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(valuesOutType_ != ge::DT_BF16,
+    const ge::DataType expectedValuesType =
+        *opParamInfo_.returnValue == 2 ? ge::DT_FLOAT : ge::DT_BF16;
+    OP_CHECK_IF(valuesOutType_ != expectedValuesType,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_values",
                                                       QLIV2DataTypeToSerialString(valuesOutType_).c_str(),
-                                                      "The dtype of sparse_values must be bfloat16"),
+                                                      "The dtype of sparse_values must be float32 for return_value=2, otherwise bfloat16"),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -848,6 +854,18 @@ ge::graphStatus QLIV2InfoParser::CheckShapeDim()
             OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "output_idx_offset", std::to_string(outputIdxOffsetShapeDim).c_str(),
                                          std::to_string(expectShapeDim - 1).c_str()),
             return ge::GRAPH_FAILED);
+    }
+    if (*opParamInfo_.returnValue == 2) {
+        const auto &indicesShape = opParamInfo_.attenOut.shape->GetStorageShape();
+        const auto &valuesShape = opParamInfo_.sparseValues.shape->GetStorageShape();
+        OP_CHECK_IF(valuesShape.GetDimNum() != indicesShape.GetDimNum(),
+                    OP_LOGE(opName_, "FP32 DCP scores must have the same shape as sparse_indices."),
+                    return ge::GRAPH_FAILED);
+        for (size_t dim = 0; dim < indicesShape.GetDimNum(); ++dim) {
+            OP_CHECK_IF(valuesShape.GetDim(dim) != indicesShape.GetDim(dim),
+                        OP_LOGE(opName_, "FP32 DCP scores must have the same shape as sparse_indices."),
+                        return ge::GRAPH_FAILED);
+        }
     }
     if (npuArch_ == NpuArch::DAV_3510 && *opParamInfo_.returnValue == 1) {
         uint32_t sparseValuesShapeDim = opParamInfo_.sparseValues.shape->GetStorageShape().GetDimNum();

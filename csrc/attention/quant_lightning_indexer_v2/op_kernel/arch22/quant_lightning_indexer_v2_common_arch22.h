@@ -105,6 +105,7 @@ struct ConstInfo {
     uint64_t kHeadNum;
     uint64_t headDim;
     uint64_t sparseCount;             // topK选取大小
+    bool returnFp32Scores = false;
     uint64_t kSeqSize = 0ULL;         // kv最大S长度
     uint64_t qSeqSize = 1ULL;         // q最大S长度
     uint32_t kCacheBlockSize = 0;     // PA场景的block size

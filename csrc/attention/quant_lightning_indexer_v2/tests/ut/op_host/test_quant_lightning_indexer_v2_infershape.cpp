@@ -214,3 +214,37 @@ TEST_F(QuantLightningIndexerV2Proto, QuantLightningIndexerV2_inferdtype)
         EXPECT_EQ(context->GetOutputDataType(0), outputRef0);
     }
 }
+
+TEST_F(QuantLightningIndexerV2Proto, QuantLightningIndexerV2_dcp_fp32_inferdtype)
+{
+    auto registry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(registry, nullptr);
+    auto impl = registry->GetOpImpl("VllmAscendQuantLightningIndexerV2");
+    ASSERT_NE(impl, nullptr);
+    ASSERT_NE(impl->infer_datatype, nullptr);
+    ge::DataType inputQ = ge::DT_INT8;
+    ge::DataType inputFp16 = ge::DT_FLOAT16;
+    ge::DataType inputI32 = ge::DT_INT32;
+    auto holder = gert::InferDataTypeContextFaker()
+        .NodeIoNum(14, 3)
+        .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
+        .NodeOutputTd(1, ge::FORMAT_ND, ge::FORMAT_ND)
+        .NodeOutputTd(2, ge::FORMAT_ND, ge::FORMAT_ND)
+        .InputDataTypes({&inputQ, &inputQ, &inputFp16, &inputFp16, &inputFp16, &inputI32, &inputI32,
+                         &inputI32, &inputI32, &inputI32, &inputI32, &inputI32, &inputI32, &inputI32})
+        .NodeAttrs({{"topk", Ops::Transformer::AnyValue::CreateFrom<int64_t>(512)},
+                    {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                    {"max_seqlen_q", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+                    {"layout_q", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+                    {"layout_k", Ops::Transformer::AnyValue::CreateFrom<std::string>("PA_BBND")},
+                    {"mask_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                    {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4)},
+                    {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)}})
+        .Build();
+    auto context = holder.GetContext<gert::InferDataTypeContext>();
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(impl->infer_datatype(context), ge::GRAPH_SUCCESS);
+    EXPECT_EQ(context->GetOutputDataType(0), ge::DT_INT32);
+    EXPECT_EQ(context->GetOutputDataType(1), ge::DT_FLOAT);
+    EXPECT_EQ(context->GetOutputDataType(2), ge::DT_INT32);
+}
