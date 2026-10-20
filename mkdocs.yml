@@ -102,7 +102,7 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-      toc_depth: 4
+      toc_depth: 5
   # Python Markdown Extensions
   - pymdownx.arithmatex:
       generic: true
@@ -143,6 +143,7 @@ extra_css:
 extra_javascript:
   - javascripts/mathjax.js
   - javascripts/tabbed-toc.js
+  - javascripts/table-fullscreen.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
@@ -234,8 +235,7 @@ nav:
         - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
-        - tutorials/models/GLM5.2.md
-        - tutorials/models/GLM5.3.md
+        - "GLM-5.2 & GLM-5.3": tutorials/models/GLM5.2.md
         - tutorials/models/GLM5.3-Flash.md
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md

@@ -411,8 +411,8 @@ msgstr ""
 "[Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md)"
 " |"
 
-msgid "    | GLM-5.3             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3](../../tutorials/models/GLM5.3.md) |"
-msgstr "    | GLM-5.3             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3](../../tutorials/models/GLM5.3.md) |"
+msgid "    | GLM-5.3             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3](../../tutorials/models/GLM5.2.md) |"
+msgstr "    | GLM-5.3             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3](../../tutorials/models/GLM5.2.md) |"
 
 msgid ""
 "    | Qwen3.5-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | "
