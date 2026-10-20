@@ -72,6 +72,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE": lambda: _strict_binary_env("VLLM_ASCEND_QUANTIZED_ALL_REDUCE"),
+    # Minimum numel for a bf16 all-reduce to be quantized (default 4 MiB of
+    # bf16 payload). Smaller messages stay on the bf16 path because they are
+    # latency-bound.
+    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": lambda: os.getenv(
+        "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", None
+    ),
 }
 
 # end-env-vars-definition
