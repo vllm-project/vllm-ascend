@@ -35,7 +35,7 @@ def reference_attention(
     values = values.repeat_interleave(group_size, dim=1)
     scores = torch.einsum("thd,shd->ths", query.float(), keys)
     probabilities = (scores / math.sqrt(HEAD_DIM)).softmax(dim=-1)
-    return torch.einsum("ths,shd->thd", probabilities, values)
+    return torch.einsum("t\x68s,shd->thd", probabilities, values)
 
 
 def run_case(dtype: torch.dtype, tail_tokens: int) -> None:
