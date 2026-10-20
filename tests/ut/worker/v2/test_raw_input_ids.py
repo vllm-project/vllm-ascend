@@ -26,10 +26,10 @@ class TokenModel(torch.nn.Module):
 def make_state(monkeypatch):
     def initialize(self, config, model, encoder_cache, device):
         self.vllm_config = config
+        self.model_config = config.model_config
         self.model = model
         self.max_num_reqs = 4
         self.max_num_tokens = 32
-        self.max_model_len = 128
 
     monkeypatch.setattr(DefaultModelState, "__init__", initialize)
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda *args: {})
@@ -43,7 +43,10 @@ def make_state(monkeypatch):
 
     def create(requires_ids=True):
         model = TokenModel(requires_ids)
-        config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(max_model_len=128),
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        )
         state = state_module.AscendModelState(config, model, None, torch.device("cpu"))
         return state, model
 
@@ -121,6 +124,8 @@ def test_raw_ids_binding_preserves_model_specific_attention_metadata(make_state,
     metadata = object()
     build_metadata = Mock(return_value={})
     monkeypatch.setattr(state_module, "build_attn_metadata", build_metadata)
+    # Upstream reads this property from model_config after auto-fit updates.
+    state.model_config.max_model_len = 96
 
     state.prepare_attn(
         current_batch,
@@ -133,6 +138,7 @@ def test_raw_ids_binding_preserves_model_specific_attention_metadata(make_state,
     )
 
     assert build_metadata.call_args.kwargs["model_specific_attn_metadata"] is metadata
+    assert build_metadata.call_args.kwargs["max_seq_len"] == 96
     restored = model(input_ids=None, positions=current_batch.positions)
     assert restored.data_ptr() == native_ids.data_ptr()
     torch.testing.assert_close(restored, native_ids[:24])

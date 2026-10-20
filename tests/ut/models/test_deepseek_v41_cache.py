@@ -132,6 +132,9 @@ def runtime(config):
             tensor_parallel_size=1,
         ),
         speculative_config=None,
+        # vLLM main annotates sliding-window specs before global PP planning.
+        # This fixture has no drafter, so no prefill lookahead is retained.
+        num_prefill_lookahead_tokens=0,
         kv_transfer_config=None,
         use_v2_model_runner=False,
         # vLLM main reads attention_config.hisparse_config in the KV cache

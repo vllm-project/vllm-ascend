@@ -283,6 +283,10 @@ logical devices of one A3 server, and a `20,20` encoder/decoder split. DSpark
 uses the checkpoint's three draft layers. The target model uses
 `FULL_DECODE_ONLY`; the draft executes eagerly.
 
+V4.1 pipeline parallelism requires Model Runner V2. The decoder-layer bounded
+replay optimization is disabled with PP greater than one; target Decode ACL
+graphs remain enabled by `FULL_DECODE_ONLY`.
+
 Use the matching vLLM and vLLM Ascend source revisions containing the MRV2 PP
 adaptation. Check `vllm_ascend.__file__` before starting to ensure that Python
 imports that checkout. This is a validation configuration; successful unit
@@ -346,6 +350,11 @@ provided IDs and adds no token copies or synthetic replacement IDs.
 On A3 with expandable memory segments, masked Engram history loads keep
 their addresses inside the allocated request row; missing history still
 produces `-1`.
+
+MRV2 captures auxiliary states at the checkpoint's post-layer boundaries,
+before the following layer's Engram input. The shared model preserves MRV1's
+pre-layer auxiliary capture for existing deployments without PP. Normal and
+bounded-replay layer loops use the same runner-specific capture convention.
 
 Five speculative tokens require six target verification queries per request.
 Capture size 24 aligns that width with TP8 and fits four requests. Preserve
@@ -947,8 +956,8 @@ For common environment, installation, and parameter issues, refer to the
 - The A2 configuration is retained unchanged and is not revalidated by this
   update. Its revised configuration will be documented separately.
 - The A3 DP and PD examples use model runner V1 with
-  `VLLM_USE_V2_MODEL_RUNNER=0`. Section 5.1.1 separately describes the
-  experimental MRV2 PP2/TP8 configuration and forces
+  `VLLM_USE_V2_MODEL_RUNNER=0`. V4.1 pipeline parallelism requires Model Runner
+  V2. Section 5.1.1 describes the experimental PP2/TP8 configuration and forces
   `VLLM_USE_V2_MODEL_RUNNER=1`. Text generation checks observed target FULL
   graph replay and accepted DSpark tokens. That configuration is text-only, uses PCP1
   and native asynchronous scheduling, and does not enable DSA-CP. PP3/PP4

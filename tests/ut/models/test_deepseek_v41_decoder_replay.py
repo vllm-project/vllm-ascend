@@ -9,6 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
+from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
@@ -107,6 +108,7 @@ def test_replay_without_rows_keeps_inputs():
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
 def test_model_replays_only_layers_after_kv_sources(monkeypatch, use_v2_model_runner):
     monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     seen = []
 
     class Layer:

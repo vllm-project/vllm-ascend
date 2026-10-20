@@ -47,6 +47,8 @@ class _PipelineLayer(torch.nn.Module):
 def _pipeline_stage(start, end, embedding, use_sp, *, num_layers=6):
     model = object.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    # __new__ bypasses compile-decorator initialization; keep the real eager forward.
+    model.do_not_compile = True
     model.config = SimpleNamespace(hidden_size=4, engram_layer_ids=())
     model.hc_mult = 4
     model.decoder_replay_layers = None
