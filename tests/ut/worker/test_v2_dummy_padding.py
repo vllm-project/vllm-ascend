@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -152,8 +153,9 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
             batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
         )
         assert actual_uniform == uniform
+        dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(
-            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, dp_sync=sync
+            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, **{dp_sync_kwarg: sync}
         )
         assert draft_desc.cg_mode == draft_mode.decode_mode()
         assert draft_desc.num_tokens == capture_size
@@ -314,6 +316,8 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
         assert batch.num_tokens == batch.num_tokens_after_padding == num_tokens
         blocks = SimpleNamespace(
             input_block_tables=[torch.zeros((num_reqs, 8), dtype=torch.int32)],
+            # vLLM main reads block_sizes; v0.31.0 reads kernel_block_sizes.
+            block_sizes=[16],
             kernel_block_sizes=[16],
             blocks_per_kv_block=[1],
         )

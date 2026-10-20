@@ -1169,20 +1169,33 @@ class TestNPUWorker(TestBase):
         worker.get_kv_cache_spec.assert_called_once_with()
 
     def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
+        from vllm.config import get_current_vllm_config
+
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
         worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
-        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+
+        # Capture the active vLLM config while profile_run() executes, so we can
+        # verify the fast path runs it inside set_current_vllm_config().
+        profile_run_configs = []
+
+        def record_active_config(*args, **kwargs):
+            profile_run_configs.append(get_current_vllm_config())
+
+        worker.model_runner = MagicMock()
+        worker.model_runner.profile_run.side_effect = record_active_config
 
         result = worker.determine_available_memory()
 
         self.assertEqual(result, 4096)
-        worker.model_runner.profile_run.assert_called_once_with()
+        worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
         worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+        self.assertEqual(profile_run_configs, [worker.vllm_config])
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -1389,6 +1402,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None

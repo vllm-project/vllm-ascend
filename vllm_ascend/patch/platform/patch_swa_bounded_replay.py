@@ -95,7 +95,8 @@ def _add_dataclass_field(cls: type, name: str, factory: type, annotation: type) 
         return
     cls.__annotations__[name] = annotation
     # A mutable default must be a factory, or every instance would share it.
-    setattr(cls, name, dataclasses.field(default_factory=factory))
+    # Keep subclasses free to add required fields after this optional payload.
+    setattr(cls, name, dataclasses.field(default_factory=factory, kw_only=True))
     delattr(cls, "__init__")
     dataclasses.dataclass(cls)
     assert name in cls.__dataclass_fields__, f"{cls.__name__}.{name} was not declared"  # type: ignore[attr-defined]
