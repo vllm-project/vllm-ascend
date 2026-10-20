@@ -65,6 +65,19 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.failed_recv_requests_lock = threading.Lock()
         return thread
 
+    def test_mark_failed_recv_request_accepts_flat_and_grouped_block_ids(self):
+        thread = self._make_thread()
+
+        thread._mark_failed_recv_request("flat", [2, 3, 4])
+        self.assertEqual(thread.failed_recv_requests, {"flat"})
+        self.assertEqual(thread.invalid_block_ids, {2, 3, 4})
+
+        thread.failed_recv_requests.clear()
+        thread.invalid_block_ids.clear()
+        thread._mark_failed_recv_request("grouped", ([10, 11], [12]))
+        self.assertEqual(thread.failed_recv_requests, {"grouped"})
+        self.assertEqual(thread.invalid_block_ids, {10, 11, 12})
+
     def test_group_transfer_and_completion(self):
         thread = self._make_thread()
         self.addCleanup(thread.executor.shutdown, wait=True)

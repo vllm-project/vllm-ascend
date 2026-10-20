@@ -605,10 +605,15 @@ class KVCacheRecvingThread(threading.Thread):
             return request_id in self.failed_recv_requests
 
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
+        # BlockIds is a flat list[int] or a grouped tuple[list[int], ...].
+        # Updating the invalid set with a bare int raises TypeError.
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
             for group_block_ids in local_block_ids:
-                self.invalid_block_ids.update(group_block_ids)
+                if isinstance(group_block_ids, (list, tuple, set)):
+                    self.invalid_block_ids.update(group_block_ids)
+                else:
+                    self.invalid_block_ids.add(group_block_ids)
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
