@@ -1,0 +1,5 @@
+pr: 19286
+entries:
+  - category: feature
+    text: Added PIECEWISE ACL graph support for DeepSeek V4.1 bounded decoder replay on Ascend.
+    model: deepseek-v4.1
