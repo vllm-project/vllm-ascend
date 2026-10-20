@@ -1983,6 +1983,49 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c8_bypasses_float_weight_filter(self, mock_fix, mock_sparse, mock_kpool):
+        for dtype in ("fp8", "auto"):
+            with self.subTest(dtype=dtype):
+                vc = VllmConfig()
+                vc.quant_config = SimpleNamespace(
+                    quant_description={"model.layers.3.self_attn.indexer.wq_b.weight": "FLOAT"}
+                )
+                vc.attention_config.indexer_kv_dtype = dtype
+                vc.cache_config.cache_dtype = "fp8"
+                config = init_ascend_config(vc)
+                self.assertEqual(config.is_kpool_li_c8_enabled(), dtype != "auto")
+                self.assertFalse(config.is_sparse_li_c8_layer("model.layers.3.self_attn.indexer.k_cache"))
+                self.assertTrue(config.enable_sparse_sfa_c8)
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_int8_is_rejected_without_changing_other_sfa_models(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        vc.attention_config.indexer_kv_dtype = "int8"
+        with self.assertRaisesRegex(ValueError, "KPool supports FP8 CANN or BF16"):
+            init_ascend_config(vc)
+        mock_kpool.return_value = False
+        mock_sparse.return_value = True
+        config = init_ascend_config(vc)
+        self.assertTrue(config.enable_sparse_li_c8)
+        self.assertFalse(config.is_kpool_li_c8_enabled())
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_kpool_indexer", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kpool_li_c4_is_rejected(self, mock_fix, mock_sparse, mock_kpool):
+        vc = VllmConfig()
+        vc.attention_config.indexer_kv_dtype = "mxfp4"
+        with self.assertRaisesRegex(ValueError, "KPool indexer does not support LI C4"):
+            init_ascend_config(vc)
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()

@@ -3,6 +3,7 @@
 """State gathering and nonempty input adaptation for CANN KeyPool."""
 
 import torch
+import torch_npu
 
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 
@@ -77,3 +78,9 @@ def pool_key_indexer_nonempty(
         mask_mode=mask_mode,
     )
     return indices[:tokens], values
+
+
+def quantize_keypool_query(query):
+    result, scale = torch_npu.npu_dynamic_quant(query, dst_type=torch.float8_e4m3fn)
+    scale.masked_fill_(scale == 0, 1.0)
+    return result, scale
