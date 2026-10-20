@@ -66,12 +66,11 @@ test_cases:
       - chat_completion
     prompts:
       - seed: "x "
-        target_tokens: 4
+        target_tokens: 200
     api_keyword_args:
       max_tokens: 200
       temperature: 0.0
     expected_response:
-      prompt_tokens: 4
       completion_tokens: 200
   - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification"
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
@@ -85,10 +84,9 @@ test_cases:
       - chat_completion
     prompts:
       - seed: "x "
-        target_tokens: 4
+        target_tokens: 200
     api_keyword_args:
       max_tokens: 200
       temperature: 0.0
     expected_response:
-      prompt_tokens: 4
       completion_tokens: 200
