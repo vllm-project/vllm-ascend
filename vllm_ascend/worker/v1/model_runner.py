@@ -4266,10 +4266,17 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
-                # step3p5 MTP draft layers span multiple KV cache groups; capture
-                # each group's block table / slot mapping so the proposer can
-                # build per-step attention metadata for the active MTP layer.
+            if self.speculative_config and isinstance(
+                self.drafter,
+                (
+                    AscendStep3p5MTPProposer,
+                    AscendDSparkProposer,
+                    AscendQwen4ExpMTPProposer,
+                ),
+            ):
+                # Multi-group draft layers need each group's block table and
+                # slot mapping as one addressing pair. Flattened slot ids are
+                # not interchangeable when group block sizes differ.
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             elif self.speculative_config and isinstance(
