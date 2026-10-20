@@ -34,6 +34,21 @@ def _call_bool(config: Any, name: str) -> bool:
     return bool(value()) if callable(value) else bool(value)
 
 
+def _architecture_names(owner: Any) -> set[str]:
+    if owner is None:
+        return set()
+    names: set[str] = set()
+    architecture = getattr(owner, "architecture", None)
+    if isinstance(architecture, str):
+        names.add(architecture)
+    architectures = getattr(owner, "architectures", None)
+    if isinstance(architectures, str):
+        names.add(architectures)
+    elif architectures is not None:
+        names.update(name for name in architectures if isinstance(name, str))
+    return names
+
+
 def is_dflash2_draft(speculative_config: Any, method: str | None = None) -> bool:
     """Return whether a DFlash config selects the DFlash2 draft architecture."""
     method = method or getattr(speculative_config, "method", None)
@@ -41,10 +56,11 @@ def is_dflash2_draft(speculative_config: Any, method: str | None = None) -> bool
         return False
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
     hf_config = getattr(draft_model_config, "hf_config", None)
+    hf_text_config = getattr(draft_model_config, "hf_text_config", None)
     model_arch_config = getattr(draft_model_config, "model_arch_config", None)
-    architectures = set()
-    for owner in (draft_model_config, hf_config, model_arch_config):
-        architectures.update(getattr(owner, "architectures", None) or ())
+    architectures: set[str] = set()
+    for owner in (draft_model_config, hf_config, hf_text_config, model_arch_config):
+        architectures.update(_architecture_names(owner))
     return "DFlash2DraftModel" in architectures
 
 
