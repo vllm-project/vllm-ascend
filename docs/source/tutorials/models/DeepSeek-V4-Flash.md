@@ -658,10 +658,6 @@ Before you start, please:
 
 === "A3 series with dspark"
 
-    The DSpark Prefill node uses PCP8, DP2, and TP1 across 16 NPU devices. The Decode node uses DP16 and TP1.
-
-    This PCP8/TP1 configuration leaves FlashComm1 disabled because its MoE sequence-parallel path requires TP greater than 1.
-
     1. Prefill node
 
         ```shell
