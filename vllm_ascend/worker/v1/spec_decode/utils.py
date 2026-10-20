@@ -15,6 +15,37 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
 
 
+def copy_slot_mapping_to_padded_buffer(
+    buffer: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    *,
+    padding_value: int,
+    copy_tokens: int | None = None,
+) -> torch.Tensor:
+    """Copy slot ids into a reusable padded spec-decode buffer.
+
+    Ascend ACL graph capture keeps a persistent slot-mapping allocation and
+    fills the graph-padding tail with the backend's sentinel slot. Keeping the
+    copy/fill contract in one place prevents MTP, Step3.5, and multi-KV-group
+    paths from drifting on dtype, overlap, or padding behavior.
+    """
+    if buffer.ndim != 1 or slot_mapping.ndim != 1:
+        raise ValueError("slot mapping buffers must be one-dimensional")
+
+    if copy_tokens is None:
+        copy_tokens = slot_mapping.numel()
+    if copy_tokens < 0 or copy_tokens > slot_mapping.numel() or copy_tokens > buffer.numel():
+        raise ValueError(
+            f"copy_tokens={copy_tokens} is outside source length {slot_mapping.numel()} "
+            f"and buffer length {buffer.numel()}"
+        )
+
+    if copy_tokens and buffer.data_ptr() != slot_mapping.data_ptr():
+        buffer[:copy_tokens].copy_(slot_mapping[:copy_tokens].to(dtype=buffer.dtype))
+    buffer[copy_tokens:].fill_(padding_value)
+    return buffer
+
+
 def compact_mtp_topk_indices(
     draft_model: nn.Module,
     token_indices_to_sample: torch.Tensor,

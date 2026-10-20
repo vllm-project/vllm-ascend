@@ -5,7 +5,7 @@ from dataclasses import fields, is_dataclass, replace
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import get_layers_from_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
@@ -15,26 +15,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
-
-_MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES = {"glm5_next_mtp"}
-_MULTI_KV_CACHE_GROUP_MTP_ARCHITECTURES = {"Glm5NextMTPModel"}
-
-
-def is_multi_kv_cache_group_mtp(vllm_config: VllmConfig) -> bool:
-    """Enable selector for the multi-KV-cache-group MTP proposer.
-
-    This is a module-level helper, not an inherited method. The factory calls
-    it before constructing a proposer. Add future supported MTP model types or
-    architectures to the allowlists above.
-    """
-    speculative_config = vllm_config.speculative_config
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    hf_config = getattr(draft_model_config, "hf_config", None)
-    model_type = getattr(hf_config, "model_type", None)
-    architectures = set(getattr(hf_config, "architectures", None) or ())
-    return model_type in _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES or bool(
-        architectures & _MULTI_KV_CACHE_GROUP_MTP_ARCHITECTURES
-    )
+from vllm_ascend.worker.v1.spec_decode.utils import copy_slot_mapping_to_padded_buffer
 
 
 class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
@@ -220,8 +201,12 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 )
                 group_slot_mapping = self._multi_group_slot_mapping_buffers[(gid, draft_index)]
                 source_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
-                group_slot_mapping[:num_input_tokens].copy_(source_slot_mapping)
-                group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
+                copy_slot_mapping_to_padded_buffer(
+                    group_slot_mapping,
+                    source_slot_mapping,
+                    copy_tokens=num_actual_tokens,
+                    padding_value=PADDING_SLOT_ID,
+                )
                 group_metadata.slot_mapping = group_slot_mapping
         table = self._multi_group_block_table_buffers[gid]
         if refreshed_gids is None or gid not in refreshed_gids:

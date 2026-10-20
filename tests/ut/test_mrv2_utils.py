@@ -247,6 +247,19 @@ def test_blacklist_logs_fallback(monkeypatch):
     assert "dflash2 graph" in warning_calls[0][1]
 
 
+def test_dflash2_graph_gate_uses_shared_family_resolver(monkeypatch):
+    seen = []
+    speculative_config = SimpleNamespace(method="dflash", enforce_eager=False)
+    vllm_config = SimpleNamespace(speculative_config=speculative_config)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v1.spec_decode.method.is_dflash2_draft",
+        lambda config, method=None: seen.append(config) or True,
+    )
+
+    assert mrv2_utils._spec_decode_reasons(vllm_config, speculative_config) == ["dflash2 graph"]
+    assert seen == [speculative_config]
+
+
 def test_validation_is_decoupled_from_upstream():
     mrv2_utils._validate_v2_model_runner(object())
     mrv2_utils._validate_v2_model_runner(SimpleNamespace())

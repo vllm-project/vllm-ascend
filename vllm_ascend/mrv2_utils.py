@@ -27,9 +27,6 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-_NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
-_P_EAGLE_SPEC_METHODS = frozenset({"eagle", "eagle3"})
-_DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 _TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 
 
@@ -55,26 +52,29 @@ def _is_enabled(value: object) -> bool:
     return False
 
 
-def _architectures(model_config: object) -> list[str]:
-    names: list[str] = []
-    architecture = getattr(model_config, "architecture", None)
-    if isinstance(architecture, str):
-        names.append(architecture)
-    for owner in (
-        model_config,
-        getattr(model_config, "hf_config", None),
-        getattr(model_config, "hf_text_config", None),
-    ):
-        names.extend(getattr(owner, "architectures", None) or ())
-    return [name for name in names if isinstance(name, str)]
+def _spec_decode_reasons(vllm_config: VllmConfig, speculative_config: object) -> list[str]:
+    """Return MRV2 exclusions using the same family selector as dispatch."""
+    # mrv2_utils is imported while the platform is initialized. Keep the
+    # spec-decode package out of that import chain to avoid a vLLM cycle.
+    from vllm_ascend.worker.v1.spec_decode.method import SpecDecodeFamily, resolve_spec_decode_family
 
-
-def _is_dflash2_graph(speculative_config: object) -> bool:
-    """DFlash2 graph capture still fails on NPU; eager drafts stay on V2."""
-    if getattr(speculative_config, "enforce_eager", False) is True:
-        return False
-    draft = getattr(speculative_config, "draft_model_config", None)
-    return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
+    family = resolve_spec_decode_family(vllm_config)
+    reasons: list[str] = []
+    if family is SpecDecodeFamily.SUFFIX:
+        reasons.append("suffix speculative decoding")
+    if family in (SpecDecodeFamily.NGRAM, SpecDecodeFamily.NGRAM_GPU):
+        reasons.append("ngram speculative decoding")
+    # V2 init_speculator has no draft_model branch. Parallel drafting with a
+    # separate draft model still runs on the V1 proposer.
+    if family is SpecDecodeFamily.DRAFT_MODEL:
+        reasons.append("draft_model speculative decoding")
+    if family is SpecDecodeFamily.DFLASH2 and getattr(speculative_config, "enforce_eager", False) is not True:
+        reasons.append("dflash2 graph")
+    # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
+    # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
+    if family is SpecDecodeFamily.EAGLE and getattr(speculative_config, "parallel_drafting", False) is True:
+        reasons.append("p-eagle")
+    return reasons
 
 
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
@@ -108,21 +108,7 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("enable_dsa_cp")
 
     if _is_configured(spec_config):
-        method = getattr(spec_config, "method", None)
-        if method == "suffix":
-            reasons.append("suffix speculative decoding")
-        if method in _NGRAM_SPEC_METHODS:
-            reasons.append("ngram speculative decoding")
-        # V2 init_speculator has no draft_model branch. Parallel drafting with
-        # a separate draft model still runs on the V1 proposer.
-        if method == "draft_model":
-            reasons.append("draft_model speculative decoding")
-        if _is_dflash2_graph(spec_config):
-            reasons.append("dflash2 graph")
-        # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
-        # capture. p-eagle reads NPU seq_lens there, and that copy is rejected.
-        if method in _P_EAGLE_SPEC_METHODS and getattr(spec_config, "parallel_drafting", False) is True:
-            reasons.append("p-eagle")
+        reasons.extend(_spec_decode_reasons(vllm_config, spec_config))
 
     return reasons
 
