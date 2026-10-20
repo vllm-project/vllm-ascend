@@ -147,6 +147,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "mla_serial_norm_cache"
+        "mla_serial_q_prepare"
+        "mla_serial_q_pack"
+        "mla_serial_q_finalize"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"

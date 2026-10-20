@@ -1,0 +1,8 @@
+add_op_to_compiled_list()
+if(BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnn PRIVATE mla_serial_norm_cache_def.cpp)
+endif()
+add_ops_compile_options(OP_NAME MlaSerialNormCache OPTIONS -Wno-deprecated-declarations)
+if(NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE mla_serial_norm_cache ACLNNTYPE aclnn)
+endif()

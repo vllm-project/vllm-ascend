@@ -1,4 +1,5 @@
 #include <optional>
+#include "mla_preprocess_serial.h"
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -1952,6 +1953,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    ops.impl("mla_serial_norm_cache",&vllm_ascend::meta::mla_serial_norm_cache);
+    ops.impl("mla_serial_q_pack",&vllm_ascend::meta::mla_serial_q_pack);
+    ops.impl("mla_serial_q_finalize",&vllm_ascend::meta::mla_serial_q_finalize);
+    ops.impl("mla_serial_q_prepare",&vllm_ascend::meta::mla_serial_q_prepare);
 }
 }
 #endif

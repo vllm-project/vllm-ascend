@@ -15,6 +15,7 @@
  */
 
 #include <dlfcn.h>
+#include "mla_preprocess_serial.h"
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -3665,5 +3666,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_sparse_attention_overlap", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_sparse_attention_overlap);
+    ops.def("mla_serial_norm_cache(Tensor down, Tensor gamma_q, Tensor gamma_kv, Tensor? cos, Tensor? sin, Tensor slots, Tensor(a!) cache, Tensor(b!) cache_rope) -> Tensor");
+    ops.impl("mla_serial_norm_cache",torch::kPrivateUse1,&vllm_ascend::mla_serial_norm_cache);
+    ops.def("mla_serial_q_pack(Tensor up, int heads) -> Tensor");
+    ops.impl("mla_serial_q_pack",torch::kPrivateUse1,&vllm_ascend::mla_serial_q_pack);
+    ops.def("mla_serial_q_finalize(Tensor up, Tensor key, Tensor? cos, Tensor? sin) -> (Tensor,Tensor)");
+    ops.impl("mla_serial_q_finalize",torch::kPrivateUse1,&vllm_ascend::mla_serial_q_finalize);
+    ops.def("mla_serial_q_prepare(Tensor up, int heads, Tensor? cos, Tensor? sin) -> (Tensor,Tensor)");
+    ops.impl("mla_serial_q_prepare",torch::kPrivateUse1,&vllm_ascend::mla_serial_q_prepare);
 }
 #endif
