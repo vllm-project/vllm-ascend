@@ -72,6 +72,20 @@ test_cases:
       temperature: 0.0
     expected_response:
       completion_tokens: 200
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 11
+        threshold: 0.95
+        temperature: 0
+        ignore_eos: True
   - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification"
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
     envs:
@@ -90,3 +104,17 @@ test_cases:
       temperature: 0.0
     expected_response:
       completion_tokens: 200
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V4-Flash_input_3500_lines_128
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 11
+        threshold: 0.95
+        temperature: 0
+        ignore_eos: True
