@@ -55,8 +55,6 @@ the kernel selects cos from offset 0 and sin from ``HALF_CACHE``.
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import torch
 from vllm.triton_utils import tl, triton
 from triton.language import constexpr
@@ -64,59 +62,27 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import (
     extract_slice,
+    get_ub_size_bytes,
     get_vectorcore_num,
     insert_slice,
 )
-
-# A5 / 910_95 / 950 physical UB = 256KB, compiler reserves 8KB.
-_A5_UB_RESERVE = 8 * 1024
-_UB_KB_A2 = 192
-_UB_KB_A5 = 256
 
 # FP8 E4M3 max value for clamping.
 _FP8_E4M3_MAX = constexpr(448.0)
 
 
-@lru_cache(maxsize=1)
-def _ub_size_bytes() -> int:
-    """Get available UB size in bytes for the current NPU.
-
-    A2 / 910B / 910_93: 192KB.
-    A5 / 910_95 / 950: 256KB - 8KB compiler reserve.
-    Prefers Triton runtime ``ub_size_in_kbytes`` (same source as compiler).
-    """
-    kb: int | None = None
-    try:
-        from triton.backends.ascend.runtime import utils as npu_utils
-
-        kb = int(npu_utils.ub_size_in_kbytes)
-    except Exception:
-        kb = None
-    if kb is None:
-        name = ""
-        try:
-            name = str(torch.npu.get_device_name(0) or "")
-        except Exception:
-            name = ""
-        arch = name.lower()
-        is_a5 = any(
-            m in arch
-            for m in ("910_95", "91095", "ascend950", "950pr", "950dt", "dav-c310")
-        )
-        kb = _UB_KB_A5 if is_a5 else _UB_KB_A2
-    nbytes = kb * 1024
-    if kb >= _UB_KB_A5:
-        nbytes -= _A5_UB_RESERVE
-    return nbytes
-
-
 def _tokens_per_iter(elem_size: int, elems_per_token: int, *, cap: int = 2) -> int:
-    """Estimate token tile size based on 1/4 UB (three loops share UB)."""
-    n = int((_ub_size_bytes() // 4) / max(elem_size, 1)) // max(int(elems_per_token), 1)
+    """Estimate token tile size based on 1/4 UB (three loops share UB).
+
+    Uses the common ``get_ub_size_bytes()`` from ``triton_utils``; the 1/4
+    discount already covers the three simultaneously-resident loop buffers
+    plus multibuffering, so no extra compiler-reserve subtraction is needed.
+    """
+    n = int((get_ub_size_bytes() // 4) / max(elem_size, 1)) // max(int(elems_per_token), 1)
     return max(1, min(cap, n))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def split_qkv_index_rmsnorm_rope_kernel(
     input_gm_ptr,  # concat QKV input [q|k|v|index_q|index_k]
     q_gm_ptr,  # main Q output
