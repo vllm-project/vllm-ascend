@@ -1,0 +1,4 @@
+pr: 19277
+entries:
+  - category: bugfix
+    text: Preserved GLM-5.3-Flash MTP indexer kernel pages and corrected request-owned Triton tail-cache addressing.
