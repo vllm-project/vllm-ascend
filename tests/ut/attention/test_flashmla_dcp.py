@@ -645,3 +645,39 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("rank", range(8))
+def test_dcp8_rejection_refresh_ignores_optimistic_cpu_lengths(runtime, monkeypatch, causal, rank):
+    builder = runtime.builder(rank=rank, interleave=768)
+    # Cover an interleave boundary and a complete eight-rank stripe. The last
+    # row is idle graph padding with a nonzero query extent and zero length.
+    history_lengths = [767, 768, 769, 6143, 6144, 6145]
+    upper_bounds = [length + 4 for length in history_lengths] + [0]
+    inputs = common(upper_bounds, [4] * 7, tokens=32, causal=causal)
+    inputs.block_table_tensor = torch.arange(16, dtype=torch.int32).expand(7, -1).clone()
+    stale_host_lengths = object()
+    inputs.seq_lens_cpu = inputs._seq_lens_cpu = inputs.dcp_local_seq_lens_cpu = stale_host_lengths
+    flash = builder.build(inputs, 7, 28, False, retain_for_graph=True)
+    pointers = addresses(flash)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("DCP8 FlashMLA metadata must not read back device lengths")
+
+    for rejected in (0, 1, 3):
+        exact = [length - rejected for length in upper_bounds[:-1]] + [0]
+        inputs.seq_lens.copy_(torch.tensor(exact, dtype=torch.int32))
+        with monkeypatch.context() as guard:
+            for method in ("item", "tolist", "cpu", "numpy", "__bool__"):
+                guard.setattr(torch.Tensor, method, forbidden)
+            same = builder.build(inputs, 7, 28, False)
+        assert same is flash
+        assert addresses(flash) == pointers
+        visible = [length - 4 if causal else length for length in exact[:-1]]
+        expected = [sum(token // 768 % 8 == rank for token in range(length)) for length in visible]
+        assert flash.cache_lens[:7].tolist() == expected + [0]
+        assert not flash.cache_lens[7:].any()
+        assert flash.used_q[:7].tolist() == [4] * 6 + [0]
+        torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+        assert inputs.seq_lens_cpu is stale_host_lengths
