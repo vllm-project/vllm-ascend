@@ -15,7 +15,66 @@
 #
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/v1/spec_decode/utils.py
 
+import torch
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+@triton.jit(do_not_specialize=["vocab_size", "num_reqs"])
+def prepare_next_token_ids_padded_kernel(
+    sampled_ptr,
+    backup_ptr,
+    discard_ptr,
+    next_ptr,
+    count_ptr,
+    sampled_stride,
+    vocab_size,
+    num_reqs,
+    NUM_TOKENS: tl.constexpr,
+    TOKEN_BLOCK: tl.constexpr,
+    REQUEST_BLOCK: tl.constexpr,
+):
+    block = tl.program_id(0) * REQUEST_BLOCK
+    step = tl.num_programs(0) * REQUEST_BLOCK
+    while block < num_reqs:
+        req = block + tl.arange(0, REQUEST_BLOCK)
+        req_mask = req < num_reqs
+        offsets = tl.arange(0, TOKEN_BLOCK)
+        mask = req_mask[:, None] & (offsets[None, :] < NUM_TOKENS)
+        tokens = tl.load(sampled_ptr + req[:, None] * sampled_stride + offsets[None, :], mask=mask, other=-1)
+        count = tl.sum((mask & (tokens != -1) & (tokens < vocab_size)).to(tl.int32), axis=1)
+        count = tl.where(tl.load(discard_ptr + req, mask=req_mask, other=1), 0, count)
+        selected = tl.load(
+            sampled_ptr + req * sampled_stride + tl.where(count > 0, count - 1, 0), mask=req_mask, other=-1
+        )
+        backup = tl.load(backup_ptr + req, mask=req_mask, other=-1)
+        tl.store(next_ptr + req, tl.where(count > 0, selected, backup), mask=req_mask)
+        tl.store(count_ptr + req, count, mask=req_mask)
+        block += step
+
+
+def prepare_next_token_ids_padded(sampled, backup, discard, vocab_size):
+    num_reqs, num_tokens = sampled.shape
+    next_tokens = torch.empty_like(backup)
+    counts = torch.empty(num_reqs, dtype=torch.int64, device=sampled.device)
+    if num_reqs:
+        request_block = 4
+        grid = (min(triton.cdiv(num_reqs, request_block), get_vectorcore_num()),)
+        prepare_next_token_ids_padded_kernel[grid](
+            sampled,
+            backup,
+            discard,
+            next_tokens,
+            counts,
+            sampled.stride(0),
+            vocab_size,
+            num_reqs,
+            NUM_TOKENS=num_tokens,
+            TOKEN_BLOCK=triton.next_power_of_2(num_tokens),
+            REQUEST_BLOCK=request_block,
+        )
+    return next_tokens, counts
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
