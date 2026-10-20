@@ -17,6 +17,8 @@ DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
+DeepSeek-V4-Flash support is largely feature-complete starting from **vLLM-Ascend v0.26.0**. This document is validated and written based on **vLLM-Ascend v0.30.0**. To use the latest features, it is recommended to use the latest release candidate or official version.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -29,8 +31,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
-| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
-| `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
+| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
+| `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -151,7 +153,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800I A3 (128GB × 8) or 1 Atlas 800I A2 (64GB × 8).
 
 === "A2 series"
 
@@ -373,11 +375,11 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128GB × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800I A3 (128GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -843,7 +845,7 @@ Before you start, please:
 
 #### 5.2.2 A2 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2 (64GB × 8) multi-node environment with 4\*1P 1\*4D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800I A2 (64GB × 8) multi-node environment with 4\*1P 1\*4D for better performance.
 
 Before you start, please:
 
@@ -1165,8 +1167,8 @@ Here is the accuracy evaluation method using AISBench.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128GB × 8) |
-| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800I A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800I A3 (128GB × 8) |
 | GPQA | v0.25.1rc | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
 | SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
 | GPQA | - | accuracy | gen | 90.40 | 950PR&950DT Products, w4a4c8 |
