@@ -751,15 +751,10 @@ class NPUModelRunner(GPUModelRunner):
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        # The initial dummy profile bypasses PCP batch partitioning. Profile
-        # rank-local tokens; the existing MoE preparation still handles TP.
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        global_max_num_tokens: int = self.max_num_tokens
-        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and profile_max_num_tokens > mc2_tokens_capacity
+                and self.max_num_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -772,11 +767,7 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            self.max_num_tokens: int = profile_max_num_tokens
-            try:
-                super().profile_run(**profile_kwargs)
-            finally:
-                self.max_num_tokens = global_max_num_tokens
+            super().profile_run(**profile_kwargs)
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
