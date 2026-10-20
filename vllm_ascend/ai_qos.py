@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend-owned --ai-qos entry point. This increment implements KV only."""
+"""Ascend QoS configuration from additional_config.ai_qos; KV only."""
 
-import argparse
 import copy
-import json
 
 LEVEL_TO_QOS = {"low": 0, "medium": 3, "high": 7}
 
@@ -18,24 +16,6 @@ def normalize_kv_priority(value):
     if type(value) is int and value in LEVEL_TO_QOS.values():
         return value
     raise ValueError("kv_priority must be low/medium/high (case-insensitive), or canonical 0/3/7")
-
-
-def strict_json(value):
-    def pairs(items):
-        result = {}
-        for key, item in items:
-            if key in result:
-                raise ValueError(f"duplicate configuration key: {key}")
-            result[key] = item
-        return result
-
-    try:
-        result = json.loads(value, object_pairs_hook=pairs)
-        if not isinstance(result, dict):
-            raise ValueError("expected a JSON object")
-        return result
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def validate_ai_qos(config):
@@ -60,59 +40,6 @@ def validate_ai_qos(config):
             raise ValueError(f"kv_transfer.{name} must be a JSON boolean")
     out["default_priority"] = normalize_kv_priority(out["default_priority"])
     return {"kv_transfer": out}
-
-
-class AiQosAction(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        if getattr(namespace, "_ascend_ai_qos_seen", False):
-            parser.error("--ai-qos may be specified only once")
-        try:
-            value = validate_ai_qos(values)
-            additional = copy.deepcopy(getattr(namespace, "additional_config", None) or {})
-            if "ai_qos" in additional:
-                raise ValueError("use either --ai-qos or additional_config.ai_qos, not both")
-            additional["ai_qos"] = value
-        except (TypeError, ValueError) as exc:
-            parser.error(str(exc))
-        namespace.additional_config = additional
-        namespace._ascend_ai_qos_seen = True
-
-
-class AdditionalConfigAction(argparse._StoreAction):
-    def __call__(self, parser, namespace, values, option_string=None):
-        # Preserve --ai-qos regardless of the relative CLI option order.
-        incoming = copy.deepcopy(values)
-        if not isinstance(incoming, dict):
-            parser.error("--additional-config must be a JSON object")
-        previous = getattr(namespace, self.dest, None) or {}
-        if getattr(namespace, "_ascend_ai_qos_seen", False):
-            if "ai_qos" in incoming:
-                parser.error("conflicting --ai-qos and additional_config.ai_qos")
-            incoming["ai_qos"] = previous["ai_qos"]
-        setattr(namespace, self.dest, incoming)
-
-
-def register_cli(parser):
-    if parser is None:
-        return
-    existing = parser._option_string_actions.get("--ai-qos")
-    if existing:
-        if isinstance(existing, AiQosAction):
-            return
-        raise ValueError("--ai-qos already belongs to another implementation")
-    additional = parser._option_string_actions.get("--additional-config")
-    if additional is None or type(additional) not in (argparse._StoreAction, AdditionalConfigAction):
-        raise ValueError("unsupported --additional-config parser; refusing to lose ai_qos")
-    additional.__class__ = AdditionalConfigAction
-    parser.add_argument(
-        "--ai-qos",
-        dest="additional_config",
-        type=strict_json,
-        action=AiQosAction,
-        default=argparse.SUPPRESS,
-        metavar="JSON",
-        help="Ascend QoS; KV request levels low/medium/high map to 0/3/7",
-    )
 
 
 def apply_config(vllm_config):
@@ -157,7 +84,9 @@ def apply_config(vllm_config):
             desired["resource_config"] = copy.deepcopy(previous["resource_config"])
         previous_policy = {k: v for k, v in previous.items() if k != "resource_config"}
         if previous_policy and previous_policy != {k: v for k, v in desired.items() if k != "resource_config"}:
-            raise ValueError("--ai-qos conflicts with old kv_qos mapping; remove the old mapping (including swapped)")
+            raise ValueError(
+                "additional_config.ai_qos conflicts with old kv_qos mapping; remove the old mapping (including swapped)"
+            )
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.qos import validate_request_qos_policy
 
     validate_request_qos_policy(dict(extra, kv_qos=desired))

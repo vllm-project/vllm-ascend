@@ -107,26 +107,34 @@ class AscendQosConfigContract(unittest.TestCase):
         self.assertFalse(result.enable_cpu_binding)
         return result
 
-    def test_cli_fixed_levels_reach_factory_and_policy(self):
+    def test_cli_and_python_config_reach_same_factory_and_policy(self):
         for connector in ("AscendStoreConnector", "MooncakeConnectorV1", "MooncakeLayerwiseConnector"):
             for name, qos in (("low", 0), ("medium", 3), ("high", 7)):
-                for reverse in (False, True):
-                    with self.subTest(connector=connector, level=name, reverse=reverse):
+                for request_priority in (False, True):
+                    with self.subTest(connector=connector, level=name, request_priority=request_priority):
+                        additional = {
+                            "enable_cpu_binding": False,
+                            "ai_qos": {"kv_transfer": {"request_priority": request_priority, "default_priority": name}},
+                        }
                         parser = argparse.ArgumentParser()
                         parser.add_argument("--additional-config", type=json.loads, default={})
-                        self.ai.register_cli(parser)
-                        cli = [
-                            "--ai-qos",
-                            json.dumps({"kv_transfer": {"request_priority": False, "default_priority": name}}),
-                        ]
-                        other = ["--additional-config", '{"enable_cpu_binding":false}']
-                        args = parser.parse_args(other + cli if reverse else cli + other)
+                        args = parser.parse_args(["--additional-config", json.dumps(additional)])
                         config = self.config_for(args.additional_config, connector)
                         self.factory(config)
+                        python_config = self.config_for(copy.deepcopy(additional), connector)
+                        self.factory(python_config)
+                        self.assertEqual(config.additional_config, python_config.additional_config)
+                        self.assertEqual(
+                            config.kv_transfer_config.kv_connector_extra_config,
+                            python_config.kv_transfer_config.kv_connector_extra_config,
+                        )
                         policy = self.policy.KvQosPolicy.from_config(
                             config.kv_transfer_config.kv_connector_extra_config["kv_qos"]
                         )
-                        self.assertEqual(policy.resolve_priority({"kv_priority": "high"}), qos)
+                        self.assertEqual(policy.resolve_priority({}), qos)
+                        self.assertEqual(
+                            policy.resolve_priority({"kv_priority": "high"}), 7 if request_priority else qos
+                        )
                         self.assertEqual(policy.select(qos), qos)
 
     def test_request_override_and_serialization_preserved(self):

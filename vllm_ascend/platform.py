@@ -308,10 +308,6 @@ class NPUPlatform(Platform):
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
         # Adapt the global patch here.
-        from vllm_ascend.ai_qos import register_cli
-
-        register_cli(parser)
-
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)

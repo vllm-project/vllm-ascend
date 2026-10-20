@@ -1,6 +1,6 @@
 # Request-level KV transfer priority
 
-`--ai-qos` configures KV transfer priority independently of inference scheduling
+`additional_config.ai_qos` configures KV transfer priority independently of inference scheduling
 priority. The initial backend is Mooncake; additional backend support can use
 the same request-level interface.
 
@@ -9,20 +9,25 @@ the same request-level interface.
 Add this option to an existing KV transfer deployment:
 
 ```bash
---ai-qos '{"kv_transfer":{"enabled":true,"request_priority":true,"default_priority":"low","log":false}}'
+--additional-config '{"ai_qos":{"kv_transfer":{"enabled":true,"request_priority":true,"default_priority":"low","log":false}}}'
 ```
+
+If the deployment already uses `--additional-config`, add `ai_qos` to the same
+JSON object. Python callers use `additional_config={"ai_qos": ...}`. The former
+`--ai-qos` option has been removed; place its JSON value under the `ai_qos` key.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` within an explicit `kv_transfer` section | Enable KV priority lanes. Omitting `--ai-qos` keeps existing behavior. |
+| `enabled` | `true` within an explicit `kv_transfer` section | Enable KV priority lanes. Omitting `ai_qos.kv_transfer` keeps existing behavior. |
 | `request_priority` | `false` | Honor each request's `kv_priority`; otherwise use the configured default for every request. |
 | `default_priority` | `low` | Priority for requests without a priority, or all requests in fixed-priority mode. |
 | `log` | `false` | Emit request-to-priority mapping logs; disabling logs does not disable QoS. |
 
 Levels `low`, `medium`, and `high` map to channel QoS values `0`, `3`, and `7`.
 Labels are case-insensitive; canonical numeric values `0`, `3`, and `7` are
-also accepted. Unknown configuration fields, duplicate CLI options, and
-conflicting legacy `kv_qos` mappings are rejected.
+also accepted. Unknown QoS configuration fields and conflicting legacy
+`kv_qos` mappings are rejected. JSON parsing follows vLLM's standard
+`--additional-config` behavior.
 
 For request-priority mode, add the following field to a Completion or Chat
 Completion request:

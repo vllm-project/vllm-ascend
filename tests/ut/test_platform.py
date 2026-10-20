@@ -714,7 +714,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
         parser = argparse.ArgumentParser()
-        parser.add_argument("--additional-config", type=json.loads, default={})
+        additional_action = parser.add_argument("--additional-config", type=json.loads, default={})
         quant_action = parser.add_argument("--quantization", choices=["awq", "gptq"])
         dtype_action = parser.add_argument("--kv-cache-dtype", choices=["auto"])
 
@@ -729,8 +729,13 @@ class TestNPUPlatform(TestBase):
         self.assertIn("int8", dtype_action.choices)
         self.assertIn("mxfp8", dtype_action.choices)
         self.assertEqual(dtype_action.choices.count("auto"), 1)
-        args = parser.parse_args(["--ai-qos", '{"kv_transfer":{"default_priority":"high"}}'])
-        self.assertEqual(args.additional_config["ai_qos"]["kv_transfer"]["default_priority"], 7)
+        self.assertNotIn("--ai-qos", parser._option_string_actions)
+        self.assertIs(type(additional_action), argparse._StoreAction)
+        args = parser.parse_args(
+            ["--additional-config", '{"enable_cpu_binding":false,"ai_qos":{"kv_transfer":{"default_priority":"high"}}}']
+        )
+        self.assertFalse(args.additional_config["enable_cpu_binding"])
+        self.assertEqual(args.additional_config["ai_qos"]["kv_transfer"]["default_priority"], "high")
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
@@ -743,12 +748,11 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")
     def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
         parser = argparse.ArgumentParser()
-        parser.add_argument("--additional-config", type=json.loads, default={})
 
         self.platform.pre_register_and_update(parser)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
-        self.assertIn("--ai-qos", parser._option_string_actions)
+        self.assertNotIn("--ai-qos", parser._option_string_actions)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.configs.modelslim_config.AscendModelSlimConfig")

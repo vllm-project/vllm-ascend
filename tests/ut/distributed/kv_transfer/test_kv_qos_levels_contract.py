@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU contracts. No test in this file is evidence of A5 execution."""
 
-import argparse
-import contextlib
 import importlib.util
-import io
 import json
 import sys
 import unittest
@@ -141,35 +138,6 @@ class LevelContractTests(unittest.TestCase):
                 self.ai.validate_ai_qos(value)
         with self.assertRaises(ValueError):
             self.apply_config(self.config(connector="OtherConnector"))
-
-    def parser(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--additional-config", type=json.loads, default={})
-        self.ai.register_cli(parser)
-        return parser
-
-    def test_cli_both_option_orders_no_state_leak(self):
-        args = ["--ai-qos", '{"kv_transfer":{"request_priority":true}}']
-        additional = ["--additional-config", '{"other_setting":12}']
-        for command in (args + additional, additional + args):
-            parsed = self.parser().parse_args(command)
-            self.assertEqual(parsed.additional_config["other_setting"], 12)
-            self.assertTrue(parsed.additional_config["ai_qos"]["kv_transfer"]["request_priority"])
-        parser = self.parser()
-        self.ai.register_cli(parser)
-        parser.parse_args(args)
-        self.assertEqual(parser.parse_args([]).additional_config, {})
-
-    def test_cli_repeated_or_conflicting_entries_fail(self):
-        args = ["--ai-qos", '{"kv_transfer":{"request_priority":true}}']
-        for command in (
-            args + args,
-            args + ["--additional-config", '{"ai_qos":{}}'],
-            ["--additional-config", '{"ai_qos":{}}'] + args,
-            ["--ai-qos", '{"kv_transfer":{},"kv_transfer":{}}'],
-        ):
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                self.parser().parse_args(command)
 
     def test_input_validation_prevents_bad_label_before_original_processing(self):
         # Load the installed/pinned upstream exception without initializing the
