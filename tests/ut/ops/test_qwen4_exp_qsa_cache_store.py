@@ -7,7 +7,6 @@ import sys
 
 import pytest
 
-
 _CHILD_EXIT_NO_DEVICE = 4
 
 _CHILD_SNIPPET = f"""
@@ -72,15 +71,9 @@ def test_qsa_store_invalid_slots_stay_in_bounds_for_strided_cache():
     if not torch.npu.is_available():
         pytest.skip("requires a real Ascend NPU")
 
-    repo_root = os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    )
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        path for path in (repo_root, env.get("PYTHONPATH")) if path
-    )
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (repo_root, env.get("PYTHONPATH")) if path)
     try:
         proc = subprocess.run(
             [sys.executable, "-c", _CHILD_SNIPPET],

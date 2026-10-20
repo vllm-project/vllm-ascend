@@ -92,19 +92,13 @@ def test_ascend_step_zero_uses_qwen_per_group_block_tables() -> None:
         num_actual_tokens=2,
     )
 
-    main_common = main_builder.build_for_drafting.call_args.kwargs[
-        "common_attn_metadata"
-    ]
-    raw_common = raw_builder.build_for_drafting.call_args.kwargs[
-        "common_attn_metadata"
-    ]
+    main_common = main_builder.build_for_drafting.call_args.kwargs["common_attn_metadata"]
+    raw_common = raw_builder.build_for_drafting.call_args.kwargs["common_attn_metadata"]
     assert main_common is common
     assert main_common.block_table_tensor.tolist() == [[3, 4]]
     assert raw_common is not common
     assert raw_common.block_table_tensor.data_ptr() == raw_table.data_ptr()
-    assert multi_step == [
-        {"draft.main": main_metadata, "draft.raw": raw_metadata}
-    ]
+    assert multi_step == [{"draft.main": main_metadata, "draft.raw": raw_metadata}]
     assert primary is main_metadata
 
 

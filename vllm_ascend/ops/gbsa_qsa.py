@@ -5,7 +5,6 @@ from vllm_ascend.ops.gbsa import (
     generic_block_sparse_attention_metadata,
 )
 
-
 GBSA_COMPRESS_RATIO = 4
 GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
 GBSA_PAGE_SIZE = 128
@@ -57,8 +56,7 @@ def _as_gbsa_page_pool(
         raise ValueError("QSA GBSA requires a nonempty KV cache")
     if storage_page_size % GBSA_PAGE_SIZE:
         raise ValueError(
-            "QSA GBSA requires storage pages divisible into 128-token pages, "
-            f"got shape={tuple(cache.shape)}"
+            f"QSA GBSA requires storage pages divisible into 128-token pages, got shape={tuple(cache.shape)}"
         )
 
     row_elements = num_heads * head_dim
@@ -88,11 +86,7 @@ def _as_gbsa_page_pool(
     virtual_page_elements = subpage_elements
     physical_block_stride = cache.stride(0) // subpage_elements
     physical_subpage_stride = 1
-    physical_page_count = (
-        (num_blocks - 1) * physical_block_stride
-        + (subpages - 1) * physical_subpage_stride
-        + 1
-    )
+    physical_page_count = (num_blocks - 1) * physical_block_stride + (subpages - 1) * physical_subpage_stride + 1
     page_pool = cache.as_strided(
         size=(physical_page_count, GBSA_PAGE_SIZE, num_heads, head_dim),
         stride=(virtual_page_elements, row_elements, head_dim, 1),
@@ -129,27 +123,25 @@ def qsa_gbsa_attention(
     storage_page_size = key_cache.shape[1]
     if storage_page_size % GBSA_PAGE_SIZE:
         raise ValueError(
-            "QSA GBSA requires storage pages divisible into 128-token pages, "
-            f"got shape={tuple(key_cache.shape)}"
+            f"QSA GBSA requires storage pages divisible into 128-token pages, got shape={tuple(key_cache.shape)}"
         )
     if storage_page_size != GBSA_PAGE_SIZE:
-        key_cache, block_stride, subpage_stride, subpages = _as_gbsa_page_pool(
-            key_cache
-        )
-        value_cache, value_block_stride, value_subpage_stride, value_subpages = (
-            _as_gbsa_page_pool(value_cache)
-        )
+        key_cache, block_stride, subpage_stride, subpages = _as_gbsa_page_pool(key_cache)
+        value_cache, value_block_stride, value_subpage_stride, value_subpages = _as_gbsa_page_pool(value_cache)
         if (block_stride, subpage_stride, subpages) != (
             value_block_stride,
             value_subpage_stride,
             value_subpages,
         ):
             raise ValueError("QSA GBSA requires matching K/V cache strides")
-        subpage_offsets = torch.arange(
-            subpages,
-            dtype=block_table.dtype,
-            device=block_table.device,
-        ) * subpage_stride
+        subpage_offsets = (
+            torch.arange(
+                subpages,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            * subpage_stride
+        )
         expanded_table = block_table.unsqueeze(-1) * block_stride + subpage_offsets
         block_table = torch.where(
             block_table.unsqueeze(-1) >= 0,

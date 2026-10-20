@@ -33,9 +33,7 @@ def test_compact_prefill_output_matches_dense_reference() -> None:
     valid_state = torch.tensor([True, False, True])
 
     dense = F.silu(source).transpose(1, 2).contiguous()
-    valid_tokens = torch.arange(4).view(1, 4) < torch.tensor([2, 3, 1]).view(
-        3, 1
-    )
+    valid_tokens = torch.arange(4).view(1, 4) < torch.tensor([2, 3, 1]).view(3, 1)
     dense.masked_fill_(~(valid_tokens & valid_state.view(3, 1)).unsqueeze(-1), 0)
     expected = dense[req_indices, col_indices]
     output = torch.empty(6, 5)
