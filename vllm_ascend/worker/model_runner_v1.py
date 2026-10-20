@@ -3886,6 +3886,17 @@ class NPUModelRunner(GPUModelRunner):
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        # Under DCP the group-0 slot mapping carries the sharded interleave
+        # ownership mask.  The replicated groups (e.g. the DSA SWA/state
+        # caches, whose builders consume the COMMON slot mapping) need the
+        # unmasked full-sequence slots, so prefer a replicated group's
+        # mapping when one exists.  The block table / DCP metadata stay on
+        # the sharded group-0 geometry.
+        for _slot_gid, _bt in enumerate(getattr(self.input_batch.block_table, "block_tables", None) or []):
+            if getattr(_bt, "dcp_world_size", 1) == 1 and not getattr(_bt, "is_mamba_group", False):
+                if _slot_gid != 0:
+                    _, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(_slot_gid)
+                break
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
         if dcp_dummy_metadata is not None:
             # A DCP dummy decode must not inherit request state from the

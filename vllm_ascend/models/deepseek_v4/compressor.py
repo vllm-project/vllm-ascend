@@ -201,6 +201,13 @@ class Compressor(nn.Module):
         assert compressor_metadata is not None
         assert state_metadata is not None
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
+        # Under DCP the metadata operator runs against an identity block
+        # table, so the emitted slots are global compressed positions. The
+        # DSA-DCP metadata builder installs a remap callable that converts
+        # them to rank-local slots (padding foreign-owned groups).
+        dcp_slot_remap = getattr(compressor_metadata, "dcp_slot_remap", None)
+        if dcp_slot_remap is not None:
+            slot_mapping = dcp_slot_remap(slot_mapping)
         compressed_kv = torch.ops._C_ascend.compressor(
             hidden_states,
             self.wkv.weight,

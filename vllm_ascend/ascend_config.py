@@ -800,6 +800,41 @@ class AscendConfig:
                 migration,
             )
 
+        # DSA-DCP (decode context parallelism for the DeepSeek-V4 DSA stack)
+        # validation. Runs before the enable_dsa_cp soft-disable below so the
+        # mutual exclusion cannot be silently bypassed.
+        is_deepseek_v4 = (
+            hasattr(vc.model_config, "hf_text_config")
+            and getattr(vc.model_config.hf_text_config, "model_type", "") == "deepseek_v4"
+        )
+        if is_deepseek_v4 and vc.parallel_config.decode_context_parallel_size > 1:
+            if self.enable_dsa_cp:
+                raise ValueError(
+                    "enable_dsa_cp (replicated-cache token sharding) cannot be combined with "
+                    "decode_context_parallel_size > 1 (DCP KV sharding). Remove "
+                    "enable_dsa_cp from additional_config to use DCP."
+                )
+            if vc.parallel_config.prefill_context_parallel_size > 1:
+                raise ValueError(
+                    "DSA DCP cannot be combined with prefill context parallelism (PCP)."
+                )
+            interleave = vc.parallel_config.cp_kv_cache_interleave_size
+            block_size = vc.cache_config.block_size
+            max_compress_ratio = 128
+            if interleave % max_compress_ratio != 0:
+                raise ValueError(
+                    "DeepSeek-V4 DCP requires cp_kv_cache_interleave_size "
+                    f"({interleave}) to be a multiple of {max_compress_ratio} so C128 "
+                    "compression groups never split DCP ranks. Use "
+                    "--dcp-kv-cache-interleave-size 128 (default with --block-size 128)."
+                )
+            if block_size % interleave != 0:
+                raise ValueError(
+                    "DeepSeek-V4 DCP requires block_size "
+                    f"({block_size}) to be divisible by cp_kv_cache_interleave_size "
+                    f"({interleave})."
+                )
+
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
         # available so runtime reads do not depend on vLLM's temporary config

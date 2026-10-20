@@ -195,6 +195,15 @@ def _apply_profiling_patches():
     original_init = EngineCore.__init__
 
     def _patched_engine_core_init(self, *args, **kwargs):
+        # EngineCore lives in a separate process where the platform
+        # check_and_update_config hook never runs (VllmConfig arrives
+        # pickled), so (re-)install the DSA-DCP validate_block_size patch
+        # here, before the original init reaches _initialize_kv_caches.
+        # Called through vllm_ascend.utils directly: the implementation lives
+        # there, so this does not depend on the platform class carrying it.
+        from vllm_ascend.utils import apply_dsa_dcp_validate_block_size_patch
+
+        apply_dsa_dcp_validate_block_size_patch()
         original_init(self, *args, **kwargs)
 
         if hasattr(self.scheduler, "run_profiling_chunk_init"):

@@ -54,6 +54,8 @@ class AscendBlockTables(BlockTables):
             cp_interleave: int = 1,
             slot_mapping_enabled: list[bool] | None = None,
             dcp_sharded: list[bool] | None = None,
+            # DCP feature: per-group CP world size (1 for replicated groups).
+            group_cp_size: list[int] | None = None,
         ):
             if kernel_block_sizes is None:
                 kernel_block_sizes = block_sizes
@@ -74,6 +76,7 @@ class AscendBlockTables(BlockTables):
                 slot_mapping_enabled=slot_mapping_enabled,
                 **super_kwargs,
             )
+            self._init_dsa_dcp_extras(block_sizes, max_num_blocks_per_group, group_cp_size)
             self._triton_block_size = 1024
             # kernel_block_sizes determine the number of block-table entries
             # touched by one token tile. Use the smallest kernel block size to
@@ -113,6 +116,8 @@ class AscendBlockTables(BlockTables):
             cp_interleave: int = 1,
             slot_mapping_enabled: list[bool] | None = None,
             dcp_sharded: list[bool] | None = None,
+            # DCP feature: per-group CP world size (1 for replicated groups).
+            group_cp_size: list[int] | None = None,
         ):
             if kernel_block_sizes is None:
                 kernel_block_sizes = block_sizes
@@ -153,6 +158,7 @@ class AscendBlockTables(BlockTables):
                 **super_kwargs,
             )
             self.kernel_block_sizes_tensor = torch.tensor(kernel_block_sizes, dtype=torch.int32, device=self.device)
+            self._init_dsa_dcp_extras(block_sizes, max_num_blocks_per_group, group_cp_size)
             self._triton_block_size = 1024
             # kernel_block_sizes determine the number of block-table entries
             # touched by one token tile. Use the smallest kernel block size to
@@ -193,6 +199,32 @@ class AscendBlockTables(BlockTables):
                 for ids, blocks_per_kv_block in zip(new_block_ids, self.blocks_per_kv_block)
             )
             return super().append_block_ids(req_index, expanded_block_ids, overwrite)
+
+    def _init_dsa_dcp_extras(
+        self,
+        block_sizes: list[int],
+        max_num_blocks_per_group: list[int],
+        group_cp_size: list[int] | None,
+    ) -> None:
+        """Per-group DCP world sizes + one-shot width diagnostics (DCP feature).
+
+        Replicated groups (e.g. the DeepSeek-V4 SWA/state sliding-window
+        caches) pass 1 so their slot mappings keep the full-sequence positions
+        instead of the interleave ownership mask that sharded groups apply.
+        Consumed by the Ascend kernel override in compute_slot_mappings; the
+        sizes are NOT forwarded to the upstream constructor.
+        """
+        self.group_cp_sizes = (
+            torch.tensor(group_cp_size, dtype=torch.int32, device=self.device)
+            if group_cp_size is not None
+            else None
+        )
+        # Retained for the one-shot width diagnostics below so the per-group
+        # table widths land in the request-time log too.
+        self._dsa_block_sizes = list(block_sizes)
+        self._dsa_row_widths = list(max_num_blocks_per_group)
+        self._dsa_group_cp_sizes = list(group_cp_size) if group_cp_size is not None else None
+        self._dsa_widths_logged = False
 
     def compute_slot_mappings(
         self,

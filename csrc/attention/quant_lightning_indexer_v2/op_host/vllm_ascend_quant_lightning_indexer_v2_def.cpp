@@ -78,6 +78,11 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("dcp_context")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT32})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("sparse_values").ParamType(REQUIRED).DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND});
         this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});

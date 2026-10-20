@@ -278,6 +278,7 @@ private:
     Tensor *sequsedQ_ = nullptr;
     Tensor *sequsedK_ = nullptr;
     Tensor *cmpResidualK_ = nullptr;
+    Tensor *dcpContext_ = nullptr;
     // output
     Tensor *metadata_ = nullptr;
     // attributes
@@ -318,6 +319,7 @@ private:
         seqUsedQ = 2,
         seqUsedK = 3,
         cmpResidualK = 4,
+        dcpContext = 5,
         // output
         metadata = 0,
     };

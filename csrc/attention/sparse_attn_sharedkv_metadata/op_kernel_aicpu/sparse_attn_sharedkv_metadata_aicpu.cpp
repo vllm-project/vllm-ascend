@@ -18,6 +18,7 @@
 #include "../../sparse_attn_sharedkv/op_kernel/sparse_attn_sharedkv_metadata.h"
 #include "../../common/aicpu/cpu_context_util.h"
 #include "sparse_attn_sharedkv_metadata_aicpu.h"
+#include "../../common/dcp_causal.h"
 
 using namespace optiling;
 
@@ -42,6 +43,11 @@ bool SparseAttnSharedkvMetadataCpuKernel::Prepare(CpuKernelContext &ctx)
     actSeqLenCmpKv_ = ctx.Input(static_cast<uint32_t>(ParamId::actSeqLenCmpKv));
     seqUsedQ_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedQ));
     seqUsedKv_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedKv));
+    dcpContext_ = ctx.Input(static_cast<uint32_t>(ParamId::dcpContext));
+    // Torch represents an absent optional metadata input with an empty tensor.
+    if (dcpContext_ != nullptr && dcpContext_->GetTensorShape()->GetDimSize(0) == 0) {
+        dcpContext_ = nullptr;
+    }
     // output
     metaData_ = ctx.Output(static_cast<uint32_t>(ParamId::metaData));
 
@@ -238,6 +244,11 @@ bool SparseAttnSharedkvMetadataCpuKernel::CheckFeature()
 
 bool SparseAttnSharedkvMetadataCpuKernel::ParamsCheck()
 {
+    if (dcpContext_ != nullptr &&
+        dcpContext_->GetTensorShape()->GetDimSize(0) < vllm_ascend::dcp::SEQ_LENS_OFFSET + GetQueryBatchSize()) {
+        KERNEL_LOG_ERROR("dcp_context must contain its header and one global length per request");
+        return false;
+    }
     return (CheckSingleParam() && CheckExistence() && CheckConsistency() && CheckFeature());
 }
 
@@ -544,6 +555,12 @@ void SparseAttnSharedkvMetadataCpuKernel::CalcBlockRangeAndTailSize(Range<int64_
     s1GCache.cmpS2Start = s1GCache.winS2End;
     // 计算CmpS2LastToken的长度
     uint32_t cmpS2LastTokenSize = hasCmpKv_ ? (oriS2LastToken + 1) / cmpRatio_ : 0;
+    if (dcpContext_ != nullptr && dcpContext_->GetData() != nullptr) {
+        const auto *dcp = static_cast<const int32_t *>(dcpContext_->GetData());
+        cmpS2LastTokenSize = vllm_ascend::dcp::LocalCompressedLength(
+            oriS2TokenRange.second + 1, cmpRatio_, dcp[vllm_ascend::dcp::SIZE_INDEX],
+            dcp[vllm_ascend::dcp::RANK_INDEX], dcp[vllm_ascend::dcp::INTERLEAVE_INDEX]);
+    }
     uint32_t actCmpS2LastTokenSize = 0;
     if (isCFA) {
         actCmpS2LastTokenSize = cmpS2LastTokenSize;

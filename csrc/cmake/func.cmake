@@ -266,6 +266,7 @@ function(add_ops_info_target)
             ${OPS_INFO_JSON}
             COMMAND mkdir -p ${CUSTOM_OPS_INFO_DIR}
             COMMAND cp -f ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_DIR}
+            DEPENDS ${generate_aclnn_srcs} ${generate_aclnn_inner_srcs} ${generate_exclude_proto_srcs}
     )
 
     add_custom_target(${OPS_INFO_TARGET} ALL
@@ -574,14 +575,12 @@ function(add_bin_compile_target)
             endif ()
 
             set(DYNAMIC_PY_FILE ${OP_SRC_OUT_DIR}/${op_type}.py)
-            add_custom_command(OUTPUT ${DYNAMIC_PY_FILE}
-                    COMMAND cp -rf ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
-                    DEPENDS ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py
-                    # COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/update_get_kernel_source.sh ${DYNAMIC_PY_FILE}
-            )
-
+            # Copy after codegen, preserving mtimes when the wrapper is unchanged.
             add_custom_target(${OP_TARGET_NAME}_py_copy
-                    DEPENDS ${DYNAMIC_PY_FILE}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            ${ASCEND_IMPL_OUT_DIR}/dynamic/${op_file}.py ${DYNAMIC_PY_FILE}
+                    DEPENDS generate_transformer_adapt_py
+                    BYPRODUCTS ${DYNAMIC_PY_FILE}
             )
 
             add_custom_command(OUTPUT ${OP_BIN_OUT_DIR}

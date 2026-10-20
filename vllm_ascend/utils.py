@@ -1614,6 +1614,56 @@ def enable_dsa_cp() -> bool:
     return get_ascend_config().enable_dsa_cp
 
 
+def apply_dsa_dcp_validate_block_size_patch() -> None:
+    """Relax upstream ``validate_block_size`` for the DeepSeek-V4 DSA-DCP path.
+
+    Upstream asserts ``cp_kv_cache_interleave_size <= block_size`` against the
+    finalized block size. Some revisions derive that value as the minimum over
+    the DeepSeek-V4 kernel block table (``[128, 128, 8, 32]``), i.e. 8 -- the
+    compressor-state kernel block. Those groups are replicated under DCP (their
+    block geometry is unrelated to the interleave, which only constrains the
+    DCP-sharded MLA groups), so the assert would reject a legal configuration.
+    The real constraints -- interleave a multiple of the largest compression
+    ratio and a divisor of the scheduler block -- are already enforced by
+    ascend_config's DSA-DCP validation.
+
+    Idempotent: the installed replacement is flagged, so repeated calls (the
+    platform hook plus the EngineCore-side re-application) are no-ops.
+    """
+    from vllm.config import VllmConfig
+
+    if getattr(VllmConfig.validate_block_size, "_dsa_dcp_bypass", False):
+        return
+
+    original_validate_block_size = VllmConfig.validate_block_size
+
+    def validate_block_size(self):
+        try:
+            return original_validate_block_size(self)
+        except AssertionError:
+            parallel_config = self.parallel_config
+            model_config = self.model_config
+            interleave = getattr(parallel_config, "cp_kv_cache_interleave_size", 1)
+            is_dsa_dcp = (
+                model_config is not None
+                and getattr(getattr(model_config, "hf_text_config", None), "model_type", "") == "deepseek_v4"
+                and getattr(parallel_config, "decode_context_parallel_size", 1) > 1
+                and interleave % 128 == 0
+            )
+            if not is_dsa_dcp:
+                raise
+            logger.warning(
+                "Bypassing the upstream validate_block_size DCP assert for the "
+                "DeepSeek-V4 DSA-DCP path: the finalized block size reflects "
+                "replicated compressor-state kernel blocks, which are outside "
+                "the DCP interleave geometry. The real constraints (interleave "
+                "a multiple of 128) are enforced by ascend_config."
+            )
+
+    validate_block_size._dsa_dcp_bypass = True
+    VllmConfig.validate_block_size = validate_block_size
+
+
 def enable_sfa_dcp_force_tmajor_restore() -> bool:
     # Read from the validated AscendConfig singleton (additional-config key
     # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value

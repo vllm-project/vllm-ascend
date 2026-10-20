@@ -58,6 +58,7 @@ constexpr uint32_t BLOCK_TABLE_INDEX = 10;
 constexpr uint32_t OUTPUT_IDX_OFFSET_INDEX = 11;
 constexpr uint32_t METADATA_INDEX = 12;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_INPUT_INDEX = 13;
+constexpr uint32_t DCP_CONTEXT_INPUT_INDEX = 14;
 constexpr uint32_t SPARSE_INDICES_INDEX = 0;
 constexpr uint32_t SPARSE_VALUES_INDEX = 1;
 constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;

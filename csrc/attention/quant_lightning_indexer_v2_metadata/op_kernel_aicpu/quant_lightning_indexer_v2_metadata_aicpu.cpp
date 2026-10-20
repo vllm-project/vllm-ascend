@@ -9,6 +9,7 @@
  */
 
 #include "quant_lightning_indexer_v2_metadata_aicpu.h"
+#include "../../common/dcp_causal.h"
 #include <cstdio>
 #include <cmath>
 #include "status.h"
@@ -35,6 +36,11 @@ bool QuantLightningIndexerV2MetadataCpuKernel::Prepare(CpuKernelContext &ctx)
     sequsedQ_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedQ));
     sequsedK_ = ctx.Input(static_cast<uint32_t>(ParamId::seqUsedK));
     cmpResidualK_ = ctx.Input(static_cast<uint32_t>(ParamId::cmpResidualK));
+    dcpContext_ = ctx.Input(static_cast<uint32_t>(ParamId::dcpContext));
+    // Torch represents an absent optional metadata input with an empty tensor.
+    if (dcpContext_ != nullptr && dcpContext_->GetTensorShape()->GetDimSize(0) == 0) {
+        dcpContext_ = nullptr;
+    }
     // output
     metadata_ = ctx.Output(static_cast<uint32_t>(ParamId::metadata));
 
@@ -69,6 +75,11 @@ bool QuantLightningIndexerV2MetadataCpuKernel::ParamsCheck()
         return false;
     }
     const int32_t batchSize = GetQueryBatchSize();
+    if (dcpContext_ != nullptr &&
+        dcpContext_->GetTensorShape()->GetDimSize(0) < vllm_ascend::dcp::SEQ_LENS_OFFSET + batchSize) {
+        KERNEL_LOG_ERROR("dcp_context must contain its header and one global length per request");
+        return false;
+    }
     return CheckCuSeqlensQ(batchSize) && CheckCuSeqlensK(batchSize) && CheckSequsedQ(batchSize) &&
            CheckSequsedK(batchSize) && CheckCmpResidualK(batchSize);
 }
@@ -412,6 +423,17 @@ Range<int64_t> QuantLightningIndexerV2MetadataCpuKernel::CalcS2TokenRange(uint32
             s1FirstToken = 0;
             s1LastToken = batchCache.s1Size;
         }
+    }
+
+    if (dcpContext_ != nullptr && dcpContext_->GetData() != nullptr) {
+        const auto *dcp = static_cast<const int32_t *>(dcpContext_->GetData());
+        const int64_t rawEnd = static_cast<int64_t>(dcp[vllm_ascend::dcp::SEQ_LENS_OFFSET + batchCache.bIdx]) -
+            batchCache.s1Size + std::min(s1LastToken + 1, static_cast<int64_t>(batchCache.s1Size));
+        const uint32_t visible = vllm_ascend::dcp::LocalCompressedLength(
+            rawEnd, cmpRatio_, dcp[vllm_ascend::dcp::SIZE_INDEX], dcp[vllm_ascend::dcp::RANK_INDEX],
+            dcp[vllm_ascend::dcp::INTERLEAVE_INDEX]);
+        // Match the execution kernel's output-clearing tile for empty prefixes.
+        return {0, static_cast<int64_t>(std::max(visible, 1U)) * cmpRatio_ - 1};
     }
 
     int64_t s2FirstToken = s1FirstToken - batchCache.preTokenLeftUp;

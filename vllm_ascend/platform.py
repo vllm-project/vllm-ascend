@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     FP8_METHOD,
     dsv4_skips_indexer_topk,
     get_dsv4_compress_ratio,
+    apply_dsa_dcp_validate_block_size_patch,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
@@ -479,6 +480,17 @@ class NPUPlatform(Platform):
                         has_topk = True
 
     @classmethod
+    def _apply_dsa_dcp_validate_block_size_patch(cls) -> None:
+        """Relax upstream validate_block_size for the DeepSeek-V4 DSA-DCP path.
+
+        Implemented in
+        :func:`vllm_ascend.utils.apply_dsa_dcp_validate_block_size_patch` so the
+        EngineCore-side re-application (``patch_profiling_chunk``) does not
+        depend on this platform class carrying the method.
+        """
+        apply_dsa_dcp_validate_block_size_patch()
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
@@ -489,6 +501,7 @@ class NPUPlatform(Platform):
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default runner selection.
         apply_v2_model_runner_config_patch()
+        cls._apply_dsa_dcp_validate_block_size_patch()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs

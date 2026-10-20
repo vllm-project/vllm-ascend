@@ -293,6 +293,7 @@ private:
     Tensor *actSeqLenCmpKv_ = nullptr;
     Tensor *seqUsedQ_ = nullptr;
     Tensor *seqUsedKv_ = nullptr;
+    Tensor *dcpContext_ = nullptr;
 
     // output
     Tensor *metaData_ = nullptr;
@@ -341,6 +342,7 @@ private:
     actSeqLenCmpKv = 2,
     seqUsedQ = 3,
     seqUsedKv = 4,
+        dcpContext = 5,
     // output
     metaData = 0,
   };
