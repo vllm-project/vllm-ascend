@@ -83,7 +83,7 @@ on:
         description: 'Memcache date'
         required: false
         type: string
-        default: '20261017.1'
+        default: '20261019.10'
       memfabric_version:
         description: 'Memfabric version'
         required: false
@@ -93,7 +93,7 @@ on:
         description: 'Memfabric date'
         required: false
         type: string
-        default: '20261017.1'
+        default: '20261019.10'
       torch_npu_version:
         description: 'Torch NPU version'
         required: false
