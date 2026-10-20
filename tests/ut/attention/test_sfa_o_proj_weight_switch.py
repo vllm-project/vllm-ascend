@@ -187,6 +187,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.dcp_q_replicate_enabled = False
         impl.layerwise_kv_cache_hook = None
         impl.enable_dsa_cp_full_o_proj = True
         impl.enable_sp = False
