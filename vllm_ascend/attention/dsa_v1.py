@@ -1779,18 +1779,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
             o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
             # Pad to a static exchange size so the all_to_all / reduce_scatter
-            # shapes are identical across all ACL graph buckets — variable
-            # shapes desync the HCCL communicator during graph replay.
-            # Profiling can use the scheduler's full token budget even when
-            # the decode capacity is smaller. Freeze the larger capacity when
-            # allocating the buffers, then reuse it for capture and replay.
+            # shapes stay identical across ACL graph buckets. potential_max_tokens
+            # already covers the largest decode batch; a larger scheduler budget
+            # would only pad every decode step, so the guard below rejects it.
             if hasattr(self, "_oproj_send_buf"):
                 exchange_num_tokens = self._oproj_send_buf.shape[1]
             else:
-                exchange_num_tokens = max(
-                    get_potential_max_tokens(),
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                )
+                exchange_num_tokens = get_potential_max_tokens()
             if exchange_num_tokens < num_tokens:
                 scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
