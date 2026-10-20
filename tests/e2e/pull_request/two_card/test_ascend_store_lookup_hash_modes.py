@@ -9,8 +9,8 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
-from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 
 MODEL = "Qwen/Qwen3-8B"
 SERVED_MODEL = "ascend-store-lookup-test"
