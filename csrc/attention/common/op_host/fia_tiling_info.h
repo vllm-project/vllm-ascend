@@ -81,7 +81,7 @@ constexpr int32_t SPARSE_MODE_TREE = 9;
 constexpr int32_t SPARSE_MODE_INT_MAX = 2147483647;
 
 enum class FiaLayout : uint32_t {
-    // stardard
+    // standard
     BSH = 0,
     BSND = 1,
     BNSD = 2,

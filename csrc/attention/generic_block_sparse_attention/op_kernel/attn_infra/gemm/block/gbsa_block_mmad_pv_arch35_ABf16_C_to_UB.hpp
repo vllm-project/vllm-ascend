@@ -10,9 +10,9 @@
 
 /**
  * @brief matmul implementation for single p&v base tile
- * This implementation is designed for the following senario:
+ * This implementation is designed for the following scenario:
  * A full p base tile is loaded to L1 from UB, no workspace transit
- * A full v base tile is loaded to L1 from GM，relavent instructions launched before p base tile crossCore wait
+ * A full v base tile is loaded to L1 from GM，relevant instructions launched before p base tile crossCore wait
  * A full p*v base tile is stored from L0C to UB, or to GM for row-streamed rescaleO.
  */
 #ifndef GEMM_BLOCK_PV_ARCH35_ABF16_C2UB_HPP
@@ -129,7 +129,7 @@ public:
     template <uint32_t MODE, pipe_t PIPE>
     __aicore__ inline void SetCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC set for 2 AIVs seperately
+        // in mode 4, AIC set for 2 AIVs separately
         if constexpr (MODE == 4U) {
             uint16_t flagIdV0 = crossCoreFlag.id;
             uint16_t flagIdV1 = flagIdV0 + V0_V1_FLAG_ID_OFFSET;
@@ -142,7 +142,7 @@ public:
     template <uint32_t MODE, pipe_t PIPE>
     __aicore__ inline void WaitCrossCoreSync(Arch::CrossCoreFlag &crossCoreFlag)
     {
-        // in mode 4, AIC wait for 2 AIVs seperately
+        // in mode 4, AIC wait for 2 AIVs separately
         if constexpr (MODE == 4U) {
             uint16_t flagIdV0 = crossCoreFlag.id;
             uint16_t flagIdV1 = flagIdV0 + V0_V1_FLAG_ID_OFFSET;
@@ -287,7 +287,7 @@ public:
         uint32_t kL0LoopNum = CeilDiv(curBaseTileSize, L0_TILE_K);
         // while splitting the base tile OTmp to 2 AIVs,
         // the order of the elements in each column is expected to be preserved,
-        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe seperately.
+        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe separately.
         // therefore, FixPipe won't launch until each portion(chunked only by columns, based on nbuffer strategy)
         // of the base tile is ready on l0C
         for (uint32_t nL0Itr = 0; nL0Itr < nL0LoopNum; nL0Itr++) {
