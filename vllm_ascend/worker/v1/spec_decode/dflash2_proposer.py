@@ -1,5 +1,3 @@
-from typing import Any
-
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -8,13 +6,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import dflash2_greedy_selector_walk_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
-
-
-def is_dflash2_draft(speculative_config: Any) -> bool:
-    """True when method is dflash and the draft architecture is DFlash2DraftModel."""
-    if speculative_config.method != "dflash":
-        return False
-    return "DFlash2DraftModel" in (speculative_config.draft_model_config.architectures or [])
 
 
 def greedy_select_path(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:

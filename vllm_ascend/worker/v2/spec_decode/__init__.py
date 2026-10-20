@@ -21,6 +21,8 @@ import copy
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
+from vllm_ascend.worker.v1.spec_decode.method import SpecDecodeFamily, resolve_spec_decode_family
+
 
 def init_speculator(
     vllm_config: VllmConfig,
@@ -31,11 +33,12 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    family = resolve_spec_decode_family(vllm_config)
     if speculative_config.enforce_eager:
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
-    if speculative_config.method == "extract_hidden_states":
+    if family is SpecDecodeFamily.EXTRACT_HIDDEN_STATES:
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
@@ -43,41 +46,41 @@ def init_speculator(
         )
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
-    if speculative_config.use_dspark():
+    if family is SpecDecodeFamily.DSPARK:
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )
 
         return AscendDSparkSpeculator(vllm_config, device)
-    if speculative_config.use_dflash():
-        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
-            from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
-                AscendDFlash2Speculator,
-            )
+    if family is SpecDecodeFamily.DFLASH2:
+        from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+            AscendDFlash2Speculator,
+        )
 
-            return AscendDFlash2Speculator(vllm_config, device)
+        return AscendDFlash2Speculator(vllm_config, device)
+    if family is SpecDecodeFamily.DFLASH:
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
             AscendDFlashSpeculator,
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
-    if speculative_config.use_gemma4_mtp():
+    if family is SpecDecodeFamily.GEMMA4_MTP:
         from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
             AscendGemma4Speculator,
         )
 
         return AscendGemma4Speculator(vllm_config, device)
-    if speculative_config.method == "mtp" and not speculative_config.use_step3p5_mtp():
+    if family in (SpecDecodeFamily.MTP, SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP):
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
 
         return AscendMTPSpeculator(vllm_config, device)
-    if speculative_config.use_eagle():
+    if family is SpecDecodeFamily.EAGLE:
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
-    if speculative_config.uses_draft_model():
+    if family is SpecDecodeFamily.DRAFT_MODEL:
         from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
             AscendStandaloneARSpeculator,
         )

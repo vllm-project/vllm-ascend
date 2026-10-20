@@ -19,7 +19,7 @@
 
 
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer, is_dflash2_draft
+from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
@@ -28,10 +28,9 @@ from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import (
-    AscendMultiKVCacheGroupMTPProposer,
-    is_multi_kv_cache_group_mtp,
-)
+from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
+from vllm_ascend.worker.v1.spec_decode.method import SpecDecodeFamily, resolve_spec_decode_family
+from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import AscendMultiKVCacheGroupMTPProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -44,36 +43,37 @@ if vllm_version_is("0.31.0"):
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
-    if method == "ngram":
+    family = resolve_spec_decode_family(vllm_config, method=method)
+    if family is SpecDecodeFamily.NGRAM:
         return AscendNgramProposer(vllm_config, runner)
-    elif method == "ngram_gpu":
+    if family is SpecDecodeFamily.NGRAM_GPU:
         return AscendNgramProposerNPU(vllm_config, device, runner)
-    elif method == "suffix":
+    if family is SpecDecodeFamily.SUFFIX:
         return AscendSuffixDecodingProposer(vllm_config, runner)
-    elif method == "medusa":
+    if family is SpecDecodeFamily.MEDUSA:
         if vllm_version_is("0.31.0"):
             return AscendMedusaProposer(vllm_config, device)
         raise ValueError(
             "Medusa speculative decoding was removed in vLLM (vLLM #61701) and is only supported on the v0.31.0 lane."
         )
-    elif method == "dspark":
+    if family is SpecDecodeFamily.DSPARK:
         return AscendDSparkProposer(vllm_config, device, runner)
-    elif method == "mtp" and vllm_config.speculative_config.use_gemma4_mtp():
+    if family is SpecDecodeFamily.GEMMA4_MTP:
         return AscendGemma4Proposer(vllm_config, device, runner)
-    elif method in ("eagle", "eagle3", "mtp"):
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is not None and speculative_config.use_step3p5_mtp():
-            return AscendStep3p5MTPProposer(vllm_config, device, runner)
-        if method == "mtp" and is_multi_kv_cache_group_mtp(vllm_config):
-            return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.STEP3P5_MTP:
+        return AscendStep3p5MTPProposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP:
+        return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.EAGLE:
         return AscendEagleProposer(vllm_config, device, runner)
-    elif method == "dflash":
-        if is_dflash2_draft(vllm_config.speculative_config):
-            return AscendDflash2Proposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.DFLASH2:
+        return AscendDflash2Proposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.DFLASH:
         return AscendDflashProposer(vllm_config, device, runner)
-    elif method == "draft_model":
+    if family is SpecDecodeFamily.MTP:
+        return AscendEagleProposer(vllm_config, device, runner)
+    if family is SpecDecodeFamily.DRAFT_MODEL:
         return AscendDraftModelProposer(vllm_config, device, runner)
-    elif method == "extract_hidden_states":
+    if family is SpecDecodeFamily.EXTRACT_HIDDEN_STATES:
         return AscendExtractHiddenStatesProposer(vllm_config, device, runner)
-    else:
-        raise ValueError(f"Unknown speculative decoding method: {method}")
+    raise ValueError(f"Unknown speculative decoding method: {method}")
