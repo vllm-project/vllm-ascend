@@ -29,8 +29,8 @@ from vllm_ascend.worker.v2 import attn_utils
 def _config():
     layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="gemma4_text")),
-        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="gemma4_text"), use_mla=False),
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout, cache_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
         kv_transfer_config=None,
     )
@@ -68,8 +68,10 @@ def _specs(cache_config):
 
 @pytest.mark.parametrize("sliding_groups", [4, 5])
 @pytest.mark.parametrize("supports_shared", [False, True])
-def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared):
+@pytest.mark.parametrize("model_type", ["gemma4_text", "other_full_sliding_model", "step3p5", "step3p7"])
+def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared, model_type):
     config = _config()
+    config.model_config.hf_text_config.model_type = model_type
     cache = _cache_config(sliding_groups)
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
     worker.vllm_config = config
@@ -81,15 +83,30 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
     # Divisible by both five and six; the unsupported runner must retain scaling.
     available = 60 * cache.kv_cache_tensors[0].size
-    expected = available if supports_shared else available // (sliding_groups + 1)
+    shares_pool = supports_shared and model_type in ("gemma4_text", "step3p5", "step3p7")
+    expected = available if shares_pool else available // (sliding_groups + 1)
     assert worker._scale_kv_cache_memory_for_multi_group(available) == expected
 
 
 @pytest.mark.parametrize("runner_kind", ["v1", "v2"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, runner_kind, dtype):
+@pytest.mark.parametrize("kernel_block_size", [1, 2])
+def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, runner_kind, dtype, kernel_block_size):
     config = _config()
     cache = _cache_config(dtype=dtype)
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda blocks, block_size, heads, head_size, *_: (2, blocks, block_size, heads, head_size)
+    )
+    groups = [
+        SimpleNamespace(
+            kv_cache_group_id=index,
+            kv_cache_spec=group.kv_cache_spec,
+            layer_names=group.layer_names,
+            backend=backend,
+        )
+        for index, group in enumerate(cache.kv_cache_groups)
+    ]
+    kernel_sizes = [kernel_block_size] * len(groups)
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     if runner_kind == "v1":
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -100,6 +117,12 @@ def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, ru
         runner._allocate_int8_cache_tensor = lambda size, _: allocate(size)
         raw = runner._allocate_kv_cache_tensors(cache)
         assert runner.hybrid_with_attn_and_mamba is False
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        runner.runner_only_attn_layers = set()
+        runner._is_c8_mxfp_kv_cache = lambda _: False
+        runner.sparse_kv_offload_enabled = False
+        runner.use_hybrid_blocks = True
+        reshaped = runner._reshape_kv_cache_tensors(cache, raw, kernel_sizes)
     else:
         monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
         monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
@@ -107,13 +130,17 @@ def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, ru
         monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
         monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
         raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))
+        reshaped = attn_utils._reshape_kv_cache_v2(
+            groups, raw, "auto", kernel_sizes, {"shared_layer": groups[0].layer_names[0]}, cache
+        )
+        assert reshaped["shared_layer"] is reshaped[groups[0].layer_names[0]]
     allocate.assert_called_once_with(cache.kv_cache_tensors[0].size)
     assert len({tensor.untyped_storage().data_ptr() for pair in raw.values() for tensor in pair}) == 1
     specs = _specs(cache)
     views = {
         name: tuple(
-            tensor.view(dtype).view(cache.num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
-            for tensor in raw[name]
+            tensor.view(cache.num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
+            for tensor in reshaped[name]
         )
         for name, spec in specs.items()
     }
@@ -165,7 +192,19 @@ def test_group_descriptors_with_multiple_layers():
 
 @pytest.mark.parametrize(
     "unsupported",
-    ["empty", "full_only", "transfer", "dcp", "pcp", "layout", "padding", "quantized", "unequal_kv"],
+    [
+        "empty",
+        "full_only",
+        "transfer",
+        "dcp",
+        "pcp",
+        "layout",
+        "padding",
+        "quantized",
+        "unequal_kv",
+        "other_model",
+        "custom_cache_dtype",
+    ],
 )
 def test_unsupported_layouts_keep_private_allocation(unsupported):
     config = _config()
@@ -185,6 +224,10 @@ def test_unsupported_layouts_keep_private_allocation(unsupported):
         specs = [replace(spec, page_size_padded=spec.page_size_bytes * 2) for spec in specs]
     elif unsupported == "quantized":
         specs = [replace(spec, kv_quant_mode=KVQuantMode.FP8_PER_TENSOR) for spec in specs]
+    elif unsupported == "other_model":
+        config.model_config.hf_text_config.model_type = "other_full_sliding_model"
+    elif unsupported == "custom_cache_dtype":
+        config.cache_config.cache_dtype = "mxfp8"
     else:
         specs[0] = replace(specs[0], head_size_v=4)
     assert not can_share_full_and_sliding_kv_cache(config, specs)

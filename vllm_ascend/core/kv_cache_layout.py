@@ -16,13 +16,18 @@ from vllm.v1.kv_cache_interface import (
 
 
 def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
-    """Keep the budget and both runners on the same dense attention layout.
+    """Keep Gemma 4's budget and both runners on the same dense layout.
 
     Equal physical pages let full and sliding-window groups overlay the same
     pool even when their head dimensions and tokens per block differ. Keep
     specialized/quantized caches and distributed transfer on their existing
-    allocation paths.
+    allocation paths. Limit this regression fix to Gemma 4 so other models
+    retain their existing allocation behavior.
     """
+    if vllm_config.model_config.hf_text_config.model_type != "gemma4_text":
+        return False
+    if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+        return False
     specs = tuple(specs)
     if {type(spec) for spec in specs} != {FullAttentionSpec, SlidingWindowSpec}:
         return False
