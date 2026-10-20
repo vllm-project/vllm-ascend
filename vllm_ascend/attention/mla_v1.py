@@ -1410,6 +1410,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 pe_cache = cache_k_pe
                 k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
+            guard = getattr(self, "_kv_guard", None)
+            if guard is not None:
+                guard.read(
+                    self._kv_guard_layer_name,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    request_offset=attn_metadata.num_decodes,
+                )
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
                 pe_cache,
@@ -1617,6 +1626,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         return_current_kv: bool = False,
     ):
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.write(self._kv_guard_layer_name, slots)
         if self._uses_strided_kv_adapter() and any(not cache.is_contiguous() for cache in kv_cache):
             current_k_pe, current_k_nope = self._exec_strided_kv_writer(kv_no_split, cos, sin, kv_cache, slots)
             if return_current_kv:
@@ -2423,6 +2435,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.write(
+                self._kv_guard_layer_name,
+                slots,
+                token_offset=attn_metadata.num_decode_tokens if attn_metadata else 0,
+            )
         pcp_local_range = None
         if self.pcp_enabled:
             assert attn_metadata is not None
@@ -2532,6 +2551,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.read(self._kv_guard_layer_name, decode_meta.block_table, decode_meta.seq_lens_list)
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
@@ -2780,6 +2802,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         from cann_ops_transformer import mla_prolog  # type: ignore[import-not-found,import-untyped]  # noqa: PLC0415
 
         bsz = attn_metadata.num_decode_tokens
+        guard = getattr(self, "_kv_guard", None)
+        if guard is not None:
+            guard.write(self._kv_guard_layer_name, attn_metadata.slot_mapping[:bsz])
         history_slots = attn_metadata.slot_mapping[:bsz]
         return_current_kv = self._decode_requires_current_kv(attn_metadata)
         if return_current_kv:
@@ -3097,6 +3122,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        self._kv_guard_layer_name = layer_name
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (
             attn_metadata.num_decodes is not None
