@@ -128,6 +128,7 @@ def mooncake_store_config(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     master = shutil.which("mooncake_master")
     if master is None:
         pytest.fail("mooncake_master is required for the Store E2E")
+    assert master is not None
 
     work_dir = tmp_path_factory.mktemp("ec-mooncake-store")
     config_path = work_dir / "mooncake_store.json"

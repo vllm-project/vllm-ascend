@@ -1,5 +1,6 @@
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -68,9 +69,9 @@ def _make_store_config():
 
 
 def _make_mooncake_modules(store):
-    mooncake = ModuleType("mooncake")
+    mooncake: Any = ModuleType("mooncake")
     mooncake.__path__ = []
-    mooncake_store = ModuleType("mooncake.store")
+    mooncake_store: Any = ModuleType("mooncake.store")
     mooncake_store.MooncakeDistributedStore = MagicMock(return_value=store)
     mooncake_store.ObjectDataType = SimpleNamespace(TENSOR="tensor")
     mooncake_store.ReplicateConfig = MagicMock(return_value=MagicMock())
