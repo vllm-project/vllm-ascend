@@ -294,8 +294,8 @@ cann_ops_transformer.generic_block_sparse_attention(
 #### 公共参数组
 
 - 入参为空的场景处理：
-  - 空Tensor指必选输入和输出的shape size为0,即有任意轴为0。
-  - 触发空tensor的用例将全部拦截报错。
+    - 空Tensor指必选输入和输出的shape size为0,即有任意轴为0。
+    - 触发空tensor的用例将全部拦截报错。
 
 - q、k、v、attention_out校验:
 
