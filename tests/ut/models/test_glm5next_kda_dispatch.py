@@ -285,3 +285,78 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     assert calls == [True]
     torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)
     assert torch.count_nonzero(target[:, 3:]) == 0
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_oproj_handles_uneven_batches_with_fixed_collective_buffers(monkeypatch, rank):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    capacity = 16
+    weight = torch.arange(12, dtype=torch.float32).reshape(3, 4) / 10
+    group = SimpleNamespace(world_size=2, rank_in_group=rank, device_group=object())
+    monkeypatch.setattr(model_kda, "oproj_tp_enable", lambda: True)
+    monkeypatch.setattr(model_kda, "get_otp_group", lambda: group)
+    monkeypatch.setattr(model_kda, "get_potential_max_tokens", lambda: capacity)
+    context = SimpleNamespace(attn_metadata={})
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: context)
+    shard = weight[:, rank * 2 : (rank + 1) * 2].contiguous()
+    layer.o_proj = SimpleNamespace(
+        input_size_per_partition=2,
+        output_size=3,
+        bias=None,
+        skip_bias_add=False,
+        quant_method=SimpleNamespace(apply=lambda proj, x, bias: torch.nn.functional.linear(x, shard, bias)),
+    )
+    padded_inputs = [torch.empty(0), torch.empty(0)]
+    addresses = []
+
+    def all_to_all(recv, send, *, group):
+        expected_send = padded_inputs[rank].reshape(capacity, 2, 2).transpose(0, 1)
+        torch.testing.assert_close(send, expected_send.contiguous().view(-1))
+        recv.copy_(torch.cat([x[:, rank * 2 : (rank + 1) * 2] for x in padded_inputs]).reshape(-1))
+
+    def reduce_scatter(output, partial, *, group):
+        expected = torch.nn.functional.linear(torch.cat(padded_inputs)[:, rank * 2 : (rank + 1) * 2], shard)
+        torch.testing.assert_close(partial, expected)
+        output.copy_(torch.nn.functional.linear(padded_inputs[rank], weight))
+        addresses.append((send_ptr(), layer._oproj_recv_buf.data_ptr(), partial.data_ptr(), output.data_ptr()))
+
+    def send_ptr():
+        return layer._oproj_send_buf.data_ptr()
+
+    monkeypatch.setattr(model_kda.dist, "all_to_all_single", all_to_all)
+    monkeypatch.setattr(model_kda.dist, "reduce_scatter_tensor", reduce_scatter)
+    for counts in [(12, 6), (6, 12), (0, 6), (6, 0), (0, 0), (16, 1), (1, 16), (4096, 4096)]:
+        profiling = counts[rank] > capacity
+        context.attn_metadata = None if profiling else {}
+        inputs = [torch.arange(n * 4, dtype=torch.float32).reshape(n, 4) / 100 + r for r, n in enumerate(counts)]
+        padded_inputs = [torch.zeros(capacity, 4) for _ in range(2)]
+        if not profiling:
+            for padded, x in zip(padded_inputs, inputs):
+                padded[: x.shape[0]].copy_(x)
+        actual = layer._finalize_o_proj(inputs[rank])
+        expected = torch.zeros(counts[rank], 3) if profiling else torch.nn.functional.linear(inputs[rank], weight)
+        torch.testing.assert_close(actual, expected)
+    assert all(address == addresses[0] for address in addresses)
+    context.attn_metadata = {}
+    with pytest.raises(ValueError, match="exceeds decode capacity"):
+        layer._finalize_o_proj(torch.ones(capacity + 1, 4))
+    assert len(addresses) == 8
+
+
+def test_oproj_without_otp_keeps_original_projection(monkeypatch):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    x = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    output = x * 2
+    calls = []
+
+    def projection(value):
+        assert value is x
+        calls.append(True)
+        return output, None
+
+    layer.o_proj = projection
+    monkeypatch.setattr(model_kda, "oproj_tp_enable", lambda: False)
+    assert layer._finalize_o_proj(x) is output
+    assert calls == [True]
