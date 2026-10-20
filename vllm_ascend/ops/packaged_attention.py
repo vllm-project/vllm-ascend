@@ -7,10 +7,11 @@
 # See the upstream CANN software repository for the full text of the License.
 
 
-"""Torch dispatcher contracts for the packaged A5 DSV4.1 DSL operators.
+"""Torch dispatcher contracts bridging to the cann_ops_transformer ds41 operators.
 
-Load the operator package lazily so tracing can use fake implementations
-without importing the DSL compiler.
+The schemas and fake implementations stay in-repo so tracing and contract
+tests run without the operator package; the real kernels are loaded lazily
+from ``cann_ops_transformer.ops.ds41`` (the dsnext-generation ABI).
 """
 
 from functools import cache
@@ -20,12 +21,24 @@ import torch
 
 
 @cache
-def _get_dsl_ops(name: str):
-    """Load matching compute and metadata APIs from the operator package."""
-    suffix = "_dsl" if name in ("quant_lightning_indexer", "quant_sparse_lightning_indexer") else ""
-    compute = import_module(f"ops.{name}{suffix}")
-    metadata = import_module(f"ops.{name}_metadata{suffix}")
-    return getattr(compute, name), getattr(metadata, f"{name}_metadata")
+def _get_ds41_compute(name: str):
+    """Load a compute op from the installed cann_ops_transformer ds41 package."""
+    module = import_module("cann_ops_transformer.ops.ds41")
+    return getattr(module, name)
+
+
+@cache
+def _get_ds41_smla_metadata():
+    """The SMLA scheduling op lives in the DSL attention module."""
+    module = import_module(
+        "cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl.mixed_quant_sparse_flash_mla"
+    )
+    return module.mixed_quant_sparse_flash_mla_metadata
+
+
+def _present(kwargs: dict) -> dict:
+    """Drop optional arguments left at None before calling the ds41 API."""
+    return {key: value for key, value in kwargs.items() if value is not None}
 
 
 torch.library.define(
@@ -154,33 +167,35 @@ def _quant_lightning_indexer_impl(
     candidate_topk_blocks=-1,
     candidate_block_size=-1,
 ):
-    """Run the CANNBotDSL QLI kernel through the Torch NPU dispatcher."""
-    dsl_quant_lightning_indexer, _ = _get_dsl_ops("quant_lightning_indexer")
-
-    return dsl_quant_lightning_indexer(
-        q,
-        k,
-        w,
-        descale_q,
-        descale_k,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        seqused_q=seqused_q,
-        seqused_k=seqused_k,
-        cmp_residual_k=cmp_residual_k,
-        block_table=block_table,
-        output_idx_offset=output_idx_offset,
-        metadata=metadata,
+    """Run the ds41 QLI kernel through the Torch NPU dispatcher."""
+    return _get_ds41_compute("quant_lightning_indexer")(
+        q=q,
+        k=k,
+        w=w,
+        descale_q=descale_q,
+        descale_k=descale_k,
         topk=topk,
         quant_mode=quant_mode,
+        metadata=metadata,
+        candidate_topk_blocks=candidate_topk_blocks,
+        candidate_block_size=candidate_block_size,
         max_seqlen_q=max_seqlen_q,
         mask_mode=mask_mode,
         cmp_ratio=cmp_ratio,
         layout_q=layout_q,
         layout_k=layout_k,
         return_value=return_value,
-        candidate_topk_blocks=candidate_topk_blocks,
-        candidate_block_size=candidate_block_size,
+        **_present(
+            {
+                "cu_seqlens_q": cu_seqlens_q,
+                "cu_seqlens_k": cu_seqlens_k,
+                "seqused_q": seqused_q,
+                "seqused_k": seqused_k,
+                "cmp_residual_k": cmp_residual_k,
+                "block_table": block_table,
+                "output_idx_offset": output_idx_offset,
+            }
+        ),
     )
 
 
@@ -206,17 +221,8 @@ def _quant_lightning_indexer_metadata_impl(
     candidate_topk_blocks=-1,
     candidate_block_size=-1,
 ):
-    _, dsl_metadata = _get_dsl_ops("quant_lightning_indexer")
-
-    return dsl_metadata(
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_q,
-        seqused_k,
-        cmp_residual_k,
-        batch_size=batch_size,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
+    """Run the ds41 QLI scheduling op through the dispatcher."""
+    return _get_ds41_compute("quant_lightning_indexer_metadata")(
         num_heads_q=num_heads_q,
         num_heads_k=num_heads_k,
         head_dim=head_dim,
@@ -227,6 +233,18 @@ def _quant_lightning_indexer_metadata_impl(
         layout_k=layout_k,
         candidate_topk_blocks=candidate_topk_blocks,
         candidate_block_size=candidate_block_size,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        **_present(
+            {
+                "cu_seqlens_q": cu_seqlens_q,
+                "cu_seqlens_k": cu_seqlens_k,
+                "seqused_q": seqused_q,
+                "seqused_k": seqused_k,
+                "cmp_residual_k": cmp_residual_k,
+                "batch_size": batch_size,
+            }
+        ),
     )
 
 
@@ -345,34 +363,36 @@ def _quant_sparse_lightning_indexer_impl(
     layout_k="TND",
     return_value=False,
 ):
-    """Run the CANNBotDSL QSLI kernel through the Torch NPU dispatcher."""
-    dsl_quant_sparse_lightning_indexer, _ = _get_dsl_ops("quant_sparse_lightning_indexer")
-
-    return dsl_quant_sparse_lightning_indexer(
-        q,
-        k,
-        w,
-        descale_q,
-        candidate_block_indices,
-        candidate_block_length,
-        descale_k=descale_k,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        seqused_q=seqused_q,
-        seqused_k=seqused_k,
-        cmp_residual_k=cmp_residual_k,
-        block_table=block_table,
-        output_idx_offset=output_idx_offset,
-        metadata=metadata,
+    """Run the ds41 QSLI kernel through the Torch NPU dispatcher."""
+    return _get_ds41_compute("quant_sparse_lightning_indexer")(
+        q=q,
+        k=k,
+        w=w,
+        descale_q=descale_q,
+        candidate_block_indices=candidate_block_indices,
+        candidate_block_length=candidate_block_length,
         topk=topk,
         quant_mode=quant_mode,
         candidate_block_size=candidate_block_size,
+        metadata=metadata,
         max_seqlen_q=max_seqlen_q,
         mask_mode=mask_mode,
         cmp_ratio=cmp_ratio,
         layout_q=layout_q,
         layout_k=layout_k,
         return_value=return_value,
+        **_present(
+            {
+                "descale_k": descale_k,
+                "cu_seqlens_q": cu_seqlens_q,
+                "cu_seqlens_k": cu_seqlens_k,
+                "seqused_q": seqused_q,
+                "seqused_k": seqused_k,
+                "cmp_residual_k": cmp_residual_k,
+                "block_table": block_table,
+                "output_idx_offset": output_idx_offset,
+            }
+        ),
     )
 
 
@@ -399,18 +419,9 @@ def _quant_sparse_lightning_indexer_metadata_impl(
     layout_q="TND",
     layout_k="TND",
 ):
-    _, dsl_metadata = _get_dsl_ops("quant_sparse_lightning_indexer")
-
-    return dsl_metadata(
+    """Run the ds41 QSLI scheduling op through the dispatcher."""
+    return _get_ds41_compute("quant_sparse_lightning_indexer_metadata")(
         candidate_block_length,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        seqused_q,
-        seqused_k,
-        cmp_residual_k,
-        batch_size=batch_size,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
         num_heads_q=num_heads_q,
         num_heads_k=num_heads_k,
         head_dim=head_dim,
@@ -421,6 +432,18 @@ def _quant_sparse_lightning_indexer_metadata_impl(
         cmp_ratio=cmp_ratio,
         layout_q=layout_q,
         layout_k=layout_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        **_present(
+            {
+                "cu_seqlens_q": cu_seqlens_q,
+                "cu_seqlens_k": cu_seqlens_k,
+                "seqused_q": seqused_q,
+                "seqused_k": seqused_k,
+                "cmp_residual_k": cmp_residual_k,
+                "batch_size": batch_size,
+            }
+        ),
     )
 
 
@@ -530,20 +553,10 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
     has_ori_kv: bool = True,
     has_cmp_kv: bool = True,
 ):
-    """Generate the core task table through the external operator package."""
-    _, dsl_metadata = _get_dsl_ops("mixed_quant_sparse_flash_mla")
-
-    return dsl_metadata(
+    """Generate the core task table through the ds41 operator package."""
+    return _get_ds41_smla_metadata()(
         ori_topk_length,
         cmp_topk_length,
-        cu_seqlens_q=cu_seqlens_q,
-        seqused_q=seqused_q,
-        seqused_ori_kv=seqused_ori_kv,
-        seqused_cmp_kv=seqused_cmp_kv,
-        batch_size=batch_size,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_ori_kv=max_seqlen_ori_kv,
-        max_seqlen_cmp_kv=max_seqlen_cmp_kv,
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
         head_dim=head_dim,
@@ -552,6 +565,18 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
         layout_kv=layout_kv,
         has_ori_kv=has_ori_kv,
         has_cmp_kv=has_cmp_kv,
+        **_present(
+            {
+                "cu_seqlens_q": cu_seqlens_q,
+                "seqused_q": seqused_q,
+                "seqused_ori_kv": seqused_ori_kv,
+                "seqused_cmp_kv": seqused_cmp_kv,
+                "batch_size": batch_size,
+                "max_seqlen_q": max_seqlen_q,
+                "max_seqlen_ori_kv": max_seqlen_ori_kv,
+                "max_seqlen_cmp_kv": max_seqlen_cmp_kv,
+            }
+        ),
     )
 
 
@@ -579,21 +604,8 @@ def _mixed_quant_sparse_flash_mla_impl(
     layout_kv="PA_BBND",
     return_softmax_lse=False,
 ):
-    """Allocate outputs and pass the original inputs to the external DSL."""
-    dsl_attention, _ = _get_dsl_ops("mixed_quant_sparse_flash_mla")
-
-    attn_out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
-    lse_shape: tuple[int, ...]
-    if return_softmax_lse:
-        n2 = ori_kv.shape[2]
-        if layout_q == "TND":
-            lse_shape = (n2, q.shape[0], q.shape[1] // n2)
-        else:
-            lse_shape = (q.shape[0], n2, q.shape[1], q.shape[2] // n2)
-    else:
-        lse_shape = (0,)
-    softmax_lse = torch.empty(lse_shape, dtype=torch.float32, device=q.device)
-    dsl_attention(
+    """Run the ds41 SMLA kernel; it returns the (output, lse) pair itself."""
+    return _get_ds41_compute("mixed_quant_sparse_flash_mla")(
         q,
         ori_kv=ori_kv,
         cmp_kv=cmp_kv,
@@ -602,7 +614,6 @@ def _mixed_quant_sparse_flash_mla_impl(
         ori_block_table=ori_block_table,
         cmp_block_table=cmp_block_table,
         cu_seqlens_q=cu_seqlens_q,
-        seqused_q=seqused_q,
         seqused_ori_kv=seqused_ori_kv,
         seqused_cmp_kv=seqused_cmp_kv,
         ori_topk_length=ori_topk_length,
@@ -614,10 +625,8 @@ def _mixed_quant_sparse_flash_mla_impl(
         layout_q=layout_q,
         layout_kv=layout_kv,
         return_softmax_lse=return_softmax_lse,
-        out=attn_out,
-        lse=softmax_lse,
+        **_present({"seqused_q": seqused_q}),
     )
-    return (attn_out, softmax_lse)
 
 
 quant_lightning_indexer_metadata = torch.ops.vllm_ascend.quant_lightning_indexer_metadata.default

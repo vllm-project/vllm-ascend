@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import torch
+import torch_npu
 
 from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.build_window_indices import (
@@ -14,11 +15,21 @@ from vllm_ascend.ops.triton.packed_cache_slot_mapping import build_packed_cache_
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )
-from vllm_ascend.ops.triton.quantize_mxfp4_indexer import (
-    quantize_mxfp4_indexer,
-    write_mxfp4_indexer_cache,
-)
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
+
+
+def quantize_query_mxfp4(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize the indexer query to MXFP4 with the native NPU dynamic op.
+
+    Returns packed E2M1 data ``[T, H, width/2]`` (uint8) and E8M0 scales
+    ``[T, H, width/32]`` (uint8), matching the ds41 indexer operand layout.
+    """
+    n_heads = query.shape[-2]
+    width = query.shape[-1]
+    quantized, scale = torch_npu.npu_dynamic_mx_quant(query, dst_type=torch_npu.float4_e2m1fn_x2)
+    quantized = quantized.view(torch.uint8).reshape(-1, n_heads, width // 2)
+    scale = scale.contiguous().view(torch.uint8).reshape(quantized.shape[0], n_heads, width // 32)
+    return quantized, scale
 
 
 def _common(query, weights, source_cache, source_metadata, compress_ratio, quantized_query, query_scale):
@@ -27,7 +38,7 @@ def _common(query, weights, source_cache, source_metadata, compress_ratio, quant
         raise RuntimeError("A5 QLI metadata was not built")
     wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
     if quantized_query is None:
-        quantized_query, query_scale = quantize_mxfp4_indexer(query)
+        quantized_query, query_scale = quantize_query_mxfp4(query)
     query_start_loc = source_metadata.query_start_loc
     return (
         quantized_query,
@@ -323,7 +334,7 @@ def write_attention_cache(
         quant_mode = "mxfp8_bf16"
     else:
         raise ValueError(f"unsupported A5 cache kind: {kind}")
-    torch.ops._C_ascend.kv_compress_epilog_v2(
+    torch.ops.custom.kv_compress_epilog_v2(
         cache_arg,
         values.contiguous(),
         flat_slots.contiguous(),
@@ -332,14 +343,6 @@ def write_attention_cache(
         round_scale=True,
         x_scale=1.0,
     )
-
-
-def write_index_cache(
-    cache: tuple[torch.Tensor, torch.Tensor] | list[torch.Tensor],
-    coordinates: torch.Tensor,
-    values: torch.Tensor,
-) -> None:
-    write_mxfp4_indexer_cache(values, coordinates, cache[0], cache[1])
 
 
 class MixedQuantPackedCacheOps:
@@ -351,6 +354,5 @@ class MixedQuantPackedCacheOps:
     qsmla = staticmethod(qsmla)
     run_a5_indexer = staticmethod(run_a5_indexer)
     write_attention_cache = staticmethod(write_attention_cache)
-    write_index_cache = staticmethod(write_index_cache)
     mixed_quant_sparse_flash_mla_metadata = staticmethod(ops.mixed_quant_sparse_flash_mla_metadata)
     quant_lightning_indexer_metadata = staticmethod(ops.quant_lightning_indexer_metadata)

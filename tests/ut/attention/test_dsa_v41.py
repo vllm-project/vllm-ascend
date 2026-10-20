@@ -166,7 +166,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
 
         wkv = staticmethod(project_kv)
         wgate = staticmethod(lambda value: torch.zeros_like(value[:, :8]))
-        pool_projected = staticmethod(lambda *args: latent)
+        pool_projected = pool_projected_eager = staticmethod(lambda *args: latent)
 
     attn = SimpleNamespace(
         compressor=Compressor(),
@@ -191,7 +191,7 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     monkeypatch.setattr(a5_indexer, "wait_for_device_metadata", lambda *args: None)
     monkeypatch.setattr(
         a5_indexer,
-        "quantize_mxfp4_indexer",
+        "quantize_query_mxfp4",
         lambda query: pytest.fail("query must not be quantized twice"),
     )
     query = torch.zeros(2, 1, 128)

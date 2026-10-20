@@ -818,16 +818,28 @@ class TestPCPBatchLifecycle:
                     scatter(cache, coordinates, values)
 
                 @staticmethod
-                def write_index_cache(cache, slots, values):
-                    scatter(cache[0], slots, values)
-                    scatter(cache[1], slots, torch.ones(values.shape[0], 1))
-
-                @staticmethod
                 def qsmla(q, *args, **kwargs):
                     return q.clone()
 
+            def fake_prologue_k(*, k_cache, k_scale_cache, cache_index, storage_mode, **kwargs):
+                if storage_mode != 0:
+                    return
+                rows = k_cache.shape[1]
+                coordinates = torch.stack((cache_index // rows, cache_index % rows), dim=-1).int()
+                coordinates[cache_index < 0] = -1
+                scatter(k_cache, coordinates, kwargs["latent"])
+                scatter(k_scale_cache, coordinates, torch.ones(coordinates.shape[0], 1))
+
+            def fused_pool(hidden_states, state_metadata):
+                output = compressor._ring_pooled[: hidden_states.shape[0]]
+                return pool(compressor.wkv(hidden_states.float()), None, None, state_metadata.c2_ring_metadata, output)
+
+            monkeypatch.setattr("vllm_ascend.models.deepseek_v41.indexer.indexer_prologue_k", fake_prologue_k)
+            compressor.pool_projected = fused_pool
             attn.packed_cache_ops = indexer.packed_cache_ops = PackedBackend()
             indexer.k_cache_folded = None
+            indexer._prologue_norm_weight = torch.ones(2)
+            indexer.k_norm.eps = 1e-6
             attn.window_size = 4
 
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
