@@ -1,4 +1,5 @@
 """CPU checks for AIV offset coalescing/pairing and Cube copy replay."""
+
 import random
 import unittest
 
@@ -42,7 +43,7 @@ def prepare(group, y, paged, stride=None):
             if num == 1 and stride is not None and step == length * stride:
                 records[-1] = (previous, length + rows, 1, 0)
                 continue
-            if num == 1 and length == rows == y and 0 <= step <= 0xffffffff and step % 16 == 0:
+            if num == 1 and length == rows == y and 0 <= step <= 0xFFFFFFFF and step % 16 == 0:
                 records[-1] = (previous, length, 2, step)
                 continue
         records.append((offset, rows, 1, 0))
@@ -71,14 +72,15 @@ class SparseOffsetTest(unittest.TestCase):
                 for n in (128, 256):
                     for start in (0, y - 1, tile):
                         indices = list(range(0, 4 * tile // y + 12, 2))
-                        tokens = [i * y + j for i in indices for j in range(y)][start:start + tile - 1]
+                        tokens = [i * y + j for i in indices for j in range(y)][start : start + tile - 1]
                         stride = (33, 128, 256, 512)[y % 4] * 3
                         pages = list(range(max(tokens) // 128 + 1))
                         rng.shuffle(pages)
                         ks, vs = 128 * stride * 2, 128 * stride * 3
                         for paged in (False, True):
-                            groups = describe(indices, y, start, len(tokens), n, stride,
-                                              pages if paged else None, ks, vs)
+                            groups = describe(
+                                indices, y, start, len(tokens), n, stride, pages if paged else None, ks, vs
+                            )
                             capacity = (n + 2 * y - 2) // y
                             if paged:
                                 capacity = min(n, 2 * capacity)
@@ -93,29 +95,27 @@ class SparseOffsetTest(unittest.TestCase):
                                     if paged:
                                         self.assertEqual(paired, 0)
                                     result += rows
-                                expected = [pages[t // 128] * ps + t % 128 * stride if paged else t * stride
-                                            for t in tokens]
+                                expected = [
+                                    pages[t // 128] * ps + t % 128 * stride if paged else t * stride for t in tokens
+                                ]
                                 self.assertEqual(result, expected)
         self.assertGreater(pairs, 0)
 
     def test_page_split_count(self):
         groups = describe([1], 127, 0, 127, 128, 128, [7, 3], 16384, 32768)
         self.assertEqual(groups, [[(130944, 245632, 1), (49152, 98304, 126)]])
-        self.assertEqual(describe([1], 127, 0, 1, 128, 128, [7], 16384, 32768),
-                         [[(130944, 245632, 1)]])
+        self.assertEqual(describe([1], 127, 0, 1, 128, 128, [7], 16384, 32768), [[(130944, 245632, 1)]])
 
     def test_contiguous_merge(self):
         for y in (1, 3, 16, 31, 128):
             for stride in (33, 128, 512):
                 groups = describe([0, 1, 2, 4, 6, 7], y, 0, 6 * y - 1, 256, stride)
-                expected = [block * y * stride + row * stride for block in (0, 1, 2, 4, 6, 7)
-                            for row in range(y)][:-1]
+                expected = [block * y * stride + row * stride for block in (0, 1, 2, 4, 6, 7) for row in range(y)][:-1]
                 actual = []
                 for group in groups:
                     actual += replay(prepare(group, y, False, stride), stride, False, 0)[0]
                 self.assertEqual(actual, expected)
-        self.assertEqual(prepare([(0, 0, 16), (2048, 2048, 16), (4096, 4096, 3)],
-                                 16, False, 128), [(0, 35, 1, 0)])
+        self.assertEqual(prepare([(0, 0, 16), (2048, 2048, 16), (4096, 4096, 3)], 16, False, 128), [(0, 35, 1, 0)])
 
     def test_random_runs(self):
         rng = random.Random(20260925)
@@ -127,7 +127,7 @@ class SparseOffsetTest(unittest.TestCase):
                     indices.append(last)
                 for n in (128, 256):
                     start, size = rng.randrange(y), 511
-                    tokens = [i * y + row for i in indices for row in range(y)][start:start + size]
+                    tokens = [i * y + row for i in indices for row in range(y)][start : start + size]
                     groups = describe(indices, y, start, size, n, stride)
                     actual = []
                     for group in groups:
@@ -152,8 +152,11 @@ class SparseOffsetTest(unittest.TestCase):
             for q in (16, 32, 64, 128):
                 qr = max(q // 2, 16)
                 for precision in (0, 1):
-                    tile = (512 if q <= 32 else 256 if q <= 64 else 128) if d <= 256 else (
-                        384 if q <= 16 else 256 if q <= 32 else 128)
+                    tile = (
+                        (512 if q <= 32 else 256 if q <= 64 else 128)
+                        if d <= 256
+                        else (384 if q <= 16 else 256 if q <= 32 else 128)
+                    )
                     if precision:
                         tile = min(tile, 256)
                     n = 256 if d <= 128 and q <= 64 else 128
@@ -171,7 +174,9 @@ class SparseOffsetTest(unittest.TestCase):
                             self.assertLessEqual(mask_start + table_bytes, 248 * 1024)
                             if transit:
                                 old_rows = (248 * 1024 - mask_start - mask_bytes) // (embed * 4 * lo_bufs)
-                                new_rows = (248 * 1024 - mask_start - max(mask_bytes, table_bytes)) // (embed * 4 * lo_bufs)
+                                new_rows = (248 * 1024 - mask_start - max(mask_bytes, table_bytes)) // (
+                                    embed * 4 * lo_bufs
+                                )
                                 self.assertEqual(new_rows, old_rows)
                                 self.assertGreater(new_rows, 0)
 

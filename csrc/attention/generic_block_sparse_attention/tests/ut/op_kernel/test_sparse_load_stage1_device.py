@@ -4,6 +4,7 @@
 Run in separate processes with baseline/new ASCEND_CUSTOM_OPP_PATH. Pass --save
 for the baseline and --compare for the new package; no installed OPP is modified.
 """
+
 import argparse
 import math
 import sys
@@ -13,13 +14,14 @@ import torch
 import torch_npu
 
 ROOT = next(p for p in Path(__file__).resolve().parents if (p / "build.sh").exists())
-sys.path[:0] = [str(ROOT / "torch_extension"),
-                str(ROOT / "attention/generic_block_sparse_attention/torch_extension")]
-import generic_block_sparse_attention as ext
+sys.path[:0] = [str(ROOT / "torch_extension"), str(ROOT / "attention/generic_block_sparse_attention/torch_extension")]
+import generic_block_sparse_attention as ext  # noqa: E402
 
 builder = ext.generic_block_sparse_attention_op_builder
 builder.category = None
-builder.sources = lambda: [str(ROOT / "attention/generic_block_sparse_attention/torch_extension/csrc/generic_block_sparse_attention.cpp")]
+builder.sources = lambda: [
+    str(ROOT / "attention/generic_block_sparse_attention/torch_extension/csrc/generic_block_sparse_attention.cpp")
+]
 
 
 def cases():
@@ -39,8 +41,7 @@ def cases():
         (20, 4097, 16, 32, 256, 1, True, True),
     ]
     for i, d in enumerate((1, 31, 32, 33, 63, 65, 127, 129, 255, 257, 383, 384, 511)):
-        result.append((12, 521, (3, 16, 63)[i % 3], (16, 32, 64, 128)[i % 4],
-                       d, i % 2, i % 3 == 0, i % 2 == 0))
+        result.append((12, 521, (3, 16, 63)[i % 3], (16, 32, 64, 128)[i % 4], d, i % 2, i % 3 == 0, i % 2 == 0))
     result += [
         (1, 16384, 16, 1, 128, 0, False, False),  # AIV with no Q rows still prepares addresses.
         (20, 1025, 17, 3, 129, 1, True, True),
@@ -51,7 +52,7 @@ def cases():
         (20, 8193, 128, 16, 128, 0, False, True),  # UB capacity below blockY: split a full block.
         (20, 8193, 127, 16, 128, 0, False, True),  # UB limit + page + AIV-half boundaries.
         (20, 4097, 65, 16, 128, 0, True, True),
-        (1, 8193, 127, 16, 128, 0, False, True),   # Same boundaries within FD slices.
+        (1, 8193, 127, 16, 128, 0, False, True),  # Same boundaries within FD slices.
     ]
     return result
 
@@ -63,9 +64,9 @@ def run(case, case_id, mode, device, kv_heads=None):
     q_lengths, kv_lengths, heads = ([qs], [kvs], 1) if qs <= 2 else ([qs, 3], [kvs, 137], 2)
     heads = heads if kv_heads is None else kv_heads
     generator = torch.Generator().manual_seed(240926 + case_id)
-    q = (torch.randn(sum(q_lengths), heads * group, d, generator=generator) * .2).to(dtype)
-    logical_k = [(torch.randn(k, heads, d, generator=generator) * .2).to(dtype) for k in kv_lengths]
-    logical_v = [(torch.randn(k, heads, d, generator=generator) * .2).to(dtype) for k in kv_lengths]
+    q = (torch.randn(sum(q_lengths), heads * group, d, generator=generator) * 0.2).to(dtype)
+    logical_k = [(torch.randn(k, heads, d, generator=generator) * 0.2).to(dtype) for k in kv_lengths]
+    logical_v = [(torch.randn(k, heads, d, generator=generator) * 0.2).to(dtype) for k in kv_lengths]
     page_size = 128
     if paged:
         pages_per_batch = [math.ceil(k / page_size) for k in kv_lengths]
@@ -81,8 +82,8 @@ def run(case, case_id, mode, device, kv_heads=None):
                 pos += 1
                 table[b, page] = physical
                 size = min(page_size, kv_lengths[b] - page * page_size)
-                k_host[physical, :size] = logical_k[b][page * page_size:page * page_size + size]
-                v_host[physical, :size] = logical_v[b][page * page_size:page * page_size + size]
+                k_host[physical, :size] = logical_k[b][page * page_size : page * page_size + size]
+                v_host[physical, :size] = logical_v[b][page * page_size : page * page_size + size]
         # Different physical page strides for K and V, not merely a page permutation.
         k = torch.zeros(total_pages * 2, page_size, heads, d, dtype=dtype, device=device)[::2]
         v = torch.zeros(total_pages * 3, page_size, heads, d, dtype=dtype, device=device)[::3]
@@ -109,7 +110,7 @@ def run(case, case_id, mode, device, kv_heads=None):
                 if case_id == 28 and row % 3 == 0:
                     selected = []
                 if selected:
-                    idx[head, base + row, :len(selected)] = torch.tensor(selected)
+                    idx[head, base + row, : len(selected)] = torch.tensor(selected)
                 count[head, base + row] = len(selected)
                 full = selected + ([visible // y] if mode == 1 and visible % y else [])
                 tokens = [t for block in full for t in range(block * y, min((block + 1) * y, visible))]
@@ -124,24 +125,56 @@ def run(case, case_id, mode, device, kv_heads=None):
     cu_kv = torch.tensor([0] + list(torch.tensor(kv_lengths).cumsum(0).tolist()), dtype=torch.int64, device=device)
     used = torch.tensor(kv_lengths, dtype=torch.int32, device=device)
     idx, count = idx.to(device), count.to(device)
-    common = dict(cu_seqlens_q=cu_q, cu_seqlens_kv=None if paged else cu_kv, seqused_kv=used,
-                  layout_q="TND", layout_kv=layout, layout_sparse_pattern=4, mask_mode=1,
-                  quant_mode=0, softmax_precision=precision, win_left=-1, win_right=-1,
-                  residual_block_mode=mode, is_consistent_topk=False)
+    common = dict(
+        cu_seqlens_q=cu_q,
+        cu_seqlens_kv=None if paged else cu_kv,
+        seqused_kv=used,
+        layout_q="TND",
+        layout_kv=layout,
+        layout_sparse_pattern=4,
+        mask_mode=1,
+        quant_mode=0,
+        softmax_precision=precision,
+        win_left=-1,
+        win_right=-1,
+        residual_block_mode=mode,
+        is_consistent_topk=False,
+    )
     metadata = ext.generic_block_sparse_attention_metadata(
-        idx, count, heads * group, heads, d, [1, y], max_seqlen_q=max(q_lengths),
-        max_seqlen_kv=max(kv_lengths), **common)
+        idx,
+        count,
+        heads * group,
+        heads,
+        d,
+        [1, y],
+        max_seqlen_q=max(q_lengths),
+        max_seqlen_kv=max(kv_lengths),
+        **common,
+    )
     output, lse = ext.generic_block_sparse_attention(
-        q.to(device), k, v, idx, count, [1, y], metadata=metadata, block_table=block_table,
-        softmax_scale=1 / math.sqrt(d), return_softmax_lse=False, **common)
+        q.to(device),
+        k,
+        v,
+        idx,
+        count,
+        [1, y],
+        metadata=metadata,
+        block_table=block_table,
+        softmax_scale=1 / math.sqrt(d),
+        return_softmax_lse=False,
+        **common,
+    )
     torch_npu.npu.synchronize()
     output = output.cpu().float()
     # Softmax precision differs by route; an independent golden catches mapping
     # errors. Exact baseline equality is tested separately with --compare.
-    tolerance = .006 if bf16 else .002
+    tolerance = 0.006 if bf16 else 0.002
     torch.testing.assert_close(output, golden, atol=tolerance, rtol=tolerance)
-    print(f"PASS case={case_id} residual={mode} config={case} kv_heads={heads} FD={int(metadata[5].cpu())} "
-          f"golden_max_abs={(output - golden).abs().max().item():.7g}", flush=True)
+    print(
+        f"PASS case={case_id} residual={mode} config={case} kv_heads={heads} FD={int(metadata[5].cpu())} "
+        f"golden_max_abs={(output - golden).abs().max().item():.7g}",
+        flush=True,
+    )
     return (output,)
 
 
