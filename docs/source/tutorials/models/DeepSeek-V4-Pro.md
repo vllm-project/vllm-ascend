@@ -303,135 +303,9 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       }'
     ```
 
-=== "A3 series"
-
-    !!! note "Version compatibility"
-
-        This A3 series MTP configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later because the official DeepSeek-V4-Pro checkpoint provides DSpark speculative decoding weights rather than MTP weights.
-
-    **Node0**
-
-    ```bash
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="xxx"
-
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
-
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=2048
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
-
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-      --host 0.0.0.0 \
-      --port 8000 \
-      --data-parallel-address $node0_ip \
-      --data-parallel-rpc-port 13399 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --tensor-parallel-size 16 \
-      --enable-expert-parallel \
-      --served-model-name dsv4 \
-      --max-model-len 135000  \
-      --max-num-batched-tokens 4096 \
-      --max-num-seqs 32 \
-      --gpu-memory-utilization 0.9 \
-      --block-size 128 \
-      --tokenizer-mode deepseek_v4 \
-      --tool-call-parser deepseek_v4 \
-      --enable-auto-tool-choice \
-      --reasoning-parser deepseek_v4 \
-      --attention_config.indexer_kv_dtype int8 \
-      --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-      --quantization ascend \
-      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '
-        {"ascend_compilation_config":{
-            "enable_npugraph_ex":true,
-            "enable_static_kernel":false
-            },
-        "enable_cpu_binding": true,
-        "enable_flashcomm1": true,
-        "multistream_overlap_shared_expert":true}'
-    ```
-
-    **Node1**
-
-    ```bash
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
-    nic_name="xxx"
-    local_ip="xxx"
-
-    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-    node0_ip="xxxx"
-
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=2048
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
-
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
-      --host 0.0.0.0 \
-      --port 8000 \
-      --headless \
-      --data-parallel-address $node0_ip \
-      --data-parallel-rpc-port 13399 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
-      --tensor-parallel-size 16 \
-      --enable-expert-parallel \
-      --served-model-name dsv4 \
-      --max-model-len 135000  \
-      --max-num-batched-tokens 4096 \
-      --max-num-seqs 32 \
-      --gpu-memory-utilization 0.9 \
-      --block-size 128 \
-      --tokenizer-mode deepseek_v4 \
-      --tool-call-parser deepseek_v4 \
-      --enable-auto-tool-choice \
-      --reasoning-parser deepseek_v4 \
-      --attention_config.indexer_kv_dtype int8 \
-      --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-      --quantization ascend \
-      --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '
-        {"ascend_compilation_config":{
-            "enable_npugraph_ex":true,
-            "enable_static_kernel":false
-            },
-        "enable_cpu_binding": true,
-        "enable_flashcomm1": true,
-        "multistream_overlap_shared_expert":true}'
-    ```
-
 === "A3 series with DSpark"
 
-    !!! note "Version compatibility and deployment requirements"
-
-        This A3 series with DSpark configuration applies only to versions earlier than v0.30.0. It does not apply to v0.30.0 or later because release validation covered only PD-Disaggregated; PD Co-located configuration was not tested.
-
-        Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The example keeps the existing DP2/TP16 topology and changes only the DSpark-related and required runtime parameters.
+    Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The example keeps the existing DP2/TP16 topology and changes only the DSpark-related and required runtime parameters.
 
     **Node0**
 
@@ -772,9 +646,6 @@ Before you start, please:
     export GLOO_SOCKET_IFNAME="$nic_name"
     export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_SOCKET_IFNAME="$nic_name"
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -845,8 +716,6 @@ Before you start, please:
     export GLOO_SOCKET_IFNAME="$nic_name"
     export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_SOCKET_IFNAME="$nic_name"
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
     export ASCEND_RT_VISIBLE_DEVICES="$1"
     export SERVICE_PORT="$2"
     export DP_SIZE="$3"
@@ -1259,7 +1128,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
-- Context parallelism uses `enable_dsa_cp` in `--additional-config` on Model Runner V1 (MRv1); enabling DSA-CP also enables FlashComm1. On Model Runner V2 (MRv2), use `--prefill-context-parallel-size` to specify the PCP size instead: the A3 DSpark example uses `8` on Prefill and `1` on Decode (`1` means no context parallelism). The Decode launcher passes `--pcp-size` through `$8` / `PCP_SIZE` to this option. Keep `kv_connector_extra_config.prefill.pcp_size` and `decode.pcp_size` consistent with the corresponding pool.
+- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. The A3 DSpark example uses PCP size `8` on Prefill and `1` on Decode (`1` disables PCP). The Decode launcher passes `--pcp-size` through `$8` / `PCP_SIZE` to this option. Keep `kv_connector_extra_config.prefill.pcp_size` and `decode.pcp_size` consistent with the PCP size of the corresponding pool.
 - `--kv-transfer-config` configures KV cache transfer between the prefill producer and decode consumer in PD separation.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP, TP, PCP and DCP layout on the prefill and decode sides.
 - `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).
