@@ -883,11 +883,7 @@ Block verification supports both greedy and probabilistic draft sampling. Target
 
 ## Block Verify and Entropy Verify {: #block-verify-and-entropy-verify }
 
-Block Verify and Entropy Verify currently support Model Runner V1 only. Set `VLLM_USE_V2_MODEL_RUNNER=0` before starting the server or offline inference process, then configure these features through `additional_config.rejection_sampler_config` as shown below. Model Runner V2 is enabled by default; its block verification is configured through `speculative_config.rejection_sample_method`, as described in [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
-
-```shell
-export VLLM_USE_V2_MODEL_RUNNER=0
-```
+Entropy Verify supports Model Runner V1 and V2. Ascend Block Verify supports Model Runner V1; set `VLLM_USE_V2_MODEL_RUNNER=0` to use it. Configure both features through `additional_config.rejection_sampler_config`. Model Runner V2 is enabled by default; its upstream block verification is configured through `speculative_config.rejection_sample_method`, as described in [Block Verification in Model Runner V2](#block-verification-in-model-runner-v2).
 
 vLLM Ascend provides two optional optimizations for the rejection sampler in speculative decoding: **Block Verify** and **Entropy Verify**. These features trade a small amount of output precision for improved inference throughput.
 
@@ -911,7 +907,25 @@ This entropy-aware threshold is controlled by two parameters:
 - **`posterior_threshold`** (default: `0.95`, range: `(0, 1]`): The upper bound of the modified threshold. Even when entropy is very low, the effective threshold will not exceed this value.
 - **`posterior_alpha`** (default: `0.4`, range: `>= 0`): Controls how strongly entropy influences the threshold. A higher alpha makes the threshold more sensitive to entropy changes, resulting in a higher acceptance rate for speculative tokens but also greater precision loss. You need to tune this value based on your specific model and dataset. When alpha is `0`, entropy has no effect and the threshold equals `posterior_threshold`.
 
+In Model Runner V2, entropy is computed from the target logits after sampling parameters (such as temperature, top-k/top-p and penalties) are applied, for both raw and processed logprobs modes. Each draft position uses its own threshold `min(exp(-entropy * posterior_alpha), posterior_threshold)`. Greedy requests retain their existing behavior, and synthetic rejection sampling uses its configured acceptance rates. Use Entropy Verify with `rejection_sample_method="standard"`; upstream `"block"` verification and Entropy Verify are mutually exclusive.
+
 ### Usage
+
+For Entropy Verify on Model Runner V2, keep your proposer configuration and add:
+
+```shell
+vllm serve <model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "standard"}' \
+    --additional-config '{"rejection_sampler_config": {"enable_entropy_verify": true, "posterior_threshold": 0.95, "posterior_alpha": 0.4}}'
+```
+
+Use a model with MTP support for this example, or retain your existing supported proposer settings. To disable Entropy Verify, set `enable_entropy_verify` to `false` (the default).
+
+For Ascend Block Verify, alone or together with Entropy Verify, select Model Runner V1:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=0
+```
 
 - Online inference
 
@@ -938,7 +952,7 @@ This entropy-aware threshold is controlled by two parameters:
     )
     ```
 
-Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
+In Model Runner V1, both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
 
 ## Experimental GLM KDA RecoverSSM
 

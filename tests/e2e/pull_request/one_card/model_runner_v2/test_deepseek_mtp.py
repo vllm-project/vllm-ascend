@@ -73,3 +73,57 @@ def test_mtp_spec_decoding(
         outputs = runner.model.generate(prompts, sampling_params)
 
     assert len(outputs) == len(prompts)
+
+
+@pytest.mark.parametrize("entropy", [False, True])
+@pytest.mark.parametrize("enforce_eager,logprobs_mode", [(True, "raw_logprobs"), (False, "processed_logprobs")])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_mtp_entropy_verify(entropy, enforce_eager, logprobs_mode):
+    """Exercise random verification, ragged completions and reuse of request state.
+
+    Random MTP weights cannot establish acceptance/quality improvements. The
+    numerical kernel tests establish the policy; this test checks integration.
+    """
+    prompts = ["The capital of France is", "Write a short story about a mountain.", "Count from one to ten:"]
+    params = [
+        SamplingParams(
+            max_tokens=length,
+            ignore_eos=True,
+            temperature=0.8,
+            top_k=20,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            logprobs=2,
+            seed=42 + length,
+        )
+        for length in (8, 16, 24)
+    ]
+    with VllmRunner(
+        MTP_MODELS[0],
+        max_model_len=1024,
+        enforce_eager=enforce_eager,
+        async_scheduling=True,
+        enable_expert_parallel=True,
+        disable_log_stats=False,
+        logprobs_mode=logprobs_mode,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+        additional_config={
+            "rejection_sampler_config": {
+                "enable_entropy_verify": entropy,
+            }
+        },
+    ) as runner:
+        for _ in range(2):
+            outputs = runner.model.generate(prompts, params)
+            assert len(outputs) == len(prompts)
+            for request, param in zip(outputs, params):
+                completion = request.outputs[0]
+                assert len(completion.token_ids) == param.max_tokens
+                assert completion.logprobs is not None
+                assert len(completion.logprobs) == len(completion.token_ids)
+                assert all(token >= 0 for token in completion.token_ids)
+                assert all(token in scores for token, scores in zip(completion.token_ids, completion.logprobs))
+        num_drafts = sum(m.value for m in runner.model.get_metrics() if m.name == "vllm:spec_decode_num_drafts")
+        assert num_drafts > 0

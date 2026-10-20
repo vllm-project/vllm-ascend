@@ -31,8 +31,69 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
+
+_ENTROPY_EPSILON = 1e-10
+
+
+@triton.jit
+def _entropy_partials_kernel(
+    logits_ptr,
+    logits_stride,
+    max_ptr,
+    sumexp_ptr,
+    stats_stride,
+    entropy_ptr,
+    mapping_ptr,
+    local_pos_ptr,
+    temp_ptr,
+    vocab_size,
+    vocab_num_blocks,
+    num_speculative_steps,
+    BLOCK_SIZE: tl.constexpr,
+    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    EPSILON: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block = tl.program_id(1)
+    req = tl.load(mapping_ptr + row).to(tl.int64)
+    temp = tl.load(temp_ptr + req)
+    local_pos = tl.load(local_pos_ptr + row)
+    entropy = 0.0
+    if temp != 0.0 and local_pos < num_speculative_steps:
+        lse = _compute_global_lse(
+            max_ptr,
+            stats_stride,
+            sumexp_ptr,
+            stats_stride,
+            row,
+            vocab_num_blocks,
+            PADDED_VOCAB_NUM_BLOCKS,
+        )
+        offsets = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(logits_ptr + row * logits_stride + offsets, offsets < vocab_size, other=float("-inf"))
+        probs = tl.exp(logits.to(tl.float32) - lse)
+        entropy = tl.sum(-probs * tl.log(probs + EPSILON), 0)
+    tl.store(entropy_ptr + row * stats_stride + block, entropy)
+
+
+@triton.jit
+def _entropy_threshold_kernel(
+    entropy_ptr,
+    threshold_ptr,
+    stride,
+    num_blocks,
+    POSTERIOR_THRESHOLD: tl.constexpr,
+    POSTERIOR_ALPHA: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    entropy = tl.sum(tl.load(entropy_ptr + row * stride + offsets, offsets < num_blocks, other=0.0), 0)
+    threshold = tl.minimum(tl.exp(-entropy * POSTERIOR_ALPHA), POSTERIOR_THRESHOLD)
+    tl.store(threshold_ptr + row, threshold)
 
 
 @triton.jit
@@ -87,11 +148,13 @@ def _probabilistic_rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    entropy_threshold_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    USE_ENTROPY_VERIFY: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # Cast to int64 before pointer arithmetic: triton-ascend computes
@@ -241,6 +304,12 @@ def _probabilistic_rejection_kernel(
                     # resample the rejected token.
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
+                elif USE_ENTROPY_VERIFY:
+                    threshold = tl.load(entropy_threshold_ptr + logit_idx)
+                    target_prob = tl.exp(target_log_prob)
+                    draft_prob = tl.exp(draft_log_prob)
+                    valid_prob = draft_prob > 0.0
+                    accepted &= valid_prob & (target_prob / tl.where(valid_prob, draft_prob, 1.0) >= threshold * u)
                 else:
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
@@ -314,7 +383,14 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
+    *,
+    use_entropy_verify: bool | None = None,
+    posterior_threshold: float = 0.95,
+    posterior_alpha: float = 0.4,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Upstream passes logits after applying sampling parameters. Resolve the
+    # worker configuration here to keep its sampler and chunking flow unchanged.
+    # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
     if fly_window_size > 0:
@@ -330,6 +406,17 @@ def rejection_sample(
         assert synthetic_conditional_rates is None, (
             "Block verification is incompatible with synthetic acceptance rates."
         )
+
+    if use_entropy_verify is None:
+        config = get_ascend_config().rejection_sampler_config
+        use_entropy_verify = config.enable_entropy_verify
+        posterior_threshold = config.posterior_threshold
+        posterior_alpha = config.posterior_alpha
+    if use_entropy_verify and use_block_verification:
+        raise ValueError("Upstream block verification cannot be combined with entropy verify.")
+    use_entropy_verify = use_entropy_verify and synthetic_conditional_rates is None
+    if use_entropy_verify and (not (0 < posterior_threshold <= 1) or not (posterior_alpha >= 0)):
+        raise ValueError("posterior_threshold must be in (0, 1] and posterior_alpha must be >= 0.")
 
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
@@ -392,6 +479,37 @@ def rejection_sample(
         # bug for max-with-index reductions is fixed.
         has_auto_blockify_blacklist_op=True,
     )
+
+    entropy_threshold = None
+    if use_entropy_verify:
+        entropy_partials = torch.empty_like(target_local_sumexp)
+        entropy_threshold = target_logits.new_empty(num_logits, dtype=torch.float32)
+        _entropy_partials_kernel[(num_logits, vocab_num_blocks)](
+            target_logits,
+            target_logits.stride(0),
+            target_local_max,
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            entropy_partials,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            vocab_num_blocks,
+            num_speculative_steps,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            EPSILON=_ENTROPY_EPSILON,
+        )
+        _entropy_threshold_kernel[(num_logits,)](
+            entropy_partials,
+            entropy_threshold,
+            entropy_partials.stride(0),
+            vocab_num_blocks,
+            POSTERIOR_THRESHOLD=posterior_threshold,
+            POSTERIOR_ALPHA=posterior_alpha,
+            BLOCK_SIZE=padded_vocab_num_blocks,
+        )
 
     if use_block_verification:
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
@@ -492,11 +610,13 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        entropy_threshold,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        USE_ENTROPY_VERIFY=use_entropy_verify,
         num_warps=1,
     )
 
