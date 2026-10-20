@@ -141,7 +141,17 @@ def is_window_capped_hybrid(vllm_config, kv_cache_groups) -> bool:
     >=2 KV cache groups, all attention (no mamba), at least one sliding-window
     group, on a per-layer (layer- and block-compact) layout. gemma4 (5 sliding
     + 1 full equal-page groups) qualifies; DSV4/GLM5/K3/mamba/single-group
-    models never do."""
+    models never do.
+
+    Kill switch: set ``VLLM_ASCEND_DISABLE_WINDOW_CAPPED_POOLS=1`` to force the
+    stock homogeneous per-group block count. Required for KV Pool
+    (AscendStoreConnector) runs: the connector's pool_worker requires every KV
+    tensor's block count to be a multiple of the single ``num_blocks``, while
+    per-group pools are deliberately heterogeneous (949 vs 1664 on gemma4)."""
+    import os as _os
+
+    if _os.environ.get("VLLM_ASCEND_DISABLE_WINDOW_CAPPED_POOLS", "0") == "1":
+        return False
     if len(kv_cache_groups) < 2:
         return False
     try:
