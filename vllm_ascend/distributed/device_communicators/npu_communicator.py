@@ -71,8 +71,9 @@ class NPUCommunicator(DeviceCommunicatorBase):
 
             self.quantized_ar = QuantizedAllReduce(self.device_group)
             logger.info(
-                "Quantized all-reduce enabled (min_numel=%d).",
+                "Quantized all-reduce enabled (min_numel=%d, max_q=%d).",
                 self.quantized_ar.min_numel,
+                self.quantized_ar.max_q,
             )
         else:
             self.quantized_ar = None
