@@ -1663,3 +1663,18 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** 37. File: platform/patch_layerwise_skip_tensors.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.reload.meta`
+#    Why:
+#       Ascend runtime buffers and shared checkpoint parameters must not be
+#       counted as independently delivered tensors or replaced by meta storage.
+#    How:
+#       Extend the existing skip sets in place and zero-fill materialized meta
+#       tensors. Checkpoint loading and explicit Worker retention remain separate.
+#    Related PR (if no, explain why):
+#       No upstream PR yet: the tensor names and shared aliases are Ascend-specific.
+#    Future Plan:
+#       Remove when upstream reload supports backend-provided accounting/storage
+#       exclusions and defined materialization for partially covered modules.

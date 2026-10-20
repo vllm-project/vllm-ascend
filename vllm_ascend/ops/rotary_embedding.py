@@ -124,9 +124,9 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
 
 
-def _record_cos_sin_cache(cos_sin_cache):
+def _record_cos_sin_cache(cos_sin_cache, force=False):
     global _cos_sin_cache
-    if _cos_sin_cache is not None:
+    if not force and _cos_sin_cache is not None:
         return
     _cos_sin_cache = cos_sin_cache
 
@@ -269,6 +269,21 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
+        _record_cos_and_sin_cache_interleaved(self, self.cos_sin_cache)
+
+    def reinitialize_runtime_params(self) -> None:
+        """Re-derive and re-register the cos/sin cache after a weight update.
+
+        The cache is runtime-derived (never present in a checkpoint), so
+        layerwise reload keeps it out of loading (SKIP_LOAD_TENSORS) and the
+        weight-transfer engines call this hook after finalize to restore the
+        constructor values that a level-2 sleep discarded.  ``register_buffer``
+        mirrors the ``init_cache=True`` path of ``__init__``; the recorded
+        module-level cache views are refreshed (force) so any path consuming
+        them sees the new storage.
+        """
+        super().reinitialize_runtime_params()
+        _record_cos_sin_cache(self.cos_sin_cache, force=True)
         _record_cos_and_sin_cache_interleaved(self, self.cos_sin_cache)
 
     def forward_oot(

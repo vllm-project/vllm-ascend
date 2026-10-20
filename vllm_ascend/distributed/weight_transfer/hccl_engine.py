@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HCCL-based weight transfer engine."""
 
+import contextlib
+import gc
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -137,6 +139,26 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+
+        # Release the buffers layerwise reload allocated while applying this
+        # update.  They are only needed during the load, and holding them past
+        # finish starves the kv_cache wake that follows: the CaMem allocator then
+        # dies in aclrtMallocPhysical with 207001 (OOM).
+        gc.collect()
+        with contextlib.suppress(Exception):  # pluggable allocator may reject it
+            torch.npu.empty_cache()
+
+        # Re-run module-level runtime-parameter hooks.  Modules that serve
+        # runtime-derived buffers absent from the checkpoint (e.g. the rotary
+        # cos/sin position cache) implement ``reinitialize_runtime_params`` to
+        # re-register their constructor values via ``register_buffer`` (mirror
+        # of their ``__init__``); after a level-2 sleep the layerwise finalize
+        # above would otherwise leave (or zero-fill) freshly-woken storage and
+        # destroy positional encoding for every layer.
+        for module in self.model.modules():
+            reinit = getattr(module, "reinitialize_runtime_params", None)
+            if callable(reinit):
+                reinit()
 
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """

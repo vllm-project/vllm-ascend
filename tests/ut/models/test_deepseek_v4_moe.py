@@ -328,3 +328,60 @@ def test_hash_layer_router_bias_is_skipped_when_unused(monkeypatch):
     assert "model.layers.0.mlp.gate.e_score_correction_bias" not in loaded_params
     assert "model.layers.1.mlp.gate.e_score_correction_bias" in loaded_params
     assert torch.allclose(dense_layer.mlp.gate.e_score_correction_bias, dense_bias)
+
+
+def test_runtime_hook_keeps_latest_loaded_parameters(monkeypatch):
+    """Reloaded parameters must not revert to a snapshot of the first load."""
+    cfg = SimpleNamespace(
+        n_routed_experts=4,
+        n_shared_experts=None,
+        num_attention_heads=2,
+        vocab_size=4,
+        num_experts_per_tok=2,
+    )
+    layer = _make_gate_owner(with_correction_bias=False, num_experts=4)
+    layer.layer_idx = 0
+    layer.mlp.gate.tid2eid = nn.Parameter(torch.zeros(4, 2, dtype=torch.int32), requires_grad=False)
+    layer.mlp.gate.bias_vl = nn.Parameter(torch.zeros(4))
+    layer.self_attn = nn.Module()
+    layer.self_attn.attn_sink = nn.Parameter(torch.zeros(2))
+    inner = deepseek_v4_module.DeepseekV4Model.__new__(deepseek_v4_module.DeepseekV4Model)
+    nn.Module.__init__(inner)
+    inner.config = cfg
+    inner.layers = nn.ModuleList([layer])
+    inner.embed_tokens = nn.Embedding(4, 2)
+    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
+    nn.Module.__init__(model)
+    model.model = inner
+    model.config = cfg
+    model.num_redundant_experts = 0
+    monkeypatch.setattr(deepseek_v4_module, "fused_moe_make_expert_params_mapping", lambda *a, **k: [])
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_v4_module, "get_ascend_config", lambda: SimpleNamespace(mix_placement=False))
+    monkeypatch.setattr(deepseek_v4_module.rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False)
+    monkeypatch.setattr(deepseek_v4_module, "enable_dsa_cp", lambda: False)
+    table = torch.arange(8, dtype=torch.int32).reshape(4, 2) % 4
+    sink = torch.tensor([3.0, 5.0])
+    model.load_weights(
+        [
+            ("model.embed_tokens.weight", torch.ones(4, 2)),
+            ("model.layers.0.mlp.gate.tid2eid", table),
+            ("model.layers.0.self_attn.attn_sink", sink),
+        ]
+    )
+
+    new_table = table.roll(1, dims=0)
+    new_sink = sink + 7
+    pointers = (layer.mlp.gate.tid2eid.data_ptr(), layer.self_attn.attn_sink.data_ptr())
+    model.load_weights(
+        [
+            ("model.layers.0.mlp.gate.tid2eid", new_table),
+            ("model.layers.0.self_attn.attn_sink", new_sink),
+        ]
+    )
+    inner.reinitialize_runtime_params()
+    assert torch.equal(layer.mlp.gate.tid2eid, new_table)
+    assert torch.equal(layer.self_attn.attn_sink, new_sink)
+    assert (layer.mlp.gate.tid2eid.data_ptr(), layer.self_attn.attn_sink.data_ptr()) == pointers
+    assert not hasattr(inner, "_runtime_tensor_backup")

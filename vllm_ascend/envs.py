@@ -36,6 +36,9 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Optional IPC coverage check. Preserve the original flag semantics:
+    # unset/empty disables it; any non-empty value enables it.
+    "VLLM_IPC_STRICT_UPDATE": lambda: bool(os.getenv("VLLM_IPC_STRICT_UPDATE")),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
