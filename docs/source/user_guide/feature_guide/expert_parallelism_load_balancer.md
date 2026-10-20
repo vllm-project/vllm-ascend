@@ -375,18 +375,18 @@ under ideal load balance.
 ## Critical Considerations
 
 1. Parameter Tuning:
-   - For MRv2, tune `window_size` and `step_interval` against the target
+    - For MRv2, tune `window_size` and `step_interval` against the target
      workload. For MRv1, tune `expert_heat_collection_interval` and
      `algorithm_execution_interval`.
-   - `num_redundant_experts` must make `(num_experts +
+    - `num_redundant_experts` must make `(num_experts +
      num_redundant_experts)` divisible by the expert-parallel size.
 
 2. Hardware Requirements:
-   - Ensure that all NPUs have identical memory capacity and compute capabilities.
-   - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
-   - shm needs to be mounted for container
+    - Ensure that all NPUs have identical memory capacity and compute capabilities.
+    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
+    - shm needs to be mounted for container
 
 3. Monitoring & Validation:
-   - Track metrics: Search for [Expert Hotness] in the log. We will calculate the peak-to-average ratio of the load for each layer at different ranks, and then find their mean and maximum values. Current means actual peak-to-average ratio, update means estimated peak-to-average ratio after algorithm adjustment.
-   - Use vLLM monitor to detect imbalances during runtime.
-   - Always verify expert map JSON structure before loading (validate with jq or similar tools).
+    - Track metrics: Search for [Expert Hotness] in the log. We will calculate the peak-to-average ratio of the load for each layer at different ranks, and then find their mean and maximum values. Current means actual peak-to-average ratio, update means estimated peak-to-average ratio after algorithm adjustment.
+    - Use vLLM monitor to detect imbalances during runtime.
+    - Always verify expert map JSON structure before loading (validate with jq or similar tools).
