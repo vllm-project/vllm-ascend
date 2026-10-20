@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -371,3 +372,22 @@ def test_shutdown_waits_unregisters_and_releases_receive_buffer() -> None:
 
     connector.shutdown()
     connector._backend.unregister_buffer.assert_called_once_with([recv_buffer_ptr], [recv_buffer_nbytes])
+
+
+@pytest.mark.parametrize(
+    ("vision_config", "expected"),
+    [
+        (None, 1024),
+        (SimpleNamespace(out_hidden_size=512, deepstack_visual_indexes=[2, 5, 8]), 2048),
+        (SimpleNamespace(out_hidden_size=512, deepstack_visual_indexes=[]), 1024),
+        (SimpleNamespace(out_hidden_size=None, deepstack_visual_indexes=[2]), 1024),
+    ],
+)
+def test_receive_buffer_hidden_dim_preserves_deepstack_width(vision_config, expected):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(vision_config=vision_config),
+            get_inputs_embeds_size=lambda: 1024,
+        )
+    )
+    assert connector_module._get_encoder_cache_hidden_dim(config) == expected

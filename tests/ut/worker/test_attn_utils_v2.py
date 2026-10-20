@@ -882,6 +882,7 @@ def test_v2_zeroer_covers_each_mla_component_view():
 
 
 def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
+    monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
     heads, k_dim, v_dim, block = 2, 64, 64, 512
     num_blocks = 3
     k_bytes = heads * block * k_dim

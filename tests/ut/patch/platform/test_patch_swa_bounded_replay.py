@@ -21,6 +21,7 @@ there and filled from the resumed requests.
 """
 
 import inspect
+from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,19 @@ def test_declaring_the_field_is_idempotent():
     _patch_cached_request_data_replay_start()
 
     assert CachedRequestData.__dataclass_fields__ == fields_before
+
+
+def test_cached_payload_subclass_can_add_required_fields():
+    @dataclass
+    class ExtendedCachedRequestData(CachedRequestData):
+        prompt_token_ids: dict[str, list[int]]
+
+    payload = ExtendedCachedRequestData(
+        **asdict(CachedRequestData.make_empty()),
+        prompt_token_ids={"req-0": [11, 12]},
+    )
+    assert payload.prompt_token_ids == {"req-0": [11, 12]}
+    assert payload.replay_start == {}
 
 
 # --- a resumed request that rewinds has to say so ----------------------------
