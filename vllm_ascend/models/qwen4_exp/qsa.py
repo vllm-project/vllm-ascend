@@ -38,13 +38,13 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm_ascend.ops.gbsa_qsa import (
     qsa_gbsa_attention,
 )
+from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
 )
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
-from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
@@ -577,16 +577,20 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: torch.Tensor | None,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         output: torch.Tensor,
+        qkv: torch.Tensor | None = None,
+        gate: torch.Tensor | None = None,
     ) -> None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             output.zero_()
+            if gate is not None:
+                gate.zero_()
             return
         main_metadata = metadata[self.layer_name]
         if not _qsa_cache_is_bound(self.kv_cache):
@@ -595,6 +599,21 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
+
+        # Newer vLLM revisions call the owner with the packed projection when
+        # ``use_fused_qsa_prepare`` is enabled. The upstream indexer consumes
+        # that projection itself; Ascend keeps its independently fused main
+        # Q/K/V preparation and indexer paths, so materialize the same outputs
+        # here before entering the existing cache/update transaction.
+        if qkv is not None:
+            q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
+            query = q.view(-1, self.num_heads, self.head_dim)
+            key = k.view(-1, self.num_kv_heads, self.head_dim)
+            value = v.view(-1, self.num_kv_heads, self.head_dim)
+            if gate is None or projected_gate is None:
+                raise RuntimeError("Fused QSA preparation requires an output gate")
+            gate.copy_(projected_gate.view_as(gate))
+
         selected = self.indexer(
             hidden_states,
             positions,
@@ -602,6 +621,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         )
         if selected.shape != (num_tokens, self.indexer.output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
+        if query is None or key is None or value is None:
+            raise RuntimeError("QSA preparation did not produce Q/K/V tensors")
         self.impl.do_kv_cache_update(
             self,
             key,
