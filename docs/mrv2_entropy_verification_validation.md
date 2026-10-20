@@ -64,8 +64,8 @@ one-hot 草稿的 `q_i(draft_i)=1`。使用与 NPU 核函数相同的随机数�
 | 测试文件 | 验证内容 |
 | --- | --- |
 | `tests/ut/worker/v2/test_rejection_verify_reference.py` | 阈值改变接受结果、逐位置阈值、首拒绝、placeholder、零概率、alpha=0 |
-| `tests/ut/worker/v2/test_entropy_verify.py` | worker 配置、显式覆盖、配置重建隔离、processed logits 传递、模式互斥、非法参数、关闭/synthetic 跳过熵核函数 |
-| `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py` | FP32 oracle、多个 dtype/词表、参数敏感性、placeholder/bonus、greedy、synthetic、混合请求和分块一致性；保留主线 block 用例 |
+| `tests/ut/worker/v2/test_entropy_verify.py` | worker 配置、显式覆盖、配置重建隔离、processed logits 传递、模式互斥、非法参数、关闭/synthetic/alpha=0 跳过熵分配与核函数 |
+| `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py` | FP32 oracle、多个 dtype/词表、跨词表块归约及 padding、参数敏感性、placeholder/bonus、greedy、synthetic、混合请求和分块一致性；保留主线 block 用例 |
 | `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py` | 熵校验拒绝后的 residual 分布；保留原有恢复采样测试 |
 | `tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_mtp.py` | E/S 配置、图/eager、raw/processed logprobs、多请求、多轮状态复用 |
 
@@ -97,6 +97,8 @@ python -m pytest -q tests/e2e/pull_request/one_card/model_runner_v2/test_deepsee
 覆盖低并发延迟和高并发吞吐、短/长输入与短/长输出。记录输出 token/s、request/s、端到端时延、TTFT、TPOT/ITL 的 P50/P95/P99、峰值显存及错误率。统计实际输出 token 数，确保不同组的工作量可比。
 
 算子基准使用预分配输入、预热和计时区间前后的 NPU 同步，分别记录熵统计、拒绝判断、resample 和整个 verifier 耗时。端到端 benchmark 保持正常异步执行；profiler 另开短跑，不纳入正式性能统计。
+
+对本次优化另做相同 E 配置的前后对照，以 `6de9f2a24` 为优化前基线。阈值归约已合并到拒绝判断 kernel：alpha>0 时省去一次 launch 和一张 `[num_logits]` FP32 阈值张量；alpha=0 时使用常数阈值，省去全部熵扫描和熵临时张量。分别测量默认 alpha、alpha=0、小/大词表和低/高采信率；同时检查融合后拒绝判断 kernel 的耗时与完整 verifier 的净变化。核函数融合后的调度和舍入差异须通过 NPU oracle 用例验证，当前尚无实测加速结论。
 
 熵校验增加词表扫描和中间张量，只有新增接受 token 带来的收益超过这部分开销才会加速。关注关闭熵校验的 S 相比主线是否出现回归，以及大词表、低采信率负载下 E 的开销。
 

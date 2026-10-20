@@ -35,7 +35,6 @@ def launches(monkeypatch):
     for name in (
         "_compute_block_stats_kernel",
         "_entropy_partials_kernel",
-        "_entropy_threshold_kernel",
         "_compute_cumulative_log_p_kernel",
         "_compute_local_residual_mass_kernel",
         "_probabilistic_rejection_kernel",
@@ -65,13 +64,11 @@ def test_worker_config_is_resolved_per_call(monkeypatch, inputs, launches):
             mock.reset_mock()
         utils.rejection_sample(**inputs)
         getter.assert_called_once_with()
-        assert launches["_probabilistic_rejection_kernel"].call_args.kwargs["USE_ENTROPY_VERIFY"] is enabled
-        assert launches["_entropy_partials_kernel"].called is enabled
-        assert launches["_entropy_threshold_kernel"].called is enabled
-        if enabled:
-            kwargs = launches["_entropy_threshold_kernel"].call_args.kwargs
-            assert kwargs["POSTERIOR_THRESHOLD"] == threshold
-            assert kwargs["POSTERIOR_ALPHA"] == alpha
+        kwargs = launches["_probabilistic_rejection_kernel"].call_args.kwargs
+        assert kwargs["USE_ENTROPY_VERIFY"] is enabled
+        assert launches["_entropy_partials_kernel"].called is (enabled and alpha > 0)
+        assert kwargs["POSTERIOR_THRESHOLD"] == (threshold if enabled else 1.0)
+        assert kwargs["POSTERIOR_ALPHA"] == (alpha if enabled else 0.0)
         assert launches["resample"].call_args.kwargs["use_block_verification"] is False
 
 
@@ -82,19 +79,20 @@ def test_explicit_override_does_not_read_worker_config(monkeypatch, inputs, laun
     getter.assert_not_called()
     assert launches["_probabilistic_rejection_kernel"].call_args.kwargs["USE_ENTROPY_VERIFY"] is enabled
     if enabled:
-        assert launches["_entropy_threshold_kernel"].call_args.kwargs["POSTERIOR_THRESHOLD"] == 0.7
+        assert launches["_probabilistic_rejection_kernel"].call_args.kwargs["POSTERIOR_THRESHOLD"] == 0.7
 
 
-def test_synthetic_skips_entropy_allocations(monkeypatch, inputs, launches):
-    set_config(monkeypatch, enable_entropy_verify=True)
+@pytest.mark.parametrize("enabled,alpha,synthetic", [(False, 0.4, False), (True, 0.0, False), (True, 0.4, True)])
+def test_unused_entropy_skips_allocations(monkeypatch, inputs, launches, enabled, alpha, synthetic):
+    set_config(monkeypatch, enable_entropy_verify=enabled, posterior_alpha=alpha)
     empty_like = MagicMock(side_effect=AssertionError("Unexpected entropy allocation"))
     monkeypatch.setattr(utils.torch, "empty_like", empty_like)
-    utils.rejection_sample(**inputs, synthetic_conditional_rates=torch.ones(1))
+    utils.rejection_sample(**inputs, synthetic_conditional_rates=torch.ones(1) if synthetic else None)
     launches["_entropy_partials_kernel"].assert_not_called()
-    launches["_entropy_threshold_kernel"].assert_not_called()
     kwargs = launches["_probabilistic_rejection_kernel"].call_args.kwargs
-    assert kwargs["SYNTHETIC_MODE"] is True
-    assert kwargs["USE_ENTROPY_VERIFY"] is False
+    assert kwargs["SYNTHETIC_MODE"] is synthetic
+    assert kwargs["USE_ENTROPY_VERIFY"] is (enabled and not synthetic)
+    assert kwargs["POSTERIOR_ALPHA"] == 0.0
 
 
 def test_entropy_rejects_upstream_block(monkeypatch, inputs, launches):
