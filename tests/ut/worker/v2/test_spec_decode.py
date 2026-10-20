@@ -51,6 +51,7 @@ def _make_config(
         use_eagle=MagicMock(return_value=use_eagle),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
+        use_multi_module_mtp=MagicMock(return_value=False),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
     )
     return SimpleNamespace(speculative_config=speculative_config)
