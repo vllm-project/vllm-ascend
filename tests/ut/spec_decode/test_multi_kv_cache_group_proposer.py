@@ -10,6 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.spec_decode as spec_decode
 import vllm_ascend.spec_decode.multi_kv_cache_group_proposer as multi_group_proposer
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
     AscendMultiKVCacheGroupMTPProposer,
@@ -74,7 +75,10 @@ def test_copy_cache_only_metadata_passes_through_classes_and_non_dataclasses():
     class Metadata:
         num_reqs: int
 
-    for metadata in (Metadata, None, object(), SimpleNamespace(num_reqs=2)):
+    slots = torch.tensor([3, 7])
+    kpool = AscendIndexerKPoolMetadata(slots.view(-1, 1), slots, slots, slots, block_size=4, compress_ratio=4)
+    tail = AscendIndexerKPoolTailMetadata(slots.view(-1, 1), slots, block_size=4)
+    for metadata in (Metadata, None, object(), SimpleNamespace(num_reqs=2), kpool, tail):
         assert AscendMultiKVCacheGroupMTPProposer._copy_cache_only_draft_metadata(metadata) is metadata
 
 
@@ -112,14 +116,16 @@ def test_initialize_attn_backend_delegates_single_kv_cache_group():
 
 def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
-    proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache"}
+    proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache", "draft.indexer.tail_cache"}
     proposer.vllm_config = MagicMock()
     proposer.device = torch.device("cpu")
     proposer.num_speculative_tokens = 2
     proposer.slot_mapping_group = [torch.zeros(4, dtype=torch.int32) for _ in range(2)]
-    proposer.runner = SimpleNamespace(pin_memory=False)
+    proposer.runner = SimpleNamespace(pin_memory=False, max_num_reqs=2)
+    proposer.max_model_len = 128
 
     main_backend = MagicMock()
+    proposer._draft_block_table_width = MagicMock(side_effect=lambda group: 1 if group.backend is main_backend else 2)
     main_backend.full_cls_name.return_value = "main.backend"
     main_backend.get_impl_cls.return_value = object
     indexer_backend = MagicMock()
@@ -131,8 +137,8 @@ def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     indexer_layer.get_attn_backend.return_value = indexer_backend
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(layer_names=["draft.attn"], kv_cache_spec=MagicMock()),
-            SimpleNamespace(layer_names=["draft.indexer.k_cache"], kv_cache_spec=MagicMock()),
+            SimpleNamespace(layer_names=["draft.attn", "draft.indexer.k_cache"], kv_cache_spec=MagicMock()),
+            SimpleNamespace(layer_names=["draft.indexer.tail_cache"], kv_cache_spec=MagicMock()),
         ]
     )
 
@@ -141,7 +147,11 @@ def test_initialize_attn_backend_splits_glm_physical_cache_groups():
         patch.object(
             multi_group_proposer,
             "get_layers_from_vllm_config",
-            return_value={"draft.attn": main_layer, "draft.indexer.k_cache": indexer_layer},
+            return_value={
+                "draft.attn": main_layer,
+                "draft.indexer.k_cache": indexer_layer,
+                "draft.indexer.tail_cache": indexer_layer,
+            },
         ),
     ):
         proposer.initialize_attn_backend(kv_cache_config, kernel_block_sizes=[128, 32])
@@ -149,8 +159,10 @@ def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     assert proposer._uses_multi_group_kv_cache is True
     assert proposer.kv_cache_gid == 0
     assert proposer.block_size == 128
-    assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
-    assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, None]
+    assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 0, 1]
+    assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, None, None]
+    tables = list(proposer._multi_group_block_table_buffers.values())
+    assert len({t.data_ptr() for t in tables}) == 2 and all(t.shape == (2, 2) for t in tables)
 
 
 def test_secondary_group_recomputes_slot_mapping_from_its_block_table():
@@ -160,8 +172,10 @@ def test_secondary_group_recomputes_slot_mapping_from_its_block_table():
     proposer._draft_block_table_width = MagicMock(return_value=2)
     # Pre-created in initialize_attn_backend; the hook no longer allocates.
     proposer._multi_group_slot_mapping_buffers = {(1, 0): torch.zeros(4, dtype=torch.int32)}
+    proposer._multi_group_block_table_buffers = {1: torch.zeros(4, 2, dtype=torch.int32)}
 
     secondary_block_table = MagicMock()
+    secondary_block_table.is_circular_group = False
     secondary_block_table.get_device_tensor.return_value = torch.arange(8, dtype=torch.int32).reshape(2, 4)
     secondary_block_table.slot_mapping.gpu = torch.zeros(4, dtype=torch.int32)
     proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[MagicMock(), secondary_block_table]))
@@ -198,26 +212,36 @@ def test_primary_group_crops_block_table_to_builder_width():
     proposer._uses_multi_group_kv_cache = True
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=2)
+    proposer._multi_group_block_table_buffers = {0: torch.full((4, 4), 77, dtype=torch.int32)}
     proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[MagicMock()]))
     attn_group = SimpleNamespace(kv_cache_group_id=0)
     common_attn_metadata = SimpleNamespace(
         _seq_lens_cpu=torch.tensor([5, 8], dtype=torch.int32),
         seq_lens_cpu=None,
-        num_reqs=2,
+        num_reqs=4,
         num_actual_tokens=2,
         block_table_tensor=torch.arange(8, dtype=torch.int32).reshape(2, 4),
         slot_mapping=torch.arange(4, dtype=torch.int32),
     )
 
+    refreshed_gids: set[int] = set()
     group_metadata = proposer._common_attn_metadata_for_draft_group(
         common_attn_metadata,
         attn_group,
         num_input_tokens=4,
+        refreshed_gids=refreshed_gids,
     )
 
     assert group_metadata is not common_attn_metadata
-    assert group_metadata.block_table_tensor.shape == (2, 2)
+    assert group_metadata.block_table_tensor.shape == (4, 2)
+    assert not group_metadata.block_table_tensor[2:].any()
     assert group_metadata.slot_mapping.data_ptr() == common_attn_metadata.slot_mapping.data_ptr()
+    common_attn_metadata.block_table_tensor.fill_(99)
+    reused = proposer._common_attn_metadata_for_draft_group(common_attn_metadata, attn_group, 4, 0, refreshed_gids)
+    assert reused.block_table_tensor.data_ptr() == group_metadata.block_table_tensor.data_ptr()
+    assert reused.block_table_tensor[0, 0] == 0
+    refreshed = proposer._common_attn_metadata_for_draft_group(common_attn_metadata, attn_group, 4, 0, set())
+    assert refreshed.block_table_tensor[0, 0] == 99
 
 
 def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
@@ -228,7 +252,7 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
     group_common_attn_metadata = MagicMock()
     primary_metadata = object()
     cache_only_metadata = object()
-    primary_group = SimpleNamespace(layer_names=["draft.attn"])
+    primary_group = SimpleNamespace(kv_cache_group_id=0, layer_names=["draft.attn"])
     builder = MagicMock()
     builder.build_for_drafting.return_value = cache_only_metadata
     cache_only_group = SimpleNamespace(
@@ -251,6 +275,7 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
         cache_only_group,
         2,
         1,
+        {0},
     )
     builder.build_for_drafting.assert_called_once_with(group_common_attn_metadata, 1)
     assert per_layer_metadata == {
@@ -259,41 +284,50 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
     }
 
 
-@pytest.mark.parametrize("draft_index", [0, 1, 2])
+@pytest.mark.parametrize("draft_index", [0, 1, 4])
 def test_multi_group_graph_capture_uses_per_group_views(draft_index):
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer.use_compress = False
-    common = SimpleNamespace(num_input_tokens=8)
+    proposer.arange = torch.arange(25, dtype=torch.int32)
+    proposer.token_arange_np = np.arange(25, dtype=np.int32)
+    proposer.query_start_loc_group = [torch.zeros(25, dtype=torch.int32) for _ in range(5)]
+    proposer.seq_lens_group = [torch.tensor([6] + [0] * 23, dtype=torch.int32) for _ in range(5)]
+    common = SimpleNamespace(num_input_tokens=24, num_actual_tokens=24, num_reqs=4, max_query_len=6)
+    common.seq_lens_cpu = common.seq_lens = torch.tensor([6, 0, 0, 0])
+    common.query_start_loc_cpu = common.query_start_loc = torch.arange(0, 25, 6)
     group_views = [object(), object()]
     builders = [MagicMock(), MagicMock()]
     groups = [
         SimpleNamespace(
+            kv_cache_group_id=0,
             layer_names=[f"draft.layer.{index}"],
             get_metadata_builder=MagicMock(return_value=builder),
         )
         for index, builder in enumerate(builders)
     ]
     proposer.draft_attn_groups = groups
+    proposer._is_cache_only_draft_attn_group = MagicMock(side_effect=lambda group: group is groups[1])
     proposer._common_attn_metadata_for_draft_group = MagicMock(side_effect=group_views)
     expected = [object(), object()]
     for builder, metadata in zip(builders, expected):
         builder.build_for_graph_capture.return_value = metadata
+        builder.build_for_drafting.return_value = metadata
 
     result = proposer._build_multi_group_graph_capture_metadata(common, draft_index)
 
-    assert result == {
-        "draft.layer.0": expected[0],
-        "draft.layer.1": expected[1],
-    }
-    assert [invocation.args for invocation in proposer._common_attn_metadata_for_draft_group.call_args_list] == [
-        (common, groups[0], 8, draft_index),
-        (common, groups[1], 8, draft_index),
-    ]
-    for builder, group_view in zip(builders, group_views):
-        builder.build_for_graph_capture.assert_called_once_with(
-            group_view,
-            multi_group_proposer.AscendAttentionState.DecodeOnly,
-        )
+    assert result == dict(zip(("draft.layer.0", "draft.layer.1"), expected))
+    captured = proposer._common_attn_metadata_for_draft_group.call_args_list[0].args[0]
+    assert common.num_reqs == 4 and common.num_actual_tokens == 24 and common.max_query_len == 6
+    query = captured.query_start_loc.clamp(max=captured.num_actual_tokens)
+    assert (captured.seq_lens - query.diff() >= 0).all()
+    assert (captured.num_reqs, captured.num_actual_tokens) == ((24, 1) if draft_index else (4, 6))
+    if draft_index:
+        assert captured.max_query_len == captured.decode_token_per_req == 1
+    for index, (builder, group_view) in enumerate(zip(builders, group_views)):
+        drafting = draft_index and index == 0
+        method = builder.build_for_drafting if drafting else builder.build_for_graph_capture
+        mode = draft_index if drafting else multi_group_proposer.AscendAttentionState.DecodeOnly
+        method.assert_called_once_with(group_view, mode)
 
 
 def test_multi_group_graph_capture_rejects_compressed_attention():
@@ -306,54 +340,60 @@ def test_multi_group_graph_capture_rejects_compressed_attention():
 def test_secondary_tail_slots_cover_prefill_and_keep_each_step():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer._uses_multi_group_kv_cache = True
+    proposer.use_compress = False
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=1)
-    proposer._multi_group_slot_mapping_buffers = {
-        (1, 0): torch.zeros(8, dtype=torch.int32),
-        (1, 1): torch.zeros(8, dtype=torch.int32),
-    }
+    proposer._multi_group_slot_mapping_buffers = {(1, step): torch.zeros(8, dtype=torch.int32) for step in range(5)}
+    proposer._multi_group_block_table_buffers = {1: torch.zeros(8, 1, dtype=torch.int32)}
     slots = torch.full((8,), -1, dtype=torch.int32)
-    table = torch.tensor([[2], [7]], dtype=torch.int32)
+    table = torch.tensor([[2], [7], [0], [0], [0], [0], [0], [9]], dtype=torch.int32)
     block_table = MagicMock()
+    block_table.is_circular_group = True
     block_table.get_device_tensor.return_value = table
     block_table.slot_mapping.gpu = slots
 
-    def compute(num_reqs, query_start_loc, positions):
-        slots.fill_(-1)
-        for req in range(num_reqs):
-            start, end = query_start_loc[req : req + 2].tolist()
-            slots[start:end] = table[req, 0] * 9 + positions[start:end] % 9
-
-    block_table.compute_slot_mapping.side_effect = compute
+    block_table.compute_slot_mapping.side_effect = lambda *args: slots.fill_(-1)
     proposer.runner = SimpleNamespace(input_batch=SimpleNamespace(block_table=[None, block_table]))
-    group = SimpleNamespace(kv_cache_group_id=1)
+    builder = SimpleNamespace(build_for_drafting=lambda metadata, step: metadata)
+    group = SimpleNamespace(kv_cache_group_id=1, layer_names=["tail"], get_metadata_builder=lambda: builder)
+    primary = SimpleNamespace(kv_cache_group_id=0, layer_names=["attn"])
+    build = proposer._build_cache_only_group_next_step_attn_metadata
     common = SimpleNamespace(
         num_reqs=2,
         num_actual_tokens=5,
         positions=torch.tensor([5, 6, 7, 10, 11, 0, 0, 0]),
+        slot_mapping=torch.tensor([1, 2, 3, 4, 5, -1, -1, -1], dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3, 5]),
         _seq_lens_cpu=None,
         seq_lens_cpu=None,
     )
     first = proposer._common_attn_metadata_for_draft_group(common, group, 8, 0)
-    assert first.slot_mapping.tolist() == [23, 24, 25, 64, 65, -1, -1, -1]
+    assert first.slot_mapping is common.slot_mapping
+    assert first.block_table_tensor.tolist() == [[2], [7]]
     common.positions = torch.tensor([8, 12, 0, 0, 0, 0, 0, 0])
     common.query_start_loc = torch.tensor([0, 1, 2])
     common.num_actual_tokens = 2
-    second = proposer._common_attn_metadata_for_draft_group(common, group, 8, 1)
-    assert second.slot_mapping.tolist() == [26, 66, -1, -1, -1, -1, -1, -1]
-    assert first.slot_mapping.tolist() == [23, 24, 25, 64, 65, -1, -1, -1]
-    assert first.slot_mapping.data_ptr() != second.slot_mapping.data_ptr()
-
-    common.positions = torch.tensor([9, 13, 0, 0, 0, 0, 0, 0])
-    refreshed = proposer._common_attn_metadata_for_draft_group(common, group, 8, 1)
-    assert refreshed.slot_mapping.data_ptr() == second.slot_mapping.data_ptr()
-    assert refreshed.slot_mapping.tolist() == [18, 67, -1, -1, -1, -1, -1, -1]
+    common.num_reqs = 8
+    common.slot_mapping = torch.tensor([6, -1, -1, -1, -1, -1, -1, -1], dtype=torch.int32)
+    assert first.slot_mapping.data_ptr() != common.slot_mapping.data_ptr()
+    for step, circular in ((1, True), (2, True), (4, True), (1, True), (2, False)):
+        block_table.is_circular_group = circular
+        if step == 1 or not circular:
+            expected = table.clone()
+        current = build(common, step, 8, primary, None, [group])["tail"]
+        assert torch.equal(current.block_table_tensor, expected)
+        assert current.block_table_tensor.data_ptr() == first.block_table_tensor.data_ptr()
+        if circular:
+            assert current.positions is common.positions and current.slot_mapping is common.slot_mapping
+        common.positions = common.positions + 1
+        table.add_(10)
+    block_table.compute_slot_mapping.assert_called_once()
 
 
 def test_later_draft_sequence_lengths_exclude_rejected_tokens():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer._uses_multi_group_kv_cache = True
+    proposer._multi_group_block_table_buffers = {0: torch.zeros(12, 1, dtype=torch.int32)}
     proposer.kv_cache_gid = 0
     proposer.uses_mrope = False
     proposer.method = "mtp"
@@ -395,6 +435,7 @@ def test_later_draft_sequence_lengths_exclude_rejected_tokens():
 def test_full_graph_later_draft_accepts_missing_cpu_sequence_lengths():
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
     proposer._uses_multi_group_kv_cache = True
+    proposer._multi_group_block_table_buffers = {0: torch.zeros(16, 1, dtype=torch.int32)}
     proposer.kv_cache_gid = 0
     proposer.uses_mrope = False
     proposer.method = "mtp"

@@ -81,6 +81,12 @@ class AscendAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
         if enable_dcp():
@@ -376,10 +382,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # (and trims the query to its last entry), so padding there only changes
         # the captured graph. The V2 runner reports speculative decode as
         # ChunkedPrefill, so decide from the per-request is_prefilling flags
-        # (falling back to the state when they are unavailable). v0.30.0 already
-        # pads this at the request level and stays unchanged behind
-        # vllm_version_is().
-        if not vllm_version_is("0.30.0") and self.vllm_config.use_v2_model_runner:
+        # (falling back to the state when they are unavailable).
+        if self.vllm_config.use_v2_model_runner:
             is_prefilling = common_attn_metadata.is_prefilling
             if is_prefilling is None:
                 decode_like = common_attn_metadata.attn_state in (

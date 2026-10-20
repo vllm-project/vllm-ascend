@@ -29,14 +29,12 @@ from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
 
 def is_int_list(value: Any) -> bool:
-    """True when ``value`` is a non-empty ``list[int]`` (bool excluded)."""
-    return (
-        isinstance(value, list) and bool(value) and all(isinstance(x, int) and not isinstance(x, bool) for x in value)
-    )
+    """True when ``value`` is a ``list[int]`` (bool excluded; empty allowed)."""
+    return isinstance(value, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in value)
 
 
 def is_list_of_int_lists(value: Any) -> bool:
-    """True when ``value`` is a non-empty list of int lists."""
+    """True when ``value`` is a non-empty list of ``list[int]`` (inners may be empty)."""
     return isinstance(value, list) and bool(value) and all(is_int_list(x) for x in value)
 
 

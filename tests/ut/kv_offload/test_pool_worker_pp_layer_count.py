@@ -86,6 +86,7 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(pp_rank, is_save):
     worker.group_block_len = {}
     worker.group_block_stride = {}
     worker.group_layer_cache_entry_offsets = {}
+    worker.group_cache_entry_segments = {}
     worker.group_num_layers = {}
     for group_id, names in enumerate(group_layer_names):
         worker._infer_cache_group_metadata(group_id, names)

@@ -15,8 +15,6 @@ from vllm_ascend.platform import NPUPlatform
 
 
 def _non_ssm_backend_patch():
-    if utils.vllm_version_is("0.30.0"):
-        return patch.object(NPUPlatform, "_find_non_ssm_backend", return_value=AscendAttentionBackend)
     return patch.object(NPUPlatform, "_find_non_ssm_backends", return_value=[AscendAttentionBackend])
 
 

@@ -351,7 +351,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
         # vLLM main exposes aux_output_config; the release has no such field.
-        mock_vllm_config.aux_output_config = None if vllm_version_is("0.30.0") else MagicMock(enabled=False)
+        mock_vllm_config.aux_output_config = MagicMock(enabled=False)
         mock_vllm_config.parallel_config.enable_eplb = False
         mock_vllm_config.offload_config.uva.cpu_offload_gb = 0
         mock_vllm_config.offload_config.prefetch.offload_group_size = 0
@@ -819,7 +819,12 @@ class TestNPUPlatform(TestBase):
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
                     self.platform.apply_config_platform_defaults(vllm_config)
 
-                self.assertEqual(pass_config.sp_min_token_num, 1)
+                if vllm_version_is("0.31.0"):
+                    self.assertEqual(pass_config.sp_min_token_num, 1)
+                else:
+                    # vLLM #60517 removed the PassConfig SP fields on main, so
+                    # the Ascend SP-threshold default no longer applies.
+                    self.assertIsNone(pass_config.sp_min_token_num)
 
                 pass_config.sp_min_token_num = 512
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
@@ -986,7 +991,12 @@ class TestNPUPlatform(TestBase):
                     )
 
                 if should_align:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
+                    # vLLM #60517 removed the method on main; platform inlines
+                    # the tp-multiple filtering instead.
+                    if vllm_version_is("0.31.0"):
+                        vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
+                    else:
+                        vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
                     self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
                 else:
@@ -1082,7 +1092,7 @@ class TestNPUPlatform(TestBase):
         # dispatch/FFN/combine branch, which requires scale-bias tensors.
         fused_input = SimpleNamespace(weights=SimpleNamespace(w1_scale_bias=None, w2_scale_bias=None))
         with (
-            patch("vllm_ascend.ascend_forward_context.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True),
+            patch("vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS", True),
             patch(
                 "vllm_ascend.ascend_forward_context.get_forward_context",
                 return_value=SimpleNamespace(additional_kwargs=kwargs),
@@ -1093,6 +1103,29 @@ class TestNPUPlatform(TestBase):
         dummy_comm_method._apply_cann_mega_moe.assert_called_once_with(
             fused_input, fused_input.weights, is_decode_only_node=False
         )
+
+    def test_set_additional_forward_context_v2_without_tp_falls_back(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+
+        with (
+            patch(
+                "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
+                return_value=1,
+            ),
+            patch(
+                "vllm.distributed.get_tensor_model_parallel_world_size",
+                side_effect=AssertionError("tensor model parallel group is not initialized"),
+            ),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
 
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

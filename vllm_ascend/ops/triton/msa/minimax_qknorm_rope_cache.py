@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
-FP8_E4M3_MAX: tl.constexpr = 448.0
+FP8_E4M3_MAX = 448.0
 
 
 @triton.jit
@@ -90,6 +90,7 @@ def _minimax_qknorm_rope_cache_kernel(
     INDEX_BLOCK_SIZE: tl.constexpr,
     CACHE_FP8: tl.constexpr,
     INDEX_FP8: tl.constexpr,
+    FP8_E4M3_MAX: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
@@ -224,6 +225,7 @@ def minimax_qknorm_rope_cache(
         index_cache.shape[1],
         key_cache.dtype == torch.float8_e4m3fn,
         index_cache.dtype == torch.float8_e4m3fn,
+        FP8_E4M3_MAX=FP8_E4M3_MAX,
         enable_fp_fusion=False,
     )
     return query, index_query

@@ -15,7 +15,7 @@ from vllm.config import ParallelConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
@@ -45,7 +45,7 @@ _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
     try:
-        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+        if not get_ascend_config().kv_pool_range_debug:
             return
         payload = {
             "event": "whole_key",

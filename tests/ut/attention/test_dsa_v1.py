@@ -71,7 +71,6 @@ _DSA_C_ASCEND_OPS = (
     "npu_sparse_attn_sharedkv_metadata",
     "npu_kv_quant_sparse_attn_sharedkv",
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
-    "kv_compress_epilog",
     "npu_scatter_nd_update_sk",
 )
 
@@ -2431,14 +2430,19 @@ def test_pcp_graph_metadata_restores_mtp_query_offsets():
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
+@pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
     shard_o_proj: bool,
+    global_prefill: bool,
+    decode_sharded: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
     impl = _make_impl(AscendDSAPCPImpl)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
+    impl._pcp_decode_sharded = decode_sharded
     impl.pcp_o_proj_weight_switch_config = MagicMock()
+    events = []
     weight_switches = []
     for _ in range(2):
         state = SimpleNamespace(handles=[])
@@ -2446,10 +2450,12 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
 
         def gather(state, config):
             assert not state.handles
+            events.append("weights")
             state.handles.append(MagicMock())
 
         def wait(state):
             assert state.handles
+            events.append("wait")
             state.handles.clear()
 
         method.all_gather_weight.side_effect = gather
@@ -2483,7 +2489,9 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             num_actual_tokens=global_num_tokens,
             num_decodes=0,
             num_decode_tokens=0,
-            num_prefills=1,
+            # A short prefill may be classified as decode by token-count
+            # metadata; the global request-state flag must still select weights.
+            num_prefills=0,
         )
         for cache_prefix in cache_prefixes
     }
@@ -2501,11 +2509,12 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             num_actual_tokens=local_num_actual_tokens,
             num_decodes=0,
             num_decode_tokens=0,
-            num_prefills=int(local_num_actual_tokens > 0),
+            num_prefills=0,
             req_metadata=req_metadata if local_num_actual_tokens else None,
             local_num_tokens_after_padding=4,
             hidden_restore_idx=restore_idx,
             global_dsa_metadata=global_dsa_metadata_by_prefix[cache_prefix],
+            pcp_has_global_prefill=global_prefill,
         )
         for cache_prefix in cache_prefixes
     }
@@ -2517,15 +2526,20 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     ).reshape(local_num_actual_tokens, 1, 2)
     output = torch.full((4, 2), -1.0)
     captured_o_proj_inputs: list[torch.Tensor] = []
-    pcp_group = SimpleNamespace(
-        all_gather=MagicMock(return_value=gathered_hidden_states),
-    )
+
+    def gather_hidden(*args, **kwargs):
+        events.append("hidden")
+        return gathered_hidden_states
+
+    pcp_group = SimpleNamespace(all_gather=MagicMock(side_effect=gather_hidden))
 
     def fake_o_proj(o_proj_input: torch.Tensor, output_tensor: torch.Tensor) -> torch.Tensor:
-        if shard_o_proj:
+        if shard_o_proj and global_prefill:
             for _, method, state in weight_switches:
                 method.wait_weight_all_gather(state)
+        events.append("projection")
         captured_o_proj_inputs.append(o_proj_input.clone())
+        output_tensor.zero_()
         output_tensor[:local_num_actual_tokens].copy_(
             o_proj_input[:local_num_actual_tokens].reshape(local_num_actual_tokens, 2)
         )
@@ -2550,7 +2564,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             return_value=caches,
         ),
         patch("vllm_ascend.attention.context_parallel.dsa_cp.get_pcp_group", return_value=pcp_group),
-        patch.object(impl, "_update_global_swa_cache") as update_swa,
+        patch.object(impl, "_update_global_swa_cache", side_effect=lambda *args: events.append("cache")) as update_swa,
         patch.object(impl, "_update_global_compressor_cache") as update_compressor,
         patch.object(
             impl,
@@ -2562,9 +2576,10 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
     ):
-        # Repeated empty batches must not leave pending gathers for the next layer.
-        num_calls = 2 if shard_o_proj and local_num_actual_tokens == 0 else 1
+        # Repeated batches must not leave pending gathers for the next layer.
+        num_calls = 2
         for _ in range(num_calls):
+            events.clear()
             actual = impl.forward(
                 layer_name="layer",
                 hidden_states=hidden_states,
@@ -2572,6 +2587,11 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
                 attn_metadata=attn_metadata,
                 output=output,
             )
+            assert events[0] == "hidden"
+            if shard_o_proj and global_prefill:
+                assert events.index("cache") < events.index("weights")
+            if "projection" in events:
+                assert events.index("cache") < events.index("projection")
 
     assert actual is output
     assert torch.equal(pcp_group.all_gather.call_args.args[0], hidden_states)
@@ -2580,8 +2600,8 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     assert update_compressor.call_count == num_calls
     assert impl.indexer.update_cache.call_count == num_calls
     for _, method, state in weight_switches:
-        assert method.all_gather_weight.call_count == (num_calls if shard_o_proj else 0)
-        assert method.wait_weight_all_gather.call_count == (num_calls if shard_o_proj else 0)
+        assert method.all_gather_weight.call_count == (num_calls if shard_o_proj and global_prefill else 0)
+        assert method.wait_weight_all_gather.call_count == (num_calls if shard_o_proj and global_prefill else 0)
         assert not state.handles
     expected_global_hidden = gathered_hidden_states.index_select(0, restore_idx)
     assert torch.equal(update_swa.call_args.args[1], expected_global_hidden)
@@ -2594,7 +2614,8 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     assert update_indexer_call.kwargs["kv_cache"] is caches
     if local_num_actual_tokens == 0:
         forward_attention.assert_not_called()
-        assert not captured_o_proj_inputs
+        assert len(captured_o_proj_inputs) == num_calls * int(shard_o_proj and not global_prefill)
+        assert all(torch.count_nonzero(inputs) == 0 for inputs in captured_o_proj_inputs)
         assert torch.count_nonzero(output) == 0
     else:
         assert torch.equal(
@@ -2603,7 +2624,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         )
         assert forward_attention.call_args.args[4] is True
         assert not forward_attention.call_args.kwargs
-        assert len(captured_o_proj_inputs) == 1
+        assert len(captured_o_proj_inputs) == num_calls
         assert torch.count_nonzero(captured_o_proj_inputs[0][local_num_actual_tokens:]) == 0
         assert torch.equal(
             output[:local_num_actual_tokens],
@@ -2622,17 +2643,20 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
     attn_metadata = {"swa_cache": metadata}
     impl.enable_pcp_o_proj_weight_sharding = True
     impl._pcp_o_proj_use_full_weight = True
-    with override_forward_context(_make_forward_context()):
-        impl._get_o_proj_input_shape(attn_metadata)
-    assert not impl._pcp_o_proj_use_full_weight
-    impl._get_pcp_o_proj_weight_switches = MagicMock()
+    impl._pcp_decode_sharded = False
+    impl._pcp_o_proj_weight_switches = None
+    impl._get_pcp_o_proj_weight_switches = MagicMock(return_value=())
 
-    with patch.object(
-        AscendDSAImpl,
-        "_prepare_caches_before_attention",
-        autospec=True,
-        return_value=False,
-    ) as prepare_standard_caches:
+    with (
+        patch.object(
+            AscendDSAImpl,
+            "_prepare_caches_before_attention",
+            autospec=True,
+            return_value=False,
+        ) as prepare_standard_caches,
+        impl._o_proj_batch(needs_global_metadata=False, has_prefill=False),
+    ):
+        assert not impl._pcp_o_proj_use_full_weight
         assert not impl._prepare_caches_before_attention(
             "layer",
             torch.empty((4, 4)),
@@ -2641,13 +2665,28 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         )
 
     prepare_standard_caches.assert_called_once()
-    impl._get_pcp_o_proj_weight_switches.assert_not_called()
+    impl._get_pcp_o_proj_weight_switches.assert_called_once()
+
+
+@pytest.mark.parametrize("global_prefill", [False, True])
+def test_disabled_pcp_o_projection_context_needs_no_shard_state(global_prefill):
+    impl = _make_impl(AscendDSAPCPImpl)
+    assert not hasattr(impl, "_pcp_o_proj_weight_switches")
+    assert not hasattr(impl, "_pcp_decode_sharded")
+    with (
+        pytest.raises(RuntimeError, match="injected failure"),
+        impl._o_proj_batch(needs_global_metadata=True, has_prefill=global_prefill),
+    ):
+        assert not impl._pcp_o_proj_use_full_weight
+        assert not impl._pcp_o_proj_use_activation_exchange
+        raise RuntimeError("injected failure")
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("reduce_results", [False, True])
 @pytest.mark.parametrize("quant_bias_value", [0, 64])
-def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_results, quant_bias_value):
+@pytest.mark.parametrize("decode_sharded", [False, True])
+def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_results, quant_bias_value, decode_sharded):
     """The complete wo_b bias must survive TP/PCP summation exactly once."""
     scheme = object.__new__(AscendW8A8LinearMethod)
     scheme.quant_method = "modelslim"
@@ -2656,6 +2695,7 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
         for tp_rank in range(tp_size):
             impl = _make_impl(AscendDSAPCPImpl)
             impl.n_local_groups = 2
+            impl.n_local_heads = 2
             impl.support_fp8_attention = False
             layer = object.__new__(AscendRowParallelLinear)
             torch.nn.Module.__init__(layer)
@@ -2676,13 +2716,29 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
             layer.tp_size = tp_size
             layer.prefix = "layer.wo_b"
             layer.custom_op = None
+            layer.output_size_per_partition = 2
             impl.wo_b = layer
             tp_group = SimpleNamespace(
                 rank_in_group=tp_rank, world_size=tp_size, all_reduce=MagicMock(side_effect=lambda x: x)
             )
             pcp_group = SimpleNamespace(
-                rank_in_group=pcp_rank, world_size=2, all_reduce=MagicMock(side_effect=lambda x: x)
+                rank_in_group=pcp_rank,
+                world_size=2,
+                device_group=object(),
+                all_reduce=MagicMock(side_effect=lambda x: x),
             )
+            impl.vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=1),
+                compilation_config=SimpleNamespace(max_cudagraph_capture_size=2, cudagraph_capture_sizes=None),
+                num_speculative_tokens=0,
+                model_config=SimpleNamespace(dtype=torch.bfloat16),
+            )
+
+            def exchange(destination, source, *, group):
+                destination.copy_(source.repeat(2, 1))
+
+            def scatter(destination, source, *, group, rank=pcp_rank):
+                destination.copy_(source.chunk(2)[rank])
 
             def quant_matmul(x, weight, scale, *, bias, output_dtype):
                 result = torch.zeros((x.shape[0], 2), dtype=output_dtype)
@@ -2699,18 +2755,30 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
                 patch.object(torch.ops.vllm, "quantize", create=True, side_effect=lambda x, *args: x.to(torch.int8)),
                 patch("torch_npu.npu_transpose_batchmatmul", create=True, side_effect=lambda x, *args, **kwargs: x),
                 patch("torch_npu.npu_quant_matmul", create=True, side_effect=quant_matmul),
+                patch(
+                    "vllm_ascend.attention.context_parallel.dsa_cp.dist.all_gather_into_tensor", side_effect=exchange
+                ) as ag,
+                patch(
+                    "vllm_ascend.attention.context_parallel.dsa_cp.dist.reduce_scatter_tensor", side_effect=scatter
+                ) as rs,
             ):
                 result = torch.empty((1, 2), dtype=torch.bfloat16)
-                impl._forward_o_proj_with_local_weights(torch.zeros((1, 2, 2), dtype=torch.bfloat16), result)
+                inputs = torch.zeros((1, 2, 2), dtype=torch.bfloat16)
+                if decode_sharded:
+                    impl._initialize_pcp_o_proj_exchange_buffers()
+                    impl._forward_o_proj_with_sharded_tokens(inputs, result)
+                else:
+                    impl._forward_o_proj_with_local_weights(inputs, result)
                 partial_outputs.append(result)
             assert tp_group.all_reduce.call_count == int(reduce_results and tp_size > 1)
-            pcp_group.all_reduce.assert_called_once()
+            assert pcp_group.all_reduce.call_count == int(not decode_sharded)
+            assert ag.call_count == rs.call_count == int(decode_sharded)
     assert torch.equal(torch.stack(partial_outputs).sum(0), torch.full((1, 2), quant_bias_value, dtype=torch.bfloat16))
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
-@pytest.mark.parametrize("decode_capacity,scheduler_capacity", [(4, 6), (6, 4), (6, 6)])
-def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, scheduler_capacity):
+def test_o_proj_capacity_covers_decode_batch(tp_size):
+    decode_capacity, scheduler_capacity = 4, 6
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
     impl.n_local_groups = tp_size
     impl.support_fp8_attention = False
@@ -2720,7 +2788,6 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
         scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_capacity, max_num_seqs=4)
     )
     group = SimpleNamespace(world_size=tp_size, device_group=object())
-    capacity = max(decode_capacity, scheduler_capacity)
 
     def exchange(recv, send, *, group):
         recv.copy_(send)
@@ -2729,39 +2796,39 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
         return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
     def reduce_scatter(out, partial, *, group):
-        out.copy_(partial.reshape(tp_size, capacity, 2).sum(0))
+        out.copy_(partial.reshape(tp_size, decode_capacity, 2).sum(0))
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity) as get_capacity,
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=matmul),
     ):
         buffers = None
-        # A full profiling batch, a smaller decode batch, and an idle rank
-        # must all use the same collective shapes and buffer addresses.
-        for num_tokens in (capacity, 1, 0):
+        # A full decode batch, a smaller batch and an idle rank must reuse the
+        # same buffers so every collective keeps its shape.
+        for num_tokens in (decode_capacity, 1, 0):
             x = torch.arange(num_tokens * tp_size * 2, dtype=torch.float32).reshape(num_tokens, tp_size, 2)
             output = torch.empty(num_tokens, 2)
             impl._forward_o_proj(x, output)
-            expected = x.sum((1, 2)).unsqueeze(1).expand(-1, 2)
-            torch.testing.assert_close(output, expected)
-            current_buffers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
-            assert impl._oproj_send_buf.shape[1] == capacity
+            torch.testing.assert_close(output, x.sum((1, 2)).unsqueeze(1).expand(-1, 2))
             assert torch.count_nonzero(impl._oproj_send_buf[:, num_tokens:]) == 0
+            current_buffers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
             if buffers is None:
                 buffers = current_buffers
-                get_capacity.return_value = capacity + 2
             else:
                 assert all(current is original for current, original in zip(current_buffers, buffers))
 
-        with pytest.raises(ValueError, match=r"capacity \(\d+\) must cover local tokens \(\d+\)"):
-            impl._forward_o_proj(torch.zeros(capacity + 1, tp_size, 2), torch.empty(capacity + 1, 2))
+        assert impl._oproj_send_buf.shape[1] == decode_capacity
+
+        # A batch sized by the larger scheduler budget must fail fast instead
+        # of inflating the static exchange buffers.
+        with pytest.raises(ValueError, match=r"capacity \(4\) must cover local tokens \(6\)"):
+            impl._forward_o_proj(torch.zeros(scheduler_capacity, tp_size, 2), torch.empty(scheduler_capacity, 2))
 
     assert a2a.call_count == rs.call_count == 3
-    get_capacity.assert_called_once()
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
@@ -2798,7 +2865,7 @@ def test_a5_fp8_o_proj_keeps_otp_collectives(tp_size, num_tokens):
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=4),
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant", side_effect=quantize),

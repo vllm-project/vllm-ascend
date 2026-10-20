@@ -22,13 +22,13 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -77,6 +77,7 @@ from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -105,6 +106,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
+from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_model_runner import (
     AsyncGPUModelRunnerOutput,
     GPUModelRunner,
@@ -116,7 +118,6 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     AttentionGroup,
-    prepare_kernel_block_sizes,
     raise_if_nan_logits,
 )
 
@@ -134,10 +135,13 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBu
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
+    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
+    supports_strided_mla_cache,
     using_paged_attention,
 )
 
@@ -180,7 +184,9 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
@@ -221,6 +227,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -240,6 +247,10 @@ from vllm_ascend.worker.utils import (
     AscendKVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     disable_compilation,
+    get_single_raw_mla_backing,
+    make_page_strided_cache_view,
+    prepare_ascend_kernel_block_sizes,
+    row_major_strides,
 )
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -260,6 +271,8 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
+    from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -267,6 +280,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.attention.dsa_v41 import (
+    AscendDSAV41Metadata,
     AscendDSAV41MetadataBuilder,
     DeepseekV41CacheLayer,
 )
@@ -278,6 +292,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
+    supports_component_major_mla_pd,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -368,6 +383,8 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        self.decoder_replay: AscendDecoderReplayLayers | None = None
+        self._decoder_replay_common_metadata: AscendCommonAttentionMetadata | None = None
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
         model_config = getattr(vllm_config, "model_config", None)
@@ -872,6 +889,9 @@ class NPUModelRunner(GPUModelRunner):
                 finegrained_tp.mlp_tensor_parallel_size,
             )
         )
+        # Routing capture assumes padding is at the end of the full DP batch,
+        # not inside each SP shard after MC2 prepare.
+        needs_uniform_routing_capture = self.vllm_config.aux_output_config.enable_return_routed_experts
         # Graph replay, these MoE paths and cross-DP fine-grained TP require
         # uniform runner inputs.
         # Draft models retain their padding until their communication policy
@@ -882,6 +902,7 @@ class NPUModelRunner(GPUModelRunner):
             or needs_uniform_moe_input
             or needs_uniform_mega_moe_input
             or needs_finegrained_tp
+            or needs_uniform_routing_capture
         ):
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
@@ -2933,7 +2954,6 @@ class NPUModelRunner(GPUModelRunner):
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
-        output_spec_token_ids = None
         use_padded_batch = False
         early_pp_padded_drafter = False
         if self.speculative_config:
@@ -2992,27 +3012,10 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-            draft_token_ids = self._draft_token_ids if use_pp_spec_decode else None
-            if draft_token_ids is not None:
-                if isinstance(draft_token_ids, torch.Tensor):
-                    num_reqs = draft_token_ids.shape[0]
-                    draft_ids_list = draft_token_ids[:num_reqs].cpu().tolist()
-                    draft_req_ids = self._draft_token_req_ids
-                else:
-                    draft_ids_list = draft_token_ids
-                    draft_req_ids = self.input_batch.req_ids
-                if draft_ids_list and draft_req_ids:
-                    draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
-                        draft_by_req_id.get(req_id, [])
-                        for req_id in req_ids_output_copy
-                    ]
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -3274,6 +3277,223 @@ class NPUModelRunner(GPUModelRunner):
             "block_table": block_table.get_device_tensor(num_reqs),
         }
 
+    def _initialize_decoder_replay(self) -> None:
+        self.decoder_replay = getattr(self.model, "decoder_replay_layers", None)
+        if self.decoder_replay is None:
+            return
+        capacity = round_up(self.max_num_tokens, self.parallel_config.tensor_parallel_size)
+        self._decoder_replay_rows = torch.empty(capacity, dtype=torch.int64, device=self.device)
+        self._decoder_replay_positions = torch.empty_like(self._decoder_replay_rows)
+        self._decoder_replay_offsets = self._make_buffer(self.max_num_reqs + 1, dtype=torch.int32)
+        self._decoder_replay_dropped_before = self._make_buffer(self.max_num_reqs + 1, dtype=torch.int32)
+        self._decoder_replay_start = torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device)
+        self._decoder_replay_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_source_slot_mappings: torch.Tensor | None = None
+        self._decoder_replay_builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self._decoder_replay_num_tokens = 0
+        self._decoder_replay_num_actual_tokens = 0
+        self._decoder_replay_counts: torch.Tensor | None = None
+        self._decoder_replay_metadata: dict[str, AscendDSAV41Metadata] | None = None
+
+    def _initialize_decoder_replay_metadata(self) -> None:
+        layers = self.decoder_replay
+        assert layers is not None
+        self._decoder_replay_slot_mappings = torch.empty(
+            (len(self.attn_groups), self._decoder_replay_rows.numel()), dtype=torch.int64, device=self.device
+        )
+        self._decoder_replay_source_slot_mappings = torch.empty_like(self._decoder_replay_slot_mappings)
+        self._decoder_replay_builders.clear()
+        for group_id, groups in enumerate(self.attn_groups):
+            for group in groups:
+                if isinstance(group.kv_cache_spec, CircularBufferSpec):
+                    continue
+                builder_cls = group.backend.get_builder_cls()
+                if not issubclass(builder_cls, AscendDSAV41MetadataBuilder):
+                    continue
+                builder = builder_cls(group.kv_cache_spec, group.layer_names, self.vllm_config, self.device)
+                self._decoder_replay_builders.append((group_id, group.layer_names, builder))
+        gather_replay_batch(
+            self.query_start_loc.gpu,
+            self._decoder_replay_dropped_before.gpu,
+            self.seq_lens,
+            self.replay_start.gpu,
+            self.positions,
+            self._decoder_replay_source_slot_mappings,
+            self._decoder_replay_rows,
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_positions,
+            self._decoder_replay_slot_mappings,
+            self._decoder_replay_start,
+            self._decoder_replay_rows.numel(),
+            layers.window,
+            warmup=True,
+        )
+
+    def _prepare_decoder_replay(self, num_tokens: int, is_dummy: bool) -> None:
+        layers = self.decoder_replay
+        assert layers is not None
+        layers.rows = layers.context_factory = None
+        if self.parallel_config.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(self.vllm_config):
+            logger.warning_once(
+                "Decoder bounded replay requires synchronized Ascend DP execution modes; skipping replay."
+            )
+            return
+        context = get_forward_context()
+        if (
+            context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or context.in_profile_run
+            or context.capturing
+            or torch.npu.is_current_stream_capturing()
+        ):
+            return
+        common = self._decoder_replay_common_metadata
+        real_batch = (
+            not is_dummy
+            and common is not None
+            and context.attn_metadata is not None
+            and self.input_batch.num_reqs > 0
+        )
+        trims = False
+        kept_lens = np.empty(0, dtype=np.int32)
+        self._decoder_replay_num_actual_tokens = num_tokens
+        if real_batch:
+            assert common is not None
+            num_reqs = self.input_batch.num_reqs
+            offsets = common.query_start_loc_cpu[: num_reqs + 1].numpy()
+            query_lens = np.diff(offsets)
+            keeps_rows = np.array([req in self.num_prompt_logprobs for req in self.input_batch.req_ids])
+            prefills = common.is_prefilling[:num_reqs].numpy()
+            kept_lens = np.where(prefills & ~keeps_rows, np.minimum(query_lens, layers.window), query_lens)
+            trims = bool((kept_lens < query_lens).any())
+            self._decoder_replay_num_actual_tokens = int(kept_lens.sum())
+            kept_offsets = self._decoder_replay_offsets.np[: num_reqs + 1]
+            kept_offsets[0] = 0
+            np.cumsum(kept_lens, out=kept_offsets[1:])
+            self._decoder_replay_dropped_before.np[: num_reqs + 1] = offsets - kept_offsets
+        self._decoder_replay_num_tokens = self._decoder_replay_num_actual_tokens
+        if enable_dsa_cp():
+            self._decoder_replay_num_tokens = round_up(
+                self._decoder_replay_num_tokens, self.parallel_config.tensor_parallel_size
+            )
+        self._decoder_replay_counts = None
+        if self.parallel_config.data_parallel_size > 1:
+            agreed = torch.zeros((2, self.parallel_config.data_parallel_size), dtype=torch.int32)
+            agreed[:, get_dp_group().rank_in_group] = torch.tensor([trims, self._decoder_replay_num_tokens])
+            if not should_skip_dp_coordination():
+                dist.all_reduce(agreed, group=get_dp_group().cpu_group)
+            trims = bool(agreed[0].any())
+            self._decoder_replay_counts = agreed[1]
+        if not trims:
+            return
+        if real_batch:
+            self._decoder_replay_metadata = self._build_decoder_replay_metadata(kept_lens)
+        else:
+            torch.arange(num_tokens, out=self._decoder_replay_rows[:num_tokens])
+            self._decoder_replay_rows[num_tokens : self._decoder_replay_num_tokens].zero_()
+            self._decoder_replay_metadata = context.attn_metadata
+        layers.rows = self._decoder_replay_rows[: self._decoder_replay_num_tokens]
+        layers.num_actual_rows = self._decoder_replay_num_actual_tokens
+        layers.context_factory = self._decoder_replay_context
+        logger.debug(
+            "Decoder bounded replay DP%d: %d -> %d tokens (%d padded).",
+            get_dp_group().rank_in_group,
+            num_tokens,
+            self._decoder_replay_num_actual_tokens,
+            self._decoder_replay_num_tokens,
+        )
+
+    def _build_decoder_replay_metadata(self, kept_lens: np.ndarray) -> dict[str, AscendDSAV41Metadata]:
+        layers = self.decoder_replay
+        original = self._decoder_replay_common_metadata
+        assert layers is not None and original is not None
+        num_reqs = len(kept_lens)
+        num_tokens = self._decoder_replay_num_tokens
+        assert self._decoder_replay_slot_mappings is not None
+        self._decoder_replay_dropped_before.copy_to_gpu(num_reqs + 1)
+        assert self._decoder_replay_source_slot_mappings is not None
+        source_slots = self._decoder_replay_source_slot_mappings[:, : original.num_actual_tokens]
+        for group_id in range(len(self.attn_groups)):
+            source_slots[group_id].copy_(
+                self.input_batch.block_table[group_id].slot_mapping.gpu[: original.num_actual_tokens]
+            )
+        slots = self._decoder_replay_slot_mappings[:, :num_tokens]
+        gather_replay_batch(
+            original.query_start_loc[: num_reqs + 1],
+            self._decoder_replay_dropped_before.gpu[: num_reqs + 1],
+            original.seq_lens[:num_reqs],
+            self.replay_start.gpu[:num_reqs],
+            original.positions,
+            source_slots,
+            self._decoder_replay_rows,
+            self._decoder_replay_offsets.gpu,
+            self._decoder_replay_positions,
+            slots,
+            self._decoder_replay_start,
+            num_tokens,
+            layers.window,
+        )
+        common = original.replace(
+            query_start_loc=self._decoder_replay_offsets.gpu[: num_reqs + 1],
+            query_start_loc_cpu=self._decoder_replay_offsets.cpu[: num_reqs + 1],
+            seq_lens=original.seq_lens[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=self._decoder_replay_num_actual_tokens,
+            num_input_tokens=num_tokens,
+            positions=self._decoder_replay_positions[:num_tokens],
+            positions_cpu=None,
+            max_query_len=int(kept_lens.max()),
+            is_prefilling=original.is_prefilling[:num_reqs],
+            actual_seq_lengths_q=self._decoder_replay_offsets.np[1 : num_reqs + 1].tolist(),
+        )
+        # Decoder metadata is prepared before forward, so its RoPE must not
+        # overwrite the runtime buffers referenced by the encoder metadata.
+        rope = get_cos_and_sin_dsa(common.positions, use_cache=False)
+        metadata: dict[str, AscendDSAV41Metadata] = {}
+        batch_shared: dict[str, Any] = {}
+        group_shared: dict[int, dict[str, Any]] = {}
+        for group_id, layer_names, builder in self._decoder_replay_builders:
+            cm = common.replace(
+                block_table_tensor=self.input_batch.block_table[group_id].get_device_tensor(num_reqs),
+                slot_mapping=slots[group_id],
+            )
+            value = builder.build(
+                0,
+                cm,
+                num_actual_reqs=num_reqs,
+                common_v41_batch_metadata=batch_shared,
+                common_v41_metadata=group_shared.setdefault(group_id, {}),
+                rope_views=rope,
+                replay_start=self._decoder_replay_start[:num_reqs],
+                replay_seq_lens=original.seq_lens[:num_reqs],
+                replay_max_seq_len=int(kept_lens.max()) + layers.window - 1,
+            )
+            for name in layer_names:
+                metadata[name] = value
+        return metadata
+
+    @contextmanager
+    def _decoder_replay_context(self) -> Iterator[None]:
+        outer = get_forward_context()
+        mask = getattr(outer, "mc2_mask", None)
+        saved_mask = mask.clone() if mask is not None else None
+        try:
+            with set_ascend_forward_context(
+                self._decoder_replay_metadata,
+                self.vllm_config,
+                num_tokens=self._decoder_replay_num_tokens,
+                num_tokens_across_dp=self._decoder_replay_counts,
+                num_actual_tokens=self._decoder_replay_num_actual_tokens,
+                aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                model_instance=self.model,
+                has_sinks=self._has_sinks,
+                eplb_heat_collection_status=outer.eplb_heat_collection_status,
+            ):
+                yield
+        finally:
+            if saved_mask is not None:
+                assert mask is not None
+                mask.copy_(saved_mask)
+
     def _model_forward(
         self,
         num_tokens_padded: int,
@@ -3281,6 +3501,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        decoder_replay_dummy: bool = False,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3327,6 +3548,8 @@ class NPUModelRunner(GPUModelRunner):
         run_model = partial(self.model, **model_inputs)
 
         try:
+            if self.decoder_replay is not None:
+                self._prepare_decoder_replay(num_tokens_padded, decoder_replay_dummy)
             if self.enable_enpu:
                 # The soft segmentation scenario requires event.record first, then event.wait
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
@@ -3983,6 +4206,7 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor if cudagraph_runtime_mode == CUDAGraphMode.FULL else None,
             )
         self._maybe_eager_restore_copy_sfa_tails(attn_metadata)
+        self._decoder_replay_common_metadata = cm_base
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -4017,6 +4241,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
+        randomize_inputs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -4341,7 +4566,11 @@ class NPUModelRunner(GPUModelRunner):
             active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
             self.kvpp.prepare_forward(False)
 
-            with set_ascend_forward_context(
+            with (
+                self.maybe_randomize_inputs(input_ids, inputs_embeds, randomize_inputs=True)
+                if randomize_inputs
+                else nullcontext()
+            ), set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
@@ -4359,7 +4588,12 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded,
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                    decoder_replay_dummy=True,
                 )
             if active_device_metadata_executor is not None and active_device_metadata_executor.submission_in_flight:
                 active_device_metadata_executor.release()
@@ -4416,7 +4650,7 @@ class NPUModelRunner(GPUModelRunner):
         output = self.model.compute_logits(hidden_states)
         return output
 
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         self.eplb_warmup()
         if self.sparse_kv_offload_enabled:
             allocate_kv_offload_topk_profile_buffers(
@@ -4431,8 +4665,10 @@ class NPUModelRunner(GPUModelRunner):
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
             with disable_compilation(self.get_model()):
-                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
-        super().profile_run()
+                self._dummy_run(
+                    mc2_tokens_capacity, with_prefill=True, is_profile=True, randomize_inputs=randomize_inputs
+                )
+        super().profile_run(randomize_inputs=randomize_inputs)
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -4586,6 +4822,8 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     owners[key] = impl
 
+        self._initialize_decoder_replay()
+
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -4698,10 +4936,13 @@ class NPUModelRunner(GPUModelRunner):
         # old first-spec scan over attn_groups cannot recognize them.
         self.need_accepted_tokens = kv_cache_config.has_mamba_layers
 
-        kernel_block_sizes = prepare_kernel_block_sizes(
-            kv_cache_config, self.attn_groups
-        )
+        kernel_block_sizes = prepare_ascend_kernel_block_sizes(kv_cache_config, self.attn_groups)
         self.kernel_block_sizes = kernel_block_sizes
+        if not vllm_version_is("0.31.0"):
+            # vLLM #57169/main splits metadata-builder creation out of
+            # `initialize_attn_backend`; builders need the kernel block sizes.
+            self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+            self._init_device_metadata_providers()
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # The one replay window the KV cache groups agree on, 0 when nothing
         # replays (the scheduler asserts the same agreement). Read after the
@@ -4757,8 +4998,13 @@ class NPUModelRunner(GPUModelRunner):
                 | AscendDraftModelProposer,
             )
             kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
-                sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
+            if isinstance(self.drafter, AscendDSparkProposer) or not vllm_version_is("0.31.0"):
+                # On main, create_metadata_builders() selects the kernel block
+                # size via select_common_block_size(), which requires an int.
+                # 310P keeps per-group candidate lists (e.g. [[128], [0]]), so
+                # collapse each group to its first candidate.
+                candidate_sizes = cast("list[int] | list[list[int]] | int", kernel_block_sizes)
+                sizes = candidate_sizes if isinstance(candidate_sizes, list) else [candidate_sizes]
                 draft_kernel_block_sizes = [
                     int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
                 ]
@@ -4789,6 +5035,8 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             kv_caches=kv_caches,
         )
+        if self.decoder_replay is not None:
+            self._initialize_decoder_replay_metadata()
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
@@ -4926,6 +5174,32 @@ class NPUModelRunner(GPUModelRunner):
             self.use_compress
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         )
+
+    def _uses_single_raw_mla_cache(
+        self,
+        layer_name: str,
+        kv_cache_spec: KVCacheSpec,
+        attn_module: AttentionLayerBase | None = None,
+    ) -> bool:
+        """Whether this runner can expose an MLA layer from one raw backing."""
+        if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            return False
+        if not kv_cache_spec.supports_single_raw_backing:
+            return False
+        # Runtime-only exclusions do not need the static forward context. In
+        # particular, sparse layerwise tests synthesize a runner without it.
+        if (
+            not supports_component_major_mla_pd(self.vllm_config)
+            or self.use_sparse
+            or self.sparse_kv_offload_enabled
+            or self.use_compress
+        ):
+            return False
+        if attn_module is None:
+            attn_module = self.compilation_config.static_forward_context.get(layer_name)
+            if attn_module is None:
+                return False
+        return supports_strided_mla_cache(self.vllm_config, attn_module, kv_cache_spec)
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
@@ -5356,6 +5630,23 @@ class NPUModelRunner(GPUModelRunner):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
                     current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
+                    is_single_raw_mla = self._uses_single_raw_mla_cache(
+                        layer_name,
+                        current_kv_cache_spec,
+                    )
+                    # Pure MLA layers allocate a single raw backing here. Hybrid
+                    # MLA uses a bare tensor slice from the standardized shared
+                    # backing above. The single-raw predicate is per-layer and
+                    # must not be generalized to shared_layers.
+                    if is_single_raw_mla:
+                        fused_raw_size = (
+                            kv_cache_config.num_blocks
+                            * current_kv_cache_spec.page_size_bytes
+                        )
+                        kv_cache_raw_tensors[layer_name] = (
+                            self._allocate_int8_cache_tensor(fused_raw_size, alignment),
+                        )
+                        continue
 
                     # vLLM #51718 packs every layer of a group into a single
                     # KVCacheTensor on main; the per-layer size is the block
@@ -5447,24 +5738,20 @@ class NPUModelRunner(GPUModelRunner):
     ):
         reshaped_kv_tensors = []
         assert raw_tensor.element_size() == 1
-        base_storage_offset_bytes = raw_tensor.storage_offset() + initial_offset_bytes
-        storage_offset_bytes = base_storage_offset_bytes
+        base_offset_bytes = initial_offset_bytes
+        storage_offset_bytes = base_offset_bytes
         for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
             if overlap_full_kv_cache and idx == 2:
-                storage_offset_bytes = base_storage_offset_bytes
+                storage_offset_bytes = base_offset_bytes
             dtype_size = get_dtype_size(dtype)
-            num_element_per_page = (
-                page_size_bytes // dtype_size
-            )
+            stride = row_major_strides(shape)
 
-            stride = torch.empty(shape).stride()
-            target_stride = (num_element_per_page, *stride[1:])
-            assert storage_offset_bytes % dtype_size == 0
-            tensor = torch.as_strided(
-                raw_tensor.view(dtype),
-                size=shape,
-                stride=target_stride,
-                storage_offset=storage_offset_bytes // dtype_size,
+            tensor = make_page_strided_cache_view(
+                raw_tensor,
+                shape,
+                dtype,
+                page_size_bytes,
+                storage_offset_bytes,
             )
             reshaped_kv_tensors.append(tensor)
             storage_offset_bytes += stride[0] * dtype_size
@@ -5719,6 +6006,89 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
+                        continue
+
+                    # MLA uses one raw backing allocated by the allocation or
+                    # hybrid phase. A5 FlashMLA consumes one token-interleaved
+                    # tensor; A3 FIA consumes component-major views. MHA/GQA
+                    # keeps the raw K/V protocol.
+                    raw_cache = kv_cache_raw_tensors[layer_name]
+                    fused_raw_tensor = get_single_raw_mla_backing(raw_cache)
+
+                    # Only a single-backing Ascend MLA cache needs module-level
+                    # metadata. Legacy MHA/GQA K/V tuples keep the raw K/V path.
+                    attn_module = None
+                    if (
+                        fused_raw_tensor is not None
+                        and isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                    ):
+                        attn_module = self.compilation_config.static_forward_context.get(layer_name)
+
+                    if (
+                        fused_raw_tensor is not None
+                        and self._uses_single_raw_mla_cache(
+                            layer_name,
+                            current_kv_cache_spec,
+                            attn_module,
+                        )
+                    ):
+                        dtype = current_kv_cache_spec.dtype
+                        manager_block_size = current_kv_cache_spec.block_size
+                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id]
+                        kernel_blocks_per_manager = manager_block_size // kernel_block_size
+                        physical_page_bytes = current_kv_cache_spec.page_size_bytes
+                        slot_bytes = physical_page_bytes // kernel_blocks_per_manager
+                        nope_dim, rope_dim = self._get_attention_kv_cache_dims(
+                            layer_name, current_kv_cache_spec
+                        )
+                        fused_dim = nope_dim + rope_dim
+                        component_shape = (
+                            kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                            kernel_block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                        )
+                        if (
+                            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                            and current_kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                            and get_flashmla_ops() is not None
+                            # The outer eligibility check admits only supported
+                            # PD, which requires component-major pages.
+                            and self.vllm_config.kv_transfer_config is None
+                        ):
+                            # A5 interleaves [NoPE | RoPE] per token in every
+                            # kernel slot: token0[NoPE|RoPE], token1[...], ...
+                            fused_cache = make_page_strided_cache_view(
+                                fused_raw_tensor,
+                                (*component_shape, fused_dim),
+                                dtype,
+                                slot_bytes,
+                            )
+                            kv_caches[layer_name] = fused_cache
+                            continue
+
+                        # A3/FIA requires NoPE and RoPE to be internally
+                        # contiguous; only the first axis may carry the page
+                        # stride. Each kernel slot is physically stored as
+                        # [all NoPE][all RoPE][padding].
+                        nope_cache = make_page_strided_cache_view(
+                            fused_raw_tensor,
+                            (*component_shape, nope_dim),
+                            dtype,
+                            slot_bytes,
+                        )
+                        rope_cache = make_page_strided_cache_view(
+                            fused_raw_tensor,
+                            (*component_shape, rope_dim),
+                            dtype,
+                            slot_bytes,
+                            offset_bytes=(
+                                kernel_block_size
+                                * current_kv_cache_spec.num_kv_heads
+                                * nope_dim
+                                * get_dtype_size(dtype)
+                            ),
+                        )
+                        kv_caches[layer_name] = (nope_cache, rope_cache)
                         continue
                     raw_kv_is_combined = False
                     if (self.use_sparse or current_packed_sfa_main_cache) and "cache_only_layers" not in layer_name:
@@ -6201,18 +6571,30 @@ class NPUModelRunner(GPUModelRunner):
             for group_key, layer_names in attn_backends_map.items():
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
-                attn_metadata_builders = []
-                attn_metadata_builders.append(
-                    attn_backend.get_builder_cls()(
-                        kv_cache_spec,
-                        layer_names,
-                        self.vllm_config,
-                        self.device,
+                if vllm_version_is("0.31.0"):
+                    attn_metadata_builders = [
+                        attn_backend.get_builder_cls()(
+                            kv_cache_spec,
+                            layer_names,
+                            self.vllm_config,
+                            self.device,
+                        )
+                    ]
+                    attn_group = AttentionGroup(
+                        attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                     )
-                )
-                attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
-                )
+                else:
+                    # vLLM #57169/main inserted `kernel_block_size` (et al.)
+                    # before `metadata_builders`, so the builders are no longer
+                    # the 5th positional field. On main they are created later
+                    # by `initialize_metadata_builders` (which also needs the
+                    # kernel block sizes).
+                    attn_group = AttentionGroup(
+                        backend=attn_backend,
+                        layer_names=layer_names,
+                        kv_cache_spec=kv_cache_spec,
+                        kv_cache_group_id=kv_cache_group_id,
+                    )
                 attn_groups.append(attn_group)
             return attn_groups
 
@@ -6231,6 +6613,16 @@ class NPUModelRunner(GPUModelRunner):
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
+        # On main the metadata builders are created later, in
+        # `initialize_metadata_builders` (called from `initialize_kv_cache`),
+        # so the device-metadata providers and the reorder threshold are set up
+        # there instead.
+        if vllm_version_is("0.31.0"):
+            self._init_device_metadata_providers()
+            # Calculate reorder batch threshold (if needed)
+            self.calculate_reorder_batch_threshold()
+
+    def _init_device_metadata_providers(self) -> None:
         device_metadata_providers = {
             id(builder): builder
             for attn_groups in self.attn_groups
@@ -6243,9 +6635,6 @@ class NPUModelRunner(GPUModelRunner):
             self.device_metadata_providers = device_metadata_providers
             for provider in device_metadata_providers.values():
                 provider.enable_device_metadata()
-
-        # Calculate reorder batch threshold (if needed)
-        self.calculate_reorder_batch_threshold()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -6363,6 +6752,13 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
+                        # Keep the physical MLA latent head count for Kimi K3;
+                        # query heads must not inflate the generic KV page shape.
+                        num_heads=(
+                            spec.num_heads
+                            if getattr(self.model_config.hf_text_config, "model_type", None) == "kimi_linear"
+                            else attn_module.num_heads
+                        ),
                         num_kv_heads=spec.num_kv_heads,
                         head_size=head_size,
                         dtype=dtype,
@@ -6460,9 +6856,14 @@ class NPUModelRunner(GPUModelRunner):
         TODO: Resolve mode first, then apply joint alignment upstream and remove
         this workaround, including the resolver-only TP override.
         """
+        # vLLM #60517 removed `PassConfig.enable_sp` on main; the
+        # `enable_sp(self.vllm_config)` term already covers Ascend SP there.
+        pass_sp = (
+            self.compilation_config.pass_config.enable_sp if vllm_version_is("0.31.0") else False
+        )
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or self.compilation_config.pass_config.enable_sp)
+            and (enable_dsa_cp() or enable_sp(self.vllm_config) or pass_sp)
         )
 
     def _check_and_update_cudagraph_mode(
@@ -6490,16 +6891,25 @@ class NPUModelRunner(GPUModelRunner):
             resolver_tensor_parallel_size = tensor_parallel_size
             if self._should_align_cudagraph_capture_sizes():
                 graph_alignment = math.lcm(self.uniform_decode_query_len, tensor_parallel_size)
-                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
+                # vLLM #60517 dropped the `tensor_parallel_size` argument on
+                # main; the SP-aware lcm is computed here instead.
+                if vllm_version_is("0.31.0"):
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
+                else:
+                    self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
                 resolver_tensor_parallel_size = 1
+            # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
+            resolve_kwargs = (
+                {"tensor_parallel_size": resolver_tensor_parallel_size} if vllm_version_is("0.31.0") else {}
+            )
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
+                **resolve_kwargs,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
@@ -6692,6 +7102,11 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 
 @contextmanager
 def update_pass_config(model_runner):
+    # vLLM #60517 removed `PassConfig.enable_sp` on main; the pass-based SP this
+    # context manager toggled no longer exists there, so it is a no-op.
+    if not vllm_version_is("0.31.0"):
+        yield
+        return
     try:
         original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
         model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
