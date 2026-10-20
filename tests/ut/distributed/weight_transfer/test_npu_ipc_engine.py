@@ -192,6 +192,7 @@ def test_start_weight_update():
 
 def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine._packed_pending = []
     engine.model = MagicMock()
     engine.model_config = MagicMock()
     mock_finalize = MagicMock()

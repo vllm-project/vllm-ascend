@@ -1671,10 +1671,10 @@
 #       Ascend runtime buffers and shared checkpoint parameters must not be
 #       counted as independently delivered tensors or replaced by meta storage.
 #    How:
-#       Extend the existing skip sets in place and zero-fill materialized meta
-#       tensors. Checkpoint loading and explicit Worker retention remain separate.
+#       Extend upstream skip sets in place. Runtime buffers use the existing
+#       Worker backup; checkpoint parameters use normal loading or retention.
 #    Related PR (if no, explain why):
 #       No upstream PR yet: the tensor names and shared aliases are Ascend-specific.
 #    Future Plan:
 #       Remove when upstream reload supports backend-provided accounting/storage
-#       exclusions and defined materialization for partially covered modules.
+#       exclusions for runtime buffers and shared checkpoint parameters.

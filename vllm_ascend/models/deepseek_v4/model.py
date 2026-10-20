@@ -66,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -673,33 +674,6 @@ class DeepseekV4Attention(nn.Module):
     ) -> torch.Tensor:
         return self.dsa_attn(positions, hidden_states, llama_4_scaling)
 
-    def reinitialize_runtime_params(self) -> None:
-        """Restore weightless-norm identity weights and attention scale mirrors.
-
-        ``q_norm_without_weight`` is an ``RMSNorm(has_weight=False)`` whose
-        ``weight`` stays a plain (non-Parameter) tensor of ones used as the
-        identity multiplier by the A5 q-RMS kernel path.  After a level-2
-        sleep (and layerwise reload that never refills it, since it is absent
-        from the checkpoint) the storage comes back zeroed, which makes the
-        served-side attention output collapse to zeros.  The attention scale
-        mirrors live on the DSA attention module (``dsa_attn``), so sweep them
-        there as well: a ``getattr`` on this module would never see them.
-        """
-        qnw = getattr(self, "q_norm_without_weight", None)
-        if qnw is not None:
-            w = getattr(qnw, "weight", None)
-            if w is not None and not isinstance(w, torch.nn.Parameter) and w.numel() > 0:
-                with torch.no_grad():
-                    w.fill_(1.0)
-        for _owner in (self, getattr(self, "dsa_attn", None)):
-            if _owner is None:
-                continue
-            for _name in ("_k_scale_cpu", "_v_scale_cpu"):
-                _s = getattr(_owner, _name, None)
-                if isinstance(_s, torch.Tensor) and _s.numel() > 0:
-                    with torch.no_grad():
-                        _s.fill_(1.0)
-
 
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
@@ -927,57 +901,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 device=self.device,
             )
 
-    def reinitialize_runtime_params(self) -> None:
-        """Reconstruct derived state without overwriting checkpoint parameters.
+        self._register_sleep_buffers()
 
-        Routing tables, router biases and attention sinks are named parameters.
-        Frozen subsets use ModelConfig.sleep_preserve_parameter_names and the
-        Worker's per-sleep snapshot; other parameters receive the update payload.
-        Neither path may be overwritten with boot-time values or constructor
-        defaults here. The layerwise skip set preserves their existing storage.
-        """
-        for layer in self.layers:
-            attn = getattr(layer, "self_attn", None)
-            if attn is None:
-                continue
-            rotary = getattr(attn, "rotary_emb", None)
-            if rotary is not None and callable(getattr(rotary, "reinitialize_runtime_params", None)):
-                rotary.reinitialize_runtime_params()
-            attention_reinit = getattr(attn, "reinitialize_runtime_params", None)
-            if callable(attention_reinit):
-                attention_reinit()
-
-        # Generic sweep: every weightless RMSNorm keeps its identity weight as a
-        # plain tensor (has_weight=False -> no nn.Parameter, absent from the
-        # checkpoint); after sleep+wake / layerwise reload the storage is
-        # zeroed and nothing refills it.  Restore the constructor value (ones).
-        for _mod in self.modules():
-            if not getattr(_mod, "has_weight", True) and hasattr(_mod, "weight"):
-                _w = getattr(_mod, "weight", None)
-                if isinstance(_w, torch.Tensor) and not isinstance(_w, torch.nn.Parameter) and _w.numel() > 0:
-                    with torch.no_grad():
-                        _w.fill_(1.0)
-        # The generic attention glue registers ``_k_scale``/``_v_scale``/
-        # ``_q_scale``/``_prob_scale`` as constants (``torch.tensor(1.0)``), but
-        # a dummy/meta-started engine materialises those scalar buffers from
-        # uninitialised storage, so the live-update lane can end up with a
-        # garbage descale factor while a startup-loaded server keeps 1.0.  They
-        # are not weight-derived in a bf16-KV configuration, so restore the
-        # default (skipping meta tensors, whose values cannot be read).
-        for _mod in self.modules():
-            _buffers = getattr(_mod, "_buffers", None)
-            if not _buffers:
-                continue
-            for _sname in ("_k_scale", "_v_scale", "_q_scale", "_prob_scale"):
-                _buf = _buffers.get(_sname)
-                if (
-                    isinstance(_buf, torch.Tensor)
-                    and _buf.numel() == 1
-                    and _buf.device.type != "meta"
-                    and float(_buf.detach().cpu()) != 1.0
-                ):
-                    with torch.no_grad():
-                        _buf.fill_(1.0)
+    def _register_sleep_buffers(self) -> None:
+        # Expose weightless RMSNorm identity tensors to the existing Worker backup.
+        # Keep the original object/address used by the kernel, without adding a
+        # checkpoint parameter or a second CPU snapshot implementation.
+        for module in self.modules():
+            if isinstance(module, RMSNorm) and not module.has_weight:
+                module.register_buffer("_sleep_norm_weight", module.weight, persistent=False)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1130,6 +1062,35 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     }
     model_cls = DeepseekV4Model
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.hc_head.hc_": "model.hc_head_"},
+        orig_to_new_substr={
+            "self_attn.compressor.indexer.position_bias": "self_attn.indexer.compressor.ape",
+            "self_attn.compressor.indexer.kv_proj.weight": "self_attn.indexer.compressor.wkv.weight",
+            "self_attn.compressor.indexer.gate_proj.weight": "self_attn.indexer.compressor.wgate.weight",
+            "self_attn.compressor.indexer.kv_norm.weight": "self_attn.indexer.compressor.norm.weight",
+            "self_attn.compressor.indexer.q_b_proj.weight": "self_attn.indexer.wq_b.weight",
+            "self_attn.compressor.indexer.scorer.weights_proj.weight": "self_attn.indexer.weights_proj.weight",
+            "self_attn.compressor.position_bias": "self_attn.compressor.ape",
+            "self_attn.compressor.kv_proj.weight": "self_attn.compressor.wkv.weight",
+            "self_attn.compressor.gate_proj.weight": "self_attn.compressor.wgate.weight",
+            "self_attn.compressor.kv_norm.weight": "self_attn.compressor.norm.weight",
+            "self_attn.q_a_proj.weight": "self_attn.wq_a.weight",
+            "self_attn.q_a_norm.weight": "self_attn.q_norm.weight",
+            "self_attn.q_b_proj.weight": "self_attn.wq_b.weight",
+            "self_attn.kv_proj.weight": "self_attn.wkv.weight",
+            "self_attn.o_a_proj.weight": "self_attn.wo_a.weight",
+            "self_attn.o_b_proj.weight": "self_attn.wo_b.weight",
+            ".attn_hc.fn": ".hc_attn_fn",
+            ".attn_hc.base": ".hc_attn_base",
+            ".attn_hc.scale": ".hc_attn_scale",
+            ".ffn_hc.fn": ".hc_ffn_fn",
+            ".ffn_hc.base": ".hc_ffn_base",
+            ".ffn_hc.scale": ".hc_ffn_scale",
+            ".self_attn.sinks": ".self_attn.attn_sink",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1176,10 +1137,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
-
-    def reinitialize_runtime_params(self) -> None:
-        """Delegate to the backbone (hash-router tables, VL bias, sinks)."""
-        self.model.reinitialize_runtime_params()
 
     def forward(
         self,
@@ -1256,100 +1213,22 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         heads_per_rank = self.config.num_attention_heads // tp_size
         head_start = tp_rank * heads_per_rank
 
-        # ---- HF checkpoint -> served-model name translation (weight update) ----
-        # On a live weight update the trainer enumerates an HF
-        # ``DeepseekV4ForCausalLM`` ``from_config`` model, so the incoming
-        # parameter names follow the HF layout (``q_a_proj``, ``sinks``,
-        # ``mlp.experts.gate_up_proj`` fused tensors, ...) that the served model
-        # does not use.  Translate every incoming name onto the served-model
-        # layout and expand fused routed-expert tensors into per-expert weights
-        # before the normal loading pipeline below.  ``<old,new>`` pairs mirror
-        # the HF -> served rename table in
-        # ``tests/e2e/pull_request/rlhf/weight_transfer_test_utils.py``.
-        _dsv4_self_attn_renames = (
-            ("self_attn.compressor.position_bias", "self_attn.compressor.ape"),
-            ("self_attn.compressor.kv_proj.weight", "self_attn.compressor.wkv.weight"),
-            ("self_attn.compressor.gate_proj.weight", "self_attn.compressor.wgate.weight"),
-            ("self_attn.compressor.kv_norm.weight", "self_attn.compressor.norm.weight"),
-            ("self_attn.q_a_proj.weight", "self_attn.wq_a.weight"),
-            ("self_attn.q_a_norm.weight", "self_attn.q_norm.weight"),
-            ("self_attn.q_b_proj.weight", "self_attn.wq_b.weight"),
-            ("self_attn.kv_proj.weight", "self_attn.wkv.weight"),
-            ("self_attn.o_a_proj.weight", "self_attn.wo_a.weight"),
-            ("self_attn.o_b_proj.weight", "self_attn.wo_b.weight"),
-        )
-        # HF nests the served indexer under the compressor
-        # (``self_attn.compressor.indexer.*``); the served model keeps the
-        # indexer as a sibling of the compressor, with its own nested
-        # ``compressor`` module.
-        _dsv4_indexer_renames = (
-            ("self_attn.compressor.indexer.position_bias", "self_attn.indexer.compressor.ape"),
-            ("self_attn.compressor.indexer.kv_proj.weight", "self_attn.indexer.compressor.wkv.weight"),
-            ("self_attn.compressor.indexer.gate_proj.weight", "self_attn.indexer.compressor.wgate.weight"),
-            ("self_attn.compressor.indexer.kv_norm.weight", "self_attn.indexer.compressor.norm.weight"),
-            ("self_attn.compressor.indexer.q_b_proj.weight", "self_attn.indexer.wq_b.weight"),
-            ("self_attn.compressor.indexer.scorer.weights_proj.weight", "self_attn.indexer.weights_proj.weight"),
-        )
-        # HC (hash-constrained) aug-head parameters: HF ``attn_hc/ffn_hc``
-        # versus served ``hc_attn/hc_ffn``.
-        _dsv4_hc_renames = (
-            (".attn_hc.fn", ".hc_attn_fn"),
-            (".attn_hc.base", ".hc_attn_base"),
-            (".attn_hc.scale", ".hc_attn_scale"),
-            (".ffn_hc.fn", ".hc_ffn_fn"),
-            (".ffn_hc.base", ".hc_ffn_base"),
-            (".ffn_hc.scale", ".hc_ffn_scale"),
-        )
+        def unpack_experts(weights):
+            for name, weight in weights:
+                if name.endswith(".mlp.experts.gate_up_proj"):
+                    prefix = name.removesuffix("gate_up_proj")
+                    gate, up = weight.chunk(2, dim=1)
+                    for expert in range(weight.shape[0]):
+                        yield f"{prefix}{expert}.gate_proj.weight", gate[expert].contiguous()
+                        yield f"{prefix}{expert}.up_proj.weight", up[expert].contiguous()
+                elif name.endswith(".mlp.experts.down_proj"):
+                    prefix = name.removesuffix("down_proj")
+                    for expert in range(weight.shape[0]):
+                        yield f"{prefix}{expert}.down_proj.weight", weight[expert].contiguous()
+                else:
+                    yield name, weight
 
-        def _dsv4_translate_hf_name(name: str) -> str:
-            if name.startswith("model.hc_head.hc_"):
-                # HF keeps the HC-aug-head parameters under a nested
-                # ``model.hc_head`` module (``model.hc_head.hc_fn``), while the
-                # served model registers them directly on ``DeepseekV4Model``
-                # (``model.hc_head_fn``).  Drop the intermediate ``hc_head``
-                # module segment so the mapped name exists in params_dict.
-                suffix = name[len("model.hc_head.hc_") :]  # fn / base / scale
-                return f"model.hc_head_{suffix}"
-            for old, new in _dsv4_indexer_renames:
-                if old in name:
-                    name = name.replace(old, new)
-            for old, new in _dsv4_self_attn_renames:
-                if name.endswith(old):
-                    name = name[: -len(old)] + new
-            for old, new in _dsv4_hc_renames:
-                if old in name:
-                    name = name.replace(old, new)
-            if name.endswith(".self_attn.sinks"):
-                name = name[: -len(".sinks")] + ".attn_sink"
-            return name
-
-        def _dsv4_expand(out: list, name: str, loaded_weight: torch.Tensor) -> None:
-            # HF keeps routed experts fused into one tensor per projection.
-            # gate_up_proj: (num_experts, 2*intermediate, hidden)
-            # down_proj:    (num_experts, hidden, intermediate)
-            if name.endswith(".mlp.experts.gate_up_proj"):
-                num_experts, two_inter, hidden = loaded_weight.shape
-                inter = two_inter // 2
-                prefix = name[: -len("mlp.experts.gate_up_proj")]
-                for e in range(num_experts):
-                    out.append((f"{prefix}mlp.experts.{e}.gate_proj.weight", loaded_weight[e, :inter, :].contiguous()))
-                    out.append((f"{prefix}mlp.experts.{e}.up_proj.weight", loaded_weight[e, inter:, :].contiguous()))
-                return
-            if name.endswith(".mlp.experts.down_proj"):
-                num_experts, hidden, inter = loaded_weight.shape
-                prefix = name[: -len("mlp.experts.down_proj")]
-                for e in range(num_experts):
-                    out.append((f"{prefix}mlp.experts.{e}.down_proj.weight", loaded_weight[e].contiguous()))
-                return
-            out.append((name, loaded_weight))
-
-        # expand fused experts and translate names in one pass
-        _normalized_weights: list[tuple[str, torch.Tensor]] = []
-        for _name, _weight in weights:
-            _dsv4_expand(_normalized_weights, _dsv4_translate_hf_name(_name), _weight)
-        weights = _normalized_weights
-
-        for name, loaded_weight in weights:
+        for name, loaded_weight in unpack_experts(self.hf_to_vllm_mapper.apply(weights)):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model

@@ -906,11 +906,7 @@ class NPUWorker(WorkerBase):
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
-            # DSV4 fix(rl-weight-update): keep the weights pool persistently
-            # mapped across sleep/wake so the ACL graph (captured against the
-            # boot addresses) stays valid after a weight update; the update
-            # loader writes in-place into the original storage.
-            context = allocator.use_memory_pool(tag=CaMemAllocator.sleep_persistent_tag)
+            context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
 

@@ -23,21 +23,6 @@ class TestEnvVariables(TestBase):
     def setUp(self):
         self.env_vars = list(envs_ascend.env_variables.keys())
 
-    def test_ipc_strict_update_preserves_nonempty_flag_semantics(self):
-        name = "VLLM_IPC_STRICT_UPDATE"
-        original_val = os.environ.pop(name, None)
-        try:
-            self.assertFalse(getattr(envs_ascend, name))
-            for value, expected in (("", False), ("0", True), ("1", True)):
-                with self.subTest(value=value):
-                    os.environ[name] = value
-                    self.assertIs(getattr(envs_ascend, name), expected)
-        finally:
-            if original_val is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = original_val
-
     def test_env_vars_behavior(self):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):

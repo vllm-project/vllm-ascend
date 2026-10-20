@@ -69,6 +69,8 @@ class _SinkOnlyModel(nn.Module):
         self.quant_config = None
         self.rotation_path = None
 
+    hf_to_vllm_mapper = target_module.AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper
+
     # Keep the actual predicates/mappings, including the MTP block container.
     no_mtp_block_in_name = mtp_module.DeepSeekV4MTP.no_mtp_block_in_name
     _remap_dspark_name = dspark_module.DSparkDeepseekV4ForCausalLM._remap_dspark_name
@@ -159,19 +161,6 @@ def test_attention_sink_dsa_cp_loading(sink_path, with_weight_loader):
     _check_load(case, tp_size=2, tp_rank=1, dsa_cp=True, with_weight_loader=with_weight_loader)
 
 
-# vllm_ascend deliberately keeps Ascend-only runtime tensors out of the
-# layerwise reload plan (patch.platform.patch_layerwise_skip_tensors), and
-# ``attn_sink`` is one of them: it is a single nn.Parameter registered on two
-# modules, so the plan would count it twice and one of the two modules could
-# never reach its completion trigger.  This test asserts the stock wrapper is
-# installed for that parameter, which does not hold while the patch is active.
-_ATTN_SINK_IS_SKIPPED = "attn_sink" in getattr(reload_meta, "SKIP_LOAD_TENSORS", ())
-
-
-@pytest.mark.skipif(
-    _ATTN_SINK_IS_SKIPPED,
-    reason="vllm_ascend excludes attn_sink from the layerwise reload plan",
-)
 @pytest.mark.parametrize("dsa_cp", [False, True], ids=["tp", "dsa_cp"])
 def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
     """The real upstream wrapper must replay two updates into original storage."""
@@ -186,8 +175,12 @@ def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
 
     for offset in (100, 200):
         initialize_layerwise_reload(case.model)
-        assert case.attention.attn_sink.is_meta
-        assert case.attention.attn_sink.weight_loader.__name__ == "online_process_loader"
+        if "attn_sink" in reload_meta.SKIP_LOAD_TENSORS:
+            assert not case.attention.attn_sink.is_meta
+            assert case.attention.attn_sink is original_param
+        else:
+            assert case.attention.attn_sink.is_meta
+            assert case.attention.attn_sink.weight_loader.__name__ == "online_process_loader"
         new_weight = initial_weight + offset
         assert case.load(new_weight) == {case.parameter_name}
         finalize_layerwise_reload(case.model, SimpleNamespace(dtype=torch.float32))

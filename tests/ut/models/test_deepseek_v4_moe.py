@@ -380,8 +380,40 @@ def test_runtime_hook_keeps_latest_loaded_parameters(monkeypatch):
             ("model.layers.0.self_attn.attn_sink", new_sink),
         ]
     )
-    inner.reinitialize_runtime_params()
+    inner._register_sleep_buffers()
     assert torch.equal(layer.mlp.gate.tid2eid, new_table)
     assert torch.equal(layer.self_attn.attn_sink, new_sink)
     assert (layer.mlp.gate.tid2eid.data_ptr(), layer.self_attn.attn_sink.data_ptr()) == pointers
     assert not hasattr(inner, "_runtime_tensor_backup")
+
+
+@pytest.mark.parametrize("value", [0.125, 0.375])
+def test_weightless_norm_uses_worker_buffer_retention(monkeypatch, value):
+    class RuntimeNorm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.has_weight = False
+            self.weight = torch.ones(3)
+
+    monkeypatch.setattr(deepseek_v4_module, "RMSNorm", RuntimeNorm)
+    model = deepseek_v4_module.DeepseekV4Model.__new__(deepseek_v4_module.DeepseekV4Model)
+    nn.Module.__init__(model)
+    model.runtime_norm = RuntimeNorm()
+    gate = nn.Module()
+    gate.tid2eid = nn.Parameter(torch.tensor([[2, 0], [1, 2]]), requires_grad=False)
+    for name in ("bias_vl", "e_score_correction_bias", "attn_sink"):
+        gate.register_parameter(name, nn.Parameter(torch.full((3,), value)))
+    model.gate = gate
+    before = {n: (p.detach().clone(), p.data_ptr()) for n, p in model.named_parameters()}
+    weight = model.runtime_norm.weight
+    for _ in range(2):
+        model._register_sleep_buffers()
+        assert model.runtime_norm._sleep_norm_weight is weight
+        assert "runtime_norm._sleep_norm_weight" in dict(model.named_buffers())
+        assert "runtime_norm._sleep_norm_weight" not in model.state_dict()
+        assert model.runtime_norm.weight is weight
+        for name, param in model.named_parameters():
+            expected, pointer = before[name]
+            torch.testing.assert_close(param, expected)
+            assert param.data_ptr() == pointer
+    assert not hasattr(model, "_runtime_tensor_backup")

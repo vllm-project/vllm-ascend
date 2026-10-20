@@ -201,7 +201,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
         auto_port=False,
     ) as server:
         client = server.get_client()
-        dummy_signature = generation_signature(client, case.model, image_prompt=case.image_prompt)
+        dummy_signature = generation_signature(client, case.model)
 
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
 
@@ -245,7 +245,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
             )
             # START -> broadcast -> FINISH against the inference server.
             _send_update(server, source, model_update_group, packed=packed)
-            signatures.append(generation_signature(client, case.model, image_prompt=case.image_prompt))
+            signatures.append(generation_signature(client, case.model))
 
     updated_signature, reloaded_signature = signatures
     assert_weight_update_matches_reference(

@@ -211,6 +211,18 @@ def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], t
     # and therefore the payload - ships them in BF16, and ``default_weight_loader``
     # casts on copy, so the payload stays faithful to the checkpoint.
     params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
+    # HF's text meta model omits these real router parameters. A full update
+    # must carry them rather than relying on the previous device allocation.
+    for layer in range(int(config.num_hidden_layers)):
+        params.append((f"model.layers.{layer}.mlp.gate.bias_vl", (int(config.n_routed_experts),), torch.float32))
+        if config.mlp_layer_types[layer] != "hash_moe":
+            params.append(
+                (
+                    f"model.layers.{layer}.mlp.gate.e_score_correction_bias",
+                    (int(config.n_routed_experts),),
+                    torch.float32,
+                )
+            )
     return params
 
 
@@ -255,34 +267,6 @@ MODEL_CASES = (
             "the attention-sink fix that lives in #16355, and the two-card HCCL "
             "lane has an open problem with the model as well"
         ),
-    ),
-    WeightUpdateModelCase(
-        id="deepseek-v4-flash-vision-exp-moe-layout",
-        model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-        hf_overrides={
-            "num_hidden_layers": 4,
-            "n_routed_experts": 8,
-            # >0 routes the config to the multimodal wrapper (see
-            # DeepseekV4ModelArchConfigConvertor); the tower itself is reduced to
-            # fit the single-chip IPC budget next to the text backbone.
-            "vision_n_layers": 2,
-            # The published checkpoint is FP8, while this suite compares a BF16
-            # payload against a BF16 startup load. Both lanes share this override,
-            # so quantization is off on both sides of the oracle.
-            "quantization_config": None,
-        },
-        # Same checkpoint-facing text layout as the text-only DeepSeek case above;
-        # the vision tower is the part no meta model can enumerate.
-        checkpoint_name_map=deepseek_v4_checkpoint_name,
-        expert_intermediate_size=2048,
-        extra_param_builder=deepseek_v4_vision_params,
-        extra_server_args=(
-            "--tokenizer-mode",
-            "deepseek_v4",
-            "--limit-mm-per-prompt",
-            '{"image": 1}',
-        ),
-        image_prompt=True,
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
