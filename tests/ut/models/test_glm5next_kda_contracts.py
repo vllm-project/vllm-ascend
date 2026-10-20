@@ -99,7 +99,7 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         torch.testing.assert_close(beta, torch.full_like(beta, 0.5))
         return v, torch.full_like(kwargs["initial_state"], 17)
 
-    monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
+    monkeypatch.setattr(torch.ops._C_ascend, "chunk_kda_fwd_ascendc", chunk, raising=False)
     monkeypatch.setattr(kda_ops, "l2norm_fwd", lambda x: x)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
