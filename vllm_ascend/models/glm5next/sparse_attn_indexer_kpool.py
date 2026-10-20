@@ -121,7 +121,6 @@ class SparseAttnIndexerKpool(nn.Module):
             positions,
             indexer_metadata.cum_query_lens,
             indexer_metadata.raw_seq_lens,
-            tail_metadata.slot_mapping[:num_tokens],
             tail_metadata.block_table,
             indexer_metadata.slot_mapping[:num_tokens],
             index_kpool,
