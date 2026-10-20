@@ -91,6 +91,36 @@ _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 
+def ensure_hccl_socket_port_range() -> None:
+    """Reserve a per-process NPU-adapter port range for HCCL rootInfo detection.
+
+    The NPU-adapter socket used for rootInfo detection defaults to a single
+    port (16666) shared by every process on the host. An elastic-EP worker
+    hosts several HCCL comms at once (its local ws=1 torch world plus multiple
+    stateless groups), and concurrent comm creation across processes then
+    fails with Communication_Error_Bind_IP_Port (EI0020, "port already
+    bound"). Give each NPU device -- i.e. each worker process on a node -- its
+    own port range. The rootInfo exchanged via the store carries the actual
+    port, so the ranks of a comm may use different ranges (verified on 910
+    with the EEP group-lifecycle test, 4 ranks x distinct ranges). An
+    explicitly configured HCCL_NPU_SOCKET_PORT_RANGE (operator override) wins.
+
+    Ray-scheduled workers are fenced to one device via
+    ASCEND_RT_VISIBLE_DEVICES, so ``torch.npu.current_device()`` is 0 in all
+    of them; the physical device id must come from the env var instead.
+    """
+    if "HCCL_NPU_SOCKET_PORT_RANGE" in os.environ:
+        return
+    visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+    first = visible.split(",")[0].strip() if visible.strip() else ""
+    try:
+        device = int(first)
+    except ValueError:
+        device = torch.npu.current_device()
+    base = 17000 + device * 20
+    os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = f"{base}-{base + 19}"
+
+
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
@@ -292,16 +322,7 @@ class NPUPlatform(Platform):
         # ws=1 torch world plus multiple stateless groups), and concurrent
         # comm creation across processes then fails with
         # Communication_Error_Bind_IP_Port (EI0020, "port already bound").
-        # Give each NPU device -- i.e. each worker process on a node -- its
-        # own port range. The rootInfo exchanged via the store carries the
-        # actual port, so the ranks of a comm may use different ranges
-        # (verified on 910 with the EEP group-lifecycle test, 4 ranks x
-        # distinct ranges). An explicitly configured
-        # HCCL_NPU_SOCKET_PORT_RANGE (operator override) wins.
-        if "HCCL_NPU_SOCKET_PORT_RANGE" not in os.environ:
-            device = torch.npu.current_device()
-            base = 17000 + device * 20
-            os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = f"{base}-{base + 19}"
+        ensure_hccl_socket_port_range()
 
         backend_class = ProcessGroupHCCL(
             prefix_store, group_rank, group_size, pg_options

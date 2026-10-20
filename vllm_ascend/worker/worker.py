@@ -536,6 +536,14 @@ class NPUWorker(WorkerBase):
 
         torch.npu.set_device(device)
 
+        # Must precede every HCCL comm creation in this process (the local
+        # ws=1 torch world below is the first one): the default adapter
+        # socket port is a single host-wide port and collides across the
+        # Ray-scheduled elastic-EP workers.
+        from vllm_ascend.platform import ensure_hccl_socket_port_range
+
+        ensure_hccl_socket_port_range()
+
         if enable_custom_op():
             register_device_print()
 
