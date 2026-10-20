@@ -156,13 +156,19 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         parallel = self.parallel_config
         rank = parallel.data_parallel_index * parallel.world_size + parallel.rank + init_info.rank_offset
         with torch.npu.device(self.device):
-            self.model_update_group = self._stateless_init_process_group(  # type: ignore[assignment]
+            group = self._stateless_init_process_group(
                 init_info.master_address,
                 init_info.master_port,
                 rank,
                 init_info.world_size,
                 device=torch.accelerator.current_device_index(),
             )
+            # `--follow-imports skip` hides the inherited `PyNcclCommunicator`
+            # annotation, so mypy would infer a non-optional type from this
+            # assignment and then reject clearing the field in `shutdown()`.
+            # Declare the optional HCCL type here (attribute annotations inside a
+            # function body are not evaluated at runtime).
+            self.model_update_group: PyHcclCommunicator | None = group  # type: ignore[assignment]
 
     def _wire_params(self, update: HCCLWeightTransferUpdateInfo) -> dict[str, Any]:
         """Resolve the packed wire params for one update.
