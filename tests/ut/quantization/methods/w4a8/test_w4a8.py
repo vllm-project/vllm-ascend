@@ -8,6 +8,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+from vllm_ascend.ops.fused_moe.moe_mlp import _unified_apply_activation, apply_moe_mlp
 from vllm_ascend.quantization.methods.w4a8.w4a8 import (
     AscendW4A8DynamicFusedMoEMethod,
     _expand_a5_w4a8_scale,
@@ -335,6 +336,286 @@ class TestAscendW4A8A5Fallback(TestBase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    @staticmethod
+    def _compute_input(activation=MoEActivation.SILU):
+        return SimpleNamespace(
+            layer=SimpleNamespace(
+                w13_weight=torch.zeros((2, 8, 1), dtype=torch.int32),
+                w2_weight=torch.zeros((2, 4, 1), dtype=torch.int32),
+                w13_weight_scale=torch.ones((2, 8), dtype=torch.int64),
+                w2_weight_scale=torch.ones((2, 1, 8), dtype=torch.int64),
+                w13_scale_bias=torch.ones((2, 8)),
+                w2_scale_bias=torch.ones((2, 8)),
+            ),
+            hidden_states=torch.ones((4, 8), dtype=torch.int8),
+            dynamic_scale=torch.ones(4),
+            group_list=torch.tensor([1, 3], dtype=torch.int32),
+            group_list_type=1,
+            activation=activation,
+            activation_situ_beta=None,
+            activation_situ_linear_beta=None,
+            swiglu_limit=0.0,
+            quant=SimpleNamespace(is_quant=True),
+            lora_context=None,
+        )
+
+    def test_ling_shared_pipeline_preserves_bf16_rounding_clamp_and_gmm2(self):
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+
+        def cpu_swiglu(value):
+            gate, up = value.float().chunk(2, dim=-1)
+            return (torch.nn.functional.silu(gate) * up).to(value.dtype)
+
+        def cpu_quant(value, *, dst_type):
+            self.assertEqual(value.dtype, torch.bfloat16)
+            scale = value.float().abs().amax(dim=-1).clamp_min(1e-6) / 127
+            quantized = (value.float() / scale[:, None]).round().clamp(-128, 127).to(dst_type)
+            return quantized, scale
+
+        for architecture in ("BailingMoeV3ForCausalLM", "BailingMoeV3MTPModel"):
+            self.config.model_config.architecture = architecture
+            method = AscendW4A8DynamicFusedMoEMethod()
+            for rows, limit in ((0, 0.0), (4, 0.0), (4, 0.75)):
+                with self.subTest(architecture=architecture, rows=rows, limit=limit):
+                    compute_input = self._compute_input()
+                    compute_input.hidden_states = compute_input.hidden_states[:rows]
+                    compute_input.dynamic_scale = compute_input.dynamic_scale[:rows]
+                    compute_input.group_list = torch.tensor([0, rows], dtype=torch.int32)
+                    compute_input.swiglu_limit = limit
+                    layer = compute_input.layer
+                    layer.w13_weight_scale = torch.ones((2, 2, 8), dtype=torch.int64)
+                    pre_activation = torch.tensor(
+                        [[-4.125, -0.339, 0.715, 3.28, 1.33, -2.11, 0.628, 2.89]], dtype=torch.bfloat16
+                    ).repeat(rows, 1)
+                    with patch(f"{module}.torch_npu.npu_swiglu", side_effect=cpu_swiglu, create=True):
+                        reference = _unified_apply_activation(compute_input, pre_activation.clone(), method)
+                    reference_q, reference_scale = cpu_quant(reference, dst_type=torch.int8)
+                    events = []
+
+                    def gmm(
+                        *,
+                        events=events,
+                        pre_activation=pre_activation,
+                        reference_q=reference_q,
+                        reference_scale=reference_scale,
+                        **kwargs,
+                    ):
+                        events.append("gmm")
+                        if len(events) == 1:
+                            return [pre_activation.clone()]
+                        # Capture the exact activation buffer handed to the down projection.
+                        torch.testing.assert_close(kwargs["x"][0], reference_q, rtol=0, atol=0)
+                        torch.testing.assert_close(kwargs["per_token_scale"][0], reference_scale, rtol=0, atol=0)
+                        return [kwargs["x"][0].float() * kwargs["per_token_scale"][0][:, None]]
+
+                    def dispose(value, events=events):
+                        events.append("dispose")
+                        value.set_(torch.empty((0,), dtype=value.dtype, device=value.device))
+
+                    def swiglu(value, events=events, compute_input=compute_input):
+                        self.assertEqual(compute_input.hidden_states.numel(), 0)
+                        events.append("swiglu")
+                        return cpu_swiglu(value)
+
+                    def quant(value, events=events, reference=reference, **kwargs):
+                        events.append("quant")
+                        torch.testing.assert_close(value, reference, rtol=0, atol=0)
+                        return cpu_quant(value, **kwargs)
+
+                    stream = SimpleNamespace(record_event=Mock(return_value="before_gmm2"))
+                    with (
+                        patch.object(
+                            torch, "npu", SimpleNamespace(current_stream=Mock(return_value=stream)), create=True
+                        ),
+                        patch.object(
+                            method,
+                            "_quant_hidden_states",
+                            return_value=(compute_input.hidden_states, compute_input.dynamic_scale),
+                        ),
+                        patch.object(
+                            method, "apply_gmm1", side_effect=AssertionError("must use the shared combination")
+                        ),
+                        patch.object(
+                            method, "_apply_dequantized_gmm1", wraps=method._apply_dequantized_gmm1
+                        ) as shared_gmm,
+                        patch(f"{module}.torch_npu.npu_grouped_matmul", side_effect=gmm) as grouped_matmul,
+                        patch(f"{module}.torch_npu.npu_swiglu", side_effect=swiglu, create=True),
+                        patch(f"{module}.torch_npu.npu_dynamic_quant", side_effect=quant, create=True),
+                        patch(f"{module}._unified_apply_activation", wraps=_unified_apply_activation) as activation,
+                        patch(f"{module}._expand_a5_w4a8_scale") as expand,
+                        patch(f"{module}.dispose_tensor", side_effect=dispose),
+                        patch("torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2", create=True) as fused,
+                        patch("torch.ops._C_ascend.dequant_situ_quant", create=True) as situ,
+                    ):
+                        output, event = apply_moe_mlp(compute_input, method)
+                    self.assertEqual(events, ["gmm", "dispose", "swiglu", "quant", "gmm"])
+                    self.assertEqual(event, "before_gmm2")
+                    torch.testing.assert_close(output, reference_q.float() * reference_scale[:, None], rtol=0, atol=0)
+                    shared_gmm.assert_called_once()
+                    activation.assert_called_once()
+                    first, second = [call.kwargs for call in grouped_matmul.call_args_list]
+                    self.assertIs(first["scale"][0], layer.w13_weight_scale)
+                    self.assertIs(first["bias"][0], layer.w13_scale_bias)
+                    self.assertIs(second["scale"][0], layer.w2_weight_scale)
+                    self.assertIs(second["bias"][0], layer.w2_scale_bias)
+                    expand.assert_not_called()
+                    fused.assert_not_called()
+                    situ.assert_not_called()
+
+    def test_a3_and_other_a5_silu_keep_full_fusion_arguments(self):
+        for family, architecture in (
+            (DeviceAdaptorFamily.STANDARD, "BailingMoeV3ForCausalLM"),
+            (DeviceAdaptorFamily.FP8_OPTIMIZED, "OtherForCausalLM"),
+        ):
+            with self.subTest(family=family, architecture=architecture):
+                self.profile.device_adaptor_family = family
+                self.config.model_config.architecture = architecture
+                method = AscendW4A8DynamicFusedMoEMethod()
+                compute_input = self._compute_input()
+                compute_input.group_list = torch.tensor([1, 4], dtype=torch.int32)
+                compute_input.group_list_type = 0
+                compute_input.swiglu_limit = 2.0
+                with (
+                    patch.object(
+                        method,
+                        "_quant_hidden_states",
+                        return_value=(compute_input.hidden_states, compute_input.dynamic_scale),
+                    ),
+                    patch.object(method, "_apply_dequantized_gmm1") as split,
+                    patch("vllm_ascend.quantization.methods.w4a8.w4a8.dispose_tensor"),
+                    patch(
+                        "torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2", return_value=("q", "scale"), create=True
+                    ) as fused,
+                ):
+                    self.assertEqual(method.apply_gmm1_act_quant(compute_input), ("q", "scale"))
+                split.assert_not_called()
+                kwargs = fused.call_args.kwargs
+                self.assertIs(kwargs["weight"][0], compute_input.layer.w13_weight)
+                self.assertIs(kwargs["weight_scale"][0], compute_input.layer.w13_weight_scale)
+                self.assertIs(kwargs["weight_assist_matrix"][0], compute_input.layer.w13_scale_bias)
+                self.assertIs(kwargs["x_scale"], compute_input.dynamic_scale)
+                torch.testing.assert_close(kwargs["group_list"], torch.tensor([1, 3], dtype=torch.int32))
+                self.assertEqual(
+                    (kwargs["group_list_type"], kwargs["dequant_mode"], kwargs["swiglu_limit"]), (1, 0, 2.0)
+                )
+
+    def test_kimi_full_fusion_retains_priority_and_arguments(self):
+        self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
+        self.config.model_config.architecture = "KimiK3ForConditionalGeneration"
+        self.config.model_config.hf_text_config.hidden_act = "situ"
+        method = AscendW4A8DynamicFusedMoEMethod()
+        compute_input = self._compute_input(MoEActivation.SITU)
+        compute_input.activation_situ_beta = 4.0
+        compute_input.activation_situ_linear_beta = 25.0
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+        out_scale = torch.ones(4)
+        with (
+            patch.object(
+                method, "_quant_hidden_states", return_value=(compute_input.hidden_states, compute_input.dynamic_scale)
+            ),
+            patch(f"{module}._gmm_dequant_situ_quant_fusion_supported", return_value=True),
+            patch.object(method, "_apply_dequantized_gmm1") as split,
+            patch(f"{module}.dispose_tensor"),
+            patch("torch.ops._C_ascend.gmm_dequant_situ_quant", return_value=("q", out_scale), create=True) as fused,
+        ):
+            output, scale = method.apply_gmm1_act_quant(compute_input)
+        self.assertEqual(output, "q")
+        self.assertEqual(scale.shape, (4, 1))
+        split.assert_not_called()
+        kwargs = fused.call_args.kwargs
+        for expert in range(2):
+            self.assertEqual(kwargs["weight"][expert].data_ptr(), compute_input.layer.w13_weight[expert].data_ptr())
+            self.assertEqual(
+                kwargs["weight_scale"][expert].data_ptr(), compute_input.layer.w13_weight_scale[expert].data_ptr()
+            )
+        self.assertEqual(kwargs["weight_assist_matrix"], [])
+        self.assertEqual((kwargs["beta"], kwargs["linear_beta"], kwargs["group_list_type"]), (4.0, 25.0, 1))
+        self.assertIs(kwargs["group_list"], compute_input.group_list)
+
+    def test_kimi_split_pipeline_preserves_expert_lists_dtypes_and_situ_parameters(self):
+        self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
+        self.config.model_config.architecture = "KimiK3ForConditionalGeneration"
+        self.config.model_config.hf_text_config.hidden_act = "situ"
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+        for expert_list in (False, True):
+            for has_bias in (False, True):
+                for beta, linear_beta in ((None, None), (4.0, 25.0)):
+                    with self.subTest(expert_list=expert_list, has_bias=has_bias, beta=beta):
+                        method = AscendW4A8DynamicFusedMoEMethod()
+                        method.use_expert_weight_list = expert_list
+                        compute_input = self._compute_input(MoEActivation.SITU)
+                        compute_input.activation_situ_beta = beta
+                        compute_input.activation_situ_linear_beta = linear_beta
+                        layer = compute_input.layer
+                        layer.w13_weight_scale = layer.w13_weight_scale.float()
+                        layer.w2_weight_scale = layer.w2_weight_scale.half()
+                        if not has_bias:
+                            layer.w13_scale_bias = None
+                            layer.w2_scale_bias = None
+                        if expert_list:
+                            for name in (
+                                "w13_weight",
+                                "w2_weight",
+                                "w13_weight_scale",
+                                "w2_weight_scale",
+                                "w13_scale_bias",
+                                "w2_scale_bias",
+                            ):
+                                value = getattr(layer, name)
+                                setattr(layer, name + "_list", list(value.unbind(0)) if value is not None else None)
+                        w1, w1_scale, _, w2_scale = method._get_mlp_weights(layer)
+                        bias1, _ = method._get_mlp_scale_bias(layer)
+                        dequantized = torch.ones((4, 8), dtype=torch.bfloat16 if has_bias else torch.float16)
+
+                        def dispose(value):
+                            value.set_(torch.empty((0,), dtype=value.dtype, device=value.device))
+
+                        def situ_quant(*, compute_input=compute_input, **kwargs):
+                            self.assertEqual(compute_input.hidden_states.numel(), 0)
+                            self.assertGreater(kwargs["x"].numel(), 0)
+                            return "q", "scale"
+
+                        with (
+                            patch.object(
+                                method,
+                                "_quant_hidden_states",
+                                return_value=(compute_input.hidden_states, compute_input.dynamic_scale),
+                            ),
+                            patch(f"{module}._gmm_dequant_situ_quant_fusion_supported", return_value=False),
+                            patch(f"{module}.torch_npu.npu_grouped_matmul", return_value=[dequantized]) as gmm,
+                            patch(f"{module}.dispose_tensor", side_effect=dispose),
+                            patch(
+                                "torch.ops._C_ascend.dequant_situ_quant", side_effect=situ_quant, create=True
+                            ) as situ,
+                        ):
+                            self.assertEqual(method.apply_gmm1_act_quant(compute_input), ("q", "scale"))
+                        kwargs = gmm.call_args.kwargs
+                        self.assertEqual(len(kwargs["weight"]), len(w1))
+                        for actual, weight in zip(kwargs["weight"], w1):
+                            self.assertEqual(actual.data_ptr(), weight.data_ptr())
+                        for actual, source in zip(kwargs["scale"], w1_scale):
+                            torch.testing.assert_close(
+                                actual, source.to(w2_scale[0].dtype).unsqueeze(-2), rtol=0, atol=0
+                            )
+                        self.assertEqual(kwargs["output_dtype"], dequantized.dtype)
+                        if has_bias:
+                            for actual, expected in zip(kwargs["bias"], bias1):
+                                self.assertIs(actual, expected)
+                        else:
+                            self.assertIsNone(kwargs["bias"])
+                        self.assertIs(kwargs["per_token_scale"][0], compute_input.dynamic_scale)
+                        self.assertEqual(
+                            (kwargs["split_item"], kwargs["group_type"], kwargs["group_list_type"]), (2, 0, 1)
+                        )
+                        kwargs = situ.call_args.kwargs
+                        self.assertIs(kwargs["x"], dequantized)
+                        self.assertEqual(kwargs["beta"], 1.0 if beta is None else beta)
+                        self.assertEqual(kwargs["linear_beta"], linear_beta or 0.0)
+                        self.assertEqual((kwargs["activate_left"], kwargs["quant_mode"]), (True, "dynamic"))
+                        torch.testing.assert_close(kwargs["group_index"], compute_input.group_list.to(torch.int64))
+                        for name in ("weight_scale", "activation_scale", "bias", "quant_scale", "quant_offset"):
+                            self.assertIsNone(kwargs[name])
+
     def test_scale_expansion_preserves_encoded_bits_and_dequantized_weights(self):
         encoded = torch.tensor([[0, 0xFFFFFFFF, 0x3D800000, 0x80000000] * 8] * 2, dtype=torch.int64)
         generator = torch.Generator().manual_seed(3108)
@@ -388,7 +669,7 @@ class TestAscendW4A8A5Fallback(TestBase):
                         family == DeviceAdaptorFamily.FP8_OPTIMIZED and quantization == ASCEND_QUANTIZATION_METHOD
                     )
                     self.assertEqual(method._use_a5_ling_w4a8, expected)
-                    self.assertEqual(method.fused_activations, frozenset() if expected else original_activations)
+                    self.assertEqual(method.fused_activations, original_activations)
         self.assertEqual(AscendW4A8DynamicFusedMoEMethod.fused_activations, original_activations)
 
     def test_scope_uses_exact_resolved_v3_architecture_and_silu_text_config(self):
@@ -419,8 +700,8 @@ class TestAscendW4A8A5Fallback(TestBase):
                         architecture in ("BailingMoeV3ForCausalLM", "BailingMoeV3MTPModel") and activation == "silu"
                     )
                     self.assertEqual(method._use_a5_ling_w4a8, expected)
-                    self.assertEqual(method.supports_fused_activation(MoEActivation.SILU), not expected)
-                    self.assertEqual(method.supports_fused_activation(MoEActivation.SITU), not expected)
+                    self.assertTrue(method.supports_fused_activation(MoEActivation.SILU))
+                    self.assertTrue(method.supports_fused_activation(MoEActivation.SITU))
 
     def test_text_config_precedence_and_missing_config(self):
         target = "BailingMoeV3ForCausalLM"
@@ -456,7 +737,9 @@ class TestAscendW4A8A5Fallback(TestBase):
         AscendW4A8DynamicFusedMoEMethod()
         logger.warning_once.assert_called_once()
         self.assertIn("A5 Ling ModelSlim W4A8", logger.warning_once.call_args.args[0])
-        self.assertIn("Fused GMM-activation-quantization is disabled", logger.warning_once.call_args.args[0])
+        self.assertIn(
+            "fully fused GMM-activation-quantization operator is unavailable", logger.warning_once.call_args.args[0]
+        )
 
     def test_non_a5_keeps_fused_parallel_configurations(self):
         self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
