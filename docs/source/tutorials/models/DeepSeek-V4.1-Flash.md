@@ -373,8 +373,8 @@ The selected PP2 setup passed 27 real-weight text requests covering serial
 and concurrent generation, chunked prefill up to 14,155 prompt tokens,
 long-context retrieval, multi-step decoding and JSON-schema output. Runtime
 statistics recorded target FULL graph dispatch and accepted DSpark tokens.
-These checks used vLLM `ced6857afa0ea7b2e3f0846a62e1394e90f15607` with
-vLLM Ascend base `8fde6d4e335fe300e2b949aab0e31659cce0811d` plus this
+These checks used vLLM `a98247ab4db686ee03c66d5feb3c761e52a2f8ab` with
+vLLM Ascend base `399c30d3ae5b1b91e2820e6cd405e1a689a797d1` plus this
 MRV2 PP adaptation.
 
 Real-weight PP4, multimodal inputs and performance require separate
