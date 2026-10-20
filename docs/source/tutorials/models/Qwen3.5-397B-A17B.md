@@ -938,7 +938,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
 
 === "A2 series"
 
-    For A2 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+    For A2 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the standard proxy script.
 
     ```shell
     unset ftp_proxy
