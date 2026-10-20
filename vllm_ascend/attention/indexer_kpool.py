@@ -261,14 +261,23 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         max_seq_len = getattr(common_attn_metadata, "max_seq_len", None)
+        if not max_seq_len and num_reqs > 0:
+            # Ascend's spec-decode proposer hardcodes max_seq_len=0 in draft
+            # (MTP) metadata, which the other attention backends never read.
+            # The KPool score kernel derives its pool bound from it, so recover
+            # the batch's longest sequence from the CPU lengths. seq_lens_cpu
+            # is host-side data, so this adds no device synchronization.
+            seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+            if seq_lens_cpu is not None and seq_lens_cpu.numel() >= num_reqs:
+                max_seq_len = int(seq_lens_cpu[:num_reqs].max().item())
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             positions=positions,
-            max_pool_seq_len=(max_seq_len + self.compress_ratio - 1) // self.compress_ratio
-            if max_seq_len is not None
-            else None,
+            max_pool_seq_len=(max_seq_len + self.compress_ratio - 1) // self.compress_ratio if max_seq_len else None,
             block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
@@ -765,6 +774,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         if indexer_cache.dtype == torch.int8:
+            # CANN pool_key_indexer scores bf16 caches only; LI C8 caches are
+            # scored by the Triton kernel (INT16 pair unpack, packed scale).
             from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore[import-untyped]
                 glm5_next_lightning_indexer_triton,
             )

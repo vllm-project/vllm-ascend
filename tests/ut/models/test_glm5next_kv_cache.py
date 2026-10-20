@@ -484,6 +484,37 @@ def _common():
     )
 
 
+@pytest.mark.parametrize("length_field", ["seq_lens_cpu", "_seq_lens_cpu", None])
+@pytest.mark.parametrize("max_seq_len", [0, None])
+def test_draft_pool_bound_recovers_without_reading_device_lengths(
+    length_field, max_seq_len, keypool_kernels, monkeypatch
+):
+    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: False)
+    builder = _builder(_config())
+    common = SimpleNamespace(**vars(_common()))
+    common.max_seq_len = max_seq_len
+    # The extra padded row must not enlarge the live batch's bound.
+    if length_field is not None:
+        setattr(common, length_field, torch.tensor([8, 9, 1000], dtype=torch.int32))
+    common.seq_lens = MagicMock()
+    common.seq_lens.max.side_effect = AssertionError("Device reduction would synchronize")
+    common.seq_lens.cpu.side_effect = AssertionError("Device-to-host copy is forbidden")
+    metadata = builder.build_for_drafting(common, draft_index=1)
+    assert metadata.max_pool_seq_len == (3 if length_field is not None else None)
+
+
+def test_later_drafts_without_cpu_lengths_use_capacity_bound(keypool_kernels, monkeypatch):
+    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: False)
+    builder = _builder(_config())
+    common = SimpleNamespace(**vars(_common()))
+    common.max_seq_len = 0
+    common.seq_lens_cpu = torch.tensor([8, 9], dtype=torch.int32)
+    assert builder.build_for_drafting(common, draft_index=0).max_pool_seq_len == 3
+    # The multi-cache proposer clears host lengths after accepting target tokens.
+    common.seq_lens_cpu = common._seq_lens_cpu = None
+    assert builder.build_for_drafting(common, draft_index=1).max_pool_seq_len is None
+
+
 @pytest.mark.parametrize("input_tokens", [9, 10])
 @pytest.mark.parametrize("unpadded", [None, "positions", "slot_mapping"])
 @pytest.mark.parametrize("dsa_cp", [False, True])
