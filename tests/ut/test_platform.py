@@ -30,6 +30,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
+    vllm_version_is,
 )
 
 
@@ -818,7 +819,12 @@ class TestNPUPlatform(TestBase):
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
                     self.platform.apply_config_platform_defaults(vllm_config)
 
-                self.assertEqual(pass_config.sp_min_token_num, 1)
+                if vllm_version_is("0.31.0"):
+                    self.assertEqual(pass_config.sp_min_token_num, 1)
+                else:
+                    # vLLM #60517 removed the PassConfig SP fields on main, so
+                    # the Ascend SP-threshold default no longer applies.
+                    self.assertIsNone(pass_config.sp_min_token_num)
 
                 pass_config.sp_min_token_num = 512
                 with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
@@ -985,7 +991,12 @@ class TestNPUPlatform(TestBase):
                     )
 
                 if should_align:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
+                    # vLLM #60517 removed the method on main; platform inlines
+                    # the tp-multiple filtering instead.
+                    if vllm_version_is("0.31.0"):
+                        vllm_config.update_sizes_for_sequence_parallelism.assert_called_once_with([1, 2, 4, 8])
+                    else:
+                        vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
                     self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
                 else:

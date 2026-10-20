@@ -36,6 +36,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
+    ATTENTION_UPDATE_MAX_INPUTS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
     PreprocessType,
@@ -43,6 +44,7 @@ from vllm_ascend.attention.utils import (
     enable_dcp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
+    merge_prefill_chunks,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     supports_strided_mla_cache,
@@ -73,6 +75,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -96,6 +99,12 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_builder_cls():
@@ -1371,6 +1380,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefix_lse = prefix_lse.to(torch.float32)
         out_list = [prefix_output.reshape(num_tokens * H, D)]
         lse_list = [prefix_lse.reshape(num_tokens * H)]
+        lse_anchor = None
+        has_context = False
 
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
@@ -1457,10 +1468,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             chunk_lse = chunk_lse.to(torch.float32)
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
+            has_context = True
+            if len(out_list) == ATTENTION_UPDATE_MAX_INPUTS:
+                # CANN npu_attention_update accepts at most 16 output/LSE pairs
+                # per call. Merge at this limit and retain the aggregate as one
+                # pair so subsequent chunks cannot exceed the operator limit.
+                merged_out, merged_lse, lse_anchor = merge_prefill_chunks(
+                    out_list, lse_list, lse_anchor, return_lse=True
+                )
+                out_list = [merged_out]
+                lse_list = [merged_lse]
 
-        if len(out_list) == 1:
+        if not has_context:
             return current_attn_result
-        output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
+        if len(out_list) == 1:
+            # Exact flush boundaries (16, 31, 46, ...) already hold the result.
+            output_final = out_list[0]
+        else:
+            output_final, _, _ = merge_prefill_chunks(out_list, lse_list, lse_anchor, return_lse=False)
         return output_final.view(num_tokens, H, D), None
 
     def _forward_prefill(
@@ -2161,7 +2186,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
             ckvkr_repo_mode=0,
             quant_scale_repo_mode=0,
-            tile_size=kv_cache[0].shape[1],
+            # PROLOG quantization tiles are independent of KV cache page size.
+            tile_size=128,
             quant_scale_ckv=(
                 (self.fak_descale_reciprocal if self.support_fp8_attention else self.quant_kscale[:, :1])
                 if self.fa_quant_layer

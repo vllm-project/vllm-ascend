@@ -41,6 +41,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -538,26 +539,57 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
-def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
-    """Use the same DSV4 divisor as Ascend's shared-tuple planner.
+# vLLM #57169 added a leading ``vllm_config`` argument on main; the v0.31.0
+# lane still calls ``_pool_bytes_per_block(kv_cache_groups)``. Gate the whole
+# function outside its body, mirroring the other main2main version gates.
+if vllm_version_is("0.31.0"):
 
-    vLLM #51718 re-plans ranks with more KV memory using
-    ``min_num_blocks * _pool_bytes_per_block(groups)``. Its standardized
-    per-group layout has a different divisor from Ascend's DSV4 shared-tuple
-    layout, so using the upstream value changes ``num_blocks`` during the
-    re-plan and leaves ranks inconsistent.
-    """
-    if tq_cache.uses_turboquant_groups(kv_cache_groups):
-        return tq_cache.pool_bytes_per_block(kv_cache_groups)
-    if is_deepseek_v41_cache(kv_cache_groups):
-        return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
-    if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_pool_bytes_per_block(kv_cache_groups)
+    def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+        """Use the same DSV4 divisor as Ascend's shared-tuple planner.
 
-    page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
-    return sum(page_sizes) * num_layer_tuples
+        vLLM #51718 re-plans ranks with more KV memory using
+        ``min_num_blocks * _pool_bytes_per_block(groups)``. Its standardized
+        per-group layout has a different divisor from Ascend's DSV4 shared-tuple
+        layout, so using the upstream value changes ``num_blocks`` during the
+        re-plan and leaves ranks inconsistent.
+        """
+        if tq_cache.uses_turboquant_groups(kv_cache_groups):
+            return tq_cache.pool_bytes_per_block(kv_cache_groups)
+        if is_deepseek_v41_cache(kv_cache_groups):
+            return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
+        if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+            return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+        if not _is_deepseek_v4_groups(kv_cache_groups):
+            return _orig_pool_bytes_per_block(kv_cache_groups)
+
+        page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
+        return sum(page_sizes) * num_layer_tuples
+
+else:
+
+    def _ascend_pool_bytes_per_block(  # type: ignore[misc]
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> int:
+        """Use the same DSV4 divisor as Ascend's shared-tuple planner.
+
+        vLLM #51718 re-plans ranks with more KV memory using
+        ``min_num_blocks * _pool_bytes_per_block(groups)``. Its standardized
+        per-group layout has a different divisor from Ascend's DSV4 shared-tuple
+        layout, so using the upstream value changes ``num_blocks`` during the
+        re-plan and leaves ranks inconsistent.
+        """
+        if tq_cache.uses_turboquant_groups(kv_cache_groups):
+            return tq_cache.pool_bytes_per_block(kv_cache_groups)
+        if is_deepseek_v41_cache(kv_cache_groups):
+            return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
+        if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+            return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+        if not _is_deepseek_v4_groups(kv_cache_groups):
+            return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+        page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
+        return sum(page_sizes) * num_layer_tuples
 
 
 def _ascend_max_memory_usage_bytes_from_groups(
