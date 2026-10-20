@@ -506,13 +506,25 @@ class ChunkedTokenDatabase:
         length = len(group_block_len)
         if length == 0:
             return addr_list, size_list, block_id
+        segments = self.group_cache_entry_segments.get(kv_cache_group_id)
+        block_start = start // group_block_size * group_block_size
+        start_in_block = start - block_start
+        end_in_block = end - block_start
         for index, base_addr in enumerate(group_addrs):
+            segment_index, segment_count = segments[index] if segments else (0, 1)
+            segment_tokens = group_block_size // segment_count
+            segment_start = segment_index * segment_tokens
+            copy_start = max(start_in_block, segment_start)
+            copy_end = min(end_in_block, segment_start + segment_tokens)
+            if copy_start >= copy_end:
+                continue
             block_len = group_block_len[index % length]
             block_stride = group_block_stride[index % length] if group_block_stride else block_len
-            addr = base_addr + block_id * block_stride
-            size = int(block_len / group_block_size * (end - start))
+            byte_start = block_len * (copy_start - segment_start) // segment_tokens
+            byte_end = block_len * (copy_end - segment_start) // segment_tokens
+            addr = base_addr + block_id * block_stride + byte_start
             addr_list.append(addr)
-            size_list.append(size)
+            size_list.append(byte_end - byte_start)
         return addr_list, size_list, block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
