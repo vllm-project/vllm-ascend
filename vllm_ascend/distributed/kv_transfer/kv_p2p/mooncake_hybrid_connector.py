@@ -58,6 +58,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.remote_rank import select_remote_rank_group
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -2085,15 +2086,8 @@ class MooncakeConnectorWorker:
         return sum(self._get_remote_ranks_for_req(req_id), [])
 
     def _get_remote_rank(self, req_id: str, prefill_tp_size: int | None = None) -> list[int]:
-        # `_get_remote_ranks_for_req` is indexed by decode TP rank (length ≈ D-TP).
-        # Decode consumers and symmetric P/D TP can index with `self.tp_rank`.
-        # A prefill producer doing a DPLB cross-P load has P-side `tp_rank`
-        # (0..P-TP-1), which is out of range when P-TP > D-TP (e.g. P-TP8 /
-        # D-TP1). Use decode-group 0 rather than a new shuffle / modulo.
         remote_ranks = self._get_remote_ranks_for_req(req_id, prefill_tp_size)
-        if self.kv_role == "kv_producer" and self.tp_rank >= len(remote_ranks):
-            return remote_ranks[0]
-        return remote_ranks[self.tp_rank]
+        return select_remote_rank_group(remote_ranks, kv_role=self.kv_role, tp_rank=self.tp_rank)
 
     def _get_remote_tp_ranks(
         self, tp_ori_data: np.ndarray, rand_group_index: list[int], num_groups: int, prefill_tp_size: int

@@ -3580,9 +3580,26 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         symmetric = make_worker_with_fake_ranks(2, "kv_producer", [[0], [1], [2], [3]])
         self.assertEqual(symmetric._get_remote_rank("req-symmetric"), [2])
 
-        # Multi-group OOR still uses decode-group 0 (not modulo / other groups).
+        # Multi-group OOR uses modulo, not decode-group 0: 5 % 2 == 1.
         multi = make_worker_with_fake_ranks(5, "kv_producer", [[10], [11]])
-        self.assertEqual(multi._get_remote_rank("req-multi-oor"), [10])
+        self.assertEqual(multi._get_remote_rank("req-multi-oor"), [11])
+
+        # P-TP8 / D-TP4: pick the group that contains the producer rank.
+        member = make_worker_with_fake_ranks(2, "kv_producer", [[0, 1], [2, 3], [4, 5], [6, 7]])
+        self.assertEqual(member._get_remote_rank("req-member"), [2, 3])
+        member.tp_rank = 5
+        self.assertEqual(member._get_remote_rank("req-member-high"), [4, 5])
+        member.tp_rank = 9
+        self.assertEqual(member._get_remote_rank("req-modulo"), [2, 3])
+
+        indexed = make_worker_with_fake_ranks(1, "kv_producer", [[0], [4]])
+        self.assertEqual(indexed._get_remote_rank("req-in-range-index"), [4])
+        consumer_index = make_worker_with_fake_ranks(1, "kv_consumer", [[0, 1], [2, 3], [4, 5], [6, 7]])
+        self.assertEqual(consumer_index._get_remote_rank("req-consumer-index"), [2, 3])
+
+        empty = make_worker_with_fake_ranks(0, "kv_producer", [])
+        with self.assertRaises(ValueError):
+            empty._get_remote_rank("req-empty")
 
         # Real P-TP8 / D-TP1 grouping: producer tp_rank=5 matches decode-group 0.
         with (

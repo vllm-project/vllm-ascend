@@ -428,11 +428,37 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
         worker.tp_rank = 2
         self.assertEqual(worker._get_remote_rank("req-symmetric"), [2])
 
-        # Multi-group OOR still uses decode-group 0 (not modulo / other groups).
+        # Multi-group OOR uses modulo, not decode-group 0: 5 % 2 == 1.
         worker._get_remote_ranks_for_req = MagicMock(return_value=[[10], [11]])
         worker.kv_role = "kv_producer"
         worker.tp_rank = 5
-        self.assertEqual(worker._get_remote_rank("req-multi-oor"), [10])
+        self.assertEqual(worker._get_remote_rank("req-multi-oor"), [11])
+
+        # P-TP8 / D-TP4: pick the group that contains the producer rank.
+        grouped = [[0, 1], [2, 3], [4, 5], [6, 7]]
+        worker._get_remote_ranks_for_req = MagicMock(return_value=grouped)
+        worker.tp_rank = 2
+        self.assertEqual(worker._get_remote_rank("req-member"), [2, 3])
+        worker.tp_rank = 5
+        self.assertEqual(worker._get_remote_rank("req-member-high"), [4, 5])
+        # 9 is in no group; 9 % 4 == 1.
+        worker.tp_rank = 9
+        self.assertEqual(worker._get_remote_rank("req-modulo"), [2, 3])
+        # In-range producer that is not a member still indexes by tp_rank.
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[[0], [4]])
+        worker.tp_rank = 1
+        self.assertEqual(worker._get_remote_rank("req-in-range-index"), [4])
+        # Consumers keep decode-TP indexing and do not search by membership.
+        worker.kv_role = "kv_consumer"
+        worker._get_remote_ranks_for_req = MagicMock(return_value=grouped)
+        worker.tp_rank = 1
+        self.assertEqual(worker._get_remote_rank("req-consumer-index"), [2, 3])
+
+        worker.kv_role = "kv_producer"
+        worker._get_remote_ranks_for_req = MagicMock(return_value=[])
+        worker.tp_rank = 0
+        with self.assertRaises(ValueError):
+            worker._get_remote_rank("req-empty")
 
     def test_start_load_kv_replica_routing_and_completion(self):
         cases = [
