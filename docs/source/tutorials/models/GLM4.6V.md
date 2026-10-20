@@ -146,23 +146,15 @@ Once your server is started, you can query the model with input prompts.
 
 ### 6.1 Text Request
 
-Send a text request and check that the response contains generated content:
+Send a text request:
 
 ```bash
-curl -sS -o response.json -w '%{http_code}\n' \
-    http://127.0.0.1:8000/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"glm","messages":[{"role":"user","content":"Hello, please introduce yourself."}],"max_tokens":256,"temperature":0.0}'
-
-jq -e '.choices[0].message.content | length > 0' response.json
 ```
 
-Expected output:
-
-```text
-200
-true
-```
+Expected result: the HTTP status is 200 and the JSON response contains a `choices` field with the generated reply in `.choices[0].message.content`.
 
 ### 6.2 Image Request
 
@@ -172,8 +164,7 @@ Set `IMAGE_PATH` to a local JPEG file and send an image request:
 IMAGE_PATH=/root/.cache/example.jpg
 IMAGE_BASE64=$(base64 -w 0 "$IMAGE_PATH")
 
-curl -sS -o response.json -w '%{http_code}\n' \
-    http://127.0.0.1:8000/v1/chat/completions \
+curl http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     --data-binary @- <<EOF
 {
@@ -189,18 +180,9 @@ curl -sS -o response.json -w '%{http_code}\n' \
     "temperature": 0.0
 }
 EOF
-
-jq -e '.choices[0].message.content | length > 0' response.json
 ```
 
-Expected output:
-
-```text
-200
-true
-```
-
-Check that `.choices[0].message.content` describes the image content.
+Expected result: the HTTP status is 200 and the JSON response contains a `choices` field whose `.choices[0].message.content` describes the image.
 
 ## 7 Accuracy Evaluation
 
