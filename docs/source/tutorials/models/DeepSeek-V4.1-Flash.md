@@ -26,11 +26,16 @@ vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
 guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration.
 
-DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
-upstream vLLM revision dated September 11, 2026 or later. Development builds
-use the verified main revision recorded in `.github/vllm-main-verified.commit`.
-Release builds use the tag recorded in `.github/vllm-release-tag.commit`
-(currently v0.31.0). These are separate supported upstream revisions.
+DeepSeek-V4.1-Flash was first supported in **vLLM Ascend v0.30.0**.
+This guide uses **vLLM Ascend v0.30.0** as its documentation and model-validation
+baseline. Use **vLLM Ascend v0.30.0 or later** to deploy this model. To use the
+latest features, use the latest vLLM Ascend release or the latest `main` branch.
+
+Use the matching upstream vLLM revision for the selected vLLM Ascend version.
+On `main`, development builds use the verified revision recorded in
+`.github/vllm-main-verified.commit`, while release builds use the tag recorded
+in `.github/vllm-release-tag.commit` (currently v0.31.0). These are separate
+supported upstream revisions.
 
 ## 2 Supported Features
 
