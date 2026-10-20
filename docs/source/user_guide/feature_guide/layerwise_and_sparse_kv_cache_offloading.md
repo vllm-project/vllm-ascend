@@ -162,6 +162,72 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Optional paired Host prefix cache on Decode
+
+`SfaPrefixOffloadingConnector` composes the existing SFA PD transport with
+vLLM's native CPU offloading scheduler and prefix manager. It saves the Host
+main KV together with the NPU indexer KV (including INT8 scales), and restores
+only their common valid prefix. The Prefill node sends the remaining suffix.
+vLLM continues to own prefix hashes, admission, LRU eviction and publication
+after transfer completion. Enable this option only when repeated prefixes
+justify the extra Host memory and save traffic.
+
+Keep the existing `sparse_kv_offload_config` and Prefill configuration. Replace
+the Decode transfer configuration with, for example:
+
+```bash
+--enable-prefix-caching \
+--kv-transfer-config '{
+    "kv_connector": "SfaPrefixOffloadingConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": 20050,
+    "kv_connector_extra_config": {
+        "prefix_cache": {
+            "cpu_bytes_to_use": 8589934592,
+            "blocks_per_chunk": 1
+        }
+    }
+}'
+```
+
+`prefix_cache.cpu_bytes_to_use` is a required, additional CPU-cache budget
+for each DP engine, covering both main KV and indexer backups across its
+workers. It is separate from `dram_size_per_dp_GB`, the live main-KV pool.
+Only TP0 backs up the shared main KV; every TP rank backs up its indexer.
+Budget sizing conservatively counts main KV on every worker, so actual usage
+can be lower than this limit. Allow additional memory for allocator overhead
+and the existing PD transport. Larger `blocks_per_chunk` values reduce key
+management overhead but require longer aligned prefixes to hit.
+
+Other extra-config entries retain their existing SFA PD meaning. The cache
+supports the CPU primary tier, ordinary decode and MTP; secondary tiers,
+canonical layout, `keep_device_kv_cache=True` and other speculative methods
+are rejected. Keep the default `kv_load_failure_policy="fail"`; local
+recomputation after a transfer error is not supported. Existing sparse-offload hardware and parallelism restrictions
+still apply. There is no standalone local Prefill path, and active indexer
+KV continues to consume HBM as context grows.
+
+Restoration requires both transfers to complete on every TP rank before the
+request resumes, including initialization of short dense Hot rows. Cancelled
+requests retain their DMA destinations until transfers drain. No dtype
+conversion or attention/indexer algorithm change is involved. This path still
+requires NPU end-to-end accuracy and performance validation for the intended
+model and deployment before production use; CPU unit tests do not establish
+an NPU performance gain.
+
+The paired transfer test can be run on an Ascend device with:
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_sparse_prefix_offload.py
+```
+
+For deployment validation, compare generated tokens against sparse offload
+without this cache using repeated prompts after device-cache eviction. Cover
+short dense rows, long sparse rows, partial-prefix hits, MTP, TP, cancellations
+and CPU-cache churn. Measure TTFT, decode latency, throughput, Host memory and
+transfer traffic with the same concurrency and prompt distribution; cache-save
+traffic can outweigh the saved PD traffic at a low hit rate.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are

@@ -20,6 +20,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import regex as re
 import torch
 from vllm.config import VllmConfig
@@ -153,6 +154,7 @@ class SFAPDRD2HConsumerWorker:
         self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
         # Internal req_id -> early-bound fused_copy_sfa top-k row used by the runner.
         self.copy_sfa_slots_by_req: dict[str, int] = {}
+        self._prefix_hot_restores: dict[str, tuple[int, list[int], int]] = {}
         # external_req_id -> circular-tail destination. Shared with the read thread.
         self._copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = {}
         self._topk_k_bases: list[int] = []
@@ -263,6 +265,9 @@ class SFAPDRD2HConsumerWorker:
                 if pool_slot is not None:
                     self.copy_sfa_slots_by_req[req_id] = int(pool_slot)
                     dense = bool(getattr(req, "dense", False))
+                    cached_prefix = int(getattr(req, "cached_prefix_tokens", 0))
+                    if dense and cached_prefix:
+                        self._prefix_hot_restores[req_id] = (int(pool_slot), main_ids, cached_prefix)
                     tail_tokens = int(getattr(req, "tail_tokens", 0) or 0)
                     # dense: the pull thread copies the whole prompt into the
                     # row's hot region (short requests decode as -3); tail: the
@@ -288,6 +293,22 @@ class SFAPDRD2HConsumerWorker:
     def wait_for_save(self):
         return
 
+    def finish_prefix_cache_loads(self, request_ids: set[str]) -> None:
+        """Initialize dense Hot prefixes after all TP ranks restored Host KV.
+
+        PD fills only the uncached suffix. These bounded copies are enqueued
+        before the next model forward on its compute stream, outside capture.
+        """
+        for request_id in request_ids:
+            restore = self._prefix_hot_restores.pop(request_id, None)
+            if restore is not None:
+                slot, main_ids, tokens = restore
+                self.offload_manager.dense_fill_copy_sfa_rows(
+                    {slot: (0, tokens)},
+                    block_size=self._copy_sfa_block_size,
+                    block_table=np.asarray([main_ids], dtype=np.int32),
+                )
+
     def _cleanup_request_state(self, req_ids: set[str]) -> None:
         ext_ids = set()
         for req_id in req_ids:
@@ -304,6 +325,7 @@ class SFAPDRD2HConsumerWorker:
             self._dest_blocks_by_req.pop(ext_id, None)
             getattr(self, "_dspark_draft_blocks_by_req", {}).pop(ext_id, None)
             getattr(self, "copy_sfa_slots_by_req", {}).pop(req_id, None)
+            getattr(self, "_prefix_hot_restores", {}).pop(req_id, None)
             getattr(self, "_copy_sfa_tail_by_req", {}).pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)

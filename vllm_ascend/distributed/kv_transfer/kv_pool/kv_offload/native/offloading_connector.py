@@ -7,12 +7,18 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+    get_offloading_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
@@ -32,8 +38,12 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     CanonicalPageMapping,
 )
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
 
 
 def _make_int8_block_view(
@@ -160,9 +170,20 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
+        # HiSparse owns Host main KV and ephemeral Resident/Hot replicas.
+        # Its native offloader owns only the indexer groups selected upstream.
+        # Keep their original group IDs in the scheduler; worker data refs use
+        # the selected-group order, as in the upstream worker.
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
+        )
+        if not selected_groups:
+            raise ValueError("No eligible KV cache groups for native offloading")
+        if any(group.host_resident for group in selected_groups):
+            raise ValueError("Native NPU offloading cannot own Host-resident KV cache groups")
 
         requires_layout_adaptation = False
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -223,7 +244,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 )
             )
 
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -231,6 +252,21 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     continue
                 layer_spec = per_layer_specs.get(layer_name, group_spec)
                 layer_cache = kv_caches[layer_name]
+
+                if getattr(layer_spec, "store_on_host", False):
+                    if not self.spec.config.extra_config.get("sparse_prefix_cache", False):
+                        raise ValueError("Host main KV requires SfaPrefixOffloadingConnector")
+                    # Sparse offload's six-tensor tuple also contains a debug
+                    # NPU cache and transient Hot buffers. Only its durable Host
+                    # pair belongs to APC. Non-TP0 tuples have placeholder CPU
+                    # entries; the manager owns their restored shared views.
+                    from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                        get_sparse_kv_offload_manager,
+                    )
+
+                    manager = get_sparse_kv_offload_manager()
+                    layer_id = manager._get_offload_layer_id(layer_name)
+                    layer_cache = (manager.k_caches_cpu[layer_id], manager.v_caches_cpu[layer_id])
 
                 if isinstance(layer_spec, AttentionSpec):
                     if isinstance(layer_cache, torch.Tensor):
@@ -299,7 +335,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
@@ -326,7 +362,31 @@ class AscendOffloadingConnector(OffloadingConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        super().__init__(vllm_config, role, kv_cache_config)
+        config_for_budget = kv_cache_config
+        if vllm_config.kv_transfer_config.kv_connector_extra_config.get("sparse_prefix_cache", False):
+            # The runner's device allocation excludes Host main KV. Make the
+            # upstream budget builder sum the selected specs instead, including
+            # both durable caches, rather than size this pool from HBM alone.
+            config_for_budget = replace(kv_cache_config, kv_cache_tensors=[])
+            # This composition has two independent loaders. Keep all upstream
+            # manager/fence machinery, but do not save cancelled/failed PD KV.
+            from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.sparse_scheduler import (
+                SparsePrefixOffloadingScheduler,
+            )
+
+            KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
+            offloading_config = build_offloading_config(vllm_config, config_for_budget)
+            self._canonical_layout = offloading_config.canonical_layout
+            spec = OffloadingSpecFactory.create_spec(offloading_config)
+            self.connector_scheduler = None
+            self.connector_worker = None
+            if role == KVConnectorRole.SCHEDULER:
+                self.connector_scheduler = SparsePrefixOffloadingScheduler(spec, vllm_config, kv_cache_config)
+            else:
+                self.connector_worker = AscendOffloadingConnectorWorker(spec, vllm_config, kv_cache_config)
+            return
+        super().__init__(vllm_config, role, config_for_budget)
+        self._kv_cache_config = kv_cache_config
         connector_worker = self.connector_worker
         if connector_worker is not None:
             self.connector_worker = AscendOffloadingConnectorWorker(
@@ -334,3 +394,9 @@ class AscendOffloadingConnector(OffloadingConnector):
                 vllm_config,
                 kv_cache_config,
             )
+
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        # External loads must not advertise Host main KV as restored by the
+        # indexer offloader. The inherited _max_loadable_tokens bounds these
+        # loads by the other groups' local, valid prefixes.
+        return get_offloading_group_ids(self._kv_cache_config)

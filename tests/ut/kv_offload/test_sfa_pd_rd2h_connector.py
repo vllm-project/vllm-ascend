@@ -1008,6 +1008,9 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
+    scheduler.prefix_cache_enabled = False
+    scheduler.prefix_cache_tokens = {}
+    scheduler._prefix_pending_recv = set()
     scheduler._metaserver_lock = threading.Lock()
     scheduler._cancelled_metaserver_requests = set()
     scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
@@ -1510,6 +1513,9 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
+    scheduler.prefix_cache_enabled = False
+    scheduler.prefix_cache_tokens = {}
+    scheduler._prefix_pending_recv = set()
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_bindings = {}
@@ -1562,6 +1568,9 @@ def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
+    scheduler.prefix_cache_enabled = False
+    scheduler.prefix_cache_tokens = {}
+    scheduler._prefix_pending_recv = set()
     scheduler._copy_sfa_bindings = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
