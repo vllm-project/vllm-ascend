@@ -184,7 +184,7 @@ extra:
   main_torch_npu_version: "2.10.0.post4"
   main_torchvision_version: "0.25.0"
   main_torchaudio_version: "2.10.0"
-  main_triton_ascend_version: "3.2.2"
+  main_triton_ascend_version: "3.6.0"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
