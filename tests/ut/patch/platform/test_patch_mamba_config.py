@@ -373,6 +373,7 @@ def test_backend_alignment_restores_contiguous_hybrid_geometry():
     _run(config)
     for _ in range(2):
         config.cache_config.block_size = 128
+        config.cache_config.mamba_page_size_padded = 8192
         with (
             patch("vllm_ascend.platform.get_current_hardware_profile", return_value=_STANDARD_MAMBA_PROFILE),
             patch.object(Platform, "_align_hybrid_block_size") as upstream,
