@@ -70,6 +70,7 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    oproj_tp_enable,
 )
 
 if TYPE_CHECKING:
@@ -1901,7 +1902,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
-            # Profiling run.
+            # Dummy run. Attention is skipped, but the O-projection is fused
+            # into this op and, with OTP, carries collectives across DP ranks.
+            # An idle rank that returns here desyncs the active ranks' o_proj
+            # and deadlocks them, so join with a zero input of the group-agreed
+            # shape -- the same fallback a PCP rank without a local query uses.
+            if oproj_tp_enable():
+                num_tokens = get_forward_context().num_tokens
+                o_proj_input = hidden_states.new_zeros((num_tokens, self.local_num_heads * self.v_head_dim))
+                self._finalize_o_proj(o_proj_input, output[:num_tokens], False)
+                return output
             return output.fill_(0)
 
         if self.qk_rope_head_dim == 0:
