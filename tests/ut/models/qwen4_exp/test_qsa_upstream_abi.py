@@ -1,11 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
+
+
+def test_mtp_qkv_projection_uses_graph_safe_upstream_path(monkeypatch) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    qkv = torch.empty((2, 24))
+    positions = torch.arange(2)
+    expected = tuple(torch.empty(1) for _ in range(4))
+    monkeypatch.setattr(
+        qsa,
+        "get_forward_context",
+        lambda: SimpleNamespace(is_draft_model=True),
+    )
+
+    with patch.object(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        return_value=expected,
+    ) as upstream_project:
+        actual = layer._project_qkv_gate(qkv, positions)
+
+    assert actual == expected
+    upstream_project.assert_called_once_with(qkv, positions)
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:

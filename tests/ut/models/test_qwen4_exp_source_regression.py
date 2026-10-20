@@ -111,6 +111,5 @@ def test_qsa_uses_only_fused_runtime_backends() -> None:
         "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER",
         "VLLM_ASCEND_ENABLE_QSA_INDEXER_FUSED_NORM_ROPE",
         "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE",
-        "super()._project_qkv_gate",
     ):
         assert fallback not in qsa
