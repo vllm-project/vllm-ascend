@@ -1169,8 +1169,8 @@ Here is the accuracy evaluation method using AISBench.
 | ----- | ----- | ----- | ----- | ----- | ----- |
 | GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800I A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800I A3 (128GB × 8) |
-| GPQA | v0.25.1rc | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
-| SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
+| GPQA | - | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
+| SWE Multilingual | - | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
 | GPQA | - | accuracy | gen | 90.40 | 950PR&950DT Products, w4a4c8 |
 
 > **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
