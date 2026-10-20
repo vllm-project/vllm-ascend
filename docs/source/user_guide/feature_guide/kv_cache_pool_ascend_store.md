@@ -58,6 +58,10 @@ Bulk and layerwise pooling transfer MLA components in separate physical-block se
 
 Pool objects written by the older contiguous-range implementation are incompatible with the corrected representation for affected layouts, even though their total byte size is unchanged. Upgrade all writers and readers together, and invalidate the affected pool entries or use a fresh cache namespace. For request-level isolation, use a new `cache_salt` consistently for requests that should share cached prefixes. Restarting vLLM workers alone does not invalidate persisted pool objects.
 
+For non-layerwise complete-block transfers, adjacent MLA components sharing one backing storage are coalesced into one descriptor per physical page, or one descriptor per logical block when the pages have no gaps. Padding is never copied. Layerwise transfers, partial-chunk configurations, align-state groups, decode-cache saving, TP mismatch, DCP and KVPP retain the component-segment fallback. Registration logs report each coalesced layer and its descriptor count.
+
+This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
