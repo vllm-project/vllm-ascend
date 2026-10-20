@@ -37,9 +37,20 @@
 
     // Keep tab contents in the page without repeating them in the navigation.
     document.querySelectorAll('.md-nav--secondary a[href]').forEach(link => {
-      const target = document.getElementById(decodeURIComponent(link.hash.slice(1)))
+      const hash = link.hash.slice(1)
+      if (!hash) {
+        return
+      }
+
+      let id
+      try {
+        id = decodeURIComponent(hash)
+      } catch (error) {
+        return
+      }
+      const target = document.getElementById(id)
       if (target && target.closest('.tabbed-block')) {
-        link.closest('.md-nav__item').remove()
+        link.closest('.md-nav__item')?.remove()
       }
     })
 
@@ -76,7 +87,12 @@
       return
     }
 
-    const id = decodeURIComponent(window.location.hash.slice(1))
+    let id
+    try {
+      id = decodeURIComponent(window.location.hash.slice(1))
+    } catch (error) {
+      return
+    }
     const target = document.getElementById(id)
     if (!target) {
       return
