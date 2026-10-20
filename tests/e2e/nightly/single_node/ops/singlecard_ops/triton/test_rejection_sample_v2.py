@@ -612,6 +612,42 @@ def test_entropy_parameters_and_per_position_thresholds(has_draft_logits):
     assert np.any(expected_counts[2] != expected_counts[3])
 
 
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@torch.inference_mode()
+def test_entropy_verify_reduces_all_vocab_blocks(has_draft_logits):
+    # Three vocabulary blocks require both a cross-block sum and padding masks.
+    vocab_size, num_trials = 16385, 128
+    target = torch.full((vocab_size,), -float("inf"), device="npu")
+    draft = target.clone()
+    token_ids = torch.tensor([0, 8192, 16384], device="npu")
+    target[token_ids] = torch.tensor([0.2, 0.3, 0.5], device="npu").log()
+    draft[token_ids] = torch.tensor([0.8, 0.1, 0.1], device="npu").log()
+    inputs = _build_rejection_sample_inputs(target, draft, 1, 1.0, num_trials)
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    inputs["draft_sampled"].zero_()
+    uniforms = torch.empty_like(inputs["pos"], dtype=torch.float32)
+    _export_verification_uniforms[(uniforms.numel(),)](
+        uniforms, inputs["seed"], inputs["pos"], inputs["expanded_idx_mapping"], NUM_ROWS=uniforms.numel()
+    )
+    sampled, counts = rejection_sample(
+        **inputs, num_speculative_steps=1, use_entropy_verify=True, posterior_threshold=1.0, posterior_alpha=1.0
+    )
+    # Only these three entries have mass; use an independent sparse reference.
+    p = target.softmax(-1)[token_ids].cpu().numpy()[None, :]
+    q = draft.softmax(-1)[token_ids].cpu().numpy()[None, :] if has_draft_logits else None
+    draws = uniforms.cpu().numpy().reshape(num_trials, 2)[:, :1]
+
+    def reference(thresholds):
+        return np.array([accepted_prefix(p, q, [0], u, thresholds=thresholds) + 1 for u in draws])
+
+    expected = reference(entropy_thresholds(p, 1.0, 1.0))
+    np.testing.assert_array_equal(counts.cpu().numpy(), expected)
+    assert (sampled[counts == 2, 0] == 0).all()
+    # Ensure these draws would expose a reduction that uses only the first block.
+    assert np.any(expected != reference(entropy_thresholds(p[:, :1], 1.0, 1.0)))
+
+
 @torch.inference_mode()
 def test_synthetic_entropy_is_a_noop():
     logits = torch.tensor([0.0, -1.0, 1.0], device="npu")

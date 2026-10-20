@@ -80,23 +80,6 @@ def _entropy_partials_kernel(
 
 
 @triton.jit
-def _entropy_threshold_kernel(
-    entropy_ptr,
-    threshold_ptr,
-    stride,
-    num_blocks,
-    POSTERIOR_THRESHOLD: tl.constexpr,
-    POSTERIOR_ALPHA: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    row = tl.program_id(0).to(tl.int64)
-    offsets = tl.arange(0, BLOCK_SIZE)
-    entropy = tl.sum(tl.load(entropy_ptr + row * stride + offsets, offsets < num_blocks, other=0.0), 0)
-    threshold = tl.minimum(tl.exp(-entropy * POSTERIOR_ALPHA), POSTERIOR_THRESHOLD)
-    tl.store(threshold_ptr + row, threshold)
-
-
-@triton.jit
 def _probabilistic_rejection_kernel(
     # [num_reqs, num_speculative_steps + 1]
     sampled_ptr,
@@ -148,13 +131,16 @@ def _probabilistic_rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
-    entropy_threshold_ptr,
+    # [num_logits, num_blocks], same layout as target_local_sumexp
+    entropy_partials_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     USE_ENTROPY_VERIFY: tl.constexpr,
+    POSTERIOR_THRESHOLD: tl.constexpr,
+    POSTERIOR_ALPHA: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # Cast to int64 before pointer arithmetic: triton-ascend computes
@@ -305,7 +291,18 @@ def _probabilistic_rejection_kernel(
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
                 elif USE_ENTROPY_VERIFY:
-                    threshold = tl.load(entropy_threshold_ptr + logit_idx)
+                    threshold = POSTERIOR_THRESHOLD
+                    if POSTERIOR_ALPHA > 0:
+                        blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
+                        entropy = tl.sum(
+                            tl.load(
+                                entropy_partials_ptr + logit_idx * target_local_sumexp_stride + blocks,
+                                mask=blocks < vocab_num_blocks,
+                                other=0.0,
+                            ),
+                            0,
+                        )
+                        threshold = tl.minimum(tl.exp(-entropy * POSTERIOR_ALPHA), POSTERIOR_THRESHOLD)
                     target_prob = tl.exp(target_log_prob)
                     draft_prob = tl.exp(draft_log_prob)
                     valid_prob = draft_prob > 0.0
@@ -480,10 +477,10 @@ def rejection_sample(
         has_auto_blockify_blacklist_op=True,
     )
 
-    entropy_threshold = None
-    if use_entropy_verify:
+    entropy_partials = None
+    # With alpha=0 the threshold is constant; no vocabulary scan is needed.
+    if use_entropy_verify and posterior_alpha > 0:
         entropy_partials = torch.empty_like(target_local_sumexp)
-        entropy_threshold = target_logits.new_empty(num_logits, dtype=torch.float32)
         _entropy_partials_kernel[(num_logits, vocab_num_blocks)](
             target_logits,
             target_logits.stride(0),
@@ -500,15 +497,6 @@ def rejection_sample(
             BLOCK_SIZE=VOCAB_BLOCK_SIZE,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             EPSILON=_ENTROPY_EPSILON,
-        )
-        _entropy_threshold_kernel[(num_logits,)](
-            entropy_partials,
-            entropy_threshold,
-            entropy_partials.stride(0),
-            vocab_num_blocks,
-            POSTERIOR_THRESHOLD=posterior_threshold,
-            POSTERIOR_ALPHA=posterior_alpha,
-            BLOCK_SIZE=padded_vocab_num_blocks,
         )
 
     if use_block_verification:
@@ -610,13 +598,15 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
-        entropy_threshold,
+        entropy_partials,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         USE_ENTROPY_VERIFY=use_entropy_verify,
+        POSTERIOR_THRESHOLD=posterior_threshold if use_entropy_verify else 1.0,
+        POSTERIOR_ALPHA=posterior_alpha if use_entropy_verify else 0.0,
         num_warps=1,
     )
 
