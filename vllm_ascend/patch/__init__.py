@@ -325,13 +325,24 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
-#       block size is set to 16 in vLLM which is not supported by Ascend.
-#    How：
-#       Set block size to 128 on npu.
+#       - vLLM's generic hybrid layout does not enforce Ascend's contiguous
+#         Attention/Mamba page invariant. Ascend shares one physical page
+#         between the Attention and Mamba groups, so the Attention K segment
+#         must equal the SSM page and the page must cover K + V + conv.
+#       - Sparse index-kpool (GLM-Next) additionally needs C128/C16 alignment
+#         for the compressed indexer.
+#       - Upstream's default block size (16) is not supported by Ascend.
+#    How:
+#       - Align the Attention block size so block_size * K_token == SSM page.
+#       - Set the Mamba page to block_size * (K_token + V_token) + conv page.
+#       - Keep the existing sparse index-kpool (SFA C8) alignment.
+#       - Leave mxfp8 packed pages and 310P on their existing paths.
 #    Related PR (if no, explain why):
-#       we'll fix this in vLLM soon.
+#       vllm-ascend#18621 restores the pre-#14340 layout for MRv1;
+#       vllm-ascend#18004 is the broader MRv1+MRv2 candidate.
 #    Future Plan:
-#       Remove this patch when vLLM merges the PR.
+#       Remove once upstream can express Ascend's contiguous hybrid page
+#       geometry, or once the non-contiguous layout has end-to-end validation.
 #
 # ** 12. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
