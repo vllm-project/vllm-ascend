@@ -137,16 +137,9 @@ jobs:
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
 
       - name: Set MAX_JOBS based on runner
-        env:
-          VLLM_CI_RUNNER: ${{ inputs.runner }}
         run: |
-          if [[ "$VLLM_CI_RUNNER" =~ -([0-9]+)(-binding)?$ ]]; then
-            CARDS="${BASH_REMATCH[1]}"
-          else
-            echo "::error::Cannot determine card count from runner label: $VLLM_CI_RUNNER"
-            exit 1
-          fi
-          echo "MAX_JOBS=$((10#$CARDS * 23))" >> "$GITHUB_ENV"
+          CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
+          echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend
         if: ${{ inputs.request_id != '' }}
