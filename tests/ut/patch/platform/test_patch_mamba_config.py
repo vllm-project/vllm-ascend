@@ -137,11 +137,14 @@ def test_hybrid_config_aligns_contiguous_state_segments(block_size):
     assert config.cache_config.mamba_block_size == 4096
 
 
-def test_contiguous_hybrid_rejects_larger_attention_segment():
+def test_contiguous_hybrid_overrides_larger_attention_segment():
     config = _config()
     config.cache_config.block_size = 4096
-    with pytest.raises(ValueError, match="requires block_size=2048"):
-        _run(config)
+
+    _run(config)
+
+    assert config.cache_config.block_size == 2048
+    assert config.cache_config.mamba_page_size_padded == 2 * 1048576 + 49152
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "int8", "auto"])
