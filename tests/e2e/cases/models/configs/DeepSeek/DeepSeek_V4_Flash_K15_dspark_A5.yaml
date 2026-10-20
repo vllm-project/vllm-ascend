@@ -73,7 +73,7 @@ test_cases:
     expected_response:
       prompt_tokens: 4
       completion_tokens: 200
-  - name: "DeepSeek-V4-Flash-DSpark-DSpark-AdaptiveVerification"
+  - name: "DeepSeek-V4-Flash-DSpark-AdaptiveVerification"
     model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash-0731"
     envs:
       <<: *envs
