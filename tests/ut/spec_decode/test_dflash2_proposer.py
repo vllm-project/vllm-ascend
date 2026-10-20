@@ -1,3 +1,4 @@
+import io
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -106,10 +107,52 @@ def test_lilicorr_cannot_silently_use_plain_dflash_on_v1():
     plain_dflash.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "mask_state",
+    [
+        None,
+        {"mask_token_id": 3, "embedding": torch.ones(8)},
+        {"mask_token_id": 7, "embedding": torch.ones(8)},
+        b"corrupt",
+    ],
+)
+def test_dflash_mask_embedding_errors_are_not_silently_ignored(monkeypatch, mask_state):
+    import vllm.model_executor.models.qwen3_dflash as upstream_dflash
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    data = mask_state
+    if isinstance(mask_state, dict):
+        buffer = io.BytesIO()
+        torch.save(mask_state, buffer)
+        data = buffer.getvalue()
+    monkeypatch.setattr(upstream_dflash, "get_hf_file_bytes", lambda *args: data)
+    model = SimpleNamespace(
+        model=SimpleNamespace(mask_token_id=3),
+        draft_model_config=SimpleNamespace(model="unused", revision="main"),
+    )
+    read_mask = upstream_dflash.DFlashQwen3ForCausalLM._read_mask_embedding
+    if mask_state is None:
+        assert read_mask(model) is None
+    elif isinstance(mask_state, dict) and mask_state["mask_token_id"] != model.model.mask_token_id:
+        with pytest.raises(ValueError, match="mask_token_id does not match"):
+            read_mask(model)
+    elif isinstance(mask_state, dict):
+        torch.testing.assert_close(read_mask(model), mask_state["embedding"])
+    else:
+        # Deserialization failures must propagate instead of changing the draft.
+        monkeypatch.setattr(
+            upstream_dflash.torch, "load", MagicMock(side_effect=RuntimeError("corrupt mask embedding"))
+        )
+        with pytest.raises(RuntimeError, match="corrupt mask embedding"):
+            read_mask(model)
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("v_scale", [None, 0.5])
 @pytest.mark.parametrize("mapping_kind", ["shared", "per_layer", "dummy"])
-def test_context_kv_preserves_projection_norm_rope_and_value_scale(quantized, v_scale, mapping_kind):
+@pytest.mark.parametrize("inplace_rope", [False, True])
+def test_context_kv_preserves_projection_norm_rope_and_value_scale(quantized, v_scale, mapping_kind, inplace_rope):
     from vllm_ascend.patch.worker.patch_qwen3_dflash import (
         _project_context_kv,
         precompute_and_store_context_kv,
@@ -130,8 +173,14 @@ def test_context_kv_preserves_projection_norm_rope_and_value_scale(quantized, v_
     ]
 
     def rotate(pos, query, key):
-        # A deterministic in-place transform verifies the layer-major layout.
-        query.add_(pos[:, None])
+        # Both in-place Triton and out-of-place torch_npu paths must cache
+        # the returned keys in the same layer-major layout.
+        assert key is None
+        rotated = query + pos[:, None]
+        if inplace_rope:
+            query.copy_(rotated)
+            return query, None
+        return rotated, None
 
     norms = [torch.nn.RMSNorm(head_dim, eps=1e-6) for _ in range(num_layers)]
     caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(num_layers)]
