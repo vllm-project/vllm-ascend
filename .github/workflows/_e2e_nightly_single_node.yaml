@@ -216,6 +216,7 @@ jobs:
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend
+        id: install-ascend
         if: ${{ inputs.request_id != '' }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
@@ -233,7 +234,22 @@ jobs:
           grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
             requirements.txt > /tmp/requirements-runtime.txt || true
           uv pip install -r /tmp/requirements-runtime.txt
-          uv pip install -e . --no-deps
+          # --no-deps alone still creates an isolated build environment with
+          # pyproject.toml's release torch/torch-npu instead of the image pair.
+          mkdir -p /tmp/test-logs
+          set -euo pipefail
+          uv pip install -v -e . --no-deps --no-build-isolation \
+            2>&1 | tee /tmp/test-logs/ascend-install.log
+          # Reject missing/unloadable native bindings before waiting for a server.
+          python3 -c 'import torch; import torch_npu; import vllm_ascend.vllm_ascend_C'
+
+      - name: Upload failed Ascend build log
+        if: ${{ failure() && steps.install-ascend.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ascend-install-${{ inputs.name || inputs.runner }}-${{ github.run_attempt }}
+          path: /tmp/test-logs/ascend-install.log
+          if-no-files-found: warn
 
       - name: Uninstall Triton for 310P tests
         if: ${{ inputs.soc_version == '310P' }}
@@ -327,7 +343,7 @@ jobs:
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ success() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True

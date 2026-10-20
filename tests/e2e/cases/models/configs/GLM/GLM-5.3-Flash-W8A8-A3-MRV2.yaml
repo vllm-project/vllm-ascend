@@ -57,9 +57,10 @@ test_cases:
   - --kv-transfer-config
   - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port":
     "0", "use_layerwise": false}}'
+  # PIECEWISE disables npugraph_ex/static/super kernels in the platform config.
   - --additional-config
   - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "enable_flashcomm1": true, "enable_cpu_binding":
-    true, "weight_nz_mode": 1, "ascend_compilation_config": {"enable_static_kernel": true, "enable_super_kernel": true}}'
+    true, "weight_nz_mode": 1, "ascend_compilation_config": {"enable_static_kernel": false, "enable_super_kernel": false}}'
   prompts:
   - Reply with one short sentence confirming the service is healthy.
   test_content:

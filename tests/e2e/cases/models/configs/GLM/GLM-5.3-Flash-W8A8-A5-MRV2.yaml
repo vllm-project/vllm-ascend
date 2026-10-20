@@ -52,10 +52,11 @@ test_cases:
   - --enable-prefix-caching
   - --compilation-config
   - '{"cudagraph_mode": "PIECEWISE"}'
+  # PIECEWISE disables npugraph_ex/static/super kernels in the platform config.
   - --additional-config
   - '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_dsa_cp": false, "enable_fused_mc2": 0,
     "multistream_overlap_shared_expert": false, "enable_shared_expert_dp": true,
-    "ascend_compilation_config": {"enable_static_kernel": true, "enable_super_kernel": true}}'
+    "ascend_compilation_config": {"enable_static_kernel": false, "enable_super_kernel": false}}'
   - --profiler-config
   - '{"profiler": "torch", "torch_profiler_dir": "/tmp/glm53-flash-a5-mrv2-profiles",
     "torch_profiler_with_stack": false, "torch_profiler_record_shapes": true}'

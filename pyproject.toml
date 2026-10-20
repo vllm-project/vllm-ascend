@@ -34,6 +34,12 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+# Build this native extension against the preinstalled torch/torch-npu pair.
+# This also applies to PR /nightly installs driven by the main-branch workflow.
+# Install requirements.txt (or the nightly image-preserving subset) first.
+[tool.uv.pip]
+no-build-isolation-package = ["vllm-ascend"]
+
 [tool.uv.extra-build-dependencies]
 pandas = ["setuptools<72"]
 
