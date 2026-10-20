@@ -14,6 +14,9 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
 class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlashSpeculator):
     """LiLiCorr drafter using the shared Ascend DFlash runtime."""
 
+    # Candidate top-k bypasses sample_draft's group-aligned row padding.
+    _lmhead_tp_sample_draft_supported = False
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # LiLiCorr shares DFlash2's candidate walk. Until that NPU Triton
         # kernel is ACL-graph capturable, keep the draft eager while allowing

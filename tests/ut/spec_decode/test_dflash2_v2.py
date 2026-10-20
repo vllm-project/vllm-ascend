@@ -328,6 +328,13 @@ def test_lilicorr_uses_ascend_dflash_runtime_hooks():
     assert AscendLiLiCorrSpeculator.propose is AscendDFlashSpeculator.propose
 
 
+def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", lambda: True)
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    with pytest.raises(NotImplementedError, match="lmhead TP does not support AscendLiLiCorrSpeculator"):
+        speculator._lmhead_tp_validate_draft_sampling()
+
+
 def test_lilicorr_requires_enforce_eager(monkeypatch):
     calls: list[CUDAGraphMode] = []
     monkeypatch.setattr(
