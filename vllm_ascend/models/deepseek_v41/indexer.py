@@ -126,7 +126,10 @@ class DeepseekV41Indexer(nn.Module):
             # conversion is forced here instead of relying on the global
             # weight_nz_mode=2, which would also convert the MoE gate weight
             # that the A5 npu_fused_matmul gate path requires in ND format.
-            if torch_npu.get_npu_format(self.wk.weight.data) != ACL_FORMAT_FRACTAL_NZ:
+            if (
+                self.wk.weight.data.device.type == "npu"
+                and torch_npu.get_npu_format(self.wk.weight.data) != ACL_FORMAT_FRACTAL_NZ
+            ):
                 self.wk.weight.data = torch_npu.npu_format_cast(self.wk.weight.data, ACL_FORMAT_FRACTAL_NZ)
         else:
             # Non-quantized caches keep the eager chain: follow the global policy.
@@ -144,8 +147,9 @@ class DeepseekV41Indexer(nn.Module):
                 # [T, 2] mapping per call, computed once per cache group.
                 slot_mapping = slots
             elif slots.ndim == 2:
-                slot_mapping = (slots[:, 0]) * k_cache.shape[1] + slots[:, 1]
-                slot_mapping = slot_mapping.clamp(min=-1).to(torch.int32)
+                invalid = (slots[:, 0] < 0) | (slots[:, 1] < 0)
+                slot_mapping = slots[:, 0] * k_cache.shape[1] + slots[:, 1]
+                slot_mapping = torch.where(invalid, -1, slot_mapping).to(torch.int32)
             else:
                 raise ValueError(f"indexer update_keys slot mapping must be [T, 2] or [T], got ndim={slots.ndim}")
             cache_index = slot_mapping.to(torch.int64)

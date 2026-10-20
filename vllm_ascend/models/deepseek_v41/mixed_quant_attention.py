@@ -7,6 +7,14 @@ from __future__ import annotations
 import torch
 import torch_npu
 
+try:
+    import cann_ops_transformer  # noqa: F401  # Registers torch.ops.cann_ops_transformer.*
+    import custom_ops  # noqa: F401  # Registers torch.ops.custom.* from the wheel.
+except ImportError:
+    # A3 environments do not ship the ds41 operator wheels; the packed-cache
+    # path below is gated to A5 and raises a clear error when they are missing.
+    pass
+
 from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.build_window_indices import (
     build_window_indices_triton,
