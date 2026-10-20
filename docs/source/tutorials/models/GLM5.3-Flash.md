@@ -600,6 +600,9 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --max-num-batched-tokens 120 \
               --trust-remote-code \
               --quantization ascend \
+              --tool-call-parser glm47 \
+              --enable-auto-tool-choice \
+              --reasoning-parser glm47 \
               --enable-prefix-caching \
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.95 \
