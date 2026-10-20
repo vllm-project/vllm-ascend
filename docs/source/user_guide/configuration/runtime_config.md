@@ -95,7 +95,7 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `window` | int \| list[int] | `32` | Sliding content window size(s); a list enables multi-window detection |
+| `window` | int \| list[int] | `32` | Sliding content window size(s), between 8 and 512; a list enables multi-window detection (1-4 windows) |
 | `repeat_sum_threshold` | int \| list[int] | `64` | Alert when the sum of repeat scores exceeds this; one per window |
 | `min_tokens` | int \| list[int] | `32` | Minimum content tokens before alerting; one per window |
 | `consecutive_hits` | int | `1` | Required consecutive over-threshold steps |
@@ -107,6 +107,10 @@ legacy single-window form) or a list of equal length (multi-window). A scalar
 crossing its own threshold arms the incident; the report records which
 window(s) fired. For example, a short window catches tight token runs early
 while a long window catches whole-sentence repeats:
+
+Each `window` entry must be between 8 and 512, and at most 4 windows are
+allowed. Out-of-range values, an empty list, or too many windows are rejected;
+the previous configuration is kept.
 
 ```json
 "token_repeat": {

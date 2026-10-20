@@ -116,11 +116,14 @@ def _as_int_list(
     default: list[int],
     field: str,
     min_value: int,
+    max_value: int | None = None,
 ) -> list[int]:
     """Normalize a scalar-or-list config value into a ``list[int]``.
 
     Direct ``_data`` edits (unit tests / startup overlays that bypass full
     validation) still funnel through here, so the detector stays robust.
+    Out-of-range values are rejected (not silently clamped) so a bad window
+    keeps the previous config instead of quietly changing behavior.
     """
     if raw is None:
         return list(default)
@@ -129,15 +132,33 @@ def _as_int_list(
     if isinstance(raw, (int, float)):
         if isinstance(raw, float) and not raw.is_integer():
             raise ValueError(f"{field} must be an integer, got {raw!r}")
-        return [max(min_value, int(raw))]
+        _check_window_value(int(raw), field, min_value, max_value)
+        return [int(raw)]
     if isinstance(raw, (list, tuple)):
         out: list[int] = []
         for item in raw:
             if isinstance(item, bool) or not isinstance(item, int):
                 raise ValueError(f"{field} entries must be int, got {item!r}")
-            out.append(max(min_value, int(item)))
+            _check_window_value(int(item), field, min_value, max_value)
+            out.append(int(item))
         return out
     raise ValueError(f"{field} must be an int or list of ints, got {type(raw).__name__}")
+
+
+def _check_window_value(value: int, field: str, min_value: int, max_value: int | None) -> None:
+    """Reject window sizes outside ``[min_value, max_value]``."""
+    if value < min_value:
+        raise ValueError(f"{field} must be >= {min_value}, got {value}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{field} must be <= {max_value}, got {value}")
+
+
+# Bounds for the multi-window config surface. A window smaller than this is a
+# degenerate "two identical adjacent tokens" detector that W=8 already covers,
+# and more/larger windows only add linear CPU/memory without extra coverage.
+_MIN_WINDOW = 8
+_MAX_WINDOW = 512
+_MAX_WINDOWS = 4
 
 
 class TokenRepeatDetector(ConfigBackedDetector):
@@ -164,7 +185,10 @@ class TokenRepeatDetector(ConfigBackedDetector):
                 "window",
                 32,
                 "int_or_list_int",
-                min_value=1,
+                min_value=_MIN_WINDOW,
+                max_value=_MAX_WINDOW,
+                min_items=1,
+                max_items=_MAX_WINDOWS,
                 help="Sliding content window size(s); scalar or list for multi-window",
             ),
             ConfigField(
@@ -223,8 +247,13 @@ class TokenRepeatDetector(ConfigBackedDetector):
                 getter("window", self._windows),
                 default=self._windows,
                 field="token_repeat.window",
-                min_value=1,
+                min_value=_MIN_WINDOW,
+                max_value=_MAX_WINDOW,
             )
+            if not new_windows:
+                raise ValueError("token_repeat: at least one window is required")
+            if len(new_windows) > _MAX_WINDOWS:
+                raise ValueError(f"token_repeat: at most {_MAX_WINDOWS} windows, got {len(new_windows)}")
             new_thresholds = _as_int_list(
                 getter("repeat_sum_threshold", self._repeat_sum_thresholds),
                 default=self._repeat_sum_thresholds,

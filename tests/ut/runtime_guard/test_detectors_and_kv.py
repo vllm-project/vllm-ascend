@@ -299,6 +299,49 @@ def test_token_repeat_hot_reload_levels_reach_ongoing_request(tmp_path: Path):
     assert len(alerts) == 1
 
 
+def test_token_repeat_window_bounds_keep_previous_config(tmp_path: Path):
+    """Out-of-range window configs are rejected; the detector keeps its current windows."""
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+
+    RequestGuardStore.reset_for_tests()
+    RequestIoSnapshotManager.reset_for_tests()
+    cfg = RuntimeConfig(
+        config_path=tmp_path / "c.json",
+        report_dir=tmp_path / "r",
+        ensure_file=True,
+        hot_reload=False,
+    )
+    tr = cfg._data["detector"]["token_repeat"]
+    tr["enabled"] = True
+    tr["window"] = [8, 128]
+    tr["repeat_sum_threshold"] = [8, 64]
+    tr["min_tokens"] = [0, 32]
+
+    det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    det.refresh_from_config()
+    assert det._windows == [8, 128]
+
+    # Too many windows: rejected, previous config kept.
+    tr["window"] = [8, 16, 32, 64, 128]
+    det.refresh_from_config()
+    assert det._windows == [8, 128]
+
+    # Below the minimum window size: rejected.
+    tr["window"] = 4
+    det.refresh_from_config()
+    assert det._windows == [8, 128]
+
+    # Above the maximum window size: rejected.
+    tr["window"] = 600
+    det.refresh_from_config()
+    assert det._windows == [8, 128]
+
+    # Empty window list: rejected.
+    tr["window"] = []
+    det.refresh_from_config()
+    assert det._windows == [8, 128]
+
+
 def test_w1_1_r04_same_wave_double_fold_keeps_seen_eq_oc(tmp_path: Path):
     """W1-1/R-04: same-wave duplicate after-sample must not inflate content_tokens_seen.
 
