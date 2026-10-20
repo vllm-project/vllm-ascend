@@ -4313,9 +4313,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
             modules=lambda: (),
         )
         proposer.model = SimpleNamespace(model=draft_model)
-        target_model = SimpleNamespace(
-            model=SimpleNamespace(topk_indices_buffer=target_buffer)
-        )
+        target_model = SimpleNamespace(model=SimpleNamespace(topk_indices_buffer=target_buffer))
 
         proposer._maybe_share_topk_indices(target_model)
 

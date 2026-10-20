@@ -76,17 +76,13 @@ class AscendQwen4ExpMTPProposer(
     ):
         """Rebind later MTP draft steps to every QSA cache group's table."""
         del num_input_tokens
-        per_layer_attn_metadata = {
-            layer_name: primary_metadata for layer_name in primary_group.layer_names
-        }
+        per_layer_attn_metadata = {layer_name: primary_metadata for layer_name in primary_group.layer_names}
         for attn_group in cache_only_groups:
             gid = attn_group.kv_cache_group_id
             group_common = common_attn_metadata
             if gid != self.kv_cache_gid:
                 block_table = self._per_group_block_tables.get(gid)
-                assert block_table is not None, (
-                    f"Missing Qwen draft block table for KV cache group {gid}"
-                )
+                assert block_table is not None, f"Missing Qwen draft block table for KV cache group {gid}"
                 group_common = self.shallow_copy_metadata(common_attn_metadata)
                 group_common.block_table_tensor = block_table[: group_common.num_reqs]
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
