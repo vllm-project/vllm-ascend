@@ -242,7 +242,11 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         use_independent_store = use_store_independent_te()
         self._use_store_independent_te = use_independent_store
         use_shared_roce_engine = not use_fabric_mem and not use_independent_store
-        if use_fabric_mem:
+        if use_fabric_mem or use_independent_store:
+            # Independent topology is deliberately staged: initialize the EC
+            # engine first under the top-level resource config, before the
+            # Store factory enables the process-global RoCE selectors for its
+            # separately owned engine.
             producer_memory.ensure_prepared(torch.device(self._buffer_device))
         try:
             store_client = create_ascend_mooncake_embedding_store_client(
@@ -256,7 +260,6 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                     # engine before registering the shared NPU staging slab.
                     producer_memory.ensure_prepared(torch.device(self._buffer_device))
                 elif use_independent_store:
-                    producer_memory.ensure_prepared(torch.device(self._buffer_device))
                     staging = producer_memory.tensor
                     if staging is None:
                         raise RuntimeError("Producer staging slab is unavailable")

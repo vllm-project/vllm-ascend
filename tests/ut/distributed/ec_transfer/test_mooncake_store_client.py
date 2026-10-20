@@ -1,3 +1,4 @@
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -513,6 +514,37 @@ def test_shared_roce_engine_enables_roce_before_engine_initialization():
         assert store_client_module.os.environ["HCCL_INTRA_ROCE_ENABLE"] == "1"
 
 
+@pytest.mark.parametrize(
+    "top_protocol",
+    ["hccs:device", "roce:device"],
+)
+def test_independent_engines_remove_global_link_override(top_protocol):
+    resource_config = json.dumps(
+        {
+            "comm_resource_config": {"protocol_desc": [top_protocol]},
+            "store": {
+                "comm_resource_config": {"protocol_desc": ["roce:device"]},
+            },
+        }
+    )
+    with patch.dict(
+        store_client_module.os.environ,
+        {
+            "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
+            "ASCEND_GLOBAL_RESOURCE_CONFIG": resource_config,
+            "HCCL_INTRA_PCIE_ENABLE": "0",
+            "HCCL_INTRA_ROCE_ENABLE": "1",
+        },
+        clear=True,
+    ):
+        store_client_module.configure_non_fabric_transport()
+
+        assert "ASCEND_ENABLE_USE_FABRIC_MEM" not in store_client_module.os.environ
+        assert "HCCL_INTRA_PCIE_ENABLE" not in store_client_module.os.environ
+        assert "HCCL_INTRA_ROCE_ENABLE" not in store_client_module.os.environ
+        assert store_client_module.os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] == resource_config
+
+
 def test_shared_roce_engine_rejects_internal_buffer_pool():
     with (
         patch.dict(
@@ -637,6 +669,11 @@ def test_factory_lets_store_create_owned_engine(
             MagicMock(),
             registration_transfer,
         )
+
+        if use_independent_te:
+            assert "ASCEND_ENABLE_USE_FABRIC_MEM" not in store_client_module.os.environ
+            assert store_client_module.os.environ["HCCL_INTRA_PCIE_ENABLE"] == "0"
+            assert store_client_module.os.environ["HCCL_INTRA_ROCE_ENABLE"] == "1"
 
     registration_transfer._ensure_engine.assert_not_called()
     store.setup.assert_called_once_with(

@@ -297,12 +297,12 @@ def test_start_services_global_config_dual_registers_long_lived_staging():
 
     assert lifecycle.mock_calls == [
         call.import_store(),
+        call.prepare(device),
         call.client(
             worker._producer_memory.bounce_arena,
             worker._transfer,
             read_buffer_bytes=256,
         ),
-        call.prepare(device),
         call.register(staging),
         call.backend(
             store_client,
@@ -1080,8 +1080,8 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks(
         patch.object(worker_module, "_resolve_bounce_arena_size", return_value=4096),
         patch.object(
             worker_module,
-            "configure_non_fabric_roce",
-        ) as configure_roce,
+            "configure_non_fabric_transport",
+        ) as configure_transport,
         patch.object(worker_module, "ensure_mooncake_available") as ensure_available,
         patch.object(worker_module, "get_ip", return_value="127.0.0.1"),
         patch.object(worker_module.torch.npu, "current_device", return_value=3),
@@ -1095,13 +1095,13 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks(
         patch.object(worker_module.threading.Thread, "start"),
     ):
         lifecycle = MagicMock()
-        lifecycle.attach_mock(configure_roce, "configure_roce")
+        lifecycle.attach_mock(configure_transport, "configure_transport")
         lifecycle.attach_mock(ensure_available, "ensure_mooncake")
         lifecycle.attach_mock(transfer_class, "create_transfer")
         worker = AscendECMooncakeWorker(vllm_config)
 
     assert lifecycle.mock_calls[:3] == [
-        call.configure_roce(),
+        call.configure_transport(),
         call.ensure_mooncake(),
         call.create_transfer("127.0.0.1", 3),
     ]
@@ -1131,6 +1131,7 @@ def test_worker_initializes_ascend_data_plane_without_factory_hooks(
         (128, 16, 32),
         (128, 128, 256),
         (72, 36, 72),
+        (5, 16, 10),
     ],
 )
 def test_resolve_default_bounce_arena_size(
