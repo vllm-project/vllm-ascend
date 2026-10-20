@@ -461,7 +461,6 @@ N=128: 2336B
 
 未覆盖或尚未验收的范围不得视为已通过：public API 仍拒绝 LSE 输出，本次 API 测试不包含它；阶段二的数据 gather 尚未实现。
 
-
 ### 11.5 BSA 对照与性能归因
 
 对照 `step4_block_sparse_attention` 的 `PackedRegionLoadPackedRowToUb`、`PackedRegionDecodeOneTileSplitToGm`、`PackedRegionRs8LoadHalf/IssueHalf` 和主 kernel，逐项实验，而非只比较“工作是否移到了 AIV”。
@@ -525,7 +524,6 @@ QK 首个 D 子块仍需对实际读到的每条 64B scalar cache line 失效，
 
 交替复测 Prefill 为 26.032ms→24.729ms，D256/G32 为 1.426ms→1.325ms；收益方向一致。D256 scalar 的小幅上升同样复现。Decode 小幅改善缺少独立重复样本，不作为稳定收益承诺。完整报告见 `perf/gbsa_stage1_flat/README.md`。
 
-
 ## 13. 阶段二：AIV gather 连续 K/V（2026-09-24）
 
 阶段一已提交为 `43183069`，作为独立的地址预计算/单层消费对照。阶段二不再保留 GM 描述表，非量化 DispatchPolicy 的第三个布尔量为 `GATHER_KV`。全量化仍默认 false，保留原 sparse loader。
@@ -585,7 +583,6 @@ QK 首个 D 子块仍需对实际读到的每条 64B scalar cache line 失效，
 最终 Prefill 两次为25.306621/25.306270ms，阶段一本轮复测24.515721ms。未经连续行DMA合并的中间版出现过29.786707ms样本，也保留在报告中，未剔除。不能只用scalar降低宣称整体加速。
 
 BSA参考地址预计算没有本版额外的K/V数据GM中转。D512保持原LO模式后，只能容纳1～2行gather，产生大量小chunk DMA与握手；后续须评估联合UB预算/生命周期复用和数据中转隐藏，而非把D128当作唯一开发范围。完整指标、推断边界与复现命令见 `perf/gbsa_stage2/README.md`。阶段二保留在工作区供审查，未覆盖系统custom，未额外提交。
-
 
 ## 14. 逐 block/page 片段立即写回（索引窗口版，历史实现）
 
