@@ -66,6 +66,18 @@ def _specs(cache_config):
     return {name: group.kv_cache_spec for group in cache_config.kv_cache_groups for name in group.layer_names}
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(model_config=SimpleNamespace()),
+        SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace())),
+    ],
+)
+def test_partial_model_configs_keep_existing_path(config):
+    assert not can_share_full_and_sliding_kv_cache(config, _specs(_cache_config()).values())
+
+
 @pytest.mark.parametrize("sliding_groups", [4, 5])
 @pytest.mark.parametrize("supports_shared", [False, True])
 @pytest.mark.parametrize("model_type", ["gemma4_text", "other_full_sliding_model", "step3p5", "step3p7"])

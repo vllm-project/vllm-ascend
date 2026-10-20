@@ -24,7 +24,9 @@ def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable
     allocation paths. Limit this regression fix to Gemma 4 so other models
     retain their existing allocation behavior.
     """
-    if vllm_config.model_config.hf_text_config.model_type != "gemma4_text":
+    model_config = getattr(vllm_config, "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) != "gemma4_text":
         return False
     if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
         return False
