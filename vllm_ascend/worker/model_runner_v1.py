@@ -4341,20 +4341,24 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute ubatch_slices when DBO is enabled so that _dummy_run warms
         # up the same dual-stream path used by real execute_model.
+        # Bare-runner CPU-UT harnesses build NPUModelRunner via __new__
+        # without parallel_config; treat that as ubatching disabled.
         should_ubatch_dummy = False
-        if self.parallel_config.use_ubatching:
+        num_ubatches = 1
+        if getattr(getattr(self, "parallel_config", None), "use_ubatching", False):
             from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
             should_ubatch_dummy = check_ubatch_thresholds(
                 self.parallel_config,
                 num_tokens_padded,
                 uniform_decode=uniform_decode,
             )
+            num_ubatches = self.parallel_config.num_ubatches
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch_dummy,
             num_scheduled_tokens,
             num_tokens_padded,
             num_reqs_padded,
-            self.parallel_config.num_ubatches,
+            num_ubatches,
         )
         attn_metadata: PerLayerAttnMetadata | None = None
         # A dummy/profiling/capture batch never replays: it does not go through
@@ -4871,7 +4875,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
-            if self.parallel_config.use_ubatching:
+            if getattr(getattr(self, "parallel_config", None), "use_ubatching", False):
                 from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchWrapper
                 self.model = NPUUBatchWrapper(
                     self.model, self.vllm_config, self.device
@@ -6592,7 +6596,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             num_metadata_builders = (
                 self.parallel_config.num_ubatches
-                if self.parallel_config.use_ubatching
+                if getattr(getattr(self, "parallel_config", None), "use_ubatching", False)
                 else 1
             )
             for group_key, layer_names in attn_backends_map.items():

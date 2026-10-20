@@ -36,12 +36,29 @@ from tests.ut.base import TestBase
 # (matching the previous behaviour for B-class tests in CPU-only envs).
 
 
+def _npu_device_ready() -> bool:
+    """True only on a real NPU.
+
+    In CPU-UT sessions tests/ut/conftest.py replaces torch.npu with mocks,
+    and some import chains rebind it to a bare MagicMock whose
+    ``is_available()`` returns a truthy mock. A real device always reports
+    an int device count, so require that as the authoritative signal.
+    """
+    try:
+        if not torch.npu.is_available():
+            return False
+        count = torch.npu.device_count()
+        return isinstance(count, int) and count > 0
+    except Exception:
+        return False
+
+
 def npu_test(num_npus: int = 1):
-    """Skip test when torch.npu is unavailable; otherwise run as-is."""
+    """Skip test when no real NPU device is available; otherwise run as-is."""
 
     def decorator(func):
         def wrapper(*args, **kwargs):
-            if not torch.npu.is_available():
+            if not _npu_device_ready():
                 pytest.skip(f"{func.__name__} requires NPU device (num_npus={num_npus})")
             return func(*args, **kwargs)
 
@@ -213,16 +230,24 @@ class TestNPUUBatchWrapperPassthrough(TestBase):
 class TestNPUUBatchContext(unittest.TestCase):
     """Test NPUUBatchContext stream/event operations."""
 
-    @patch("torch.npu.set_stream")
-    def test_update_stream(self, mock_set_stream):
+    def test_update_stream(self):
+        # Capture calls directly instead of @patch("torch.npu.set_stream"):
+        # CPU-UT sessions may rebind torch.npu between patch time and call
+        # time, which silently detaches the mock.
         from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchContext
 
         ctx = NPUUBatchContext.__new__(NPUUBatchContext)
         mock_stream = MagicMock()
-        ctx.update_stream(mock_stream)
+        set_stream_calls: list = []
+        original_set_stream = torch.npu.set_stream
+        torch.npu.set_stream = set_stream_calls.append
+        try:
+            ctx.update_stream(mock_stream)
+        finally:
+            torch.npu.set_stream = original_set_stream
 
         assert ctx.current_stream is mock_stream
-        mock_set_stream.assert_called_once_with(mock_stream)
+        assert set_stream_calls == [mock_stream]
 
     def test_signal_comm_done(self):
         from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchContext
