@@ -2801,7 +2801,7 @@ def test_o_proj_capacity_covers_decode_batch(tp_size):
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity) as get_capacity,
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=matmul),
@@ -2829,7 +2829,6 @@ def test_o_proj_capacity_covers_decode_batch(tp_size):
             impl._forward_o_proj(torch.zeros(scheduler_capacity, tp_size, 2), torch.empty(scheduler_capacity, 2))
 
     assert a2a.call_count == rs.call_count == 3
-    get_capacity.assert_called_once()
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])

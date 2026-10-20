@@ -2006,10 +2006,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # shapes stay identical across ACL graph buckets. potential_max_tokens
             # already covers the largest decode batch; a larger scheduler budget
             # would only pad every decode step, so the guard below rejects it.
-            if hasattr(self, "_oproj_send_buf"):
-                exchange_num_tokens = self._oproj_send_buf.shape[1]
-            else:
-                exchange_num_tokens = get_potential_max_tokens()
+            exchange_num_tokens = get_potential_max_tokens()
             if exchange_num_tokens < num_tokens:
                 scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
