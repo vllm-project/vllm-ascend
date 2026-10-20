@@ -10,11 +10,12 @@ Host tiling and metadata API checks are covered by their separate unit tests.
 import argparse
 import ctypes as C
 import os
-import re
 import subprocess
 import tempfile
 from itertools import product
 from pathlib import Path
+
+import regex as re
 
 HERE = Path(__file__).resolve().parent
 OP = HERE.parents[2]
