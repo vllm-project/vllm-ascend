@@ -263,6 +263,45 @@ class NPUPlatform(Platform):
         pg_options.is_high_priority_stream = False
         pg_options._timeout = timeout or _timedelta(minutes=30)
         pg_options.global_ranks_in_group = []
+        # Each stateless group rendezvouses on its own TCP port, so the
+        # underlying store's host:port is unique per group and identical
+        # on every rank. Use it as the HCCL comm identity, like the
+        # netloader does (group_id = init_method-based string); an empty
+        # group_id lets sequentially created comms collide on HCCL's
+        # identity-scoped resources (e.g. the EI0019 port-60000 bind).
+        underlying_store = prefix_store.underlying_store
+        pg_options.group_id = (
+            f"tcp://{underlying_store.host}:{underlying_store.port}/"
+        )
+        # Give each stateless group its own HCCL host-socket port window.
+        # Listeners used for rootInfo detection are not always released
+        # when a group is destroyed, so a later group can hit
+        # Communication_Error_Bind_IP_Port (EI0019) on the default 60000
+        # range. The rendezvous port is unique per group and identical on
+        # every rank, and HCCL comm init is lazy (at the first collective),
+        # so the env value seen at init time is this group's. Window:
+        # [base, base + 100), 50 windows starting at 60000. An explicitly
+        # configured HCCL_IF_BASE_PORT (operator override) wins.
+        if "HCCL_IF_BASE_PORT" not in os.environ:
+            os.environ["HCCL_IF_BASE_PORT"] = str(
+                60000 + (underlying_store.port % 50) * 100
+            )
+        # The NPU-adapter socket used for rootInfo detection defaults to a
+        # single port (16666) shared by every process on the host. An
+        # elastic-EP worker hosts several HCCL comms at once (its local
+        # ws=1 torch world plus multiple stateless groups), and concurrent
+        # comm creation across processes then fails with
+        # Communication_Error_Bind_IP_Port (EI0020, "port already bound").
+        # Give each NPU device -- i.e. each worker process on a node -- its
+        # own port range. The rootInfo exchanged via the store carries the
+        # actual port, so the ranks of a comm may use different ranges
+        # (verified on 910 with the EEP group-lifecycle test, 4 ranks x
+        # distinct ranges). An explicitly configured
+        # HCCL_NPU_SOCKET_PORT_RANGE (operator override) wins.
+        if "HCCL_NPU_SOCKET_PORT_RANGE" not in os.environ:
+            device = torch.npu.current_device()
+            base = 17000 + device * 20
+            os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = f"{base}-{base + 19}"
 
         backend_class = ProcessGroupHCCL(
             prefix_store, group_rank, group_size, pg_options
