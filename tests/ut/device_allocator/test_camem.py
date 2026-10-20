@@ -37,6 +37,13 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
+    @pytest.fixture(autouse=True)
+    def _camem_available(self):
+        # get_instance() asserts camem_available, but CPU UTs can run without
+        # the vllm_ascend_C extension.
+        with patch("vllm_ascend.device_allocator.camem.camem_available", True):
+            yield
+
     @pytest.mark.parametrize(
         "handle",
         [
@@ -83,7 +90,10 @@ class TestCaMem(PytestBase):
         instance2 = CaMemAllocator.get_instance()
         assert instance1 is instance2
 
-    def test_python_malloc_and_free_callback(self):
+    @patch("vllm_ascend.device_allocator.camem.torch.cuda.synchronize")
+    def test_python_malloc_and_free_callback(self, mock_cuda_sync):
+        # Upstream's free callback drains CUDA work; the NPU worker patches
+        # that at runtime, so the CPU UT stubs it out.
         allocator = CaMemAllocator.get_instance()
 
         # mock allocation_handle
