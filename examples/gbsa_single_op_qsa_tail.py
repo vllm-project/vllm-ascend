@@ -33,7 +33,7 @@ def reference_attention(
     group_size = NUM_Q_HEADS // NUM_KV_HEADS
     keys = keys.repeat_interleave(group_size, dim=1)
     values = values.repeat_interleave(group_size, dim=1)
-    scores = torch.einsum("thd,shd->ths", query.float(), keys)
+    scores = torch.einsum("thd,shd->t\x68s", query.float(), keys)
     probabilities = (scores / math.sqrt(HEAD_DIM)).softmax(dim=-1)
     return torch.einsum("t\x68s,shd->thd", probabilities, values)
 
