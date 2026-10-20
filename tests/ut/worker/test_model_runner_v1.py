@@ -3,7 +3,6 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
@@ -60,7 +59,6 @@ from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import (
     NPUModelRunner,
-    _pad_qwen4_exp_ple_graph_inputs,
     _resolve_draft_kernel_block_sizes,
 )
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -112,92 +110,27 @@ class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
         )
 
 
-class TestQwen4ExpPleInputs(unittest.TestCase):
-    @staticmethod
-    def _build_runner() -> NPUModelRunner:
+class TestModelInputAdapterDispatch(unittest.TestCase):
+    def test_runner_delegates_auxiliary_inputs(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.model_config = SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                ple_layer_ids=[0],
-                ngram_size=3,
-                eos_token_id=999,
-            )
-        )
-        runner.max_num_reqs = 2
-        runner.device = torch.device("cpu")
-        runner._qwen4_exp_ngram_context_buffer = None
-        runner._qwen4_exp_query_start_loc_buffer = None
-        runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1, 1], dtype=torch.int32))
+        runner.model_input_adapter = MagicMock()
+        runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1], dtype=torch.int32))
         runner.input_batch = SimpleNamespace(
             num_computed_tokens_cpu=np.array([3], dtype=np.int32),
-            token_ids_cpu=np.array([[7, 8, 9, 0]], dtype=np.int32),
+            token_ids_cpu=np.array([[7, 8, 9]], dtype=np.int32),
         )
-        return runner
+        model_kwargs = {}
 
-    def test_graph_padding_uses_fixed_buffers(self):
-        context_buffer = torch.empty((2, 2), dtype=torch.int32)
-        query_buffer = torch.empty(3, dtype=torch.int32)
-        context, query = _pad_qwen4_exp_ple_graph_inputs(
-            context_buffer,
-            query_buffer,
-            torch.tensor([[8, 9]], dtype=torch.int32),
-            torch.tensor([0, 1], dtype=torch.int32),
-            1,
-            999,
-        )
-        self.assertEqual(context.tolist(), [[8, 9], [999, 999]])
-        self.assertEqual(query.tolist(), [0, 1, 1])
-
-    def test_non_qwen_runner_without_text_config_is_unchanged(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.model_config = SimpleNamespace()
-        model_kwargs: dict[str, Any] = {}
-
-        runner._maybe_add_qwen4_exp_ple_inputs(
+        runner._maybe_add_model_inputs(
             model_kwargs,
             num_reqs=1,
             num_reqs_padded=1,
         )
 
-        self.assertEqual(model_kwargs, {})
-
-    def test_ngram_context_keeps_address_and_refreshes_values(self):
-        runner = self._build_runner()
-        dummy_kwargs: dict[str, Any] = {}
-        runner._maybe_add_qwen4_exp_ple_inputs(
-            dummy_kwargs,
-            num_reqs=1,
-            num_reqs_padded=1,
-            is_dummy=True,
-        )
-        dummy_context = dummy_kwargs["ngram_context"]
-        stable_context_ptr = dummy_context.data_ptr()
-        stable_query_ptr = dummy_kwargs["query_start_loc"].data_ptr()
-        self.assertEqual(dummy_context.tolist(), [[999, 999], [999, 999]])
-        self.assertEqual(dummy_kwargs["query_start_loc"].tolist(), [0, 1, 1])
-
-        real_kwargs: dict[str, Any] = {}
-        runner._maybe_add_qwen4_exp_ple_inputs(
-            real_kwargs,
-            num_reqs=1,
-            num_reqs_padded=1,
-        )
-        self.assertEqual(real_kwargs["ngram_context"].data_ptr(), stable_context_ptr)
-        self.assertEqual(real_kwargs["query_start_loc"].data_ptr(), stable_query_ptr)
-        self.assertEqual(real_kwargs["ngram_context"].tolist(), [[8, 9], [999, 999]])
-
-        external_kwargs = {
-            "ngram_context": torch.tensor([[33, 44]], dtype=torch.int32),
-            "query_start_loc": torch.tensor([0, 1], dtype=torch.int32),
-        }
-        runner._maybe_add_qwen4_exp_ple_inputs(
-            external_kwargs,
-            num_reqs=1,
-            num_reqs_padded=1,
-        )
-        self.assertEqual(external_kwargs["ngram_context"].data_ptr(), stable_context_ptr)
-        self.assertEqual(external_kwargs["query_start_loc"].data_ptr(), stable_query_ptr)
-        self.assertEqual(external_kwargs["ngram_context"].tolist(), [[33, 44], [999, 999]])
+        call_args = runner.model_input_adapter.prepare.call_args.args
+        self.assertIs(call_args[0], model_kwargs)
+        self.assertEqual(call_args[1].num_reqs, 1)
+        self.assertEqual(call_args[1].num_reqs_padded, 1)
 
 
 class TestGlm5MtpGraphMetadata(unittest.TestCase):
