@@ -75,4 +75,10 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
+    if speculative_config.method == "suffix":
+        from vllm_ascend.worker.v2.spec_decode.suffix.speculator import (
+            SuffixSpeculator,
+        )
+
+        return SuffixSpeculator(vllm_config, device)
     raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
