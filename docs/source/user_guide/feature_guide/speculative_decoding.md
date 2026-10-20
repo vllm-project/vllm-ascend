@@ -383,6 +383,7 @@ A few important things to consider when using DFlash2 draft models:
 
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
