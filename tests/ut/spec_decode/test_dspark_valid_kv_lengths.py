@@ -21,6 +21,7 @@ def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
+    spec._draft_mla_uses_device_lengths = False
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([99999], dtype=torch.int32))
     spec.max_model_len = 131072
@@ -54,6 +55,21 @@ def test_padded_idle_has_zero_valid_lengths():
     actual, prefilling = _spec([99999] * 4)._prepare_draft_dcp_metadata_inputs(0, 4, 8)
     assert actual is not None
     assert actual.tolist() == [0] * 4
+    assert not prefilling.any()
+
+
+@pytest.mark.parametrize("num_reqs,padded", [(0, 4), (1, 1), (2, 4)])
+def test_flashmla_uses_device_lengths_without_reading_host_mirror(num_reqs, padded):
+    spec = _spec([73, 81, 99999, 99999])
+    spec._draft_mla_uses_device_lengths = True
+    # The FlashMLA branch must not copy either the device lengths or the
+    # optimistic target CPU mirror into a separate draft host-length view.
+    spec.input_buffers = object()
+    spec.target_input_buffers = object()
+    actual, prefilling = spec._prepare_draft_dcp_metadata_inputs(num_reqs, padded, 8)
+    assert actual is None
+    assert prefilling.dtype == torch.bool
+    assert prefilling.shape == (padded,)
     assert not prefilling.any()
 
 

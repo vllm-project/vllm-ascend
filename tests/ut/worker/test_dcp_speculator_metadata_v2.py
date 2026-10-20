@@ -83,6 +83,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         spec.model_state = object()
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
+    if kind == "dspark":
+        spec._draft_mla_uses_device_lengths = False
     spec.dcp_manager = manager
     # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
     spec.dcp_size = config.parallel_config.decode_context_parallel_size
