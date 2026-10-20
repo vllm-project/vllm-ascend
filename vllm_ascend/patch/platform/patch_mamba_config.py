@@ -91,6 +91,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
         mamba_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
         mamba_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
         mamba_sizes = [math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba_shapes, mamba_dtypes)]
+        assert mamba_sizes, "hybrid models must expose at least one mamba state"
+        assert len(mamba_sizes) <= 2, (
+            f"contiguous hybrid KV cache supports at most conv and SSM states, got {len(mamba_sizes)}"
+        )
         mamba_raw_page_size = sum(mamba_sizes)
 
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
@@ -158,6 +162,16 @@ def verify_and_update_config(cls, vllm_config) -> None:
     elif cache_config.cache_dtype != "mxfp8":
         ssm_page_size = max(mamba_sizes)
         conv_page_size = min(mamba_sizes)
+        if len(mamba_shapes) == 2:
+            # The contiguous layout lays states down in specification order:
+            # conv first, SSM second. The attention front padding is exactly
+            # the conv region, so a reversed order would misalign K and SSM.
+            assert len(mamba_shapes[0]) == 2, (
+                "contiguous hybrid KV cache assumes (conv_state, ssm_state) order; "
+                f"got first state shape {mamba_shapes[0]}"
+            )
+        # Pure linear attention models (e.g. bailing 2.5) have only an SSM
+        # state and no conv block. They expose a single 3-D mamba shape.
         if len(mamba_shapes) == 1 and len(mamba_shapes[0]) == 3:
             conv_page_size = 0
         # Align contiguous K and SSM segments so shared block IDs do not
