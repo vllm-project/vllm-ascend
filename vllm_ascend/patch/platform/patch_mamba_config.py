@@ -164,15 +164,26 @@ def verify_and_update_config(cls, vllm_config) -> None:
         # cause cross-group writes to overwrite other blocks.
         attn_block_size = kernel_block_size * cdiv(ssm_page_size, kernel_block_size * attn_single_token_k_page_size)
         if attn_block_size * attn_single_token_k_page_size != ssm_page_size:
-            raise ValueError("Cannot align SSM and Attention pages for contiguous hybrid KV cache.")
-        if cache_config.block_size is None or cache_config.block_size < attn_block_size:
-            cache_config.block_size = attn_block_size
-            logger.info("Setting attention block size to %d tokens for contiguous hybrid KV cache.", attn_block_size)
-        if cache_config.block_size != attn_block_size:
             raise ValueError(
-                f"Contiguous hybrid KV cache requires block_size={attn_block_size} "
-                "to align Attention K and SSM state segments."
+                "Cannot align SSM and Attention pages for contiguous hybrid KV cache: "
+                f"ssm_page={ssm_page_size} B, "
+                f"k_page_per_block={kernel_block_size * attn_single_token_k_page_size} B, "
+                f"model={model_config.architecture}."
             )
+        requested_block_size = cache_config.block_size
+        if requested_block_size is not None and requested_block_size > attn_block_size:
+            # Hybrid alignment may override the user's block size, matching
+            # the upstream Platform.update_block_size_for_backend contract.
+            logger.warning(
+                "Overriding block_size=%d with %d to align Attention K and SSM "
+                "state segments for contiguous hybrid KV cache.",
+                requested_block_size,
+                attn_block_size,
+            )
+        elif requested_block_size != attn_block_size:
+            logger.info("Setting attention block size to %d tokens for contiguous hybrid KV cache.", attn_block_size)
+        cache_config.block_size = attn_block_size
+        assert cache_config.block_size * attn_single_token_k_page_size == ssm_page_size
         target_mamba_page_size = cache_config.block_size * attn_token_page_size + conv_page_size
         if cache_config.mamba_page_size_padded != target_mamba_page_size:
             cache_config.mamba_page_size_padded = target_mamba_page_size
