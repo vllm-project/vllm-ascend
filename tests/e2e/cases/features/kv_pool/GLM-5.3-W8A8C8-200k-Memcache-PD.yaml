@@ -383,12 +383,13 @@ kv_pool:
   config_store_port: 6000
   config:
     meta:
-      ock.mmc.log_level: error
+      ock.mmc.log_level: info
     local:
-      ock.mmc.log_level: error
-      ock.mmc.local_service.world_size: 24
+      ock.mmc.log_level: info
+      ock.mmc.local_service.world_size: 256
       ock.mmc.local_service.protocol: device_sdma
       ock.mmc.local_service.dram.size: 5GB
+      ock.mmc.local_service.bind_address: "${LOCAL_IP}"
 
 config:
   - node_index: 0
