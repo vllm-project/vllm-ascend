@@ -51,6 +51,7 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_c8_mxfp_kv_quant,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -403,7 +404,7 @@ class NPUPlatform(Platform):
         if (
             get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH)
             and getattr(vllm_config.model_config, "is_hybrid", False)
-            and vllm_config.cache_config.cache_dtype != "mxfp8"
+            and not is_c8_mxfp_kv_quant(vllm_config)
         ):
             from vllm.model_executor.models.config import HybridAttentionMambaModelConfig
 
