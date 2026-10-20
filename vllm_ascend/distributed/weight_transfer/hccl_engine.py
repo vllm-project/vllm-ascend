@@ -1,342 +1,296 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HCCL-based weight transfer engine."""
+"""HCCL adapters for upstream vLLM's dense NCCL weight-transfer engines.
+
+Reload lifecycle, update payloads and metadata checks stay upstream. Only NPU
+operations, HCCL rendezvous and legacy wire parameters are local. Packed helpers
+and layerwise cross-chunk behavior are unchanged.
+"""
 
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, ClassVar
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
-
-from vllm.config import VllmConfig
-from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferEngine,
-    WeightTransferInitInfo,
-    WeightTransferUpdateInfo,
+from typing_extensions import Self
+from vllm.distributed.weight_transfer.base import ParamMeta, VLLMWeightSyncClient, WeightSource, WeightTransferInitInfo
+from vllm.distributed.weight_transfer.nccl_common import worker_init_payload
+from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerInitInfo,
+    NCCLTrainerWeightTransferEngine,
+    NCCLWeightTransferEngine,
+    NCCLWeightTransferUpdateInfo,
 )
 
+from vllm_ascend.distributed.weight_transfer import hccl_common
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
+    packed_broadcast_producer,
 )
+
+
+def _validate_packed_params(info: Any) -> None:
+    if info.packed is not None and not isinstance(info.packed, bool):
+        raise ValueError("packed must be a boolean or None")
+    for name in ("packed_buffer_size_bytes", "packed_num_buffers"):
+        value = getattr(info, name)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+            raise ValueError(f"{name} must be a positive integer")
 
 
 @dataclass
 class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for HCCL weight transfer backend."""
+    """TCP rendezvous; omitted packed fields remain configurable per update."""
 
     master_address: str
-    """IP address of the trainer (rank 0) for HCCL process group setup."""
     master_port: int
-    """Port on the trainer for HCCL process group setup."""
     rank_offset: int
-    """Offset added to each vLLM worker's rank within the HCCL group.
-    Typically 1 (trainer is rank 0, workers start at rank 1)."""
     world_size: int
-    """Total number of participants in the HCCL group (trainer + all workers)."""
+    packed: bool | None = None
+    packed_buffer_size_bytes: int | None = None
+    packed_num_buffers: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_packed_params(self)
+
+
+@dataclass
+class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
+    """Upstream trainer contract with the existing HCCL unpacked default."""
+
+    backend: ClassVar[str] = "hccl"
+    packed: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_packed_params(self)
 
 
 @dataclass
 class HCCLTrainerSendWeightsArgs:
-    """Arguments for HCCL trainer_send_weights method."""
+    """Backward-compatible arguments for the static trainer entry point."""
 
     group: Any
-    """Process group (PyHcclCommunicator) for HCCL communication."""
     src: int = 0
-    """Source rank (default 0, trainer is typically rank 0)."""
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor] | None = None
-    """Optional function to apply to each (name, tensor) pair before broadcasting.
-    If None, extracts just the tensor."""
     packed: bool = False
-    """Whether to use packed tensor broadcasting for efficiency.
-    When True, multiple tensors are batched together before broadcasting
-    to reduce HCCL communication overhead."""
-    stream: torch.npu.Stream | None = None
-    """ACL stream to use for broadcasting if packed is False.
-    If packed is True, new streams will be created for each buffer."""
+    stream: Any = None
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes for each packed tensor buffer.
-    Must match the value used in HCCLWeightTransferUpdateInfo."""
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
-    """Number of buffers for double/triple buffering during packed transfer.
-    Must match the value used in HCCLWeightTransferUpdateInfo."""
 
 
 @dataclass
-class HCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for HCCL weight transfer backend."""
+class HCCLWeightTransferUpdateInfo(NCCLWeightTransferUpdateInfo):
+    """Upstream metadata plus the legacy per-update packed wire parameters."""
 
-    names: list[str]
-    """Names of the parameters to transfer (e.g. ``model.layers.0.weight``)."""
-    dtype_names: list[str]
-    """Torch dtype names (e.g. ``bfloat16``, ``float32``) for each parameter."""
-    shapes: list[list[int]]
-    """Shapes of each parameter as integer lists."""
-    packed: bool = False
-    """Whether to use packed tensor broadcasting for efficiency.
-    When True, multiple tensors are batched together before broadcasting
-    to reduce HCCL communication overhead."""
-    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes for each packed tensor buffer.
-    Both producer and consumer must use the same value."""
-    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
-    """Number of buffers for double/triple buffering during packed transfer.
-    Both producer and consumer must use the same value."""
+    packed: bool | None = None
+    packed_buffer_size_bytes: int | None = None
+    packed_num_buffers: int | None = None
 
-    def __post_init__(self):
-        """Validate that all lists have the same length."""
-        num_params = len(self.names)
-        if len(self.dtype_names) != num_params:
-            raise ValueError(
-                f"`dtype_names` should be of the same size as `names`: "
-                f"got {len(self.dtype_names)} and {len(self.names)}"
-            )
-        if len(self.shapes) != num_params:
-            raise ValueError(
-                f"`shapes` should be of the same size as `names`: got {len(self.shapes)} and {len(self.names)}"
-            )
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        _validate_packed_params(self)
+        for name in self.dtype_names:
+            if not isinstance(getattr(torch, name, None), torch.dtype):
+                raise ValueError(f"unknown torch dtype name {name!r}")
 
 
-class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, HCCLWeightTransferUpdateInfo]):
-    """
-    Weight transfer engine using HCCL for communication between trainer and workers.
+class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
+    """Inherit reload lifecycle; adapt rendezvous and receive operations."""
 
-    This implementation uses HCCL broadcast operations to transfer weights from
-    the trainer (rank 0) to all inference workers in a process group.
-    """
-
-    # Define backend-specific dataclass types
-    init_info_cls = HCCLWeightTransferInitInfo
+    init_info_cls = HCCLWeightTransferInitInfo  # type: ignore[assignment]
     update_info_cls = HCCLWeightTransferUpdateInfo
+    _stateless_init_process_group = staticmethod(hccl_common.stateless_init_process_group)
 
-    def __init__(  # type: ignore[misc]
-        self,
-        config: WeightTransferConfig,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        model: torch.nn.Module,
-    ) -> None:
-        super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyHcclCommunicator | None = None  # type: ignore[no-redef]
-
-    def start_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
-
-    def finish_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
-
-    def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
-        """
-        Initialize HCCL process group with the trainer.
-
-        Args:
-            init_info: HCCL initialization info containing master address, port,
-                      rank offset, and world size
-        """
-
+    def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:  # type: ignore[override]
         self.shutdown()
-
-        # Calculate the global rank in the trainer-worker process group
-        # Must account for data parallel to get unique ranks across all workers
-        dp_rank = self.parallel_config.data_parallel_index
-        world_size_per_dp = self.parallel_config.world_size  # TP * PP
-        rank_within_dp = self.parallel_config.rank
-
-        # Unique rank across all DP groups
-        worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-        rank = worker_rank + init_info.rank_offset
-        # Create stateless process group
-        device = torch.accelerator.current_device_index()
-        self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
-            init_info.master_address,
-            init_info.master_port,
-            rank,
-            init_info.world_size,
-            device=device,
-        )
-
-    def receive_weights(
-        self,
-        update_info: HCCLWeightTransferUpdateInfo,
-    ) -> None:
-        """
-        Receive weights from trainer via HCCL broadcast and load them incrementally.
-
-        If update_info.packed is True, uses packed tensor broadcasting for
-        efficient transfer of multiple weights in batches. Otherwise, uses simple
-        one-by-one broadcasting.
-
-        Args:
-            update_info: HCCL update info containing parameter names, dtypes, shapes,
-                        and packed flag
-        """
-        if self.model_update_group is None:
-            raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
-
-        if update_info.packed:
-            # Build iterator of (name, (shape, dtype)) from update_info
-            def state_dict_info_iterator():
-                for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
-                    dtype = getattr(torch, dtype_name)
-                    yield (name, (shape, dtype))
-
-            packed_broadcast_consumer(
-                iterator=state_dict_info_iterator(),
-                group=self.model_update_group,
-                src=0,
-                post_unpack_func=self.model.load_weights,
-                buffer_size_bytes=update_info.packed_buffer_size_bytes,
-                num_buffers=update_info.packed_num_buffers,
+        if init_info.world_size < 2:
+            raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
+        self._init_info = init_info
+        parallel = self.parallel_config
+        rank = parallel.data_parallel_index * parallel.world_size + parallel.rank + init_info.rank_offset
+        with torch.npu.device(self.device):
+            self.model_update_group = self._stateless_init_process_group(  # type: ignore[assignment]
+                init_info.master_address,
+                init_info.master_port,
+                rank,
+                init_info.world_size,
+                device=torch.accelerator.current_device_index(),
             )
-        else:
-            # Use simple one-by-one broadcasting
-            for name, dtype_name, shape in zip(update_info.names, update_info.dtype_names, update_info.shapes):
-                dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device="npu")
-                self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
-                self.model.load_weights([(name, weight)])
-                del weight
+
+    def _wire_params(self, update: HCCLWeightTransferUpdateInfo) -> dict[str, Any]:
+        params = dict(
+            packed=False,
+            packed_buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+            packed_num_buffers=DEFAULT_PACKED_NUM_BUFFERS,
+        )
+        for name in params:
+            fixed, requested = getattr(self._init_info, name), getattr(update, name)
+            if fixed is not None and requested is not None and fixed != requested:
+                raise ValueError(f"HCCL update {name} conflicts with the value fixed at init")
+            if fixed is not None or requested is not None:
+                params[name] = fixed if fixed is not None else requested
+        return params
+
+    def receive_weights(self, update_info: HCCLWeightTransferUpdateInfo) -> None:
+        if self.model_update_group is None:
+            raise RuntimeError("HCCL weight transfer is not initialized")
+        params = self._wire_params(update_info)
+        from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+
+        with torch.npu.device(self.device), disable_mtp_completeness_check():
+            metadata = zip(update_info.names, update_info.shapes, update_info.dtype_names)
+            if params["packed"]:
+                packed_broadcast_consumer(
+                    iterator=((name, (shape, getattr(torch, dtype))) for name, shape, dtype in metadata),
+                    group=self.model_update_group,
+                    src=0,
+                    post_unpack_func=self.model.load_weights,
+                    buffer_size_bytes=params["packed_buffer_size_bytes"],
+                    num_buffers=params["packed_num_buffers"],
+                )
+            else:
+                for name, shape, dtype in metadata:
+                    weight = torch.empty(shape, dtype=getattr(torch, dtype), device=self.device)
+                    self.model_update_group.broadcast(weight, src=0, stream=torch.npu.current_stream())
+                    self.model.load_weights([(name, weight)])
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        # The inherited wrapper's final synchronization uses the ambient device.
+        with torch.npu.device(self.device):
+            super().update_weights(update_info)
 
     def shutdown(self) -> None:
-        if self.model_update_group is not None:
-            self.model_update_group.close()
-            self.model_update_group = None
+        group, self.model_update_group = getattr(self, "model_update_group", None), None
+        if group is not None:
+            group.close()
+
+    @staticmethod
+    def trainer_init(init_info: HCCLWeightTransferInitInfo | dict) -> Any:
+        """Legacy rendezvous for trainers that drive their own update RPCs."""
+        return hccl_common.trainer_init(init_info)
 
     @staticmethod
     def trainer_send_weights(
         iterator: Iterator[tuple[str, torch.Tensor]],
         trainer_args: dict[str, Any] | HCCLTrainerSendWeightsArgs,
     ) -> None:
-        """Broadcast weights from trainer to vLLM workers.
-
-        Args:
-            iterator: Iterator of model parameters. Returns (name, tensor) tuples
-            trainer_args: Dictionary or HCCLTrainerSendWeightsArgs instance containing
-                         HCCL-specific arguments. If a dict, should contain keys from
-                         HCCLTrainerSendWeightsArgs.
-
-        Example:
-            >>> from vllm.distributed.weight_transfer.hccl_engine import (
-            ...     HCCLWeightTransferEngine,
-            ...     HCCLTrainerSendWeightsArgs,
-            ... )
-            >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> args = HCCLTrainerSendWeightsArgs(group=group, packed=True)
-            >>> HCCLWeightTransferEngine.trainer_send_weights(param_iter, args)
-        """
-        # Parse trainer args - accept either dict or dataclass instance
-        if isinstance(trainer_args, dict):
-            args = HCCLTrainerSendWeightsArgs(**trainer_args)
-        else:
-            args = trainer_args
-
-        if args.post_iter_func is None:
-            # Default: extract just the tensor from (name, tensor) tuple
-            post_iter_func = lambda x: x[1]
-        else:
-            post_iter_func = args.post_iter_func
-
-        if args.packed:
-            # Use packed tensor broadcasting for efficiency
-            from vllm_ascend.distributed.weight_transfer.packed_tensor import (
-                packed_broadcast_producer,
-            )
-
-            packed_broadcast_producer(
-                iterator=iterator,
-                group=args.group,
-                src=args.src,
-                post_iter_func=post_iter_func,
-                buffer_size_bytes=args.packed_buffer_size_bytes,
-                num_buffers=args.packed_num_buffers,
-            )
-        else:
-            # Use simple one-by-one broadcasting
-            for item in iterator:
-                tensor = post_iter_func(item)
-                args.group.broadcast(
-                    tensor,
+        args = HCCLTrainerSendWeightsArgs(**trainer_args) if isinstance(trainer_args, dict) else trainer_args
+        post = args.post_iter_func or (lambda item: item[1])
+        device = getattr(args.group, "device", None)
+        with torch.npu.device(device) if device is not None else nullcontext():
+            if args.packed:
+                packed_broadcast_producer(
+                    iterator=iterator,
+                    group=args.group,
                     src=args.src,
-                    stream=args.stream or torch.npu.current_stream(),
+                    post_iter_func=post,
+                    buffer_size_bytes=args.packed_buffer_size_bytes,
+                    num_buffers=args.packed_num_buffers,
                 )
+            else:
+                for item in iterator:
+                    tensor = post(item)
+                    args.group.broadcast(tensor, src=args.src, stream=args.stream or torch.npu.current_stream())
 
-    @staticmethod
+
+class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
+    """Reuse upstream send orchestration and metadata checks, not CUDA calls."""
+
+    init_info_cls = HCCLTrainerInitInfo
+
+    def __init__(self, *, device: torch.device | None = None, packed: bool = False, **kwargs: Any) -> None:
+        super().__init__(packed=packed, **kwargs)
+        if device is None:
+            index = torch.accelerator.current_device_index()
+            if index is None:
+                raise ValueError("HCCL trainer requires a current NPU device")
+            device = torch.device("npu", index)
+        self.device = device
+        self.model_update_group: Any = None
+        self._state = "ready"
+
+    @classmethod
     def trainer_init(
-        init_info: HCCLWeightTransferInitInfo | dict,
-    ) -> "PyHcclCommunicator":
-        """
-        Initialize HCCL process group for trainer-side weight transfer.
-
-        The trainer is always rank 0 in the process group. Uses the current
-        Ascend device (torch.accelerator.current_device_index()).
-
-        Args:
-            init_info: Either an HCCLWeightTransferInitInfo object or a dict with keys:
-                - master_address: str
-                - master_port: int
-                - world_size: int
-
-        Returns:
-            PyHcclCommunicator for weight transfer.
-
-        Example:
-            >>> from vllm.distributed.weight_transfer.hccl_engine import (
-            ...     HCCLWeightTransferEngine,
-            ... )
-            >>> group = HCCLWeightTransferEngine.trainer_init(
-            ...     dict(
-            ...         master_address=master_address,
-            ...         master_port=master_port,
-            ...         world_size=world_size,
-            ...     ),
-            ... )
-        """
-        if isinstance(init_info, dict):
-            master_address = init_info["master_address"]
-            master_port = init_info["master_port"]
-            world_size = init_info["world_size"]
-        else:
-            # HCCLWeightTransferInitInfo object
-            master_address = init_info.master_address
-            master_port = init_info.master_port
-            world_size = init_info.world_size
-
-        # Trainer is always rank 0
-        device = torch.accelerator.current_device_index()
-        return HCCLWeightTransferEngine._stateless_init_process_group(
-            master_address,
-            master_port,
-            0,
-            world_size,
-            device,
+        cls, init_info: HCCLTrainerInitInfo, *, client: VLLMWeightSyncClient, source: WeightSource | None = None
+    ) -> Self:
+        if source is None or init_info.world_size < 2:
+            raise ValueError("HCCL trainer requires a WeightSource and at least one worker")
+        engine = cls(
+            client=client,
+            source=source,
+            is_sender=init_info.is_sender,
+            packed=init_info.packed,
+            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
+            packed_num_buffers=init_info.packed_num_buffers,
         )
+        if not engine.is_sender:
+            return engine
+        info = HCCLWeightTransferInitInfo(
+            init_info.master_address,
+            init_info.master_port,
+            1,
+            init_info.world_size,
+            init_info.packed,
+            init_info.packed_buffer_size_bytes,
+            init_info.packed_num_buffers,
+        )
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(client.init_weight_transfer_engine, worker_init_payload(info))
+            engine.model_update_group = hccl_common.trainer_init(init_info, rank=0)
+            future.result()
+        except BaseException:
+            with suppress(Exception):
+                engine.shutdown()
+            raise
+        finally:
+            executor.shutdown(wait=False)
+        return engine
 
-    @staticmethod
-    def _stateless_init_process_group(master_address, master_port, rank, world_size, device):
-        """
-        vLLM provides `StatelessProcessGroup` to create a process group
-        without considering the global process group in torch.distributed.
-        It is recommended to create `StatelessProcessGroup`, and then initialize
-        the data-plane communication (HCCL) between external (train processes)
-        and vLLM workers.
-        """
-        from vllm.distributed.utils import StatelessProcessGroup
+    def send_weights(self) -> None:
+        if self._state != "ready":
+            raise RuntimeError(f"HCCL trainer is {self._state}; create a new engine before sending again")
+        try:
+            super().send_weights()
+        except BaseException:
+            self._state = "failed"
+            with suppress(Exception):
+                self._release_group()
+            raise
 
-        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
+    def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
+        if len({param.name for param in meta}) != len(meta):
+            raise ValueError("WeightSource.metadata() contains duplicate parameter names")
+        with torch.npu.device(self.device):
+            if not self.is_sender:
+                super()._broadcast(source, meta)
+                return
+            if self.model_update_group is None:
+                raise RuntimeError("HCCL trainer communicator is not initialized")
+            HCCLWeightTransferEngine.trainer_send_weights(
+                self._checked_iter(source, meta),
+                HCCLTrainerSendWeightsArgs(
+                    group=self.model_update_group,
+                    packed=self.packed,
+                    post_iter_func=lambda item: item[1].detach().to(self.device).contiguous(),
+                    packed_buffer_size_bytes=self.packed_buffer_size_bytes,
+                    packed_num_buffers=self.packed_num_buffers,
+                ),
+            )
 
-        pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
-        pyhccl = PyHcclCommunicator(pg, device=device)
-        return pyhccl
+    def _post_send_sync(self) -> None:
+        with torch.npu.device(self.device):
+            torch.npu.current_stream().synchronize()
+
+    def _release_group(self) -> None:
+        group, self.model_update_group = self.model_update_group, None
+        if group is not None:
+            group.close()
+
+    def shutdown(self) -> None:
+        self._state = "closed"
+        self._release_group()
