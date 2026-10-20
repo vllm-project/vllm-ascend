@@ -38,6 +38,10 @@ class AscendQwen4ExpMTPProposer(
                 device=device,
             )
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        # FULL graph replay records tensor addresses. Keep a persistent slot
+        # buffer for every later draft step and cache group.
+        self._per_group_next_step_slot_mappings: dict[tuple[int, int], torch.Tensor] = {}
 
     def _get_hidden_size(self) -> int:
         text_config = self.draft_model_config.hf_text_config
@@ -74,8 +78,7 @@ class AscendQwen4ExpMTPProposer(
         primary_metadata,
         cache_only_groups,
     ):
-        """Rebind later MTP draft steps to every QSA cache group's table."""
-        del num_input_tokens
+        """Rebind later MTP steps to every QSA cache group's address pair."""
         per_layer_attn_metadata = {layer_name: primary_metadata for layer_name in primary_group.layer_names}
         for attn_group in cache_only_groups:
             gid = attn_group.kv_cache_group_id
@@ -85,6 +88,23 @@ class AscendQwen4ExpMTPProposer(
                 assert block_table is not None, f"Missing Qwen draft block table for KV cache group {gid}"
                 group_common = self.shallow_copy_metadata(common_attn_metadata)
                 group_common.block_table_tensor = block_table[: group_common.num_reqs]
+                block_size = self._per_group_kernel_block_sizes[gid]
+                positions = group_common.positions[: group_common.num_actual_tokens]
+                block_numbers = positions // block_size
+                block_ids = block_table[: positions.shape[0]].gather(
+                    dim=1,
+                    index=block_numbers.view(-1, 1),
+                ).view(-1)
+                slot_mapping = block_ids * block_size + positions % block_size
+
+                key = (draft_index, gid)
+                slot_buffer = self._per_group_next_step_slot_mappings.get(key)
+                if slot_buffer is None:
+                    slot_buffer = torch.empty_like(self.slot_mapping_group[draft_index])
+                    self._per_group_next_step_slot_mappings[key] = slot_buffer
+                slot_buffer[: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
+                slot_buffer[slot_mapping.shape[0] : num_input_tokens].fill_(-1)
+                group_common.slot_mapping = slot_buffer[:num_input_tokens]
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 group_common,
                 draft_index,

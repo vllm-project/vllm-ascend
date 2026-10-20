@@ -27,8 +27,11 @@ class Qwen4ExpMTPProposer(EagleProposer):
         device: torch.device,
         runner=None,
     ) -> None:
-        super().__init__(vllm_config, device, runner)
+        # Graph warm-up can install group metadata through the runner while
+        # the base proposer is still being initialized.
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        super().__init__(vllm_config, device, runner)
 
     def _get_hidden_size(self) -> int:
         text_config = self.draft_model_config.hf_text_config
@@ -43,6 +46,16 @@ class Qwen4ExpMTPProposer(EagleProposer):
         block_table: torch.Tensor,
     ) -> None:
         self._per_group_block_tables[gid] = block_table
+
+    def set_per_group_attn_metadata(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        """Keep each hybrid cache group's complete addressing pair."""
+        self._per_group_block_tables[gid] = block_table
+        self._per_group_slot_mappings[gid] = slot_mapping
 
     def uses_per_group_kernel_block_sizes(self) -> bool:
         return True
@@ -66,8 +79,11 @@ class Qwen4ExpMTPProposer(EagleProposer):
                 else:
                     block_table = self._per_group_block_tables.get(gid)
                     assert block_table is not None, f"Missing Qwen draft block table for KV cache group {gid}"
+                    slot_mapping = self._per_group_slot_mappings.get(gid)
+                    assert slot_mapping is not None, f"Missing Qwen draft slot mapping for KV cache group {gid}"
                     group_common = copy(common_attn_metadata)
                     group_common.block_table_tensor = block_table[:num_reqs]
+                    group_common.slot_mapping = slot_mapping[: group_common.num_actual_tokens]
                 common_by_gid[gid] = group_common
 
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
@@ -92,6 +108,9 @@ class Qwen4ExpMTPProposer(EagleProposer):
         assert len(kernel_block_sizes) == len(kv_cache_config.kv_cache_groups), (
             "Qwen MTP requires one kernel block size per KV cache group"
         )
+        self._per_group_kernel_block_sizes = {
+            gid: block_size for gid, block_size in enumerate(kernel_block_sizes)
+        }
 
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
