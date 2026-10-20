@@ -18,6 +18,8 @@ from tests.ut.ops.test_gdn_attn_builder import (
     _build_attn_metadata,
     _patch_missing_runtime_cdiv,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.bailing_moe_v3_kda import (
     AscendBailingMoeV3KimiDeltaAttention,
     _zero_padded_spec_output,
@@ -43,14 +45,17 @@ class _RecordingNorm(nn.Module):
         return value
 
 
-def _new_attention() -> AscendBailingMoeV3KimiDeltaAttention:
+def _new_attention(*, a5: bool = True) -> AscendBailingMoeV3KimiDeltaAttention:
     attention = AscendBailingMoeV3KimiDeltaAttention.__new__(AscendBailingMoeV3KimiDeltaAttention)
     nn.Module.__init__(attention)
+    attention._requires_kda_state_copy = a5
+    attention._ascend_kda_state_copy = None
     return attention
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("num_speculative_tokens", [0, 1, 7, 8])
-def test_init_enforces_recurrent_sequence_length_limit(num_speculative_tokens):
+def test_init_enforces_recurrent_sequence_length_limit(num_speculative_tokens, device_type):
     def fake_base_init(instance, *_args, **_kwargs):
         nn.Module.__init__(instance)
         instance.num_speculative_tokens = num_speculative_tokens
@@ -58,9 +63,15 @@ def test_init_enforces_recurrent_sequence_length_limit(num_speculative_tokens):
     with (
         patch.object(BailingMoeV3KimiDeltaAttention, "__init__", fake_base_init),
         patch("vllm_ascend.ops.bailing_moe_v3_kda.is_conv_state_dim_first", return_value=False),
+        patch(
+            "vllm_ascend.ops.bailing_moe_v3_kda.get_current_hardware_profile",
+            return_value=get_hardware_profile(device_type),
+        ),
     ):
         if num_speculative_tokens <= 7:
-            AscendBailingMoeV3KimiDeltaAttention(None)
+            attention = AscendBailingMoeV3KimiDeltaAttention(None)
+            assert attention._requires_kda_state_copy == (device_type == AscendDeviceType.A5)
+            assert attention._ascend_kda_state_copy is None
         else:
             with pytest.raises(ValueError, match="at most 7 speculative tokens"):
                 AscendBailingMoeV3KimiDeltaAttention(None)
@@ -207,12 +218,16 @@ def test_recurrent_uses_current_kda_contract(safe_gate: bool, expected_lower_bou
     [(False, None), (True, -4.0)],
 )
 @pytest.mark.parametrize("has_empty_sequence", [False, True])
-def test_prefill_uses_current_chunk_contract_and_writes_back_state(
+@pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("a5", [False, True])
+def test_prefill_preserves_padded_state_on_a3_and_a5(
     safe_gate: bool,
     expected_lower_bound: float | None,
     has_empty_sequence: bool,
+    cache_dtype: torch.dtype,
+    a5: bool,
 ):
-    attention = _new_attention()
+    attention = _new_attention(a5=a5)
     attention.safe_gate = safe_gate
     attention.lower_bound = -4.0
     attention.A_log = torch.randn(1)
@@ -222,8 +237,12 @@ def test_prefill_uses_current_chunk_contract_and_writes_back_state(
     v = torch.randn_like(q)
     raw_gate = torch.randn_like(q)
     beta = torch.rand(1, 3, 1)
-    recurrent_state = torch.arange(16, dtype=torch.float32).reshape(4, 1, 2, 2)
+    backing = torch.arange(36, dtype=cache_dtype).reshape(9, 1, 2, 2)
+    recurrent_state = backing[1::2]
+    original_backing = backing.clone()
     original_state = recurrent_state.clone()
+    assert recurrent_state.storage_offset() > 0
+    assert not recurrent_state.is_contiguous()
     state_indices = torch.tensor([1, 2, 3] if has_empty_sequence else [1, 3], dtype=torch.int64)
     has_initial_state = torch.tensor([True, True, False] if has_empty_sequence else [True, False])
     metadata = SimpleNamespace(
@@ -235,15 +254,30 @@ def test_prefill_uses_current_chunk_contract_and_writes_back_state(
     output = torch.randn_like(v)
     final_state = torch.randn(2, 1, 2, 2, dtype=torch.float32)
 
+    def gather(state, indices, flags):
+        return state[indices].masked_fill(~flags[:, None, None, None], 0).contiguous()
+
+    # Mock the device-copy boundary; the real plan's kernels are covered by
+    # KDA state-copy NPU tests. Keep the padded cache view intact.
+    state_copy = SimpleNamespace(
+        gather=MagicMock(side_effect=gather),
+        scatter=MagicMock(
+            side_effect=lambda state, packed, indices: state.__setitem__(indices, packed.to(state.dtype))
+        ),
+    )
+    if a5:
+        attention._ascend_kda_state_copy = state_copy
+        attention._kda_state_copy_ready = True
     with (
-        patch(
-            "vllm_ascend.ops.bailing_moe_v3_kda.clear_ssm_states",
-            side_effect=lambda state, flags: state.masked_fill_(~flags[:, None, None, None], 0),
-        ) as clear_states,
         patch(
             "vllm_ascend.ops.bailing_moe_v3_kda.run_chunk_kda",
             return_value=(output, final_state),
         ) as run_chunk,
+        patch(
+            "vllm_ascend.ops.bailing_moe_v3_kda.clear_ssm_states",
+            side_effect=lambda state, flags: state.masked_fill_(~flags[:, None, None, None], 0),
+        ) as clear_states,
+        patch("vllm_ascend.ops.bailing_moe_v3_kda.get_current_hardware_profile") as get_profile,
     ):
         actual = attention._run_prefill(
             q,
@@ -260,9 +294,29 @@ def test_prefill_uses_current_chunk_contract_and_writes_back_state(
     assert actual is output
     initial_state = run_chunk.call_args.args[5]
     assert initial_state.is_contiguous()
-    clear_states.assert_called_once()
-    assert clear_states.call_args.args[0] is initial_state
-    torch.testing.assert_close(clear_states.call_args.args[1], torch.tensor([True, False]))
+    assert initial_state.dtype == cache_dtype
+    get_profile.assert_not_called()
+    if a5:
+        clear_states.assert_not_called()
+        state_copy.gather.assert_called_once()
+        gathered_cache, gathered_indices, gathered_flags = state_copy.gather.call_args.args
+        assert gathered_cache is recurrent_state
+        torch.testing.assert_close(gathered_indices, torch.tensor([1, 3]))
+        torch.testing.assert_close(gathered_flags, torch.tensor([True, False]))
+        state_copy.scatter.assert_called_once()
+        scattered_cache, scattered_state, scattered_indices = state_copy.scatter.call_args.args
+        assert scattered_cache is recurrent_state
+        assert scattered_state is final_state
+        assert scattered_indices is gathered_indices
+    else:
+        # A3 remains usable without worker copy-plan preparation.
+        assert attention._ascend_kda_state_copy is None
+        assert not getattr(attention, "_kda_state_copy_ready", False)
+        state_copy.gather.assert_not_called()
+        state_copy.scatter.assert_not_called()
+        clear_states.assert_called_once()
+        assert clear_states.call_args.args[0] is initial_state
+        torch.testing.assert_close(clear_states.call_args.args[1], torch.tensor([True, False]))
     torch.testing.assert_close(initial_state[0], original_state[1])
     assert torch.count_nonzero(initial_state[1]) == 0
     expected_args = (
@@ -281,8 +335,51 @@ def test_prefill_uses_current_chunk_contract_and_writes_back_state(
     for actual_arg, expected_arg in zip(run_chunk.call_args.args, expected_args):
         assert actual_arg is expected_arg
     assert run_chunk.call_args.kwargs == {"lower_bound": expected_lower_bound}
-    torch.testing.assert_close(recurrent_state[[1, 3]], final_state)
+    torch.testing.assert_close(recurrent_state[[1, 3]], final_state.to(cache_dtype))
     torch.testing.assert_close(recurrent_state[[0, 2]], original_state[[0, 2]])
+    torch.testing.assert_close(backing[::2], original_backing[::2])
+
+
+@pytest.mark.parametrize("plan_present, ready", [(False, False), (False, True), (True, False)])
+def test_prefill_rejects_unprepared_state_copy_plan(plan_present, ready):
+    attention = _new_attention()
+    state_copy = SimpleNamespace(gather=MagicMock(), scatter=MagicMock())
+    attention._ascend_kda_state_copy = state_copy if plan_present else None
+    attention._kda_state_copy_ready = ready
+    q = torch.empty(1, 1, 1, 2)
+    state = torch.empty(1, 1, 2, 2)
+    metadata = SimpleNamespace(cu_seqlens_host=(0, 1), cu_seqlens_kern=None, keep_meta=None)
+
+    with (
+        patch("vllm_ascend.ops.bailing_moe_v3_kda.run_chunk_kda") as run_chunk,
+        pytest.raises(RuntimeError, match="worker cache initialization before prefill"),
+    ):
+        attention._run_prefill(q, q, q, q, q, state, torch.tensor([0]), torch.tensor([True]), metadata)
+
+    state_copy.gather.assert_not_called()
+    state_copy.scatter.assert_not_called()
+    run_chunk.assert_not_called()
+
+
+@pytest.mark.parametrize("a5", [False, True])
+def test_prefill_requires_initial_state_metadata(a5):
+    attention = _new_attention(a5=a5)
+    state_copy = SimpleNamespace(gather=MagicMock(), scatter=MagicMock())
+    attention._ascend_kda_state_copy = state_copy
+    attention._kda_state_copy_ready = True
+    q = torch.empty(1, 1, 1, 2)
+    state = torch.empty(1, 1, 2, 2)
+    metadata = SimpleNamespace(cu_seqlens_host=(0, 1), cu_seqlens_kern=None, keep_meta=None)
+
+    with (
+        patch("vllm_ascend.ops.bailing_moe_v3_kda.run_chunk_kda") as run_chunk,
+        pytest.raises(ValueError, match="has_initial_state metadata"),
+    ):
+        attention._run_prefill(q, q, q, q, q, state, torch.tensor([0]), None, metadata)
+
+    state_copy.gather.assert_not_called()
+    state_copy.scatter.assert_not_called()
+    run_chunk.assert_not_called()
 
 
 @pytest.mark.parametrize("layout", ["sd", "ds", "page_strided"])

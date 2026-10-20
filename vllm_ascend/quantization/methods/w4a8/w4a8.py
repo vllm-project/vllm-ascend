@@ -22,11 +22,16 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -40,6 +45,30 @@ from vllm_ascend.utils import (
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+_A5_W4A8_GROUP_SIZE = 256
+
+
+def _expand_a5_w4a8_scale(scale: torch.Tensor, packed_weight: torch.Tensor) -> torch.Tensor:
+    """Represent per-channel INT4 scales in A5's group-256 GMM layout once."""
+    if packed_weight.dim() != 3 or packed_weight.dtype != torch.int8:
+        raise ValueError("A5 ModelSlim W4A8 fallback requires one ND packed INT8 tensor per projection.")
+    experts, input_size, packed_output_size = packed_weight.shape
+    output_size = packed_output_size * 2
+    if input_size <= 0 or input_size % _A5_W4A8_GROUP_SIZE:
+        raise ValueError(f"A5 W4A8 GMM requires K divisible by {_A5_W4A8_GROUP_SIZE}, got {input_size}.")
+    if scale.dtype != torch.int64 or tuple(scale.shape) not in (
+        (experts, output_size),
+        (experts, 1, output_size),
+    ):
+        raise ValueError("A5 W4A8 fallback requires encoded INT64 per-channel scales matching the weights.")
+    # Repeat the existing bit-encoded scale, preserving the quantized weights.
+    # Materialize during loading so graph replay does not allocate scale buffers.
+    return (
+        scale.reshape(experts, 1, output_size)
+        .expand(experts, input_size // _A5_W4A8_GROUP_SIZE, output_size)
+        .contiguous()
+    )
 
 
 def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
@@ -213,6 +242,29 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
+        self._use_a5_unfused_w4a8 = (
+            self.quant_method == ASCEND_QUANTIZATION_METHOD
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
+        if self._use_a5_unfused_w4a8:
+            if (
+                not vllm_config.parallel_config.enable_expert_parallel
+                or vllm_config.parallel_config.enable_eplb
+                or self.use_expert_weight_list
+                or get_ascend_config().enable_fused_mc2
+            ):
+                raise ValueError(
+                    "A5 ModelSlim W4A8 fallback currently requires EP without EPLB, expert weight lists, or fused MC2."
+                )
+            # A5's fused operator rejects the required MSD assist matrix.
+            # Keep its correction in the existing unfused GMM bias arguments.
+            self.fused_activations = frozenset()
+            logger.warning_once(
+                "A5 ModelSlim W4A8 is using unfused GMM1, activation/quantization, and GMM2 "
+                "to preserve MSD corrections. Fused GMM-activation-quantization is disabled; "
+                "this compatibility path may reduce throughput."
+            )
+
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -371,6 +423,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
 
     def process_weights_after_loading(self, layer):
+        if self._use_a5_unfused_w4a8:
+            if self.use_expert_weight_list or hasattr(layer, "w13_weight_list") or hasattr(layer, "w2_weight_list"):
+                raise ValueError("A5 ModelSlim W4A8 fallback does not support expert weight lists.")
+            self.process_weights_after_loading_modelslim(layer)
+            # ModelSlim loading above leaves the transposed weights in ND.
+            # Do not apply the A2/A3 NZ transform before packing INT4 into INT32.
+            for weight_name, scale_name in (
+                ("w13_weight", "w13_weight_scale"),
+                ("w2_weight", "w2_weight_scale"),
+            ):
+                weight = getattr(layer, weight_name)
+                scale = getattr(layer, scale_name)
+                scale.data = _expand_a5_w4a8_scale(scale.data, weight.data)
+                weight.data = self._pack_to_int32(weight.data)
+            return
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
         else:

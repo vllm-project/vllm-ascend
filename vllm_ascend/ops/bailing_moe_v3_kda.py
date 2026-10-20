@@ -13,6 +13,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -33,6 +34,12 @@ class AscendBailingMoeV3KimiDeltaAttention(BailingMoeV3KimiDeltaAttention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # Only A5 needs the Kimi worker-prepared copy plan for padded pages.
+        # Preserve the existing A2/A3 prefill path and its kernel launches.
+        self._requires_kda_state_copy = (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
+        self._ascend_kda_state_copy = None
         # The device kernel skips sequences longer than MAX_MTP without a
         # host-side error, so reject an unsupported verification width here.
         if self.num_speculative_tokens + 1 > _KDA_MAX_RECURRENT_TOKENS:
@@ -223,13 +230,23 @@ class AscendBailingMoeV3KimiDeltaAttention(BailingMoeV3KimiDeltaAttention):
             if prebuilt_metadata.cu_seqlens_kern is None
             else prebuilt_metadata.cu_seqlens_kern
         )
+        if has_initial_state is None:
+            raise ValueError("KDA prefill requires has_initial_state metadata")
         keep = prebuilt_metadata.keep_meta
         if keep is not None:
             state_indices = state_indices[keep]
             has_initial_state = has_initial_state[keep]
 
-        initial_state = recurrent_state[state_indices].contiguous()
-        clear_ssm_states(initial_state, has_initial_state)
+        if self._requires_kda_state_copy:
+            # A5 hybrid pages pad the state row stride. Gather only selected
+            # rows and clear fresh rows without copying the cache pool.
+            state_copy = getattr(self, "_ascend_kda_state_copy", None)
+            if state_copy is None or not getattr(self, "_kda_state_copy_ready", False):
+                raise RuntimeError("KDA state copy requires worker cache initialization before prefill")
+            initial_state = state_copy.gather(recurrent_state, state_indices, has_initial_state)
+        else:
+            initial_state = recurrent_state[state_indices].contiguous()
+            clear_ssm_states(initial_state, has_initial_state)
         output, final_state = run_chunk_kda(
             q,
             k,
@@ -243,7 +260,10 @@ class AscendBailingMoeV3KimiDeltaAttention(BailingMoeV3KimiDeltaAttention):
             self.dt_bias,
             lower_bound=self.lower_bound if self.safe_gate else None,
         )
-        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        if self._requires_kda_state_copy:
+            state_copy.scatter(recurrent_state, final_state, state_indices)
+        else:
+            recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
         return output
 
     @eager_break_during_capture

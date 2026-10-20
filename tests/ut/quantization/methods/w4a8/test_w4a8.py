@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import regex as re
@@ -5,7 +6,11 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
-from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
+from vllm_ascend.quantization.methods.w4a8.w4a8 import (
+    AscendW4A8DynamicFusedMoEMethod,
+    _expand_a5_w4a8_scale,
+)
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
@@ -303,3 +308,197 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
+
+
+class TestAscendW4A8A5Fallback(TestBase):
+    def setUp(self):
+        self.config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={}, get_name=lambda: ASCEND_QUANTIZATION_METHOD),
+            parallel_config=SimpleNamespace(enable_expert_parallel=True, enable_eplb=False),
+            use_v2_model_runner=True,
+        )
+        self.ascend_config = SimpleNamespace(enable_fused_mc2=0, eplb_config=SimpleNamespace(dynamic_eplb=False))
+        self.profile = SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+        for target, options in (
+            ("get_current_vllm_config", {"return_value": self.config}),
+            ("get_ascend_config", {"return_value": self.ascend_config}),
+            ("get_current_hardware_profile", {"return_value": self.profile}),
+            ("get_tensor_model_parallel_world_size", {"return_value": 8}),
+            ("get_mc2_group", {"side_effect": AttributeError("CPU test has no device group")}),
+        ):
+            patcher = patch(f"{module}.{target}", **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_scale_expansion_preserves_encoded_bits_and_dequantized_weights(self):
+        encoded = torch.tensor([[0, 0xFFFFFFFF, 0x3D800000, 0x80000000] * 8] * 2, dtype=torch.int64)
+        generator = torch.Generator().manual_seed(3108)
+        for input_size, groups in ((4096, 16), (1280, 5)):
+            weight = torch.empty((2, input_size, 16), dtype=torch.int8)
+            for scale in (encoded, encoded.unsqueeze(1)):
+                with self.subTest(input_size=input_size, scale_shape=scale.shape):
+                    expanded = _expand_a5_w4a8_scale(scale, weight)
+                    self.assertEqual(expanded.shape, (2, groups, 32))
+                    self.assertEqual(expanded.dtype, torch.int64)
+                    self.assertTrue(expanded.is_contiguous())
+                    for group in range(groups):
+                        torch.testing.assert_close(expanded[:, group], encoded, rtol=0, atol=0)
+
+            quantized_weight = torch.randint(-8, 8, (2, input_size, 32), dtype=torch.int8, generator=generator)
+            channel_scale = torch.rand((2, 32), generator=generator) / 16
+            encoded_scale = channel_scale.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+            expanded = _expand_a5_w4a8_scale(encoded_scale, weight).to(torch.int32).view(torch.float32)
+            per_group = quantized_weight.reshape(2, groups, 256, 32).float() * expanded[:, :, None, :]
+            per_channel = quantized_weight.float() * channel_scale[:, None, :]
+            torch.testing.assert_close(per_group.reshape_as(per_channel), per_channel, rtol=0, atol=0)
+
+    def test_scale_expansion_rejects_invalid_layouts(self):
+        encoded = torch.zeros((2, 32), dtype=torch.int64)
+        valid_weight = torch.empty((2, 4096, 16), dtype=torch.int8)
+        for scale, weight in (
+            (encoded, torch.empty((2, 1281, 16), dtype=torch.int8)),
+            (encoded, torch.empty((2, 0, 16), dtype=torch.int8)),
+            (encoded, torch.empty((4096, 16), dtype=torch.int8)),
+            (encoded, torch.empty((2, 4096, 4), dtype=torch.int32)),
+            (encoded.float(), valid_weight),
+            (encoded[:, :16], valid_weight),
+            (encoded[:1], valid_weight),
+            (encoded.reshape(2, 2, 16), valid_weight),
+        ):
+            with (
+                self.subTest(scale_shape=scale.shape, weight_shape=weight.shape, scale_dtype=scale.dtype),
+                self.assertRaises(ValueError),
+            ):
+                _expand_a5_w4a8_scale(scale, weight)
+
+    def test_fallback_is_limited_to_a5_modelslim_and_does_not_change_class_activation(self):
+        original_activations = AscendW4A8DynamicFusedMoEMethod.fused_activations
+        for family in DeviceAdaptorFamily:
+            for quantization in (ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD):
+                with self.subTest(family=family, quantization=quantization):
+                    self.profile.device_adaptor_family = family
+                    self.config.quant_config.get_name = Mock(return_value=quantization)
+                    method = AscendW4A8DynamicFusedMoEMethod()
+                    expected = (
+                        family == DeviceAdaptorFamily.FP8_OPTIMIZED and quantization == ASCEND_QUANTIZATION_METHOD
+                    )
+                    self.assertEqual(method._use_a5_unfused_w4a8, expected)
+                    self.assertEqual(method.fused_activations, frozenset() if expected else original_activations)
+        self.assertEqual(AscendW4A8DynamicFusedMoEMethod.fused_activations, original_activations)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.logger")
+    def test_fallback_is_reported_only_on_a5(self, logger):
+        self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
+        AscendW4A8DynamicFusedMoEMethod()
+        logger.warning_once.assert_not_called()
+        self.profile.device_adaptor_family = DeviceAdaptorFamily.FP8_OPTIMIZED
+        AscendW4A8DynamicFusedMoEMethod()
+        logger.warning_once.assert_called_once()
+        self.assertIn("Fused GMM-activation-quantization is disabled", logger.warning_once.call_args.args[0])
+
+    def test_non_a5_keeps_fused_parallel_configurations(self):
+        self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
+        self.config.parallel_config.enable_expert_parallel = False
+        self.config.parallel_config.enable_eplb = True
+        self.ascend_config.enable_fused_mc2 = 1
+        method = AscendW4A8DynamicFusedMoEMethod()
+        self.assertFalse(method._use_a5_unfused_w4a8)
+        self.assertEqual(method.fused_activations, frozenset({"silu", "situ"}))
+        self.assertTrue(method.use_expert_weight_list)
+
+    def test_fallback_rejects_unsupported_parallel_paths(self):
+        for owner, attribute, value in (
+            (self.config.parallel_config, "enable_expert_parallel", False),
+            (self.config.parallel_config, "enable_eplb", True),
+            (self.ascend_config, "enable_fused_mc2", 1),
+            (self.ascend_config.eplb_config, "dynamic_eplb", True),
+        ):
+            with self.subTest(attribute=attribute):
+                previous = getattr(owner, attribute)
+                setattr(owner, attribute, value)
+                self.config.use_v2_model_runner = attribute != "dynamic_eplb"
+                try:
+                    with self.assertRaisesRegex(ValueError, "requires EP without EPLB"):
+                        AscendW4A8DynamicFusedMoEMethod()
+                finally:
+                    setattr(owner, attribute, previous)
+                    self.config.use_v2_model_runner = True
+
+    @patch("torch.Tensor.npu", new=lambda tensor: tensor, create=True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    def test_load_preserves_nd_packed_weights_msd_assist_and_reuses_scales(self, trans_nz):
+        method = AscendW4A8DynamicFusedMoEMethod()
+        experts, hidden, intermediate = 2, 4096, 1280
+        generator = torch.Generator().manual_seed(3108)
+        layer = torch.nn.Module()
+        tensors = {
+            "w13_weight": torch.randint(
+                -128, 128, (experts, intermediate, hidden), dtype=torch.int8, generator=generator
+            ),
+            "w2_weight": torch.randint(
+                -128, 128, (experts, hidden // 2, intermediate), dtype=torch.int8, generator=generator
+            ),
+            "w13_weight_scale": torch.rand((experts, 2 * intermediate, 1), generator=generator) / 16,
+            "w2_weight_scale": torch.rand((experts, hidden, 1), generator=generator) / 16,
+            "w13_scale_bias": (
+                torch.randint(-128, 128, (experts, 2 * intermediate, 1), generator=generator).float() / 16
+            ),
+            "w2_scale_bias": torch.randint(-128, 128, (experts, hidden, 16), generator=generator).float() / 16,
+        }
+        for name, tensor in tensors.items():
+            layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+        method.process_weights_after_loading(layer)
+        trans_nz.assert_not_called()
+        self.assertEqual(layer.w13_weight.shape, (experts, hidden, intermediate // 4))
+        self.assertEqual(layer.w2_weight.shape, (experts, intermediate, hidden // 8))
+        self.assertEqual(layer.w13_weight_scale.shape, (experts, 16, 2 * intermediate))
+        self.assertEqual(layer.w2_weight_scale.shape, (experts, 5, hidden))
+        for name in ("w13_weight", "w2_weight"):
+            packed = getattr(layer, name)
+            self.assertEqual(packed.dtype, torch.int32)
+            self.assertTrue(packed.is_contiguous())
+            torch.testing.assert_close(packed.view(torch.int8), tensors[name].transpose(1, 2), rtol=0, atol=0)
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            expanded = getattr(layer, name)
+            self.assertTrue(expanded.is_contiguous())
+            decoded = expanded.to(torch.int32).view(torch.float32)
+            expected = tensors[name].squeeze(-1)
+            for group in range(decoded.shape[1]):
+                torch.testing.assert_close(decoded[:, group], expected, rtol=0, atol=0)
+        for name in ("w13_scale_bias", "w2_scale_bias"):
+            torch.testing.assert_close(getattr(layer, name), tensors[name].sum(dim=-1), rtol=0, atol=0)
+
+        # Forward must pass the prepared scales and MSD corrections unchanged;
+        # repeated graph calls must not expand or copy weight-scale buffers.
+        tokens = torch.ones((4, hidden), dtype=torch.int8)
+        token_scale = torch.ones(4)
+        compute_input = SimpleNamespace(
+            layer=layer,
+            hidden_states=tokens,
+            dynamic_scale=token_scale,
+            group_list=torch.tensor([2, 2]),
+            group_list_type=1,
+        )
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+        with (
+            patch.object(method, "_quant_hidden_states", return_value=(tokens, token_scale)),
+            patch(f"{module}.dispose_tensor"),
+            patch(f"{module}.torch_npu.npu_grouped_matmul", return_value=[tokens]) as grouped_matmul,
+        ):
+            for _ in range(2):
+                method.apply_gmm1(compute_input)
+                first = grouped_matmul.call_args.kwargs
+                self.assertEqual(first["scale"][0].data_ptr(), layer.w13_weight_scale.data_ptr())
+                self.assertIs(first["bias"][0], layer.w13_scale_bias)
+                method.apply_gmm2(compute_input, tokens, token_scale)
+                second = grouped_matmul.call_args.kwargs
+                self.assertIs(second["scale"][0], layer.w2_weight_scale)
+                self.assertIs(second["bias"][0], layer.w2_scale_bias)
+
+        # Reject lists before a second transformation can corrupt loaded data.
+        original_weight = layer.w13_weight
+        layer.w13_weight_list = []
+        with self.assertRaisesRegex(ValueError, "does not support expert weight lists"):
+            method.process_weights_after_loading(layer)
+        self.assertIs(layer.w13_weight, original_weight)
