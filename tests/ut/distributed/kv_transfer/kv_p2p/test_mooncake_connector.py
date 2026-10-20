@@ -2004,6 +2004,76 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
     assert worker.xfer_handshake_metadata.block_strides == [[16], [16, 16], [16]]
 
 
+@pytest.mark.parametrize("wire_transfer_contract", [None, "split-kernels"], indirect=True)
+@pytest.mark.parametrize("local_blocks", [[], (), ([],)], ids=["empty-list", "empty-tuple", "empty-group"])
+@pytest.mark.parametrize("tracked", [False, True], ids=["rejected", "admitted"])
+def test_zero_token_receive_only_notifies_producer(wire_transfer_contract, local_blocks, tracked):
+    """A discarded short remote hit must neither copy KV nor finish a receive."""
+    worker, receiver, engine, socket, _ = wire_transfer_contract
+    socket.recv.return_value = b"ACK"
+    metadata = MooncakeConnectorMetadata()
+    if tracked:
+        metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        local_blocks,
+        0,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3],),
+            "remote_block_size": worker.block_size,
+            "num_prompt_blocks": 1,
+        },
+    )
+    worker.start_load_kv(metadata)
+    receive = receiver.request_queue.get_nowait()
+    assert not receive["awaiting_kvs"]
+    assert not any(receive["local_block_ids"])
+    assert not any(receive["remote_block_ids"])
+    receiver._handle_request(receive)
+
+    engine.batch_transfer_sync_read.assert_not_called()
+    messages = [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list]
+    assert messages == [[DONE_RECVING_MSG, "prefill-request", {}]]
+    assert receiver.request_queue.unfinished_tasks == 0
+    assert "decode-request" not in receiver.task_tracker.reqs_to_process
+    assert worker.get_finished() == (set(), set())
+    assert worker.get_block_ids_with_load_errors() == set()
+    # Routing normalizes a copy; the scheduler's original metadata stays intact.
+    assert metadata.requests["decode-request"].local_block_ids == local_blocks
+    assert metadata.requests["decode-request"].remote_block_ids == ([3],)
+
+
+def test_empty_local_shard_still_completes_an_awaited_receive(wire_transfer_contract):
+    """An empty rank-local slice is distinct from a zero-token request."""
+    worker, receiver, engine, socket, _ = wire_transfer_contract
+    socket.recv.return_value = b"ACK"
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        ([],),
+        worker.block_size,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3],),
+            "remote_block_size": worker.block_size,
+        },
+    )
+    worker.start_load_kv(metadata)
+    receive = receiver.request_queue.get_nowait()
+    assert receive["awaiting_kvs"]
+    receiver._handle_request(receive)
+    engine.batch_transfer_sync_read.assert_not_called()
+    assert worker.get_finished() == (set(), {"decode-request"})
+
+
 @pytest.mark.parametrize(
     "computed_tokens,local_blocks,remote_offsets",
     [(0, [1, 2], [288, 384]), (16, [1, 2], [384, 480])],
@@ -3863,6 +3933,69 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker._get_remote_rank = lambda *a, **k: [0]
         return worker
 
+    def test_zero_token_receive_normalizes_all_cache_groups(self):
+        local_blocks: list[int] | tuple[list[int], ...]
+        for dcp_size in (1, 8):
+            for local_blocks in ([], (), ([], [])):
+                with self.subTest(dcp_size=dcp_size, local_blocks=local_blocks):
+                    worker = self._build_non_cp_worker()
+                    worker.dcp_size = dcp_size
+                    worker.use_mla = True
+                    worker.block_size_scale = [[1], [1]]
+                    worker.kv_group2layeridx = {
+                        0: ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+                        1: ({"kv_cache_spec_type": "MambaSpec", "kv_cache_group_id": 1}, [1]),
+                    }
+                    meta = types.SimpleNamespace(
+                        remote_pcp_size=2,
+                        remote_dcp_size=1,
+                        remote_ptp_size=1,
+                        remote_port=30000,
+                        remote_block_ids=([3], [4]),
+                        local_block_ids=local_blocks,
+                        local_full_block_ids=tuple(),
+                        num_external_tokens=0,
+                        num_prompt_blocks=1,
+                        num_computed_tokens=0,
+                        remote_block_size=worker.block_size,
+                        remote_engine_id="prefill",
+                    )
+                    worker._get_selected_pcp_rank = MagicMock(return_value=1)
+                    ports, local_ids, remote_ids = worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+                    self.assertEqual(ports, [[30001]])
+                    self.assertEqual(local_ids, [([], [])])
+                    self.assertEqual(remote_ids, [([], [])])
+                    self.assertEqual(meta.local_block_ids, local_blocks)
+                    self.assertEqual(meta.remote_block_ids, ([3], [4]))
+
+    def test_zero_token_receive_keeps_remote_dcp_notification_ports(self):
+        worker = self._build_non_cp_worker()
+        worker.use_mla = True
+        worker.handshake_port = 5000
+        worker.block_size_scale = [[1], [1]]
+        worker.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+            1: ({"kv_cache_spec_type": "MambaSpec", "kv_cache_group_id": 1}, [1]),
+        }
+        worker.local_remote_block_port_mapping = {"prefill": [[6000, 6001]]}
+        worker.remote_port_send_num = {"prefill": {}}
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=2,
+            remote_ptp_size=2,
+            remote_port=6000,
+            remote_block_ids=([3], [4]),
+            local_block_ids=[],
+            num_external_tokens=0,
+            num_prompt_blocks=1,
+            num_computed_tokens=0,
+            remote_block_size=worker.block_size,
+            remote_engine_id="prefill",
+        )
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+        self.assertEqual({port for shard in ports for port in shard}, {6000, 6001})
+        self.assertTrue(all(not any(groups) for groups in local_ids + remote_ids))
+
     def test_get_kv_split_metadata_non_cp_prefix_skip_and_trim(self):
         """No-CP: remote kernels are expanded, prefix-skipped by num_computed_tokens,
         and trimmed to the local count - all inside _get_kv_split_metadata now."""
@@ -4824,6 +4957,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     local_block_ids=([20], [30]),
                     local_full_block_ids=([20], [30]),
                     remote_block_ids=([100, 101], [200, 201]),
+                    num_external_tokens=32,
                     num_prompt_blocks=2,
                     num_computed_tokens=0,
                 )
@@ -4864,6 +4998,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 num_prompt_blocks=prompt_blocks,
                                 remote_block_ids=(list(range(100, 100 + prompt_blocks)), [200]),
                                 local_block_ids=([20, 21, 22], [30]),
+                                num_external_tokens=prompt_blocks * worker.block_size,
                                 # State uses its transfer IDs, not the attention prefix-cache view.
                                 local_full_block_ids=([20, 21, 22], [99]),
                             )

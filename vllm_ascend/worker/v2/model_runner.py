@@ -44,6 +44,7 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm.v1.worker.gpu.model_runner import (
     BatchReqState,
     ExecuteModelState,
@@ -116,6 +117,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
@@ -141,6 +143,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_connector: KVConnector
     max_num_reqs: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -292,6 +295,7 @@ class NPUModelRunner(GPUModelRunner):
         # the dumper at the end of load_model).
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
+        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -492,6 +496,14 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.static_forward_context,
             self.vllm_config.scheduler_config.max_num_seqs,
         )
+
+        copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
+        if (
+            callable(copy_mamba_state)
+            and has_kv_transfer_group()
+            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+        ):
+            self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -766,42 +778,6 @@ class NPUModelRunner(GPUModelRunner):
                 super().profile_run(**profile_kwargs)
             finally:
                 self.max_num_tokens = global_max_num_tokens
-
-    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        kv_cfg = self.vllm_config.kv_transfer_config
-        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
-        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
-        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
-        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
-        # This PD-only reclassification is a temporary workaround. Replace it with
-        # a dedicated graph-eligibility check once the upstream semantics are aligned.
-        if batch_state is not None and is_pd_decode_node:
-            pd_decode_recompute = (
-                batch_state.is_prefilling_np
-                & (batch_state.num_computed_prefill_tokens_np > 0)
-                & (batch_state.num_scheduled_tokens == self.decode_query_len)
-                & (
-                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
-                    >= batch_state.prefill_len_np
-                )
-            )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                has_prefill = bool(batch_state.is_prefilling_np.any())
-                decode_graph_eligible = not has_prefill
-                if batch_state.prefill_runs_as_decode_np is not None:
-                    decode_graph_eligible = bool(
-                        (batch_state.prefill_runs_as_decode_np | ~batch_state.is_prefilling_np).all()
-                    )
-                batch_state = batch_state._replace(has_prefill=has_prefill, decode_graph_eligible=decode_graph_eligible)
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.decode_graph_eligible,
-                )
-        return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.

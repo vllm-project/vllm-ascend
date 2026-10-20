@@ -398,11 +398,12 @@ def _ascend_get_packed_kv_cache_groups(
             assert _orig_get_packed_kv_cache_groups is not None
             return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
         groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-    vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
+    cache_utils = vllm.v1.core.kv_cache_utils
+    cache_utils._annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_trailing_layer_fallback=True,
+        use_trailing_layer_fallback=cache_utils._uses_trailing_mtp_layers(vllm_config),
     )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,

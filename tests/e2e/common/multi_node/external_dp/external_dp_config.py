@@ -362,7 +362,8 @@ class ExternalDPConfigLoader:
         benchmark_cases: list[dict[str, Any]] = []
         for name, case in (raw_config.get("benchmarks") or {}).items():
             case_with_name = dict(case)
-            case_with_name["case_name"] = name
+            case_with_name["benchmark_name"] = name
+            case_with_name["benchmark_artifact_name"] = f"{raw_config.get('test_name', 'external_dp_test')}__{name}"
             benchmark_cases.append(case_with_name)
         return benchmark_cases
 

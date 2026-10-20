@@ -84,6 +84,7 @@ def test_wake_up_does_not_return_before_npu_work_is_done():
         worker = NPUWorker.__new__(NPUWorker)
         worker.model_runner = SimpleNamespace(model=MagicMock())
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_parameters = {}
 
         enqueue_npu_busy_work()
         assert not npu_stream_idle(), "helper failed to leave device work in flight"

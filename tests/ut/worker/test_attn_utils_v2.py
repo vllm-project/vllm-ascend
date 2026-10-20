@@ -513,7 +513,8 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     attn_module.qk_rope_head_dim = 64
     attn_module.impl = SimpleNamespace(
         fa_quant_layer=False,
-        supports_prolog_v3_writer=lambda: True,
+        supports_prolog_v3_writer=lambda: False,
+        supports_strided_mla_writer=lambda: True,
     )
     backend = MagicMock()
     backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
@@ -641,7 +642,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     torch.nn.Module.__init__(attn_module)
     attn_module.impl = SimpleNamespace(
         fa_quant_layer=False,
-        supports_prolog_v3_writer=lambda: True,
+        supports_strided_mla_writer=lambda: True,
     )
     spec = AscendMLAAttentionSpec(
         block_size=384,
@@ -704,9 +705,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.enable_kv_nz = False
 
-    attn_module.impl.supports_prolog_v3_writer = lambda: False
+    attn_module.impl.supports_strided_mla_writer = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.supports_prolog_v3_writer = lambda: True
+    attn_module.impl.supports_strided_mla_writer = lambda: True
     assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
 
     monkeypatch.setattr(
@@ -1604,6 +1605,7 @@ def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_
 
 def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypatch):
     state = AscendModelState.__new__(AscendModelState)
+    state.decoder_replay = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
@@ -1923,6 +1925,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
+        model_state.decoder_replay = None
         # vLLM 0.31 (#58149) exposes max_model_len as a read-only property backed by
         # model_config.
         model_state.model_config = SimpleNamespace(max_model_len=8)

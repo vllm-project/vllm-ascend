@@ -176,7 +176,10 @@ class TestDPPaddingPolicy(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.dp_size = 2
         runner.dp_rank = dp_rank
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace())
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(),
+            aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
+        )
         runner.ascend_config = SimpleNamespace(finegrained_tp_config=FinegrainedTPConfig())
         return runner
 
@@ -274,6 +277,15 @@ class TestDPPaddingPolicy(unittest.TestCase):
                                 self.assertEqual(maximum, 31)
                                 self.assertEqual(mode, CUDAGraphMode.NONE)
                                 self.assertEqual(across_dp.tolist(), [31, 31] if size > 1 else list(tokens))
+
+    def test_routing_capture_keeps_uniform_eager_inputs(self):
+        for dp_rank in range(2):
+            with self.subTest(dp_rank=dp_rank):
+                runner = self._make_runner(dp_rank)
+                runner.vllm_config.aux_output_config.enable_return_routed_experts = True
+                _, across_dp, mode = self._run_sync(runner, comm_method=MoECommType.FUSED_MC2)
+                self.assertEqual(mode, CUDAGraphMode.NONE)
+                self.assertEqual(across_dp.tolist(), [32, 32])
 
     def test_imbalanced_and_idle_metadata_use_agreed_graph_mode(self):
         for tokens in ((0, 32), (1, 32), (8, 32)):
@@ -697,7 +709,8 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.use_compress = False
         runner._finalize_dump_data = MagicMock()
 
-        def model_forward(*args):
+        def model_forward(*args, decoder_replay_dummy=False):
+            assert decoder_replay_dummy
             events.append("forward")
             return torch.zeros((4, 1))
 
@@ -1182,6 +1195,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         return runner
 
     def _check_load_model_prolog_budget(self, with_draft, pcp_enabled):
+        """Verify persistent PROLOG buffers are charged during weight loading."""
         runner = self._build_runner()
         runner.model_config.model = "test-model"
         runner.model_config.multimodal_config = None
@@ -1324,7 +1338,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=False,
-            supports_prolog_v3_writer=lambda: True,
+            supports_prolog_v3_writer=lambda: False,
+            supports_strided_mla_writer=lambda: True,
         )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
         runner.kernel_block_sizes = [128]
@@ -1460,7 +1475,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dcp_enabled=False,
             pcp_enabled=False,
             is_pcp_decode_sharded=False,
-            supports_prolog_v3_writer=lambda: False,
+            supports_strided_mla_writer=lambda: False,
         )
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
 
@@ -1494,7 +1509,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl.is_pcp_decode_sharded = False
 
         attn_module.impl.dcp_enabled = True
-        attn_module.impl.supports_prolog_v3_writer = lambda: True
+        attn_module.impl.supports_strided_mla_writer = lambda: True
         runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
         attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
         with patch(
@@ -1516,7 +1531,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
         attn_module.impl._dcp_current_kv_buffers = None
         attn_module.impl.dcp_enabled = False
-        attn_module.impl.supports_prolog_v3_writer = lambda: True
+        attn_module.impl.supports_strided_mla_writer = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
             return_value=True,
@@ -3992,6 +4007,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
+        runner.vllm_config.aux_output_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
@@ -4031,6 +4047,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
+        runner.vllm_config.aux_output_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
             scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )

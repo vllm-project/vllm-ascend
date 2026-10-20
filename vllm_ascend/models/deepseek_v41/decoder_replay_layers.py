@@ -94,9 +94,7 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     cut = max(model.config.kv_source_layer_ids)
     if cut >= model.end_layer - 1:
         return None
-    if not config.use_v2_model_runner:
-        reason = "decoder bounded replay requires MRV2"
-    elif (
+    if (
         (model.use_sequence_parallel and not enable_dsa_cp())
         or parallel.pipeline_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1
@@ -132,7 +130,12 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         replay = AscendDecoderReplayLayers(
             model.config.sliding_window,
             model._run_replay_layers,
-            [model.topk_indices_buffer, model.candidate_indices_buffer],
+            [
+                model.topk_indices_buffer,
+                model.candidate_indices_buffer,
+                model.candidate_lengths_buffer,
+                model.topk_lengths_buffer,
+            ],
         )
         replay.sequence_parallel = model.use_sequence_parallel
         return replay

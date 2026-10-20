@@ -164,8 +164,11 @@ def test_sliding_window_mla_merge_carries_bounded_replay():
     merged = AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=True)])
     assert merged.bounded_replay
     assert not merged.prefix_cacheable
+    assert merged.prefix_replay_tokens == merged.sliding_window == 64
 
-    assert not AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()]).bounded_replay
+    ordinary = AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()])
+    assert not ordinary.bounded_replay
+    assert ordinary.prefix_replay_tokens == 0
 
     with pytest.raises(AssertionError, match="replay policy"):
         AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=False)])
