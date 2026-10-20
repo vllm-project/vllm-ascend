@@ -116,9 +116,15 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             )
             self._capture_descs = {
                 mode: [
-                    DraftBatchDescriptor(**vars(desc), num_speculative_tokens=k)
+                    desc
+                    if isinstance(desc, DraftBatchDescriptor)
+                    else DraftBatchDescriptor(**vars(desc), num_speculative_tokens=k)
                     for desc in descs
-                    for k in sorted(set(schedule) - {0, 1}, reverse=True)
+                    for k in (
+                        [desc.num_speculative_tokens]
+                        if isinstance(desc, DraftBatchDescriptor)
+                        else sorted(set(schedule) - {0, 1}, reverse=True)
+                    )
                 ]
                 for mode, descs in self._capture_descs.items()
             }
@@ -193,7 +199,11 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         )
         if specialized in self.graphs:
             return specialized
-        if desc in self.graphs and num_speculative_tokens == self.speculator.num_speculative_steps:
+        if (
+            not isinstance(desc, DraftBatchDescriptor)
+            and desc in self.graphs
+            and num_speculative_tokens == self.speculator.num_speculative_steps
+        ):
             return desc
         # A merged graph contains a fixed number of steps. Never replay a
         # different width when the selected graph has not been captured.

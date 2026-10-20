@@ -537,6 +537,29 @@ def test_fia_params_match_selected_width(k):
     assert params[-1]["actual_seq_lengths_kv"] == [10 + k - 1, 30, 0]
 
 
+@pytest.mark.parametrize("k", [2, 4])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_dcp_fia_params_match_selected_width(k, rank):
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator.use_dcp = True
+    speculator.dcp_manager = SimpleNamespace(dcp_world_rank=rank)
+    speculator.draft_vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=4)
+    )
+    speculator.num_speculative_steps = 4
+    speculator.max_model_len = 30
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
+    metadata = SimpleNamespace(decode=SimpleNamespace(block_tables=torch.zeros((3, 2))))
+    params = speculator.build_fia_params(3, {"draft": metadata}, False, k)
+    assert len(params) == k - 1
+    for step, per_step in enumerate(params, start=1):
+        lengths = [min(length + step, 30) for length in [10, 29]] + [0]
+        expected = [sum((token // 4) % 2 == rank for token in range(length)) for length in lengths]
+        assert per_step["actual_seq_lengths_kv"] == expected
+        assert per_step["block_table"] is metadata.decode.block_tables
+
+
 def test_init_decode_draft_attn_metadatas_sparse_attention():
     """Test draft decode metadata initialization for sparse attention."""
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)

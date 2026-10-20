@@ -100,6 +100,15 @@ def test_runtime_width_selects_matching_merged_graph():
     assert manager.specialize_spec_tokens(eager, 2) == eager
 
 
+def test_max_width_cannot_reuse_a_specialized_narrow_graph():
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.is_draft_model_prefill = False
+    manager.speculator = SimpleNamespace(num_speculative_steps=4)
+    desc = DraftBatchDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=4, num_reqs=4, num_speculative_tokens=2)
+    manager.graphs = {desc: object()}
+    assert manager.specialize_spec_tokens(desc, 4).cg_mode == CUDAGraphMode.NONE
+
+
 def test_legacy_task_handles_are_isolated_by_draft_width():
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager._draft_graph_params_by_desc = {}
@@ -116,6 +125,28 @@ def test_legacy_task_handles_are_isolated_by_draft_width():
         with pytest.raises(RuntimeError), manager._draft_graph_params_scope(widths[0]):
             raise RuntimeError("graph update failed")
     assert pool.handles[4] == []
+
+
+@pytest.mark.parametrize("k", [2, 4])
+@pytest.mark.parametrize("updatable", [False, True])
+def test_replay_builds_metadata_for_selected_width(k, updatable):
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.is_draft_model_prefill = False
+    manager.update_stream = MagicMock()
+    manager.speculator = SimpleNamespace(
+        attn_backend=object(),
+        draft_vllm_config=object(),
+        build_draft_attn_metadatas=MagicMock(return_value=[{}] * (k - 1)),
+    )
+    manager._draft_graph_params_scope = lambda desc: nullcontext()
+    manager._updatable_graph_replay = MagicMock()
+    manager._graph_replay = MagicMock()
+    desc = DraftBatchDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=4, num_reqs=4, num_speculative_tokens=k)
+    with patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph", return_value=updatable):
+        manager.run_fullgraph(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_called_once_with(4, 4, False, num_speculative_steps=k)
+    replay = manager._updatable_graph_replay if updatable else manager._graph_replay
+    assert replay.call_args.args[0] == desc
 
 
 @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
@@ -151,16 +182,18 @@ def test_capture_specializes_all_scheduled_widths():
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.vllm_version_is", return_value=False),
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture", capture),
     ):
-        manager.capture(
-            lambda *args, **kwargs: recorded.append(kwargs["num_speculative_steps"]),
-            object(),
-            SimpleNamespace(seq_lens_cpu=torch.zeros(4)),
-            object(),
-            [],
-            object(),
-            specialize_spec_tokens=True,
-        )
-    assert recorded == [4, 2]
+        # Elastic EP releases and recaptures graphs with the same descriptors.
+        for _ in range(2):
+            manager.capture(
+                lambda *args, **kwargs: recorded.append(kwargs["num_speculative_steps"]),
+                object(),
+                SimpleNamespace(seq_lens_cpu=torch.zeros(4)),
+                object(),
+                [],
+                object(),
+                specialize_spec_tokens=True,
+            )
+    assert recorded == [4, 2, 4, 2]
 
 
 def test_run_fullgraph_uses_updatable_graph():

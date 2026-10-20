@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
@@ -21,9 +22,11 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_draft_step_host,
     update_draft_inputs_cpu,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestMRv2Mtp310(TestBase):
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
     def test_decode_replays_only_runtime_width(self):
         speculator = object.__new__(AscendMTPSpeculator310)
         speculator.num_speculative_steps = 4
@@ -46,6 +49,7 @@ class TestMRv2Mtp310(TestBase):
                 )
                 self.assertEqual(calls, k - 1)
 
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
     def test_full_decode_updates_autoregressive_inputs_across_width_changes(self):
         # A per-step graph must feed its sampled token and feedback hidden
         # states into the next replay, and write each draft to its own column.

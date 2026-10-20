@@ -1,0 +1,4 @@
+pr: 18626
+entries:
+  - category: bugfix
+    text: Fixed Model Runner V2 autoregressive speculative decoding on vLLM main to honor the scheduled draft token count and replay matching ACL graphs when the count changes.

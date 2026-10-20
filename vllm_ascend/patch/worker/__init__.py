@@ -84,7 +84,6 @@ if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKE
     from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
         AutoRegressiveAclGraphManager310,
     )
-    from vllm_ascend.worker.v2.spec_decode.upstream import ar_speculator_module as _ar_spec
 
     _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
 
