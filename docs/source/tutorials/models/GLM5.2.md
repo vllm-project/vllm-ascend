@@ -191,16 +191,6 @@ below and select the matching checkpoint. The default model is GLM-5.3.
 Changing a checkpoint does not transfer accuracy or performance validation
 from one model to the other. Keep thinking enabled for GLM-5.3.
 
-| Scenario | Hardware | Configuration |
-| --- | --- | --- |
-| W4A4C8 single node | 950DT products | Section 5.1.1; GLM-5.2 and GLM-5.3 startup/short requests validated |
-| W8A8C8 single node, 32k | A3 | Section 5.1.1; reduced-context layout |
-| W8A8C8 colocated | 950DT products / A3 / A2 | Section 5.1.2; hardware-specific scripts |
-| PD | 950DT products / A3 / A2 | Section 5.1.3; hardware-specific images in Section 4 |
-| MemCache KV pool | A3 / A2 / 950DT products | Section 5.1.4; hardware-specific pooling scripts |
-| 1M DCP PD | Four A3 nodes | Section 5.2; Prefill DP2/TP16/DCP16, Decode DP4/TP8/DCP8 |
-| 1M FP8 PD | Four 950DT products nodes | Section 5.2; Prefill DP2/TP8/KVPP, Decode DP2/TP8/DCP8; source limits differ by role |
-
 For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
 image tag and container mounts from Section 4. Use the same image on every
 node in a deployment.
@@ -235,13 +225,6 @@ are not interchangeable.
 
 Each node exposes eight devices. Install `fastokens` before enabling
 `VLLM_USE_FASTOKENS=1`.
-
-| Scenario | Checkpoint | Prefill / colocated layout | Decode layout | Nodes |
-| --- | --- | --- | --- | --- |
-| Colocated | W8A8C8 MXFP8 | PP2/TP8, partition 42/36 | Same engine | 2 |
-| Ordinary PD | W8A8C8 MXFP8 | DP1/PP2/TP8, partition 42/36 | DP32/TP1 | 2 P + 4 D |
-| 1M PD | W8A8C8 MXFP8 | DP2/TP8, KVPP enabled | DP2/TP8/DCP8 | 2 P + 2 D |
-| Pooled PD | W4A4C8 MXFP4 | DP1/PP2/TP8, partition 42/36 | DP16/TP2 | 2 P + 4 D |
 
 Before running a role script, export `MODEL_PATH`, `LOCAL_IP`, and
 `NIC_NAME`. PP roles also require `P0_IP`;
