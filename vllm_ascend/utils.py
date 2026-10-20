@@ -837,7 +837,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
     from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-    from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -867,7 +867,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
+        "SiluAndMulWithClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
@@ -887,7 +887,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
-        "FusedRMSNormGated": AscendFusedRMSNormGated,
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
@@ -953,6 +952,22 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
+def register_ascend_fla_customop():
+    """Resolve the FLA subclass after selecting a device, before model loading.
+
+    Registration happens once inside the imported module, under Python's
+    module import lock. Repeated calls keep the same class and registry key.
+    """
+    # Separate this from general registration to avoid FLA initializing an NPU
+    # context during plugin discovery in the API process.
+    # TODO: Merge back into register_ascend_customop once supported vLLM FLA or
+    # Triton Ascend versions fix import-time NPU initialization.
+    from vllm_ascend.ops.fused_rms_norm_gated import AscendFusedRMSNormGated
+
+    REGISTERED_ASCEND_OPS["FusedRMSNormGated"] = AscendFusedRMSNormGated
+    return AscendFusedRMSNormGated
 
 
 def lmhead_tp_enable() -> bool:
@@ -1371,6 +1386,9 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 # the QFA path (the QFA D=256 requirement doc allows block sizes 512/1024).
 A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 
+# Dense-kernel minimum for upstream alignment, not the final M3 cache block.
+MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
+
 # Enabled with ``--kv-cache-dtype mxfp8``, like the other Ascend C8 KV cache
 # flavors. The ModelSlim checkpoint recipe (fa_v.scale weights) is loaded when
 # present; it is not the switch.
@@ -1378,7 +1396,28 @@ C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
 
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
-    return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+    # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
+    # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+def is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:
+    if vllm_config is None:
+        return False
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    architectures = getattr(getattr(model_config, "hf_config", None), "architectures", None) or ()
+    return (
+        any(
+            architecture in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            for architecture in architectures
+        )
+        and cache_config is not None
+        and cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+        and bool(cache_config.kv_cache_dtype_skip_layers)
+        and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    )
 
 
 def refresh_block_size(vllm_config):

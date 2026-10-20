@@ -6,6 +6,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendFABackend(AttentionBackend):
@@ -15,6 +16,12 @@ class AscendFABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "CUSTOM"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
@@ -35,7 +42,7 @@ class AscendFABackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128]
 
 
@@ -119,17 +126,20 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    False,
+                    num_decode_tokens > num_decodes,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
 
         if num_prefills > 0:
+            prefill_query_start_loc = attn_metadata.query_start_loc
+            if num_decode_tokens > 0:
+                prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decode_tokens:, :],
-                    attn_metadata.query_start_loc[num_decodes:],
+                    attn_metadata.block_tables[num_decodes:, :],
+                    prefill_query_start_loc,
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),

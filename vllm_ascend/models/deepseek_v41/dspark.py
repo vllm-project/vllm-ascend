@@ -92,6 +92,7 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
             sliding_window=spec.sliding_window,
             cache_dtype_str=spec.cache_dtype_str,
             model_version=spec.model_version,
+            bounded_replay=spec.bounded_replay,
         )
 
     def get_attn_backend(self):
@@ -344,6 +345,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, *, vllm_config, prefix="") -> None:

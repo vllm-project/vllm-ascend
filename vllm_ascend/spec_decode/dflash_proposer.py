@@ -51,7 +51,12 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
-        self.max_positions = self.max_num_tokens + self.max_query_tokens
+        # ACL graph batches can be padded beyond the logical query limit.
+        self.max_padded_query_tokens = max(
+            self.max_query_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+        self.max_positions = self.max_num_tokens + self.max_padded_query_tokens
 
         self._context_slot_mapping_buffers = torch.zeros(
             self.max_num_tokens,
@@ -60,7 +65,7 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int32,
             device=device,
         )
@@ -72,7 +77,7 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int32,
             device=device,
         )

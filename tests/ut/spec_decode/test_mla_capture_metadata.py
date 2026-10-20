@@ -16,6 +16,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 @pytest.mark.parametrize("has_flags", [False, True])
 def test_mla_capture_defaults_preserve_common_metadata(dcp, state, has_flags):
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.flashmla_state = None
     builder.dcp_enabled = dcp
     builder.reorder_batch_threshold = 3
     builder.build = MagicMock(side_effect=lambda prefix, metadata: metadata)
@@ -48,6 +49,7 @@ def test_mla_capture_defaults_preserve_common_metadata(dcp, state, has_flags):
 
 def test_mla_capture_keeps_upstream_decode_validation():
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.flashmla_state = None
     builder.dcp_enabled = True
     builder.reorder_batch_threshold = 3
     builder.build = MagicMock()

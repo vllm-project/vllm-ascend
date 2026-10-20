@@ -19,13 +19,15 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
@@ -73,6 +75,7 @@ def test_patch_swaps_upstream_selector_walk_kernel():
 def _spec_config(arch: str) -> SimpleNamespace:
     return SimpleNamespace(
         method="dflash",
+        enforce_eager=None,
         use_dspark=lambda: False,
         use_dflash=lambda: True,
         draft_model_config=SimpleNamespace(architectures=[arch]),
@@ -149,3 +152,136 @@ def test_greedy_walk_contract_reference():
     assert realized[0] == pytest.approx([0.5, 0.9, 0.9])
     assert realized[1] == pytest.approx([-1.0, -2.0, 3.0])
     assert realized[2] == [-777.0] * top_k and realized[3] == [-777.0] * top_k
+
+
+@pytest.mark.parametrize("num_reqs_padded", [2, 4])
+def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.input_batch = SimpleNamespace(num_reqs=2)
+    speculator.num_query_per_req = 3
+    speculator._group_causal = {0: False}
+    seq_lens = torch.tensor([10, 20])
+    metadata = {name: SimpleNamespace(actual_seq_lengths_q=[3, 6]) for name in ("draft.0", "draft.1")}
+    speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
+    monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+
+    assert speculator.build_draft_attn_metadatas(num_reqs_padded, seq_lens) == [metadata]
+
+    kwargs = speculator._build_uniform_attn_metadata.call_args.kwargs
+    assert kwargs["num_reqs"] == 2
+    assert kwargs["seq_lens_cpu_upper_bound"] is seq_lens
+    assert kwargs["causal"] is speculator._group_causal
+    assert kwargs["batch_desc"].cg_mode == CUDAGraphMode.FULL
+    assert kwargs["batch_desc"].num_tokens == num_reqs_padded * 3
+    assert kwargs["batch_desc"].num_reqs == num_reqs_padded
+    for layer in metadata.values():
+        assert layer.actual_seq_lengths_q == list(range(3, num_reqs_padded * 3 + 1, 3))
+
+
+@pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
+def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn):
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    batch, sync_state, result = object(), object(), object()
+    received = []
+
+    def propose(self, *args, **kwargs):
+        assert self.input_batch is batch
+        received.append(args[11])
+        return result
+
+    monkeypatch.setattr(DFlashSpeculator, "propose", propose)
+    monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+    assert (
+        speculator.propose(
+            batch, *[None] * 10, **{dp_sync_kwarg: sync_state}, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
+        )
+        is result
+    )
+    assert received == [None if dummy_run and skip_attn else sync_state]
+
+
+@pytest.mark.parametrize("active_layers", [None, {"draft.1"}])
+def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, active_layers):
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.device = torch.device("cpu")
+    speculator.max_num_tokens = 8
+    speculator.draft_kv_cache_group_ids = [0, 1]
+    speculator.draft_attn_layer_names = active_layers
+    speculator.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+    backends = {name: object() for name in ("draft.0", "draft.1")}
+    layers = {name: SimpleNamespace(get_attn_backend=lambda name=name: backends[name]) for name in backends}
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in backends])
+    monkeypatch.setattr(DFlashSpeculator, "set_attn", MagicMock())
+    monkeypatch.setattr(dflash_module, "get_layers_from_vllm_config", lambda *args: layers)
+    # set_attn installs an upstream callback; restore it after this test.
+    monkeypatch.setattr(dflash_module.dflash_speculator, "prepare_dflash_inputs", object())
+
+    speculator.set_attn(None, cache, None, None, None)
+
+    assert speculator.attn_backends == {
+        name: backend for name, backend in backends.items() if active_layers is None or name in active_layers
+    }
+    assert speculator._context_slot_mappings.shape == (2, 8)
+    assert speculator._context_slot_mappings.dtype == torch.int32
+    assert torch.count_nonzero(speculator._context_slot_mappings) == 0
+
+
+def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate(monkeypatch):
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    inputs = [object() for _ in range(28)]
+    inputs[17] = 16  # Kernel block size, distinct from physical KV blocks.
+    inputs[-1] = True  # sample_from_anchor
+
+    dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
+
+    kernel.assert_called_once_with(*inputs, kv_cache_block_size=128)
+
+
+def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):
+    """vLLM main forwards the physical block size, but the Ascend block table is
+    kernel-block addressed, so the factory restores the kernel size per group."""
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_table = torch.zeros(2, 4, dtype=torch.int32)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[block_table],
+    )
+    inputs = [object() for _ in range(28)]
+    inputs[16] = block_table
+    inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
+    inputs[-1] = True  # sample_from_anchor
+
+    if vllm_version_is("0.31.0"):
+        dflash_module.prepare_dflash_inputs_factory(384)(*inputs)
+    else:
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+
+    restored = kernel.call_args.args[17]
+    if vllm_version_is("0.31.0"):
+        # The release lane already forwards the kernel block size.
+        assert restored == 384
+    else:
+        assert restored == 128
+    assert kernel.call_args.kwargs["kv_cache_block_size"] == 384
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only kernel block size restore")
+def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)],
+    )
+    inputs = [object() for _ in range(28)]
+    # A block table that AscendBlockTables never handed out.
+    inputs[16] = torch.zeros(2, 4, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="unknown to AscendBlockTables"):
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+
+    kernel.assert_not_called()

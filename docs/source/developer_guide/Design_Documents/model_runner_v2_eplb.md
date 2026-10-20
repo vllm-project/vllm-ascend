@@ -129,8 +129,11 @@ asynchronous communicator interface:
 
 - `AscendHixlEplbCommunicator` (default): receiver-initiated one-sided reads
   between NPU memory regions registered with the HIXL engine. Participating
-  expert weights and receive buffers are registered once per engine at
-  startup, whole allocator segments at a time.
+  expert weights and receive buffers from all models are registered as aligned,
+  merged live tensor ranges. One state-owned HIXL session holds their underlying
+  storage until deregistration succeeds. Unrelated allocator growth does not
+  change these registrations. Each session supports up to 4000 merged regions
+  across all participating models; larger sets fail before backend registration.
 - `AscendGlooEplbCommunicator` (fallback): CPU-staged P2P over Gloo with
   pinned staging buffers.
 
@@ -146,6 +149,8 @@ consensus. HIXL initialization or runtime failures fail fast instead of
 falling back mid-flight: ranks may disagree on transfer progress and live
 slots may already be in transition (see
 [RFC #17572](https://github.com/vllm-project/vllm-ascend/issues/17572)).
+
+Initialization confirms engine creation, registration, metadata exchange, and connection across ranks. Explicit shutdown drains every submitted request, disconnects peers, confirms that incoming connections are gone, deregisters memory, and finalizes the engine. Failed cleanup, including initialization rollback, retains the remaining handles and storage on a fatal exception chain and terminates the worker before registered memory is released.
 
 Only asynchronous EPLB is supported. The upstream worker publishes one layer
 at a time and waits for the model-runner thread to acknowledge consumption

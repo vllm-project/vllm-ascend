@@ -27,11 +27,12 @@ ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 # ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 # MOONCAKE_TAG (optional): Version tag of the mooncake-transfer-engine-npu package.
-ARG MOONCAKE_TAG=0.3.11.post1
+ARG MOONCAKE_TAG=v0.3.14-rc1
+ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
-ARG VLLM_TAG=v0.30.0
+ARG VLLM_TAG=v0.31.0
 # VLLM_COMMIT (optional): Exact vLLM commit to build; empty to fall back to VLLM_TAG.
 ARG VLLM_COMMIT=""
 # SOC_VERSION (optional): Ascend SoC version used for custom kernel compilation.
@@ -59,20 +60,36 @@ ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
 # flash-linear-attention-npu
-ARG FLA_VERSION="26.9.1+deva4a7958"
-ARG FLA_RELEASE_TAG="v26.9.1-beta2"
-
+ARG FLA_VERSION="26.9.1+dev5cc6990"
+ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
 WORKDIR /workspace
-
-# Install clang-15 (for triton-ascend) and Mooncake
+# Install clang-15 (for triton-ascend)
 RUN apt-get update -y && \
-    apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
+    apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
+
+# ====== Install Mooncake ======
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
+        "linux/amd64"|"x86_64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl" ;; \
+        *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
+    esac && \
+    MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
+    echo "Download mooncake whl: ${MOONCAKE_URL}" && \
+    wget -q --no-check-certificate "${MOONCAKE_URL}" -P /tmp && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    echo "***********check mooncake-transfer-engine-npu version***********" && \
+    pip show mooncake-transfer-engine && \
+    rm -rf /tmp/${MOONCAKE_WHL} && \
+    pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
@@ -98,14 +115,13 @@ ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    python3 -m pip install triton-ascend==3.6.0 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
@@ -115,10 +131,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a" ;; \
+            FLA_SHA256="2577eca3f1015ca83897bf638046f41cb54691a0c15c433d9e43946fa32d985b" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a2-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="c51b11871b5e8a66b6a0612ef95ea446fd96ba3d8d02b693d93a7b7b5f1b1d0f" ;; \
+            FLA_SHA256="f9e5b2cac5278eee9b781e758a896f6f2dbae42b43b9f36a3073e4493167918a" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" && \
@@ -134,11 +150,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
 ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
 # ===== Conditional installation based on BUILD_TYPE =====

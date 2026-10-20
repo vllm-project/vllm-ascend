@@ -106,6 +106,10 @@ class SFAPDRD2HProducerScheduler:
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
         return 0, False
 
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        # Prefill keeps its own blocks; it never restores remote KV.
+        return ()
+
     def update_state_after_alloc(
         self,
         request: Request,
@@ -349,6 +353,22 @@ class SFAPDRD2HScheduler:
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
         return 0, False
+
+    def get_loaded_kv_cache_group_ids(self, request: Request) -> tuple[int, ...]:
+        params = request.kv_transfer_params
+        if params is None or not params.get("do_remote_prefill"):
+            return ()
+        # The pull restores the request's main MLA and indexer blocks and, with
+        # DSpark, its resident draft-context blocks.
+        return tuple(
+            sorted(
+                {
+                    self.main_group_idx,
+                    self.indexer_group_idx,
+                    *getattr(self, "_dspark_context_groups", ()),
+                }
+            )
+        )
 
     def update_state_after_alloc(
         self,

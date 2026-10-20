@@ -862,9 +862,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     decode_token_per_req=self.runner.decode_token_per_req,
                     is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                     max_seq_len=0,
-                    group_len=self.runner.group_len.gpu[:num_reqs],
-                    group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
-                    group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
                     req_topk_buffer_slots=(
                         self.runner._offload_pool_slots.cpu[:num_reqs]
                         if self.runner._offload_pool_slots is not None
@@ -2375,9 +2372,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
             req_topk_buffer_active=common_attn_metadata.req_topk_buffer_active,
             offload_dummy=common_attn_metadata.offload_dummy,
@@ -2475,9 +2469,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             seq_lens=common_attn_metadata.seq_lens,
             is_prefilling=common_attn_metadata.is_prefilling,
             max_seq_len=0,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
             req_topk_buffer_active=common_attn_metadata.req_topk_buffer_active,
             offload_dummy=common_attn_metadata.offload_dummy,

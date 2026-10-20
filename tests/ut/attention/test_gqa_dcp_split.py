@@ -438,6 +438,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        use_v2_model_runner=False,
     )
     builder.kv_cache_spec = object()
     builder.device = torch.device("cpu")

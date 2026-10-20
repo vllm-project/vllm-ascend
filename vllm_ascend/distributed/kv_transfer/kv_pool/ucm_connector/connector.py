@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 # isort: on
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def __init__(
@@ -286,6 +288,17 @@ class UCMConnectorV1(KVConnectorBase_V1, SupportsHMA):
 
     def reset_cache(self) -> bool | None:
         return self._call_ucm_reserved_hook("reset_cache")
+
+    if not vllm_version_is("0.31.0"):
+
+        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+            # vLLM main reads this for skip_zeroing_group_ids. UCM owns the
+            # answer when it declares the hook; otherwise the base default
+            # (prefix-cacheable groups) holds.
+            group_ids = self._call_ucm_reserved_hook("get_loaded_kv_cache_group_ids", request)
+            if group_ids is None:
+                return super().get_loaded_kv_cache_group_ids(request)
+            return tuple(group_ids)
 
     # ==============================
     # Metrics & Stats
