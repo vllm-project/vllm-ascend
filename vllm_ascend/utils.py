@@ -1590,13 +1590,17 @@ def singleton(cls):
 
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
+    """Whether to use native DSA-CP attention and weight layouts."""
     # Read from the validated AscendConfig singleton instead of bypassing it
     # via additional_config["enable_dsa_cp"]. This converges the bypass read
     # (architecture debt #7) onto the canonical get_ascend_config() path, so
     # the value benefits from @config type validation (bool lax coercion).
     from vllm_ascend.ascend_config import get_ascend_config
 
-    return get_ascend_config().enable_dsa_cp
+    config = get_ascend_config()
+    # The xlite adapter reads the shared switch directly to enable indexer CP.
+    # Native CP would replicate Q/attention weights that xlite expects TP-sharded.
+    return config.enable_dsa_cp and not config.xlite_graph_config.enabled
 
 
 def enable_sfa_dcp_force_tmajor_restore() -> bool:
