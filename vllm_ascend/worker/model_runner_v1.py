@@ -2670,6 +2670,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                ubatch_slices=ubatch_slices_padded if 'ubatch_slices_padded' in locals() else None,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -4338,8 +4339,27 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded, num_tokens_across_dp)
 
-        # vllm-ascend does not support ubatch now
-        ubatch_slices, ubatch_slices_padded = None, None
+        # Compute ubatch_slices when DBO is enabled so that _dummy_run warms
+        # up the same dual-stream path used by real execute_model.
+        # Bare-runner CPU-UT harnesses build NPUModelRunner via __new__
+        # without parallel_config; treat that as ubatching disabled.
+        should_ubatch_dummy = False
+        num_ubatches = 1
+        if getattr(getattr(self, "parallel_config", None), "use_ubatching", False):
+            from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
+            should_ubatch_dummy = check_ubatch_thresholds(
+                self.parallel_config,
+                num_tokens_padded,
+                uniform_decode=uniform_decode,
+            )
+            num_ubatches = self.parallel_config.num_ubatches
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch_dummy,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            num_ubatches,
+        )
         attn_metadata: PerLayerAttnMetadata | None = None
         # A dummy/profiling/capture batch never replays: it does not go through
         # ``_prepare_inputs``, so clear the flag rather than let the metadata
@@ -4583,6 +4603,7 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_executor=active_device_metadata_executor,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                ubatch_slices=ubatch_slices_padded,
             ):
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:
@@ -4854,7 +4875,12 @@ class NPUModelRunner(GPUModelRunner):
                     self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
-            if (
+            if getattr(getattr(self, "parallel_config", None), "use_ubatching", False):
+                from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchWrapper
+                self.model = NPUUBatchWrapper(
+                    self.model, self.vllm_config, self.device
+                )
+            elif (
                 breakable_cudagraph.is_breakable_cudagraph_enabled()
                 and cudagraph_mode != CUDAGraphMode.NONE
             ):
@@ -6568,6 +6594,11 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
+            num_metadata_builders = (
+                self.parallel_config.num_ubatches
+                if getattr(getattr(self, "parallel_config", None), "use_ubatching", False)
+                else 1
+            )
             for group_key, layer_names in attn_backends_map.items():
                 attn_backend = group_key.attn_backend
                 kv_cache_spec = group_key.kv_cache_spec
@@ -6579,6 +6610,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.vllm_config,
                             self.device,
                         )
+                        for _ in range(num_metadata_builders)
                     ]
                     attn_group = AttentionGroup(
                         attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders

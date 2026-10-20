@@ -547,7 +547,8 @@ class NPUWorker(WorkerBase):
         # for more details
         self.device = self._init_device()
         # Initialize workspace manager
-        num_ubatches = 1
+        # Bare-runner CPU-UT harnesses stub vllm_config without parallel_config.
+        num_ubatches = 2 if getattr(getattr(self.vllm_config, "parallel_config", None), "enable_dbo", False) else 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
