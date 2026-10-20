@@ -69,7 +69,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
 === "950DT products"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{tag}
@@ -106,7 +106,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
 === "A3 series"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
 
@@ -114,7 +114,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
-    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    # If you use Docker bridge networking, expose the required ports for multi-node communication in advance.
     docker run --rm \
     --name $NAME \
     --net=host \
@@ -150,7 +150,7 @@ For 950DT products PD deployment, prepare the platform-generated HCCL/HIXL confi
 
 === "A2 series"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
 
@@ -205,6 +205,27 @@ For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
 image tag and container mounts from Section 4. Use the same image on every
 node in a deployment.
 The 950DT products W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
+
+<a id="glm-common-parameters"></a>
+
+**Common Parameter Descriptions**
+
+These definitions apply to the deployment scenarios in this chapter. Use the
+values in the selected hardware and role scripts; hardware-specific values
+are not interchangeable.
+
+| Parameter | Meaning and constraints |
+| --- | --- |
+| `HCCL_BUFFSIZE` | CANN/HCCL communication buffer size in MB; a positive integer, with a documented default of 200. Larger buffers consume more device memory, multiplied by the number of communication domains. Keep the example's hardware/role-specific value and account for this memory when sizing the KV cache. See the [CANN HCCL reference](https://www.hiascend.com/document/detail/zh/canncommercial/latest/API/hcclug/hcclenvref_07_0005.html) for allocation details and version-specific constraints. |
+| `HCCL_IF_IP` and socket interface variables | Set the current node's communication IP and matching network interface. Peers must be reachable through the selected network. |
+| `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size` | DP is the number of data-parallel ranks; TP and PP partition each model engine across devices and pipeline stages. Follow the topology and placement in the selected tab. |
+| `--max-model-len` | Maximum total sequence length in tokens, including input and generated output. Requests must fit this limit and the available KV cache capacity. |
+| `--max-num-seqs`, `--max-num-batched-tokens` | Scheduler limits for sequences and tokens processed in an iteration, respectively. These are per engine, not aggregate proxy limits; tune them together with context length and memory capacity. |
+| `--gpu-memory-utilization` | Fraction of device memory budgeted to the model executor. Despite the flag name, it also applies to the NPU backend. Leave room for communication buffers and other device allocations. |
+| `--quantization ascend` | Selects the Ascend quantization loader for ModelSlim checkpoints. Use weights matching the selected hardware and quantization format. |
+| `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
+| `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
+| `--reasoning-parser` | Separates reasoning from the final answer. Use the parser in the selected example (`glm47` or `glm45`); do not infer it from the tool-call parser name. |
 
 ### 5.1 Context Below 1M
 
@@ -289,6 +310,20 @@ Use the same checkpoint path on all nodes.
       --additional-config '{"enable_flashcomm1": true, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true}'
     ```
 
+    **Key Parameter Descriptions — 950DT products**
+
+    - DP1/TP8 runs one engine across eight devices; `--enable-expert-parallel`
+      distributes MoE experts within the configured parallel groups.
+    - `--max-model-len 135000` caps input plus output tokens. The scheduler
+      limits are 20 sequences and 16384 batched tokens per iteration; these
+      settings do not establish full-length capacity or accuracy validation.
+    - `--quantization ascend` loads the W4A4C8/MXFP4 checkpoint. The example
+      uses FP8 attention and indexer KV caches; retain the matching checkpoint.
+    - `--enforce-eager` disables graph execution. FlashComm1, CPU binding,
+      shared-expert overlap and DSA CP are selected by `--additional-config`.
+    - `HCCL_BUFFSIZE=400` reserves the communication buffer size described in
+      [Common Parameter Descriptions](#glm-common-parameters).
+
 === "A3 Series"
 
     ##### A3 Series {: #glm52-53-5-1-1-a3 }
@@ -328,6 +363,18 @@ Use the same checkpoint path on all nodes.
       --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
+
+    **Key Parameter Descriptions — A3 series**
+
+    - DP1/TP16 uses all 16 logical devices for one engine. This is the
+      reduced-context W8A8C8 layout, with a maximum of 32768 total tokens.
+    - `--max-num-seqs 12` and `--max-num-batched-tokens 8192` cap concurrent
+      sequences and scheduled tokens per iteration; adjust them to KV capacity.
+    - `--quantization ascend` loads ModelSlim W8A8C8 weights. Both attention
+      and indexer KV caches use `int8` in this hardware tab.
+    - `FULL_DECODE_ONLY` captures only Decode execution; `deepseek_mtp` uses
+      three speculative tokens with an eager draft model.
+    - `HCCL_BUFFSIZE=200` follows the common HCCL buffer definition above.
 
 #### 5.1.2 Multi-node Deployment
 
@@ -530,7 +577,10 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     bash run_dp_template.sh
     ```
 
-    ###### Key Parameter Descriptions
+    **Key Parameter Descriptions — 950DT products**
+
+    The following settings apply only to this 950DT products tab; use the
+    topology and scripts in the other tabs for A3 or A2 series.
 
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` split one
       engine across two nodes. `VLLM_PP_LAYER_PARTITION="42,36"` assigns
@@ -558,8 +608,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     ###### node 0
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxx"
     local_ip="xxx"
 
@@ -617,8 +667,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     ###### node 1
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxx"
     local_ip="xxx"
 
@@ -684,8 +734,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     ###### node 0
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxx"
     local_ip="xxx"
 
@@ -749,8 +799,8 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
     ###### node 1-3
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxx"
     local_ip="xxx"
 
@@ -815,9 +865,11 @@ If you want to deploy a multi-node environment, first verify the data-plane netw
         --async-scheduling
     ```
 
-Key Parameter Descriptions:
+**Key Parameter Descriptions**
 
-Only the key parameters specific to this model/scenario are described below. max-model-len and max-num-seqs need to be set according to the actual usage scenario.
+The following descriptions cover the hardware tabs in this section; each
+platform-specific group is labeled. Shared parameter meanings are listed in
+[Common Parameter Descriptions](#glm-common-parameters).
 
 **A3 network and data parallel configuration:**
 
@@ -870,6 +922,10 @@ This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ff
 The A2 four-node commands in this section do not enable fused MC2.
 
 #### 5.1.3 Prefill-Decode Disaggregation
+
+Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
+Topology, role-specific limits and connector settings are explained in each
+hardware tab; apply only the settings for the selected platform.
 
 Select the hardware tab below for the prefill and decode topology. Prefill and decode run on separate node groups and exchange KV cache through Mooncake.
 
@@ -1341,7 +1397,10 @@ layerwise setting and topology.
     reuse. Validate long-context capacity and accuracy on the exact model/build
     before increasing concurrency. No new measured results accompany these scripts.
 
-    ###### Key Parameter Descriptions
+    **Key Parameter Descriptions — 950DT products**
+
+    The following settings apply only to this 950DT products tab; use the
+    topology and scripts in the other tabs for A3 or A2 series.
 
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
       the Prefill engine, with `VLLM_PP_LAYER_PARTITION="42,36"` across
@@ -2367,6 +2426,10 @@ layerwise setting and topology.
 
 #### 5.1.4 MemCache KV Cache Pool Deployment
 
+Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
+Topology, role-specific limits and connector settings are explained in each
+hardware tab; apply only the settings for the selected platform.
+
 Select the tab that matches the deployment hardware and its Prefill topology.
 
 === "950DT products"
@@ -2815,7 +2878,10 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     ```
 
 
-    ###### Key Parameter Descriptions
+    **Key Parameter Descriptions — 950DT products**
+
+    The following settings apply only to this 950DT products tab; use the
+    topology and scripts in the other tabs for A3 or A2 series.
 
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
       Prefill across two nodes, with `VLLM_PP_LAYER_PARTITION="42,36"`.
@@ -3844,6 +3910,10 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
 ### 5.2 1M Context Configuration
 
+Shared parameter meanings are listed in [Common Parameter Descriptions](#glm-common-parameters).
+Topology, role-specific limits and connector settings are explained in each
+hardware tab; apply only the settings for the selected platform.
+
 Select the tab that matches your deployment hardware.
 
 === "950DT products"
@@ -4111,7 +4181,7 @@ Select the tab that matches your deployment hardware.
         --decoder-ports 8000 8000
     ```
 
-    ##### Key Parameter Descriptions
+    **Key Parameter Descriptions — 950DT products**
 
     - `--data-parallel-size 2` and `--tensor-parallel-size 8` define both
       roles. Each role spans two nodes, with one TP8 engine per node and
@@ -4625,7 +4695,7 @@ Select the tab that matches your deployment hardware.
 
     Send requests to `http://<PROXY_IP>:8000` using the served model name `glm`.
 
-    Key Parameter Descriptions:
+    **Key Parameter Descriptions**
 
     - The launcher passes `$1` = visible devices, `$2` = API port, `$3` = global
       DP size, `$4` = DP rank, `$5` = DP master IP, `$6` = DP RPC port, and

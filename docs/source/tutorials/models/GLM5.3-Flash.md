@@ -57,7 +57,7 @@ Select the `docker run` command for your hardware platform:
 
 === "950DT products"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{tag}
@@ -94,7 +94,7 @@ Select the `docker run` command for your hardware platform:
 
 === "A3 series"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
 
@@ -102,7 +102,7 @@ Select the `docker run` command for your hardware platform:
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
-    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    # If you use Docker bridge networking, expose the required ports for multi-node communication in advance.
     docker run --rm \
     --name $NAME \
     --net=host \
@@ -139,7 +139,7 @@ Select the `docker run` command for your hardware platform:
 
 === "A2 series"
 
-    Start the docker image on each node.
+    Start the Docker container on each node.
 
     ```shell
 
@@ -192,6 +192,27 @@ Select the `docker run` command for your hardware platform:
 !!! note
 
     Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, otherwise the output quality may degrade.
+
+<a id="glm-common-parameters"></a>
+
+**Common Parameter Descriptions**
+
+These definitions apply to the deployment scenarios in this chapter. Use the
+values in the selected hardware and role scripts; hardware-specific values
+are not interchangeable.
+
+| Parameter | Meaning and constraints |
+| --- | --- |
+| `HCCL_BUFFSIZE` | CANN/HCCL communication buffer size in MB; a positive integer, with a documented default of 200. Larger buffers consume more device memory, multiplied by the number of communication domains. Keep the example's hardware/role-specific value and account for this memory when sizing the KV cache. See the [CANN HCCL reference](https://www.hiascend.com/document/detail/zh/canncommercial/latest/API/hcclug/hcclenvref_07_0005.html) for allocation details and version-specific constraints. |
+| `HCCL_IF_IP` and socket interface variables | Set the current node's communication IP and matching network interface. Peers must be reachable through the selected network. |
+| `--data-parallel-size`, `--tensor-parallel-size`, `--pipeline-parallel-size` | DP is the number of data-parallel ranks; TP and PP partition each model engine across devices and pipeline stages. Follow the topology and placement in the selected tab. |
+| `--max-model-len` | Maximum total sequence length in tokens, including input and generated output. Requests must fit this limit and the available KV cache capacity. |
+| `--max-num-seqs`, `--max-num-batched-tokens` | Scheduler limits for sequences and tokens processed in an iteration, respectively. These are per engine, not aggregate proxy limits; tune them together with context length and memory capacity. |
+| `--gpu-memory-utilization` | Fraction of device memory budgeted to the model executor. Despite the flag name, it also applies to the NPU backend. Leave room for communication buffers and other device allocations. |
+| `--quantization ascend` | Selects the Ascend quantization loader for ModelSlim checkpoints. Use weights matching the selected hardware and quantization format. |
+| `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
+| `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
+| `--reasoning-parser` | Separates reasoning from the final answer. Use the parser in the selected example (`glm47` or `glm45`); do not infer it from the tool-call parser name. |
 
 ### 5.1 Single-Node Online Deployment
 
@@ -300,8 +321,8 @@ Only the key parameters specific to this model/scenario are described below. `ma
     ##### node 0
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxxx"
     local_ip="xx.xx.xx.1"
 
@@ -349,8 +370,8 @@ Only the key parameters specific to this model/scenario are described below. `ma
     ##### node 1
 
     ```shell
-    # this obtained through ifconfig
-    # nic_name is the network interface name corresponding to local_ip of the current node
+    # Obtain the current node IP and its network interface using ifconfig.
+    # Set nic_name to the network interface corresponding to local_ip on this node.
     nic_name="xxxx"
     local_ip="xx.xx.xx.2"
 
