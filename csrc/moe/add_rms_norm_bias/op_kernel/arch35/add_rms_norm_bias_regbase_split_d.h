@@ -21,13 +21,13 @@
 #define ADD_RMS_NORM_BIAS_REGBASE_SPLIT_D_H
 
 #include "add_rms_norm_bias_regbase_common.h"
-#include "../rms_norm_base.h"
-namespace AddRmsNormBiasA5 {
+#include "../common/rms_norm_base.h"
+namespace AddRmsNorm {
 using namespace AscendC;
-using AddRmsNormBiasA5::ALIGN_32_FACTOR;
-using AddRmsNormBiasA5::ComputeLatterY;
-using AddRmsNormBiasA5::CONST_FACTOR_2;
-using AddRmsNormBiasA5::Min;
+using AddRmsNorm::ALIGN_32_FACTOR;
+using AddRmsNorm::ComputeLatterY;
+using AddRmsNorm::CONST_FACTOR_2;
+using AddRmsNorm::Min;
 using NormCommon::ComputeMultiLevelRstd;
 using RmsNorm::ComputeMultiLevelReduce;
 using RmsNorm::ComputeRstd;
@@ -52,24 +52,18 @@ public:
         epsilon = tiling->epsilon;
         colBufferLength = tiling->colBuferLength;
         avgFactor = tiling->avgFactor;
-        nullptrBeta = tiling->nullptr_beta;
         rowWork = (GetBlockIdx() < GetBlockNum() - 1) ? blockFactor : numRow - (GetBlockNum() - 1) * blockFactor;
-        const uint64_t blockRowOffset = static_cast<uint64_t>(GetBlockIdx()) * blockFactor;
-        const uint64_t blockOffset = blockRowOffset * numCol;
-        const uint64_t blockLength = static_cast<uint64_t>(rowWork) * numCol;
-        xGm1.SetGlobalBuffer((__gm__ T*)x1 + blockOffset, blockLength);
-        xGm2.SetGlobalBuffer((__gm__ T*)x2 + blockOffset, blockLength);
+        xGm1.SetGlobalBuffer((__gm__ T*)x1 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
+        xGm2.SetGlobalBuffer((__gm__ T*)x2 + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
-        if (!nullptrBeta) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-            pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, colBufferLength * sizeof(T));
-        }
-        yGm.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
-        rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockRowOffset, rowWork);
-        xOutGm.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
+        betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
+        pPipe->InitBuffer(inQueueBeta, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
+        yGm.SetGlobalBuffer((__gm__ T*)y + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
+        rstdGm.SetGlobalBuffer((__gm__ float*)rstd + GetBlockIdx() * blockFactor, blockFactor);
+        xOutGm.SetGlobalBuffer((__gm__ T*)x + GetBlockIdx() * blockFactor * numCol, rowWork * numCol);
         pPipe->InitBuffer(inQueueX1, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
-        pPipe->InitBuffer(inQueueGamma, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, colBufferLength * sizeof(T));
+        pPipe->InitBuffer(inQueueGamma, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rowFactor * sizeof(float));
@@ -86,7 +80,7 @@ public:
 
     __aicore__ inline void Process()
     {
-        uint32_t repeatTimes = rowWork / rowFactor + (rowWork % rowFactor != 0);
+        uint32_t repeatTimes = CeilDiv(rowWork, rowFactor);
         for (uint32_t repeat = 0; repeat < repeatTimes; repeat++) {
             uint32_t remain = rowWork - repeat * rowFactor;
             uint32_t calRowNum = Min(remain, rowFactor);
@@ -98,12 +92,12 @@ public:
     {
         LocalTensor<float> rstdLocal = outQueueRstd.AllocTensor<float>();
         Duplicate(rstdLocal, (float)0.0, rowFactor);
-        uint32_t colRepeats = numCol / ubFactor + (numCol % ubFactor != 0);
+        uint32_t colRepeats = CeilDiv(numCol, ubFactor);
 
         for (uint32_t row = 0; row < calRowNum; row++) {
             uint32_t split = ubLoop * ubFactor;
             uint32_t colTail = numCol - split;
-            uint64_t offsets = (static_cast<uint64_t>(rowRepeat) * rowFactor + row) * numCol;
+            uint64_t offsets = (rowRepeat * rowFactor + row) * numCol;
             uint32_t tail = colTail % ubFactor;
             uint32_t tailLoop = colTail / ubFactor;
             uint32_t masterLoop = tail != 0 ? 1 : 0;
@@ -144,7 +138,7 @@ private:
     __aicore__ inline void CopyInGamma(uint32_t colRepeat, uint32_t calColNum)
     {
         LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
-        DataCopyImpl<T>(gammaLocal, gammaGm[static_cast<uint64_t>(colRepeat) * ubFactor], 1, calColNum, 0, 0);
+        DataCopyImpl<T>(gammaLocal, gammaGm[colRepeat * ubFactor], 1, calColNum, 0, 0);
         inQueueGamma.EnQue(gammaLocal);
     }
 
@@ -169,11 +163,11 @@ private:
     __aicore__ inline void CopyInBeta(uint32_t colRepeat, uint32_t calColNum)
     {
         LocalTensor<T> betaLocal = inQueueBeta.AllocTensor<T>();
-        DataCopyImpl<T>(betaLocal, betaGm[static_cast<uint64_t>(colRepeat) * ubFactor], 1, calColNum, 0, 0);
+        DataCopyImpl<T>(betaLocal, betaGm[colRepeat * ubFactor], 1, calColNum, 0, 0);
         inQueueBeta.EnQue(betaLocal);
     }
 
-    __aicore__ inline void ComputeFormer(uint64_t curRow, LocalTensor<float> dstLocal, uint32_t position,
+    __aicore__ inline void ComputeFormer(uint32_t curRow, LocalTensor<float> dstLocal, uint32_t position,
                                          uint32_t masterLoop, uint32_t tailLoop, uint32_t tail)
     {
         uint64_t offset{curRow};
@@ -228,7 +222,7 @@ private:
             level1 += 1;
             ComputeMultiLevelReduce(level1Local, level2Local, level3Local, level1, level2, level3);
         }
-        ComputeMultiLevelRstd<false>(dstLocal, position, level1Local, level2Local, level3Local, level1, level2, level3);
+        ComputeMultiLevelRstd<false>(dstLocal, position, level1Local, level2Local, level3Local, level1, level2);
     }
 
     __aicore__ inline void ComputeLatter(uint32_t rowRepeat, uint32_t calRowNum, uint32_t colRepeat,
@@ -236,14 +230,10 @@ private:
     {
         CopyInGamma(colRepeat, calColNum);
         LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
-        LocalTensor<T> betaLocal;
-        if (!nullptrBeta) {
-            CopyInBeta(colRepeat, calColNum);
-            betaLocal = inQueueBeta.DeQue<T>();
-        }
+        CopyInBeta(colRepeat, calColNum);
+        LocalTensor<T> betaLocal = inQueueBeta.DeQue<T>();
         for (uint32_t row = 0; row < calRowNum; row++) {
-            uint64_t curRow = static_cast<uint64_t>(rowRepeat) * rowFactor + row;
-            uint64_t offset = curRow * numCol + static_cast<uint64_t>(colRepeat) * ubFactor;
+            uint64_t offset = (rowRepeat * rowFactor + row) * numCol + colRepeat * ubFactor;
             CopyInX(offset, calColNum);
             LocalTensor<T> xLocal1 = inQueueX1.DeQue<T>();
             LocalTensor<T> xLocal2 = inQueueX2.DeQue<T>();
@@ -265,49 +255,39 @@ private:
             LocalTensor<T> xOutLocal = outQueueX.AllocTensor<T>();
             uint32_t calCount = CeilAlign((uint64_t)(calColNum * sizeof(T)), ALIGN_512_FACTOR) / sizeof(T);
             if constexpr (!is_same<T, float>::value) {
-                if (nullptrBeta) {
-                    ComputeLatterY<T, false>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                } else {
-                    ComputeLatterY<T, true>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                }
+                ComputeLatterY<T>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
             } else {
-                if (nullptrBeta) {
-                    ComputeLatterY<T, false>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                } else {
-                    ComputeLatterY<T, true>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
-                }
+                ComputeLatterY<T>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
             }
             inQueueX1.FreeTensor(xLocal1);
             inQueueX2.FreeTensor(xLocal2);
             outQueueY.EnQue<T>(yLocal);
             outQueueX.EnQue<T>(xOutLocal);
-            CopyOutY(curRow, colRepeat, calColNum);
-            CopyOutX(curRow, colRepeat, calColNum);
+            CopyOutY(rowRepeat * rowFactor + row, colRepeat, calColNum);
+            CopyOutX(rowRepeat * rowFactor + row, colRepeat, calColNum);
         }
         inQueueGamma.FreeTensor(gammaLocal);
-        if (!nullptrBeta) {
-            inQueueBeta.FreeTensor(betaLocal);
-        }
+        inQueueBeta.FreeTensor(betaLocal);
     }
 
-    __aicore__ inline void CopyOutY(uint64_t curRow, uint32_t curCol, uint32_t calColNum)
+    __aicore__ inline void CopyOutY(uint32_t curRow, uint32_t curCol, uint32_t calColNum)
     {
         LocalTensor<T> yLocal = outQueueY.DeQue<T>();
-        DataCopyImpl<T>(yGm[curRow * numCol + static_cast<uint64_t>(curCol) * ubFactor], yLocal, 1, calColNum, 0, 0);
+        DataCopyImpl<T>(yGm[curRow * numCol + curCol * ubFactor], yLocal, 1, calColNum, 0, 0);
         outQueueY.FreeTensor(yLocal);
     }
 
     __aicore__ inline void CopyOutRstd(uint32_t rowRepeat, uint32_t calRowNum)
     {
         LocalTensor<float> rstdLocal = outQueueRstd.DeQue<float>();
-        DataCopyImpl<float>(rstdGm[static_cast<uint64_t>(rowRepeat) * rowFactor], rstdLocal, 1, calRowNum, 0, 0);
+        DataCopyImpl<float>(rstdGm[rowRepeat * rowFactor], rstdLocal, 1, calRowNum, 0, 0);
         outQueueRstd.FreeTensor(rstdLocal);
     }
 
-    __aicore__ inline void CopyOutX(uint64_t curRow, uint32_t curCol, uint32_t calColNum)
+    __aicore__ inline void CopyOutX(uint32_t curRow, uint32_t curCol, uint32_t calColNum)
     {
         LocalTensor<T> xOutLocal = outQueueX.DeQue<T>();
-        DataCopyImpl<T>(xOutGm[curRow * numCol + static_cast<uint64_t>(curCol) * ubFactor], xOutLocal, 1, calColNum, 0, 0);
+        DataCopyImpl<T>(xOutGm[curRow * numCol + curCol * ubFactor], xOutLocal, 1, calColNum, 0, 0);
         outQueueX.FreeTensor(xOutLocal);
     }
 
@@ -316,7 +296,7 @@ private:
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX1;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX2;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueGamma;
-    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueBeta;
+    TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueBeta;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueY;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueX;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueRstd;
@@ -343,8 +323,7 @@ private:
     uint32_t rowFactor;
     float epsilon;
     float avgFactor;
-    uint32_t nullptrBeta{1};
     uint32_t rowWork{1};
 };
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // _ADD_RMS_NORM_BIAS_REGBASE_SPLIT_D_H

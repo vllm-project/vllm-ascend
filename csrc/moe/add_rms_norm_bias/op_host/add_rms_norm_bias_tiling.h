@@ -38,10 +38,9 @@ TILING_DATA_FIELD_DEF(uint32_t, mul_loop_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, mul_tail_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, dst_rep_stride_fp16);
 TILING_DATA_FIELD_DEF(uint32_t, is_performance);
-TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
 END_TILING_DATA_DEF;
 
-// A5 structures are separate: the legacy A2/A3 layout and keys stay unchanged.
+// A5 structures and keys are separate from the legacy A2/A3 tiling.
 // Adapted from cann/ops-nn v9.2.0-beta.2 @ 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6.
 BEGIN_TILING_DATA_DEF(AddRMSNormBiasRegbaseTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, numRow);
@@ -56,7 +55,6 @@ TILING_DATA_FIELD_DEF(uint32_t, ubLoop);
 TILING_DATA_FIELD_DEF(uint32_t, colBuferLength);
 TILING_DATA_FIELD_DEF(uint32_t, multiNNum);
 TILING_DATA_FIELD_DEF(uint32_t, isNddma);
-TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
 END_TILING_DATA_DEF;
 
 BEGIN_TILING_DATA_DEF(AddRMSNormBiasRegbaseRFullLoadTilingData)
@@ -68,7 +66,6 @@ TILING_DATA_FIELD_DEF(uint64_t, rowFactor);
 TILING_DATA_FIELD_DEF(uint64_t, binAddQuotient);
 TILING_DATA_FIELD_DEF(float, epsilon);
 TILING_DATA_FIELD_DEF(float, avgFactor);
-TILING_DATA_FIELD_DEF(uint32_t, nullptr_beta);
 END_TILING_DATA_DEF;
 
 struct AddRmsNormBiasCompileInfo {

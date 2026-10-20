@@ -107,8 +107,7 @@ def _cpu_add_rms_norm(x, residual, weight, eps):
 def _cpu_add_rms_norm_bias(x, residual, weight, bias, eps):
     """CPU fallback for torch.ops._C_ascend.npu_add_rms_norm_bias."""
     out, _, new_residual = _cpu_add_rms_norm(x, residual, weight, eps)
-    if bias is not None:
-        out = out + bias
+    out = out + bias
     return out, _, new_residual
 
 

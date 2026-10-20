@@ -20,10 +20,6 @@ constexpr uint32_t DTYPE_KEY_FP16 = 1;
 constexpr uint32_t DTYPE_KEY_FP32 = 2;
 constexpr uint32_t DTYPE_KEY_BF16 = 3;
 constexpr uint32_t UB_USED = 1024;
-constexpr uint32_t UB_FACTOR_B16 = 12288;
-constexpr uint32_t UB_FACTOR_B32 = 10240;
-constexpr uint32_t UB_FACTOR_B16_CUTD = 12096;
-constexpr uint32_t UB_FACTOR_B32_CUTD = 9696;
 
 constexpr uint32_t UB_FACTOR_B32_WITH_BETA = 9216;
 constexpr uint32_t UB_FACTOR_B16_WITH_BETA = 11264;
@@ -36,7 +32,6 @@ constexpr size_t NUM_WITH_BETA = 4;
 
 constexpr uint32_t BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t FLOAT_BLOCK_ALIGN_NUM = 8;
-constexpr uint32_t SMALL_REDUCE_NUM = 2000;
 constexpr uint32_t MODE_NORMAL = 0;
 constexpr uint32_t MODE_SPLIT_D = 1;
 constexpr uint32_t MODE_MERGE_N = 2;
@@ -52,12 +47,9 @@ constexpr int32_t OUTPUT_X_INDEX = 2;
 constexpr size_t MAX_DIM_NUM = 8;
 constexpr size_t MIN_DIM_X = 1;
 constexpr size_t MIN_DIM_GAMMA = 1;
-constexpr size_t FP32_WEIGHT = 24;
-constexpr size_t OTHER_WEIGHT = 18;
 constexpr size_t DIV_FACTOR = 260;
 constexpr size_t FLOAT_PER_REPEAT = 64;
 constexpr size_t USE_SIZE = 256;
-constexpr size_t NUM = 2;
 constexpr int32_t TEN = 10;
 
 constexpr int32_t PERFORMANC_DIM_ZERO = 0;
@@ -171,6 +163,22 @@ static bool CheckInputOutputShape(const gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, rstd_shape);
     OP_CHECK_NULL_WITH_CONTEXT(context, x_shape);
 
+    const auto* beta_shape = context->GetInputShape(INPUT_BETA_INDEX);
+    const auto* beta_desc = context->GetInputDesc(INPUT_BETA_INDEX);
+    const auto* gamma_desc = context->GetInputDesc(INPUT_GAMMA_INDEX);
+    OP_CHECK_IF(beta_shape == nullptr || beta_desc == nullptr || gamma_desc == nullptr,
+                OP_LOGE(context, "Beta and gamma must be present."), return false);
+    OP_CHECK_IF(beta_desc->GetDataType() != gamma_desc->GetDataType(),
+                OP_LOGE(context, "Beta dtype must match gamma."), return false);
+    const auto& betaShape = beta_shape->GetStorageShape();
+    const auto& gammaShape = gamma_shape->GetStorageShape();
+    OP_CHECK_IF(betaShape.GetDimNum() != gammaShape.GetDimNum(),
+                OP_LOGE(context, "Beta rank must match gamma."), return false);
+    for (size_t i = 0; i < gammaShape.GetDimNum(); ++i) {
+        OP_CHECK_IF(betaShape.GetDim(i) != gammaShape.GetDim(i),
+                    OP_LOGE(context, "Beta shape must match gamma."), return false);
+    }
+
     size_t x1DimNum = x1_shape->GetStorageShape().GetDimNum();
     size_t gammaDimNum = gamma_shape->GetStorageShape().GetDimNum();
 
@@ -273,14 +281,14 @@ static void DetermineModeParameters(
 {
     if (numCol > ubFactor) {
         modeKey = MODE_SPLIT_D;
-        ubFactor = tiling->get_nullptr_beta() == 1 ? ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD : UB_FACTOR_B16_CUTD) : ((dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD_WITH_BETA : UB_FACTOR_B16_CUTD_WITH_BETA);
+        ubFactor = (dataType == ge::DT_FLOAT) ? UB_FACTOR_B32_CUTD_WITH_BETA : UB_FACTOR_B16_CUTD_WITH_BETA;
         uint32_t colTileNum = CeilDiv(numCol, ubFactor);
         ubFactor = CeilDiv(numCol, colTileNum * dataPerBlock) * dataPerBlock;
     } else if (blockFactor == 1 && addRmsNormBiasSocVersion != platform_ascendc::SocVersion::ASCEND310P) {
         modeKey = MODE_SINGLE_N;
-    } else if (((tiling->get_nullptr_beta() == 1 && numColAlign <= SMALL_REDUCE_NUM) || (tiling->get_nullptr_beta() == 0 && numColAlign <= SMALL_REDUCE_NUM_WITH_BETA)) && addRmsNormBiasSocVersion != platform_ascendc::SocVersion::ASCEND310P) {
+    } else if (numColAlign <= SMALL_REDUCE_NUM_WITH_BETA && addRmsNormBiasSocVersion != platform_ascendc::SocVersion::ASCEND310P) {
         modeKey = MODE_MERGE_N;
-        uint64_t numColAlignWeight = tiling->get_nullptr_beta() == 1 ? ((dtypKey == DTYPE_KEY_FP32) ? FP32_WEIGHT : OTHER_WEIGHT) : ((dtypKey == DTYPE_KEY_FP32) ? FP32_WEIGHT_WITH_BETA : OTHER_WEIGHT_WITH_BETA);
+        uint64_t numColAlignWeight = (dtypKey == DTYPE_KEY_FP32) ? FP32_WEIGHT_WITH_BETA : OTHER_WEIGHT_WITH_BETA;
         rowFactor = static_cast<uint32_t>(ubSize) /
                     (numColAlign * static_cast<uint32_t>(numColAlignWeight) + static_cast<uint32_t>(DIV_FACTOR));
         ubFactor = rowFactor * numColAlign;
@@ -303,13 +311,13 @@ static void DetermineModeParameters(
     } else if ((dataType == ge::DT_FLOAT16 || isPerformance == 1) && numCol == numColAlign) {
         modeKey = MODE_MULTI_N;
         rowFactor = (static_cast<uint32_t>(ubSize) - static_cast<uint32_t>(USE_SIZE) -
-                     numColAlign * static_cast<uint32_t>(tiling->get_nullptr_beta() == 1 ? NUM : NUM_WITH_BETA)) /
+                     numColAlign * static_cast<uint32_t>(NUM_WITH_BETA)) /
                     (numColAlign * BLOCK_ALIGN_NUM + static_cast<uint32_t>(FLOAT_PER_REPEAT));
         ubFactor = rowFactor * numColAlign;
         if (rowFactor == 0U) {
             modeKey = MODE_NORMAL;
             rowFactor = FLOAT_PER_REPEAT;
-            ubFactor = UB_FACTOR_B16;
+            ubFactor = UB_FACTOR_B16_WITH_BETA;
         }
     }
     uint32_t rowLoop = CeilDiv(blockFactor, rowFactor);
@@ -394,9 +402,6 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
 
     AddRMSNormBiasTilingData tiling;
 
-    auto betaDesc = context->GetOptionalInputDesc(INPUT_BETA_INDEX);
-    tiling.set_nullptr_beta(betaDesc == nullptr ? 1 : 0);
-
     uint32_t num_core;
     uint64_t ub_size;
     GetCompileParameters(context, num_core, ub_size);
@@ -418,7 +423,7 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
     ge::DataType data_type = SetDataTypeParameters(context, dtype_key, data_per_block);
     uint32_t mode_key = MODE_NORMAL;
     uint32_t row_factor = 64;
-    uint32_t ub_factor = betaDesc == nullptr ? ((dtype_key == DTYPE_KEY_FP32) ? UB_FACTOR_B32 : UB_FACTOR_B16) : ((dtype_key == DTYPE_KEY_FP32) ? UB_FACTOR_B32_WITH_BETA : UB_FACTOR_B16_WITH_BETA);
+    uint32_t ub_factor = (dtype_key == DTYPE_KEY_FP32) ? UB_FACTOR_B32_WITH_BETA : UB_FACTOR_B16_WITH_BETA;
     uint32_t numColAlign = CeilDiv(num_col, data_per_block) * data_per_block;
     const gert::Shape x1_shape = context->GetInputShape(0)->GetStorageShape();
     const gert::Shape gamma_shape = context->GetInputShape(2)->GetStorageShape();

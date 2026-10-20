@@ -59,7 +59,6 @@ def npu_add_rms_norm_bias_golden(x1, x2, gamma, beta, epsilon=EPSILON):
         (torch.float32, 2e-6, 2e-5),
     ],
 )
-@pytest.mark.parametrize("has_beta", [False, True])
 @pytest.mark.parametrize(
     "shape, gamma_shape",
     [
@@ -73,17 +72,15 @@ def npu_add_rms_norm_bias_golden(x1, x2, gamma, beta, epsilon=EPSILON):
     ],
 )
 @torch.inference_mode()
-def test_add_rms_norm_bias_a5(shape, gamma_shape, has_beta, dtype, atol, rtol):
+def test_add_rms_norm_bias_a5(shape, gamma_shape, dtype, atol, rtol):
     generator = torch.Generator(device="cpu").manual_seed(45)
     x1 = torch.randn(shape, generator=generator).to(dtype)
     x2 = torch.randn(shape, generator=generator).to(dtype)
     gamma = torch.linspace(-1.25, 1.25, math.prod(gamma_shape)).reshape(gamma_shape).to(dtype)
-    beta = torch.linspace(-0.75, 0.5, math.prod(gamma_shape)).reshape(gamma_shape).to(dtype) if has_beta else None
+    beta = torch.linspace(-0.75, 0.5, math.prod(gamma_shape)).reshape(gamma_shape).to(dtype)
 
     y_ref, rstd_ref, residual_ref = npu_add_rms_norm_bias_golden(x1, x2, gamma, beta)
-    y, rstd, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-        x1.npu(), x2.npu(), gamma.npu(), beta.npu() if has_beta else None, EPSILON
-    )
+    y, rstd, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x1.npu(), x2.npu(), gamma.npu(), beta.npu(), EPSILON)
 
     torch.testing.assert_close(y.cpu(), y_ref, atol=atol, rtol=rtol)
     # Statistics are always FP32; the residual has no reduction-order error.
@@ -109,7 +106,7 @@ def test_a5_beta_is_added_in_fp32_before_output_cast(dtype, columns):
     torch.testing.assert_close(y.cpu(), y_ref, atol=2e-6, rtol=0)
 
 
-@pytest.mark.parametrize("invalid_beta", ["shape", "dtype"])
+@pytest.mark.parametrize("invalid_beta", ["shape", "dtype", "none"])
 @torch.inference_mode()
 def test_a5_add_rms_norm_bias_rejects_invalid_beta(invalid_beta):
     columns = 256
@@ -118,7 +115,23 @@ def test_a5_add_rms_norm_bias_rejects_invalid_beta(invalid_beta):
     gamma = torch.ones(columns, dtype=torch.float16, device="npu")
     if invalid_beta == "shape":
         beta = torch.zeros(columns - 1, dtype=torch.float16, device="npu")
-    else:
+    elif invalid_beta == "dtype":
         beta = torch.zeros(columns, dtype=torch.float32, device="npu")
+    else:
+        beta = None
     with pytest.raises(RuntimeError):
         torch.ops._C_ascend.npu_add_rms_norm_bias(x1, x2, gamma, beta, EPSILON)
+
+
+def test_add_rms_norm_bias_meta_requires_beta():
+    x = torch.empty((3, 256), device="meta", dtype=torch.float16)
+    gamma = torch.empty(256, device="meta", dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="beta"):
+        torch.ops._C_ascend.npu_add_rms_norm_bias(x, x, gamma)
+    with pytest.raises(RuntimeError, match="beta"):
+        torch.ops._C_ascend.npu_add_rms_norm_bias(x, x, gamma, None, EPSILON)
+
+    y, rstd, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(x, x, gamma, gamma, EPSILON)
+    assert y.shape == residual.shape == x.shape
+    assert rstd.shape == (3, 1)
+    assert rstd.dtype == torch.float32
