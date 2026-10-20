@@ -242,11 +242,19 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
-        self._use_a5_unfused_w4a8 = (
+        # Limit the workaround to the verified Ling V3 SiLU weight contract;
+        # other models, including Kimi's SiTU path, keep their existing dispatch.
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_text_config", None)
+        if hf_config is None:
+            hf_config = getattr(model_config, "hf_config", None)
+        self._use_a5_ling_w4a8 = (
             self.quant_method == ASCEND_QUANTIZATION_METHOD
             and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+            and getattr(model_config, "architecture", None) in ("BailingMoeV3ForCausalLM", "BailingMoeV3MTPModel")
+            and getattr(hf_config, "hidden_act", None) == "silu"
         )
-        if self._use_a5_unfused_w4a8:
+        if self._use_a5_ling_w4a8:
             if (
                 not vllm_config.parallel_config.enable_expert_parallel
                 or vllm_config.parallel_config.enable_eplb
@@ -254,13 +262,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 or get_ascend_config().enable_fused_mc2
             ):
                 raise ValueError(
-                    "A5 ModelSlim W4A8 fallback currently requires EP without EPLB, expert weight lists, or fused MC2."
+                    "A5 Ling ModelSlim W4A8 fallback currently requires EP without EPLB, "
+                    "expert weight lists, or fused MC2."
                 )
-            # A5's fused operator rejects the required MSD assist matrix.
+            # The A5 fused SiLU operator rejects Ling's required MSD assist matrix.
             # Keep its correction in the existing unfused GMM bias arguments.
             self.fused_activations = frozenset()
             logger.warning_once(
-                "A5 ModelSlim W4A8 is using unfused GMM1, activation/quantization, and GMM2 "
+                "A5 Ling ModelSlim W4A8 is using unfused GMM1, activation/quantization, and GMM2 "
                 "to preserve MSD corrections. Fused GMM-activation-quantization is disabled; "
                 "this compatibility path may reduce throughput."
             )
@@ -423,9 +432,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
 
     def process_weights_after_loading(self, layer):
-        if self._use_a5_unfused_w4a8:
+        if self._use_a5_ling_w4a8:
             if self.use_expert_weight_list or hasattr(layer, "w13_weight_list") or hasattr(layer, "w2_weight_list"):
-                raise ValueError("A5 ModelSlim W4A8 fallback does not support expert weight lists.")
+                raise ValueError("A5 Ling ModelSlim W4A8 fallback does not support expert weight lists.")
             self.process_weights_after_loading_modelslim(layer)
             # ModelSlim loading above leaves the transposed weights in ND.
             # Do not apply the A2/A3 NZ transform before packing INT4 into INT32.

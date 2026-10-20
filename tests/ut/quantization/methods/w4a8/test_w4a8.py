@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import regex as re
 import torch
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
@@ -313,6 +314,9 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 class TestAscendW4A8A5Fallback(TestBase):
     def setUp(self):
         self.config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="BailingMoeV3ForCausalLM", hf_text_config=SimpleNamespace(hidden_act="silu")
+            ),
             quant_config=SimpleNamespace(quant_description={}, get_name=lambda: ASCEND_QUANTIZATION_METHOD),
             parallel_config=SimpleNamespace(enable_expert_parallel=True, enable_eplb=False),
             use_v2_model_runner=True,
@@ -372,7 +376,7 @@ class TestAscendW4A8A5Fallback(TestBase):
             ):
                 _expand_a5_w4a8_scale(scale, weight)
 
-    def test_fallback_is_limited_to_a5_modelslim_and_does_not_change_class_activation(self):
+    def test_fallback_is_limited_to_a5_ling_modelslim_and_does_not_change_class_activation(self):
         original_activations = AscendW4A8DynamicFusedMoEMethod.fused_activations
         for family in DeviceAdaptorFamily:
             for quantization in (ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD):
@@ -383,18 +387,75 @@ class TestAscendW4A8A5Fallback(TestBase):
                     expected = (
                         family == DeviceAdaptorFamily.FP8_OPTIMIZED and quantization == ASCEND_QUANTIZATION_METHOD
                     )
-                    self.assertEqual(method._use_a5_unfused_w4a8, expected)
+                    self.assertEqual(method._use_a5_ling_w4a8, expected)
                     self.assertEqual(method.fused_activations, frozenset() if expected else original_activations)
         self.assertEqual(AscendW4A8DynamicFusedMoEMethod.fused_activations, original_activations)
 
+    def test_scope_uses_exact_resolved_v3_architecture_and_silu_text_config(self):
+        for architecture in (
+            "BailingMoeV3ForCausalLM",
+            "BailingMoeV3MTPModel",
+            "BailingMoeForCausalLM",
+            "BailingMoeV2ForCausalLM",
+            "BailingMoeV25MTPModel",
+            "BailingMoeMTPModel",
+            "KimiK3ForConditionalGeneration",
+            "OtherForCausalLM",
+            None,
+        ):
+            for activation in ("silu", "situ", "gelu", None):
+                with self.subTest(architecture=architecture, activation=activation):
+                    self.config.model_config = SimpleNamespace(
+                        architecture=architecture,
+                        # A candidate list or shared model_type must not select the fallback.
+                        hf_text_config=SimpleNamespace(
+                            hidden_act=activation,
+                            architectures=["BailingMoeV3ForCausalLM"],
+                            model_type="bailing_hybrid",
+                        ),
+                    )
+                    method = AscendW4A8DynamicFusedMoEMethod()
+                    expected = (
+                        architecture in ("BailingMoeV3ForCausalLM", "BailingMoeV3MTPModel") and activation == "silu"
+                    )
+                    self.assertEqual(method._use_a5_ling_w4a8, expected)
+                    self.assertEqual(method.supports_fused_activation(MoEActivation.SILU), not expected)
+                    self.assertEqual(method.supports_fused_activation(MoEActivation.SITU), not expected)
+
+    def test_text_config_precedence_and_missing_config(self):
+        target = "BailingMoeV3ForCausalLM"
+        silu = SimpleNamespace(hidden_act="silu")
+        for model_config, expected in (
+            (SimpleNamespace(architecture=target, hf_config=silu), True),
+            (SimpleNamespace(architecture=target, hf_text_config=None, hf_config=silu), True),
+            (
+                SimpleNamespace(architecture=target, hf_text_config=SimpleNamespace(hidden_act="situ"), hf_config=silu),
+                False,
+            ),
+            (SimpleNamespace(architecture=target, hf_text_config=SimpleNamespace(), hf_config=silu), False),
+            (SimpleNamespace(architecture=target), False),
+            (SimpleNamespace(hf_text_config=silu), False),
+            (None, False),
+        ):
+            with self.subTest(model_config=model_config):
+                self.config.model_config = model_config
+                self.assertEqual(AscendW4A8DynamicFusedMoEMethod()._use_a5_ling_w4a8, expected)
+        del self.config.model_config
+        self.assertFalse(AscendW4A8DynamicFusedMoEMethod()._use_a5_ling_w4a8)
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.logger")
-    def test_fallback_is_reported_only_on_a5(self, logger):
+    def test_fallback_is_reported_only_on_a5_ling(self, logger):
         self.profile.device_adaptor_family = DeviceAdaptorFamily.STANDARD
         AscendW4A8DynamicFusedMoEMethod()
         logger.warning_once.assert_not_called()
         self.profile.device_adaptor_family = DeviceAdaptorFamily.FP8_OPTIMIZED
+        self.config.model_config.architecture = "KimiK3ForConditionalGeneration"
+        AscendW4A8DynamicFusedMoEMethod()
+        logger.warning_once.assert_not_called()
+        self.config.model_config.architecture = "BailingMoeV3ForCausalLM"
         AscendW4A8DynamicFusedMoEMethod()
         logger.warning_once.assert_called_once()
+        self.assertIn("A5 Ling ModelSlim W4A8", logger.warning_once.call_args.args[0])
         self.assertIn("Fused GMM-activation-quantization is disabled", logger.warning_once.call_args.args[0])
 
     def test_non_a5_keeps_fused_parallel_configurations(self):
@@ -403,9 +464,101 @@ class TestAscendW4A8A5Fallback(TestBase):
         self.config.parallel_config.enable_eplb = True
         self.ascend_config.enable_fused_mc2 = 1
         method = AscendW4A8DynamicFusedMoEMethod()
-        self.assertFalse(method._use_a5_unfused_w4a8)
+        self.assertFalse(method._use_a5_ling_w4a8)
         self.assertEqual(method.fused_activations, frozenset({"silu", "situ"}))
         self.assertTrue(method.use_expert_weight_list)
+
+    def test_other_a5_models_keep_existing_parallel_configurations(self):
+        self.config.parallel_config.enable_expert_parallel = False
+        self.config.parallel_config.enable_eplb = True
+        self.ascend_config.enable_fused_mc2 = 1
+        self.ascend_config.eplb_config.dynamic_eplb = True
+        for architecture, activation in (
+            ("KimiK3ForConditionalGeneration", "situ"),
+            ("KimiK3ForConditionalGeneration", "silu"),
+            ("OtherForCausalLM", "silu"),
+            ("BailingMoeV25MTPModel", "silu"),
+            ("BailingMoeV3ForCausalLM", "situ"),
+        ):
+            for use_v2 in (False, True):
+                with self.subTest(architecture=architecture, activation=activation, use_v2=use_v2):
+                    self.config.model_config.architecture = architecture
+                    self.config.model_config.hf_text_config.hidden_act = activation
+                    self.config.use_v2_model_runner = use_v2
+                    method = AscendW4A8DynamicFusedMoEMethod()
+                    self.assertFalse(method._use_a5_ling_w4a8)
+                    self.assertEqual(method.fused_activations, frozenset({"silu", "situ"}))
+                    self.assertTrue(method.use_expert_weight_list)
+
+    @patch("torch.Tensor.npu", new=lambda tensor: tensor, create=True)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", return_value=False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=lambda tensor: tensor)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8._expand_a5_w4a8_scale")
+    def test_other_a5_models_keep_per_channel_loading_and_situ_dispatch(self, expand, trans_nz, _mega_moe):
+        module = "vllm_ascend.quantization.methods.w4a8.w4a8"
+        experts, hidden, intermediate = 2, 64, 32
+        for architecture, activation in (
+            ("KimiK3ForConditionalGeneration", "situ"),
+            ("OtherForCausalLM", "silu"),
+            ("BailingMoeV3ForCausalLM", "situ"),
+        ):
+            with self.subTest(architecture=architecture, activation=activation):
+                self.config.model_config.architecture = architecture
+                self.config.model_config.hf_text_config.hidden_act = activation
+                method = AscendW4A8DynamicFusedMoEMethod()
+                layer = torch.nn.Module()
+                for name, tensor in {
+                    "w13_weight": torch.zeros((experts, intermediate, hidden), dtype=torch.int8),
+                    "w2_weight": torch.zeros((experts, hidden // 2, intermediate), dtype=torch.int8),
+                    "w13_weight_scale": torch.ones((experts, 2 * intermediate, 1)),
+                    "w2_weight_scale": torch.ones((experts, hidden, 1)),
+                    "w13_scale_bias": torch.ones((experts, 2 * intermediate, 1)),
+                    "w2_scale_bias": torch.ones((experts, hidden, 16)),
+                }.items():
+                    layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+                trans_nz.reset_mock()
+                method.process_weights_after_loading(layer)
+                self.assertEqual(trans_nz.call_count, 2)
+                expand.assert_not_called()
+                self.assertEqual(layer.w13_weight_scale.shape, (experts, 2 * intermediate))
+                self.assertEqual(layer.w2_weight_scale.shape, (experts, 1, hidden))
+                self.assertEqual(layer.w13_weight.dtype, torch.int32)
+                self.assertEqual(layer.w2_weight.dtype, torch.int32)
+                self.assertTrue(method.supports_fused_activation(activation))
+                if activation != "situ":
+                    continue
+                tokens = torch.ones((4, hidden), dtype=torch.int8)
+                token_scale = torch.ones(4)
+                output = torch.ones((4, intermediate), dtype=torch.int8)
+                compute_input = SimpleNamespace(
+                    layer=layer,
+                    hidden_states=tokens,
+                    dynamic_scale=token_scale,
+                    group_list=torch.tensor([2, 2], dtype=torch.int32),
+                    group_list_type=1,
+                    activation=MoEActivation.SITU,
+                    activation_situ_beta=1.25,
+                    activation_situ_linear_beta=0.125,
+                )
+                with (
+                    patch.object(method, "_quant_hidden_states", return_value=(tokens, token_scale)),
+                    patch(f"{module}._gmm_dequant_situ_quant_fusion_supported", return_value=False),
+                    patch(f"{module}.dispose_tensor"),
+                    patch(f"{module}.torch_npu.npu_grouped_matmul", return_value=[tokens.bfloat16()]) as gmm,
+                    patch(
+                        "torch.ops._C_ascend.dequant_situ_quant", return_value=(output, token_scale), create=True
+                    ) as situ,
+                    patch("torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2", create=True) as swiglu,
+                ):
+                    actual, actual_scale = method.apply_gmm1_act_quant(compute_input)
+                    self.assertIs(actual, output)
+                    self.assertIs(actual_scale, token_scale)
+                    self.assertEqual(gmm.call_args.kwargs["scale"][0].shape, (experts, 1, 2 * intermediate))
+                    self.assertIs(gmm.call_args.kwargs["bias"][0], layer.w13_scale_bias)
+                    self.assertEqual(situ.call_args.kwargs["beta"], 1.25)
+                    self.assertEqual(situ.call_args.kwargs["linear_beta"], 0.125)
+                    self.assertEqual(situ.call_args.kwargs["group_index"].dtype, torch.int64)
+                    swiglu.assert_not_called()
 
     def test_fallback_rejects_unsupported_parallel_paths(self):
         for owner, attribute, value in (

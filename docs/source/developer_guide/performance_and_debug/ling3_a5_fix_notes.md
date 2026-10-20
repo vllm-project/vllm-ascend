@@ -7,7 +7,7 @@
 
 A5 已完成 TP8 服务启动和 2、8、32 路短请求并发验证，42/42 请求返回 HTTP 200 且内容非空。MTP、ACL graph replay、prefix cache 均有运行证据。但 W4A8 使用兼容性拆分路径，MTP 多步融合和部分 CPU 绑定优化没有启用，不能把功能验证当作性能验收。
 
-修复最终限定到 A5：A3 保留原 W4A8 加载/融合路径，以及原 Ling KDA prefill 索引/清零/写回路径。本次没有 A3 实机结果，不能承诺 A3 全模型精度或性能完全无回归。
+修复最终限定到 A5 的 Ling V3：W4A8 兼容处理只接受已解析的 `BailingMoeV3ForCausalLM` / `BailingMoeV3MTPModel` 且激活为 SiLU。Kimi K3 和其他模型保持原量化路径；A3 保留原 W4A8 加载/融合路径，以及原 Ling KDA prefill 索引/清零/写回路径。本次没有 A3 或 Kimi K3 实机结果，不能承诺它们的全模型精度或性能完全无回归。
 
 环境为 8 张 Ascend 950DT_9582，模型 `Ling-3.1-flash-w4a8`，镜像：
 
@@ -20,11 +20,11 @@ sha256:6d0b1dd97cbacf336c7e4211b48aefd49aa8580c0907b29871a439d8cec8567a
 
 ## 代码修复
 
-### A5 ModelSlim W4A8
+### A5 Ling V3 ModelSlim W4A8
 
 文件：`vllm_ascend/quantization/methods/w4a8/w4a8.py`。
 
-原融合算子 `aclnnGroupedMatmulSwigluQuantWeightNzV2` 在 A5 拒绝非空 `weightAssistMatrix`，但直接删除 ModelSlim MSD 校正会改变计算结果。现在仅当量化来源为 `ascend` 且硬件 profile 为 `FP8_OPTIMIZED` 时：
+原融合算子 `aclnnGroupedMatmulSwigluQuantWeightNzV2` 在这份 Ling A5 配置下拒绝非空 `weightAssistMatrix`，但直接删除 ModelSlim MSD 校正会改变计算结果。兼容处理仅在以下条件同时成立时启用：当前 MoE 层进入普通 `W4A8_DYNAMIC` scheme、量化来源为 `ascend`、硬件 profile 为 `FP8_OPTIMIZED`、vLLM 已解析架构为 `BailingMoeV3ForCausalLM` 或 `BailingMoeV3MTPModel`，以及文本配置的 `hidden_act` 为 `silu`。启用后：
 
 - 在实例上禁用 fused activation，走 NPU GMM1 → activation/quantization → GMM2；不改变类级激活集合，也不回退 CPU/全精度权重。
 - 保留 MSD 校正和 ND 权重，避免套用 A2/A3 的 NZ 转换；INT4 仍按接口要求打包为 INT32。
@@ -32,7 +32,26 @@ sha256:6d0b1dd97cbacf336c7e4211b48aefd49aa8580c0907b29871a439d8cec8567a
 - 对非 EP、EPLB、expert weight lists、fused MC2 等未支持组合显式报错，不静默切换配置。此处 fused MC2 不等于所有普通 MC2 通信路径。
 - 新版启动时通过 `logger.warning_once` 明示拆分路径及潜在吞吐代价。已采集的旧服务日志没有这条新告警；旧版的拆分行为是通过源码确认的。
 
-非 A5 或 compressed-tensors 权重继续使用原路径。新增硬件判断在构造阶段执行，不增加每次 forward 的硬件查询。W4A8 修改位于通用量化 scheme，也适用于其他 A5 ModelSlim W4A8 使用者；当前模型级实机验证仅覆盖 Ling。
+非上述 Ling 架构、非 SiLU、非 A5 或 compressed-tensors 权重继续使用原路径。新增判断在构造阶段执行，不增加每次 forward 的硬件查询。模型识别采用 `model_config.architecture` 的实际解析结果，不用模型目录名、泛化的 `bailing_hybrid` 类型或候选 architecture 列表猜测；缺少匹配信息时不启用兼容处理。文本配置优先使用 `hf_text_config`，缺失时使用 `hf_config`。
+
+### 为什么不能把 Ling 的处理套到 Kimi K3
+
+此前只使用 A5 + ModelSlim 的门控过宽：凡进入普通 W4A8 MoE scheme 的 A5 模型都会命中，Kimi K3 也不能例外。清空整个 `fused_activations` 会同时绕过 SiLU 和 SiTU 分支，并把额外的 EP/EPLB/fused MC2 限制施加给其他模型。因此已将该门控收窄到上面的 Ling V3 配置；这是一项经特定模型验证的兼容修复，不是所有 A5 W4A8 的通用规则。
+
+相似的 KDA/MLA 模型结构不意味着 MoE 激活和算子接口相同：
+
+| 项目 | Ling V3 本次运行 | Kimi K3 普通 ModelSlim W4A8_DYNAMIC 的 SiTU 路径 |
+| --- | --- | --- |
+| 激活 | 实际 checkpoint 配置 `hidden_act=silu` | `AscendKimiMoE` 把 `config.hidden_act` 及 SiTU 参数传给 MoE |
+| 原 GMM1/激活处理 | `grouped_matmul_swiglu_quant_v2`，传入 MSD assist，触发本次参数错误 | `apply_gmm1_act_quant` 内独立的 `MoEActivation.SITU` 分支 |
+| SiTU 算子选择 | 不进入此分支 | 满足硬件/输入条件时调用 `gmm_dequant_situ_quant`；否则为 GMM1 + `dequant_situ_quant`，后者仍融合激活与输出量化 |
+| 本次最终改动 | 启用已验证的兼容路径 | 不改变原分派、权重布局或配置支持范围 |
+
+当前仓库的 `GMM_DEQUANT_SITU_QUANT` 能力属于 A3；普通 ModelSlim W4A8_DYNAMIC 在 A5 上的 SiTU 已有分步处理路径，无需通过本次 Ling 标志来选择它。之前清空激活集合反而会绕过这条 SiTU 专有路径，走通用激活和独立量化，可能影响性能。
+
+`--quantization ascend` 只选择 ModelSlim 配置入口，具体数值格式由每层 quant description 决定。另一种 `W4A8_MXFP` 使用独立的 `w4a8_mxfp4.py` scheme，在 A5 的 SiTU 算子选择也不同；它本来就不会经过此次修改的普通 W4A8 类。不能仅凭模型名称或命令中的 `ascend` 判断实际量化格式。
+
+这说明用户观察到 Kimi K3 不需要相同补丁并不矛盾，但不能据此证明任意 Kimi checkpoint 都能在当前镜像运行。本次未取得用户实际 Kimi A5 checkpoint 和启动记录：`npu2` 上检查到的 `kimi-k3-w4a8` 目录为空；仓库部署教程的 W4A8 示例明确面向 A3。未把 Kimi 推断成 MXFP4，也未把源码路径核查报告为 Kimi A5 实机验收。
 
 ### A5 Ling KDA 状态复制
 
@@ -110,9 +129,10 @@ MTP 确实执行，但接受率不能直接换算成加速比。第三步贡献�
 - A5 独立 HCCL all-reduce/all-to-all；W4A8 group-256 及 MLP 数值探针；KDA 有间隔行、非零 offset、非连续索引的实机探针。
 - A5 短生成、重复长前缀、2/8/32 并发；成功日志未发现实际 ERROR/FATAL/Traceback。
 - 本地新增回归用例包含 scale 位编码/数值不变、硬件与量化来源门控、显式拒绝不支持组合、加载后 scale 复用、A5 告警、A3 原 KDA 路径和 A5 缺 plan 报错。
+- 模型范围回归覆盖 Ling V3 主模型/MTP、Kimi K3、旧 Bailing 及其他模型，并检查非 Ling A5 的原 SiTU 分派、加载布局与并行配置不被兼容处理改变。
 - 本机缺完整 vLLM/NPU 导入依赖，定向 CPU 回归采用真实 Torch、AST 加载实际源码及用例、mock 缺失运行时边界；不能将其报告为完整 pytest 或 A3 实机通过。
 
-本轮新增的 A3 门控和一次性告警经过本地验证，运行中服务未热替换或重启；A5 的数学计算路径与此前通过 42 请求测试的实现一致。该区分也适用于随附适配 ZIP 的验证记录。
+新增的硬件/模型范围门控和一次性告警经过本地验证，运行中服务未热替换或重启；匹配的 Ling A5 数学计算路径与此前通过 42 请求测试的实现一致。该区分也适用于随附适配 ZIP 的验证记录。
 
 ## 下一步性能验证建议
 
