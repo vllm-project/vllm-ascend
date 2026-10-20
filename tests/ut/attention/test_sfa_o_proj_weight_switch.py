@@ -26,6 +26,7 @@ if "torch_npu._inductor" not in sys.modules:
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.sfa_v1 import PreprocessType, SFAForwardContext
 from vllm_ascend.weight_switch import (
+    ParallelOProjection,
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
     WeightSwitchMixin,
@@ -65,37 +66,41 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.layerwise_kv_cache_hook = None
         impl.tp_size = 2
         impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
-        impl._o_proj_weight_switch_enabled = False
-        impl.o_proj_weight_state = None
-        impl.o_proj_weight_switch_config = WeightSwitchConfig(
-            group=object(),
-            world_size=2,
-            rank=0,
+        impl._parallel_o_proj = ParallelOProjection(
+            impl.o_proj.input_size_per_partition,
+            impl.o_proj,
+            config=WeightSwitchConfig(group=object(), world_size=2, rank=0),
+            tp_group=SimpleNamespace(world_size=2, rank_in_group=0),
+            pool=impl.o_proj_full_pools,
+            pool_key=impl.o_proj_weight_switch_pool_key,
+            project_full=lambda inputs, output: output,
+            decode_sharded=False,
         )
+        impl._parallel_o_proj.enabled = True
         return impl
 
-    def test_enable_o_proj_switch_uses_mixin_state_and_is_idempotent(self):
+    def test_enable_o_proj_switch_uses_component_state_and_is_idempotent(self):
         impl = self._make_impl()
         original_weight_ptr = impl.o_proj.weight.data_ptr()
         original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
 
-        impl._enable_o_proj_full_weight_switch()
+        impl._parallel_o_proj.enable()
 
-        state = impl.o_proj_weight_state
-        self.assertTrue(impl._o_proj_weight_switch_enabled)
+        state = impl._parallel_o_proj._weight_switch_states[0][2]
+        self.assertTrue(impl._parallel_o_proj._weight_switch_enabled)
         self.assertEqual(state.gather_parts["weight"].local_tensor.data_ptr(), original_weight_ptr)
         self.assertEqual(state.gather_parts["weight_scale"].local_tensor.data_ptr(), original_scale_ptr)
         self.assertEqual(state.gather_parts["weight"].full_tensor.shape, (8, 3))
         self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (4, 3))
         self.assertEqual(len(AscendSFADSACPImpl.o_proj_full_pools), 2)
 
-        impl._enable_o_proj_full_weight_switch()
-        self.assertIs(impl.o_proj_weight_state, state)
+        impl._parallel_o_proj.enable()
+        self.assertIs(impl._parallel_o_proj._weight_switch_states[0][2], state)
 
     def test_o_proj_full_weight_forward_restores_local_storage(self):
         impl = self._make_impl()
-        impl._enable_o_proj_full_weight_switch()
-        state = impl.o_proj_weight_state
+        impl._parallel_o_proj.enable()
+        state = impl._parallel_o_proj._weight_switch_states[0][2]
         original_weight_ptr = impl.o_proj.weight.data_ptr()
         original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
         full_weight_ptr = state.gather_parts["weight"].full_tensor.data_ptr()
@@ -111,6 +116,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.enable_dsa_cp_full_o_proj = True
         gathered_output = torch.cat((torch.ones(2, 3), torch.full((2, 3), 2.0)))
         tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
+        impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
         with patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
             return_value=tp_group,
@@ -118,7 +124,6 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
             output = impl._finalize_o_proj(
                 attn_output=torch.randn(2, 8),
                 output=torch.empty(3, 3),
-                gather_full_o_proj=True,
             )
 
         self.assertEqual(impl.o_proj.weight.data_ptr(), original_weight_ptr)
@@ -128,18 +133,18 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def test_o_proj_full_weight_stages_local_result_for_upstream_sp(self):
         impl = self._make_impl()
-        impl._enable_o_proj_full_weight_switch()
+        impl._parallel_o_proj.enable()
         impl.enable_dsa_cp_full_o_proj = True
         impl.o_proj.reduce_results = False
         local_output = torch.tensor([[3.0, 4.0, 5.0], [6.0, 7.0, 8.0]])
         impl._apply_o_proj_full_weight = MagicMock(return_value=local_output)
         tp_group = SimpleNamespace(rank_in_group=1, all_gather=MagicMock())
 
+        impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
         with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
             output = impl._finalize_o_proj(
                 attn_output=torch.randn(2, 8),
                 output=torch.full((3, 3), -1.0),
-                gather_full_o_proj=True,
             )
 
         tp_group.all_gather.assert_not_called()
@@ -183,7 +188,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl = self._make_impl(_UnsupportedOProjLinearMethod())
 
         with self.assertRaisesRegex(RuntimeError, "weight-switch capable"):
-            impl._enable_o_proj_full_weight_switch()
+            impl._parallel_o_proj.enable()
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
@@ -219,28 +224,46 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         attn_output = MagicMock()
         impl._v_up_proj = MagicMock(return_value=attn_output)
         impl.o_proj = MagicMock()
+        impl._parallel_o_proj = ParallelOProjection(
+            1,
+            impl.o_proj,
+            config=WeightSwitchConfig(group=object(), world_size=2, rank=0),
+            tp_group=SimpleNamespace(world_size=2, rank_in_group=0),
+            pool={},
+            pool_key="sfa_test",
+            project_full=lambda inputs, output: output,
+            decode_sharded=False,
+        )
+        impl._parallel_o_proj._weight_switch_enabled = True
         impl._prepare_native_hidden_states = MagicMock(side_effect=lambda hidden_states, _: hidden_states)
 
         hidden_states = torch.empty(2, 1)
         output = torch.full((2, 1), 123.0)
         kv_cache = (MagicMock(), MagicMock())
         impl._compose_sfa_kv_cache = MagicMock(return_value=kv_cache)
-        impl._finalize_o_proj = MagicMock(side_effect=lambda attn_output, output, gather: output.fill_(1.0))
+
+        def finalize(attn_output, output):
+            self.assertTrue(impl._parallel_o_proj.uses_full_weight)
+            return output.fill_(1.0)
+
+        impl._finalize_o_proj = MagicMock(side_effect=finalize)
 
         attn_metadata = MagicMock()
         attn_metadata.dcp_context = None
         attn_metadata.dsa_cp_context = None
         attn_metadata.num_input_tokens = 1
         attn_metadata.num_actual_tokens = 1
-        impl._get_parallel_forward_context = MagicMock(
-            return_value=SFAForwardContext(
+
+        def prepare_context(*args):
+            impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
+            return SFAForwardContext(
                 actual_seq_lengths_query=MagicMock(),
                 actual_seq_lengths_key=MagicMock(),
                 kv_slot_mapping=MagicMock(),
                 topk_num_tokens=1,
-                gather_full_o_proj=True,
             )
-        )
+
+        impl._get_parallel_forward_context = MagicMock(side_effect=prepare_context)
 
         with (
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
@@ -262,7 +285,8 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         self.assertIs(finalize_args[0], attn_output)
         self.assertEqual(finalize_args[1].shape, (1, 1))
         self.assertEqual(finalize_args[1].data_ptr(), output.data_ptr())
-        self.assertTrue(finalize_args[2])
+        self.assertEqual(len(finalize_args), 2)
+        self.assertFalse(impl._parallel_o_proj.uses_full_weight)
         torch.testing.assert_close(result, torch.tensor([[1.0], [123.0]]))
         projected_input = impl.fused_qkv_a_proj.call_args.args[0]
         self.assertEqual(projected_input.shape, (1, 1))

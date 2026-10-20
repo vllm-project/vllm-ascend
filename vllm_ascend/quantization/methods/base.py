@@ -167,6 +167,10 @@ class AscendLinearScheme(WeightSwitchMixin, ABC):
         """
         ...
 
+    def apply_weight_shard(self, layer: torch.nn.Module, x: torch.Tensor, *, bias_rank: int) -> torch.Tensor:
+        """Include complete quantized bias on just one parallel contributor."""
+        return self.apply(layer, x, bias=None, tp_rank=bias_rank)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing (transpose, format conversion, etc.).
 
