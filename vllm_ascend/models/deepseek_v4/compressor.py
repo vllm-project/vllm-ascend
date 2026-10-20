@@ -61,14 +61,25 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
+        # ``block_size`` is consumed as a token count throughout the cache
+        # manager, while ``self.block_size`` counts state slots: one slot
+        # holds one compression interval, i.e. ``compress_ratio`` tokens.
+        # Reporting the slot count directly dragged the engine-wide cache
+        # block size and hash granularity down to 2 tokens (#16270). The
+        # prefix-cache semantics stay the stock sliding-window ones: the
+        # compressor's first boundary after a prefix hit reads the overlap
+        # state rows in the window-tail blocks the lookup shares. Kernel
+        # addressing is unchanged either way, through the derived
+        # ``storage_block_size = block_size // compress_ratio``.
         return AscendSlidingWindowMLASpec(
-            block_size=self.block_size,
+            block_size=self.block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            compress_ratio=self.compress_ratio,
         )
 
     def forward(self): ...
