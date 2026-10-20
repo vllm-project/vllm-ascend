@@ -173,6 +173,68 @@ def _make_batch_state(
     )
 
 
+@pytest.mark.parametrize("uses_flashmla", [False, True])
+@pytest.mark.parametrize("draft_tokens", [0, 3])
+def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla, draft_tokens):
+    runner = _make_runner()
+    runner._uses_flashmla = uses_flashmla
+    runner.decode_query_len = 1 + draft_tokens
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    batch_state = _make_batch_state([127, 128], [runner.decode_query_len] * 2, [128, 128], draft_tokens)
+    scheduler_output = SimpleNamespace()
+
+    with patch.object(
+        GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, runner.decode_query_len)
+    ) as parent:
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    parent.assert_called_once_with(scheduler_output, False)
+    order = [1, 0] if uses_flashmla else [0, 1]
+    assert gathered.req_ids == [batch_state.req_ids[index] for index in order]
+    for field in batch_state._fields:
+        values = getattr(batch_state, field)
+        if isinstance(values, np.ndarray):
+            np.testing.assert_array_equal(getattr(gathered, field), values[order])
+    assert gathered.has_prefill is True
+    assert gathered.decode_graph_eligible is (not uses_flashmla)
+    assert uniform == (None if uses_flashmla else runner.decode_query_len)
+    np.testing.assert_array_equal(batch_state.is_prefilling_np, [True, False])
+    if not uses_flashmla:
+        assert gathered is batch_state
+
+
+@pytest.mark.parametrize("uses_flashmla", [False, True])
+@pytest.mark.parametrize("graph_eligible", [False, True])
+def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_eligible):
+    runner = _make_runner()
+    runner._uses_flashmla = uses_flashmla
+    batch_state = _make_batch_state([128, 64], [1, 1], [128, 64])._replace(decode_graph_eligible=graph_eligible)
+    expected_uniform = 1 if graph_eligible else None
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, expected_uniform)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    assert gathered.req_ids == batch_state.req_ids
+    assert gathered.has_prefill is False
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
+    assert gathered.decode_graph_eligible is graph_eligible
+    assert uniform == expected_uniform
+
+
+@pytest.mark.parametrize("uses_flashmla", [False, True])
+def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
+    runner = _make_runner()
+    runner._uses_flashmla = uses_flashmla
+    scheduler_output = SimpleNamespace()
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(None, 4)) as parent,
+        patch("vllm_ascend.worker.v2.model_runner.prepare_flashmla_batch_req_state") as prepare,
+    ):
+        assert runner.gather_batch_req_state(scheduler_output, True) == (None, 4)
+
+    parent.assert_called_once_with(scheduler_output, True)
+    prepare.assert_not_called()
+
+
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     manager = SimpleNamespace(update_stream=None)
