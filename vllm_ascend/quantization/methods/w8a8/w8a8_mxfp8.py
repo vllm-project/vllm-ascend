@@ -32,7 +32,13 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    FP8_METHOD,
+    dispose_tensor,
+    maybe_trans_nz,
+    maybe_trans_nz_with_scale,
+)
 
 from ..base import (
     AscendLinearScheme,
@@ -211,22 +217,49 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
 
+        # Snapshot before updating the persistent buffers: after an RL reload,
+        # padded_weight can alias _mxfp8_weight_buf in the checkpoint layout.
+        target_weight = padded_weight.transpose(0, 1).contiguous()
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
+            layer._mxfp8_weight_buf = target_weight
             if not getattr(layer, "_fused_preprocess_managed", False):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
+            layer._mxfp8_weight_buf.copy_(target_weight)
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
+
+        if hasattr(layer, "_mxfp8_gather_weight_buf"):
+            # Refresh the ND communication copy only during weight processing.
+            # Keep its address stable for graph replay after weight updates.
+            layer._mxfp8_gather_weight_buf.copy_(target_weight)
 
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf
 
         # Mark as transformed
         layer._mxfp8_transformed = True
+
+    def prepare_weight_switch_gather_input(
+        self,
+        layer: torch.nn.Module,
+        attr_name: str,
+        local_tensor: torch.Tensor,
+        dim: int,
+    ) -> torch.Tensor:
+        # Subclasses with their own weight-processing lifecycle must retain
+        # the default layout unless they also implement cache refresh.
+        if attr_name != "weight" or dim != 0 or not getattr(layer, "_mxfp8_transformed", False):
+            return super().prepare_weight_switch_gather_input(layer, attr_name, local_tensor, dim)
+
+        # HCCL converts NZ inputs to ND for every all_gather_into_tensor call.
+        # Cache this immutable O-proj shard at initialization, retaining the NZ
+        # local_tensor for TP matmul and the shared full-weight output pool.
+        if not hasattr(layer, "_mxfp8_gather_weight_buf"):
+            layer._mxfp8_gather_weight_buf = torch_npu.npu_format_cast(local_tensor, ACL_FORMAT_FRACTAL_ND).contiguous()
+        return layer._mxfp8_gather_weight_buf
 
     def restore_weights_for_rl_loading(self, layer):
         """Restore weights to original shapes for RL weight reloading.
