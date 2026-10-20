@@ -574,11 +574,14 @@
 #       With PP batch queue, synchronous scheduling can schedule the next batch
 #       before the previous model output is consumed. Calling `post_step` in that
 #       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
+#       already belong to the newer schedule step. A PD prefill node does not
+#       need CPU draft-token feedback, and fetching it can drain later PP batches.
 #    How：
 #       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
 #       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
+#       writeback from the corresponding `ModelRunnerOutput` in mixed deployment.
+#       Also skip the redundant draft-token RPC on V1 PD prefill nodes without
+#       enabling their sampled-token IPC path.
 #    Related PR (if no, explain why):
 #       Backport of local vLLM PP+MTP branch changes.
 #    Future Plan:

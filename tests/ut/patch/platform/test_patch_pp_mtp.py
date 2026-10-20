@@ -380,6 +380,79 @@ def test_pp_mtp_post_step_skips_inflight_batch():
     assert EngineCore.post_step(engine, True) is None
 
 
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        SimpleNamespace(kv_role="kv_producer"),
+        SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
+    ],
+    ids=["producer-role", "producer-flags"],
+)
+@pytest.mark.parametrize(
+    (
+        "use_pp",
+        "async_scheduling",
+        "use_v2_model_runner",
+        "use_spec_decode",
+        "has_batch_queue",
+        "model_executed",
+        "expected_skip",
+    ),
+    [
+        (True, False, False, True, True, True, True),
+        (True, True, False, True, True, True, False),
+        (True, False, True, True, True, True, False),
+        (False, False, False, True, True, True, False),
+        (True, False, False, False, True, True, False),
+        (True, False, False, True, False, True, False),
+        (True, False, False, True, True, False, False),
+    ],
+    ids=["sync-prefill", "async", "v2", "no-pp", "no-spec-decode", "no-batch-queue", "no-execution"],
+)
+def test_pd_prefill_post_step_guards(
+    monkeypatch,
+    kv_transfer_config,
+    use_pp,
+    async_scheduling,
+    use_v2_model_runner,
+    use_spec_decode,
+    has_batch_queue,
+    model_executed,
+    expected_skip,
+):
+    original_calls = []
+    original_result = object()
+
+    def original_post_step(engine, executed):
+        original_calls.append((engine, executed))
+        return original_result
+
+    monkeypatch.setattr(EngineCore, "post_step", original_post_step)
+    _patch_engine_core()
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        speculative_config=object() if use_spec_decode else None,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    engine = SimpleNamespace(
+        scheduler=SimpleNamespace(vllm_config=vllm_config, use_pp=use_pp),
+        batch_queue=object() if has_batch_queue else None,
+        async_scheduling=async_scheduling,
+        use_spec_decode=use_spec_decode,
+    )
+
+    result = EngineCore.post_step(engine, model_executed)
+
+    if expected_skip:
+        assert result is None
+        assert original_calls == []
+    else:
+        assert result is original_result
+        assert original_calls == [(engine, model_executed)]
+    # Skipping draft feedback must not enable the sampled-token IPC path on P.
+    assert _use_pp_ipc_runtime_patch(vllm_config, use_pp) is False
+
+
 def test_pp_mtp_spec_token_id_edge_cases():
     finished = SimpleNamespace(is_finished=lambda: True, spec_token_ids=["keep"])
     grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1])
