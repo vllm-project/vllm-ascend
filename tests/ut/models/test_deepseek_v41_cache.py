@@ -1182,7 +1182,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", store)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     attn = SimpleNamespace(
-        compressor=SimpleNamespace(wkv=lambda x: x, wgate=lambda x: x, pool_projected=pool),
+        compressor=SimpleNamespace(wkv=lambda x: x, wgate=lambda x: x, pool_projected_eager=pool),
         indexer=SimpleNamespace(update_keys=update_keys),
         long_kv_cache=SimpleNamespace(kv_cache=[torch.empty(0)]),
         head_dim=8,
@@ -1242,7 +1242,7 @@ def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkey
 
     monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", kernel)
     hidden = torch.randn(2, 16, dtype=torch.bfloat16)
-    actual = compressor.pool_projected(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
+    actual = compressor.pool_projected_eager(compressor.wkv(hidden.float()), compressor.wgate(hidden.float()), metadata)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert compressor.wkv.weight.dtype == compressor.wgate.weight.dtype == torch.float32
 

@@ -13,8 +13,19 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 import vllm.envs as envs
 from torch import nn
+
+try:
+    import cann_ops_transformer  # noqa: F401  # Registers torch.ops.cann_ops_transformer.* from the wheel.
+    import custom_ops  # noqa: F401  # Registers torch.ops.custom.* from the wheel.
+
+    _DS41_WHEEL_OPS = True
+except ImportError:
+    # A3 environments do not ship the ds41 operator wheels; the decoder layer
+    # falls back to the in-tree mHC operators there.
+    _DS41_WHEEL_OPS = False
 from transformers import PretrainedConfig
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -77,6 +88,7 @@ from vllm_ascend.utils import (
 from .cache_config import (
     make_mla_cache_spec,
     make_swa_cache_spec,
+    uses_a5_packed_cache,
 )
 from .compressor import DeepseekV41Compressor
 from .engram import (
@@ -829,6 +841,10 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+        # The ds41 wheel operators (mHC v2, fused compressor, indexer prologue)
+        # exist only in the A5 operator-package environment; every other
+        # device keeps this repository's in-tree operators.
+        self._ds41_wheel_ops = _DS41_WHEEL_OPS and uses_a5_packed_cache()
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
@@ -843,6 +859,14 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
+        if self._ds41_wheel_ops:
+            x, _ = torch_npu.npu_rms_norm(
+                hidden_states,
+                self.post_attention_layernorm.weight,
+                epsilon=self.post_attention_layernorm.variance_epsilon,
+            )
+            x_fp32 = x.float()
+            return x, x_fp32
         outputs = DeviceOperator.rms_norm_cast(
             hidden_states, self.post_attention_layernorm.weight, self.post_attention_layernorm.variance_epsilon
         )
@@ -853,28 +877,47 @@ class DeepseekV41DecoderLayer(nn.Module):
 
     @staticmethod
     def hc_collapse(x, pre_mix):
-        return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
+        out = (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
+        return out
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
-        return torch.ops._C_ascend.npu_hc_pre_v3(
-            x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            pre_mix,
-            hc_mult=self.hc_mult,
-            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
-            norm_eps=self.norm_eps,
-            hc_eps=self.hc_eps,
-        )
+        if self._ds41_wheel_ops:
+            out = torch.ops.custom.npu_hc_pre_v2(
+                x=x,
+                hc_fn=hc_fn,
+                hc_scale=hc_scale,
+                hc_base=hc_base,
+                pre_mix=pre_mix,
+                hc_mult=self.hc_mult,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                norm_eps=self.norm_eps,
+                hc_eps=self.hc_eps,
+            )
+        else:
+            out = torch.ops._C_ascend.npu_hc_pre_v3(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                pre_mix,
+                hc_mult=self.hc_mult,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                norm_eps=self.norm_eps,
+                hc_eps=self.hc_eps,
+            )
+        return out
 
     def hc_post(self, x, residual, post, comb):
-        return torch.ops._C_ascend.npu_hc_post(
-            x.unsqueeze(0),
-            residual.unsqueeze(0),
-            post.unsqueeze(0),
-            comb.unsqueeze(0),
-        ).squeeze(0)
+        if self._ds41_wheel_ops:
+            out = torch.ops.cann_ops_transformer.mhc_post(residual, comb, x, post)
+        else:
+            out = torch.ops._C_ascend.npu_hc_post(
+                x.unsqueeze(0),
+                residual.unsqueeze(0),
+                post.unsqueeze(0),
+                comb.unsqueeze(0),
+            ).squeeze(0)
+        return out
 
     def forward(
         self,
@@ -1751,6 +1794,16 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
         return loaded
+
+    def process_weights_after_loading(self) -> None:
+        # The operator-wheel operands (Nz wk for indexer_prologue_k, BF16
+        # wkv/wgate for the fused ds41 compressor) are adapted per module
+        # after checkpoint loading. The vLLM loader only invokes quant-method
+        # hooks, so walk the explicit module types here; the VL wrapper
+        # delegates its own hook to this method.
+        for _, module in self.named_modules():
+            if isinstance(module, (DeepseekV41Compressor, DeepseekV41Indexer)):
+                module.process_weights_after_loading()
 
     def set_moe_parameters(self):
         self.expert_weights = []
