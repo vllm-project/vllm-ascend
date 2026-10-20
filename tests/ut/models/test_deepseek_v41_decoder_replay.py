@@ -43,6 +43,40 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     assert model.decoder_replay_start == 1
 
 
+def test_piecewise_replay_uses_compilation_threshold(monkeypatch):
+    monkeypatch.setattr(replay_mod, "is_breakable_cudagraph_enabled", lambda: True)
+    model = SimpleNamespace(
+        config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=128, engram_layer_ids=[]),
+        end_layer=3,
+        use_sequence_parallel=False,
+        _run_replay_layers=lambda *states: states,
+        topk_indices_buffer=torch.zeros(1),
+        candidate_indices_buffer=torch.zeros(1),
+        candidate_lengths_buffer=torch.zeros(1),
+        topk_lengths_buffer=torch.zeros(1),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        lora_config=None,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_decoder_replay=True,
+            decoder_replay_trim_threshold=768,
+        ),
+    )
+    replay = replay_mod.make_decoder_replay(model, config)
+    assert replay is not None
+    assert replay.graph_uses_replay_batch(768)
+    assert not replay.graph_uses_replay_batch(767)
+
+
 def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
@@ -121,6 +155,21 @@ def test_replay_without_rows_keeps_inputs():
     hidden = torch.arange(6)
     replay = replay_mod.AscendDecoderReplayLayers(2, lambda *states: states, [])
     assert replay(hidden, None) == (hidden, None)
+
+
+def test_piecewise_break_reuses_output_addresses(monkeypatch):
+    replay = replay_mod.AscendDecoderReplayLayers(2, lambda hidden: (hidden + 1,), [])
+    replay.trim_threshold = 4
+    monkeypatch.setattr(replay_mod, "in_piecewise_cudagraph", lambda: True)
+    monkeypatch.setattr(
+        replay_mod, "get_forward_context", lambda: SimpleNamespace(batch_descriptor=SimpleNamespace(num_tokens=4))
+    )
+
+    first = replay(torch.arange(4))
+    second = replay(torch.arange(4) + 10)
+
+    assert first[0].data_ptr() == second[0].data_ptr()
+    assert second[0].tolist() == [11, 12, 13, 14]
 
 
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):

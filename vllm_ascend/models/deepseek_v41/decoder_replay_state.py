@@ -11,10 +11,11 @@ import torch
 import torch.distributed as dist
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available, set_forward_context
 from vllm.utils.math_utils import round_up
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -31,6 +32,8 @@ from .decoder_replay_layers import AscendDecoderReplayLayers
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+    from .decoder_replay_aclgraph import DecoderReplayAclGraphManager
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,9 @@ class DecoderReplayState:
         self.num_actual_tokens = 0
         self.dp_tokens: torch.Tensor | None = None
         self.replay_pcp_context: AscendPCPAttentionContext | None = None
+        self.graph_manager: DecoderReplayAclGraphManager | None = None
+        self.graph_mode = CUDAGraphMode.NONE
+        self.graph_descriptor: BatchDescriptor | None = None
 
     def _pcp_kept_lengths(self, inputs: DecoderReplayInputs) -> tuple[np.ndarray, int, torch.Tensor] | None:
         context = inputs.pcp_context
@@ -195,14 +201,28 @@ class DecoderReplayState:
             warmup=warmup,
         )
 
-    def prepare(self, inputs: DecoderReplayInputs, mode: CUDAGraphMode, *, for_capture: bool = False) -> None:
+    def prepare(
+        self,
+        inputs: DecoderReplayInputs,
+        mode: CUDAGraphMode,
+        *,
+        for_capture: bool = False,
+        capture_desc: BatchExecutionDescriptor | None = None,
+    ) -> None:
         self.layers.rows = None
         self.layers.context_factory = None
         self.layers.num_padded_rows = None
         self.replay_pcp_context = None
+        self.layers.graph_runner = None
+        self.graph_mode = CUDAGraphMode.NONE
+        self.graph_descriptor = None
         if self.slots is None:
             self._initialize(inputs)
-        if for_capture or mode != CUDAGraphMode.NONE or get_mrv2_in_profile_run():
+        force_replay = capture_desc is not None or (
+            mode == CUDAGraphMode.PIECEWISE
+            and self.layers.graph_uses_replay_batch(inputs.batch.num_tokens_after_padding)
+        )
+        if for_capture or get_mrv2_in_profile_run() or (mode != CUDAGraphMode.NONE and not force_replay):
             return
         parallel = self.config.parallel_config
         if parallel.data_parallel_size > 1 and should_skip_allreduce_across_dp_group(self.config):
@@ -236,8 +256,18 @@ class DecoderReplayState:
                 dist.all_reduce(agreed, group=get_dp_group().cpu_group)
             trims = bool(agreed[0].any())
             self.dp_tokens = agreed[1]
-        if not trims:
+        if not (trims or force_replay):
             return
+        if self.graph_manager is not None:
+            dp_max_tokens = self.num_tokens if self.dp_tokens is None else int(self.dp_tokens.max())
+            desc = capture_desc or self.graph_manager.dispatch(num_reqs, dp_max_tokens, None, 0)
+            if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                self.num_tokens = desc.num_tokens
+                self.graph_mode = CUDAGraphMode.PIECEWISE
+                self.graph_descriptor = BatchDescriptor(num_tokens=desc.num_tokens)
+                self.layers.graph_runner = self.graph_manager.run
+                if self.dp_tokens is not None:
+                    self.dp_tokens.fill_(desc.num_tokens)
         offsets = np.zeros(num_reqs + 1, dtype=np.int32)
         np.cumsum(kept_lens, out=offsets[1:])
         dropped = batch.query_start_loc_np[: num_reqs + 1] - offsets
@@ -309,8 +339,8 @@ class DecoderReplayState:
         return metadata
 
     @contextmanager
-    def forward_context(self) -> Iterator[None]:
-        outer = get_forward_context()
+    def forward_context(self, mode: CUDAGraphMode | None = None) -> Iterator[None]:
+        outer = get_forward_context() if is_forward_context_available() else None
         mask = get_mc2_mask()
         saved_mask = mask.clone() if mask is not None else None
         try:
@@ -319,16 +349,17 @@ class DecoderReplayState:
                 self.config,
                 num_tokens=self.num_tokens,
                 num_tokens_across_dp=self.dp_tokens,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=self.graph_mode if mode is None else mode,
+                batch_descriptor=self.graph_descriptor,
             ):
                 context = get_forward_context()
-                context.additional_kwargs["eplb_heat_collection_status"] = outer.additional_kwargs.get(
-                    "eplb_heat_collection_status", False
+                context.additional_kwargs["eplb_heat_collection_status"] = (
+                    outer.additional_kwargs.get("eplb_heat_collection_status", False) if outer is not None else False
                 )
                 replay_mask = context.additional_kwargs.get("mc2_mask")
                 if replay_mask is not None:
                     replay_mask[self.num_actual_tokens :].fill_(False)
-                if outer.is_padding is not None:
+                if outer is not None and outer.is_padding is not None:
                     padding = outer.is_padding
                     if self.layers.sequence_parallel:
                         padding = tensor_model_parallel_all_gather(padding, dim=0)

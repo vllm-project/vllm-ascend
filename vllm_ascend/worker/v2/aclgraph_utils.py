@@ -174,6 +174,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
+    def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
+        # PIECEWISE replay invokes captured graph segments directly, bypassing
+        # the model's forward pre-hook that normally refreshes Engram lookups.
+        prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
+        if prepare_engram is not None:
+            model_inputs.update(prepare_engram())
+        return super().run_pw_graph(model, model_inputs)
+
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens

@@ -6,8 +6,10 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture, is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import logger
 
 from vllm_ascend.utils import enable_dsa_cp
@@ -33,8 +35,32 @@ class AscendDecoderReplayLayers:
         self.num_actual_rows = 0
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
+        self.trim_threshold: int | None = None
+        self.graph_runner: (
+            Callable[[torch.Tensor, tuple[torch.Tensor | None, ...]], tuple[torch.Tensor, ...]] | None
+        ) = None
+        self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
+        if in_piecewise_cudagraph():
+            desc = get_forward_context().batch_descriptor
+            assert desc is not None
+            if self.graph_uses_replay_batch(desc.num_tokens):
+                return self._run_in_graph_break(*states)
+        return self._run(*states)
+
+    def graph_uses_replay_batch(self, num_tokens: int) -> bool:
+        return self.trim_threshold is not None and num_tokens >= self.trim_threshold
+
+    @eager_break_during_capture
+    def _run_in_graph_break(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
+        outputs = self._run(*states)
+        if self._break_outputs is None:
+            self._break_outputs = [torch.empty_like(output) for output in outputs]
+        assert all(output.shape[0] <= buffer.shape[0] for output, buffer in zip(outputs, self._break_outputs))
+        return tuple(buffer[: output.shape[0]].copy_(output) for buffer, output in zip(self._break_outputs, outputs))
+
+    def _run(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
             return self.run_layers(*states)
         assert self.context_factory is not None
@@ -71,7 +97,10 @@ class AscendDecoderReplayLayers:
                     padding = self.num_padded_rows - state.shape[0]
                     state = torch.cat((state, state.new_zeros((padding, *state.shape[1:]))))
                 replay_states.append(state)
-            row_outputs = self.run_layers(*replay_states)
+            if self.graph_runner is not None:
+                row_outputs = self.graph_runner(rows, tuple(replay_states))
+            else:
+                row_outputs = self.run_layers(*replay_states)
             outputs = []
             for index, row_output in enumerate(row_outputs):
                 # Hidden states and pre-mix are SP-local; auxiliary states
@@ -108,9 +137,15 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         or parallel.decode_context_parallel_size > 1
         or parallel.use_ubatching
     ):
-        reason = "SP without DSA CP, PP, DCP and microbatching need a separate replay layout"
-    elif config.compilation_config.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
-        reason = "replay prefill requires eager execution; use NONE or FULL_DECODE_ONLY"
+        reason = "SP without DSA CP, PP, PCP, DCP and microbatching need a separate replay layout"
+    elif config.compilation_config.cudagraph_mode not in (
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.PIECEWISE,
+    ):
+        reason = "replay prefill requires eager or breakable PIECEWISE execution"
+    elif config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE and not is_breakable_cudagraph_enabled():
+        reason = "PIECEWISE replay requires breakable ACL graphs"
     elif any(layer > cut for layer in model.config.engram_layer_ids):
         reason = "an Engram layer follows the last KV source"
     elif speculative is not None and not speculative.use_dspark():
@@ -126,6 +161,10 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         )
     elif config.lora_config is not None:
         reason = "LoRA token mappings need to follow the replay batch"
+    elif config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE and getattr(
+        getattr(config, "model_config", None), "enable_prompt_embeds", False
+    ):
+        reason = "prompt embeddings need a separate replay graph input layout"
     else:
         model.decoder_replay_start = cut + 1
         logger.info_once(
@@ -145,6 +184,14 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             ],
         )
         replay.sequence_parallel = model.use_sequence_parallel
+        if (
+            config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            and config.compilation_config.cudagraph_decoder_replay
+        ):
+            threshold = config.compilation_config.decoder_replay_trim_threshold
+            if threshold <= replay.window:
+                raise ValueError("decoder_replay_trim_threshold must exceed the replay window")
+            replay.trim_threshold = threshold
         return replay
     logger.warning_once("Ascend decoder bounded replay is disabled: %s.", reason)
     return None
