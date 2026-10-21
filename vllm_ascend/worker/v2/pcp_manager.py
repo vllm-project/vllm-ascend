@@ -712,6 +712,15 @@ class AscendPCPManager(PCPManager):
             graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
         return graph_slot_mappings
 
+    def refresh_gathered_slot_mappings(self, slot_mappings: torch.Tensor) -> None:
+        """Publish updated global slots in the original rank-major PCP layout."""
+        assert self._global_batch is not None
+        assert self._global_batch_slot_mappings is not None
+        global_slots = self._global_batch_slot_mappings[:, : self._global_batch.num_tokens]
+        gathered_slots = self._convert_to_gathered_slot_mappings(global_slots)
+        if gathered_slots.data_ptr() != slot_mappings.data_ptr():
+            slot_mappings.copy_(gathered_slots)
+
     def _build_sharded_dummy_attention_context(
         self,
         input_batch: AscendInputBatch,

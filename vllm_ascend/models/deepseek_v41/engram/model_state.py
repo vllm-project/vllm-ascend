@@ -95,6 +95,7 @@ class EngramModelState(AscendModelState):
         if vllm_config.parallel_config.prefill_context_parallel_size > 1:
             max_num_local_reqs *= 2
         self._replay_start = CpuGpuBuffer(max_num_local_reqs, dtype=torch.int32, device=device, pin_memory=False)
+        self._global_replay_start = CpuGpuBuffer(self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self._replay_groups: tuple[int, torch.Tensor] | None = None
         layers = getattr(model, "decoder_replay_layers", None)
         self.decoder_replay_state = DecoderReplayState(vllm_config, layers, device) if layers is not None else None
@@ -172,7 +173,34 @@ class EngramModelState(AscendModelState):
         self._replay_start.np[:num_reqs] = replay_np
         self._replay_start.copy_to_gpu(metadata_num_reqs)
         replay_start = self._replay_start.gpu[:metadata_num_reqs]
-        if replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
+        pcp_context = None
+        if self.pcp_manager is not None and not input_batch.is_dummy:
+            pcp_context = self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+        if pcp_context is not None:
+            global_batch = pcp_context.global_batch
+            global_reqs = global_batch.num_reqs
+            global_replay_np = np.where(
+                global_batch.is_prefilling_np[:global_reqs],
+                self._replay_start_np[global_batch.idx_mapping_np[:global_reqs]],
+                0,
+            ).astype(np.int32)
+            self._global_replay_start.np[:global_reqs] = global_replay_np
+            self._global_replay_start.copy_to_gpu(global_reqs)
+            if replay_window > 0 and global_replay_np.any() and cacheable_groups.numel() > 0:
+                _pad_v2_replayed_slots_kernel[(global_reqs,)](
+                    pcp_context.global_slot_mappings,
+                    pcp_context.global_slot_mappings.stride(0),
+                    cacheable_groups,
+                    global_batch.query_start_loc,
+                    global_batch.positions,
+                    self._global_replay_start.gpu,
+                    replay_window,
+                    PAD_SLOT_ID,
+                    NUM_GROUPS=cacheable_groups.numel(),
+                    BLOCK=1024,
+                )
+                self.pcp_manager.refresh_gathered_slot_mappings(slot_mappings)
+        elif replay_window > 0 and replay_np.any() and cacheable_groups.numel() > 0:
             _pad_v2_replayed_slots_kernel[(num_reqs,)](
                 slot_mappings,
                 slot_mappings.stride(0),
@@ -205,7 +233,9 @@ class EngramModelState(AscendModelState):
         )
         if self.decoder_replay_state is not None:
             self.decoder_replay_state.prepare(
-                DecoderReplayInputs(input_batch, block_tables, slot_mappings, attn_groups, replay_start),
+                DecoderReplayInputs(
+                    input_batch, block_tables, slot_mappings, attn_groups, replay_start, self.pcp_context
+                ),
                 cudagraph_mode,
                 for_capture=for_capture,
             )
