@@ -799,6 +799,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host 0.0.0.0 \
   --port "$2" \
   --data-parallel-size "$3" \
+  --data-parallel-size-local 1 \
   --tensor-parallel-size "$7" \
   --enable-expert-parallel \
   --seed 1024 \
@@ -867,6 +868,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host 0.0.0.0 \
   --port "$2" \
   --data-parallel-size "$3" \
+  --data-parallel-size-local 1 \
   --data-parallel-rank "$4" \
   --data-parallel-address "$5" \
   --data-parallel-rpc-port "$6" \
@@ -946,9 +948,9 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     unset http_proxy
     python3 load_balance_proxy_server_example.py \
       --prefiller-hosts 192.xx.xx.1 \
-      --prefiller-ports 30060 \
+      --prefiller-ports <PREFILL_PORT> \
       --decoder-hosts 192.xx.xx.2 \
-      --decoder-ports 30050 \
+      --decoder-ports <DECODE_PORT> \
       --host 192.xx.xx.1 \
       --port 8000
     ```
