@@ -49,7 +49,7 @@ on:
         required: false
         type: string
         default: 'release'
-        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'daily' builds both OS variants on amd64+arm64; 'release' builds ubuntu on arm64 only."
+        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds ubuntu on arm64 only."
       swr_registry:
         required: false
         type: string
@@ -96,7 +96,7 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
+          if [ "${{ inputs.build_type }}" = "full" ]; then
             ALL='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
             ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
@@ -167,7 +167,7 @@ jobs:
           TAG_SUFFIX=""
           FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
 
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
+          if [ "${{ inputs.build_type }}" = "full" ]; then
             # Arch-specific images are pushed to the temp repo; the merge job
             # creates the multi-arch manifest.
             if [ -n "$OS_MARK" ]; then
@@ -212,7 +212,7 @@ jobs:
     needs: build
     # Run even if some matrix instances failed. Each OS variant is merged
     # independently, only when BOTH arch images exist.
-    if: ${{ inputs.should_push && always() && inputs.build_type == 'daily' }}
+    if: ${{ inputs.should_push && always() && inputs.build_type == 'full' }}
     steps:
       - name: Login to SWR
         uses: docker/login-action@v4

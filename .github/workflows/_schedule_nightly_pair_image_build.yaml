@@ -61,8 +61,8 @@ on:
       build_type:
         required: false
         type: string
-        default: 'daily'
-        description: "Matrix shape for the nightly test image: 'daily' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
+        default: 'full'
+        description: "Matrix shape for the nightly test image: 'full' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
       should_push:
         required: false
         type: boolean

@@ -112,8 +112,8 @@ jobs:
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
       base_image_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
       # Build both architectures for every OS, keeping the fixed runner mapping
-      # (and therefore the build cache) used by the previous daily pipeline.
-      build_type: 'daily'
+      # (and therefore the build cache) used by the nightly pipeline.
+      build_type: 'full'
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' }}
       skip_base: ${{ inputs.skip_base || false }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
