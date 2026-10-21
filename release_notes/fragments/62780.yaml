@@ -1,0 +1,4 @@
+pr: 62780
+entries:
+  - category: feature
+    text: Added Model Runner V2 integration for H-Spec hybrid speculative drafters with the matching vLLM H-Spec branch, using standard Ascend GQA attention and matching target/draft tensor parallelism. Pipeline and context parallelism are not enabled.

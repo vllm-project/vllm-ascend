@@ -290,6 +290,7 @@ def _local_slot(position, block_table_row, kv_cache_block_size, block_size, cp_r
 def _allocate_outputs(max_num_reqs, max_num_tokens, num_speculative_steps, device):
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -12345, dtype=torch.int32, device=device),
+        is_padding=torch.arange(max_num_tokens, device=device) % 2 == 0,
         positions=torch.full((max_num_tokens,), -12345, dtype=torch.int64, device=device),
         query_start_loc=torch.full((max_num_reqs + 1,), -12345, dtype=torch.int32, device=device),
         seq_lens=torch.full((max_num_reqs,), -12345, dtype=torch.int32, device=device),
@@ -498,6 +499,11 @@ def _validate_outputs(data, case, ref):
     total_query = num_reqs * case["num_query_per_req"]
 
     _assert_exact(outputs.input_buffers.input_ids[:total_query], ref.input_ids)
+    _assert_exact(
+        outputs.input_buffers.is_padding, [False] * total_query + [True] * (case["max_num_tokens"] - total_query)
+    )
+    _assert_exact(outputs.input_buffers.input_ids[total_query:], [0] * (case["max_num_tokens"] - total_query))
+    _assert_exact(outputs.input_buffers.positions[total_query:], [0] * (case["max_num_tokens"] - total_query))
     _assert_exact(outputs.input_buffers.positions[:total_query], ref.query_positions)
     _assert_exact(outputs.input_buffers.query_start_loc, ref.query_start_loc)
     _assert_exact(outputs.input_buffers.seq_lens, ref.seq_lens)
