@@ -315,7 +315,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
 
 
 def allocate_cache_views(config, device="cpu"):
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     backings, caches = [], {}

@@ -114,7 +114,6 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -126,6 +125,21 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+# if true, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
+
+
+class _V1ModelRunnerFactory:
+    """Import the V1 model runner only when one is actually constructed."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+
+        return NPUModelRunner(*args, **kwargs)
+
+
+NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):

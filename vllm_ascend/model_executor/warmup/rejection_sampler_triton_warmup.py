@@ -75,7 +75,7 @@ def _is_ngram_spec_method(spec_config) -> bool:
 def _collect_no_draft_probs_values(spec_config, pipeline_parallel_size: int) -> list[bool]:
     """Return ``NO_DRAFT_PROBS`` values that match the live rejection_sample path.
 
-    ``model_runner_v1._sample`` passes ``draft_probs=None`` when PP==1.
+    The V1 model runner's ``_sample`` passes ``draft_probs=None`` when PP==1.
     ngram never provides draft probs. Model-based drafts may supply probs only
     when PP>1.
     """
