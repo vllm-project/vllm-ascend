@@ -135,7 +135,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     impl.v_head_dim = 2
     impl.enable_mlapo = False
     impl.use_pcp = False
-    impl.dcp_enabled = impl_type is AscendMlaDCPImpl
+    impl.use_dcp = impl_type is AscendMlaDCPImpl
     impl.is_pcp_decode_sharded = False
     impl.speculative_config = None
     impl._prolog_v3_weights = None
@@ -185,7 +185,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     monkeypatch.setattr(mla_v1, "maybe_trans_nz", lambda tensor: tensor)
     monkeypatch.setattr(torch_npu, "npu_format_cast", lambda tensor, _format: tensor)
     monkeypatch.setattr(mla_v1, "get_offloader", lambda: NoopOffloader())
-    monkeypatch.setattr(mla_v1, "enable_dcp", lambda: impl.dcp_enabled)
+    monkeypatch.setattr(mla_v1, "enable_dcp", lambda: impl.use_dcp)
     monkeypatch.setattr(
         mla_v1,
         "get_ascend_config",
@@ -420,7 +420,7 @@ def test_constructor_initializes_parallel_routing_flags(
     impl = _construct_impl(pcp_size, dcp_size)
 
     assert impl.use_pcp is expected_pcp
-    assert impl.dcp_enabled is expected_dcp
+    assert impl.use_dcp is expected_dcp
     assert impl.is_pcp_decode_sharded is (expected_pcp and dcp_size == 1)
 
 
@@ -691,7 +691,7 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
 
 
 @pytest.mark.parametrize(
-    ("dcp_enabled", "use_pcp", "decode_sharded", "use_rope", "expected_buffers"),
+    ("use_dcp", "use_pcp", "decode_sharded", "use_rope", "expected_buffers"),
     [
         (False, False, False, True, "none"),
         (True, False, False, True, "both"),
@@ -702,16 +702,14 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
         (True, True, False, False, "decode"),
     ],
 )
-def test_dcp_post_load_allocates_only_consumed_workspaces(
-    dcp_enabled, use_pcp, decode_sharded, use_rope, expected_buffers
-):
+def test_dcp_post_load_allocates_only_consumed_workspaces(use_dcp, use_pcp, decode_sharded, use_rope, expected_buffers):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8192, max_num_seqs=32),
         cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
     )
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=7)
-    impl.dcp_enabled = dcp_enabled
+    impl.use_dcp = use_dcp
     impl.use_pcp = use_pcp
     impl.is_pcp_decode_sharded = decode_sharded
     impl.enable_mlapo = True
@@ -882,7 +880,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
 
 @pytest.mark.parametrize(
     (
-        "dcp_enabled",
+        "use_dcp",
         "has_dcp_buffers",
         "use_pcp",
         "is_pcp_decode_sharded",
@@ -900,7 +898,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     ],
 )
 def test_forward_routes_strided_cache_with_runtime_exclusions(
-    dcp_enabled,
+    use_dcp,
     has_dcp_buffers,
     use_pcp,
     is_pcp_decode_sharded,
@@ -910,7 +908,7 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = dcp_enabled
+    impl.use_dcp = use_dcp
     if has_dcp_buffers:
         impl._dcp_current_kv_buffers = (
             torch.empty(1, BLOCK_SIZE, 1, NOPE_DIM),
@@ -955,7 +953,7 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
@@ -993,7 +991,7 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
@@ -1037,7 +1035,7 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     dcp_impl.__dict__.update(impl.__dict__)
     impl = dcp_impl
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.speculative_config = None
     num_prefill_tokens = 4
     current_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
@@ -1132,7 +1130,7 @@ def test_mla_preprocess_prolog_v3_keeps_mixed_dcp_current_kv_disjoint():
     dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     dcp_impl.__dict__.update(impl.__dict__)
     impl = dcp_impl
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.speculative_config = object()
     num_decode_tokens = 2
     num_prefill_tokens = 4

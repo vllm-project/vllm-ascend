@@ -102,14 +102,14 @@ def test_merge_preserves_input_dtype(dtype, defer):
     assert merge.call_args.kwargs == {"defer_combine": defer}
 
 
-@pytest.mark.parametrize("dcp_enabled", [False, True])
-def test_capture_preserves_dcp_dummy_metadata(dcp_enabled):
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_capture_preserves_dcp_dummy_metadata(use_dcp):
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.flashmla_state = None
-    builder.dcp_enabled = dcp_enabled
+    builder.use_dcp = use_dcp
     builder.reorder_batch_threshold = 3
     expected = object()
     builder.build = Mock(return_value=expected)
@@ -121,7 +121,7 @@ def test_capture_preserves_dcp_dummy_metadata(dcp_enabled):
     assert captured is not common
     assert captured.attn_state == AscendAttentionState.ChunkedPrefill
     assert common.attn_state is None and common.is_prefilling is None
-    if dcp_enabled:
+    if use_dcp:
         assert captured.is_prefilling.shape == (3,)
         assert not captured.is_prefilling.any()
     else:
@@ -214,7 +214,7 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(use_pcp):
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
     builder.use_pcp = use_pcp
-    builder.dcp_enabled = True
+    builder.use_dcp = True
     builder.num_decodes = 0
     builder.seq_lens = torch.tensor([6, 12], dtype=torch.int32)
     builder.query_lens = torch.tensor([3, 3], dtype=torch.int32)
@@ -269,7 +269,7 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.use_pcp = builder.dcp_enabled = builder.chunked_prefill_enabled = True
+    builder.use_pcp = builder.use_dcp = builder.chunked_prefill_enabled = True
     builder.chunked_prefill_workspace_size = workspace_size
     builder.chunked_prefill_workspace = torch.empty(0)
     builder.block_size = builder.cp_virtual_block_size = 2048
@@ -319,7 +319,7 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
     builder.use_pcp = True
-    builder.dcp_enabled = True
+    builder.use_dcp = True
     builder.chunked_prefill_workspace_size = 64
     builder.dcp_collective_rank_order = [0, 2, 1, 3]
     builder.pcp_size = 2
