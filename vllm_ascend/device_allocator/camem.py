@@ -120,6 +120,20 @@ class CaMemAllocator(CuMemAllocator):
         )
         super().__init__()
 
+    def _python_free_callback(self, ptr: int) -> HandleType:
+        """Release an allocation after draining pending NPU work."""
+        data = self.pointer_to_data.pop(ptr)
+        if data.cpu_backup_tensor is not None:
+            data.cpu_backup_tensor = None
+        torch.npu.synchronize(data.handle[0])
+        logger.debug(
+            "Freed %s bytes for %s with address %s from camem allocator",
+            data.handle[1],
+            data.tag,
+            ptr,
+        )
+        return data.handle
+
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.

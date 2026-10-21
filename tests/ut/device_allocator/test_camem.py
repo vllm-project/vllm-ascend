@@ -91,9 +91,8 @@ class TestCaMem(PytestBase):
         assert instance1 is instance2
 
     @patch("vllm_ascend.device_allocator.camem.torch.cuda.synchronize")
-    def test_python_malloc_and_free_callback(self, mock_cuda_sync):
-        # Upstream's free callback drains CUDA work; the NPU worker patches
-        # that at runtime, so the CPU UT stubs it out.
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
+    def test_python_malloc_and_free_callback(self, mock_npu_sync, mock_cuda_sync):
         allocator = CaMemAllocator.get_instance()
 
         # mock allocation_handle
@@ -112,6 +111,8 @@ class TestCaMem(PytestBase):
         data.cpu_backup_tensor = torch.zeros(1)
         result_handle = allocator.python_free_callback(ptr)
         assert result_handle == handle
+        mock_npu_sync.assert_called_once_with(handle[0])
+        mock_cuda_sync.assert_not_called()
         assert ptr not in allocator.pointer_to_data
         assert data.cpu_backup_tensor is None
 
