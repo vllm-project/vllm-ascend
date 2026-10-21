@@ -199,6 +199,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.dcp_size = 1
         worker.tp_rank = 0
         worker.pp_rank = 0
+        worker.pcp_rank = 0
         worker.put_step = 1
         worker.dcp_size = 1
         worker.group_uses_align_state = [False]

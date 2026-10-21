@@ -396,8 +396,8 @@ class KVPoolScheduler:
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage has saved it, so the
-        protocol helper enumerates all stages and head/TP ranks.
+        A block is a hit only when every PP stage and PCP rank has saved it,
+        so the protocol helper enumerates all stages, PCP ranks and heads.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys

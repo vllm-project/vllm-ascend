@@ -17,6 +17,61 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mem
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_pcp_keys_cover_all_workers_and_isolate_topologies(self):
+        for pp_size in (1, 2):
+            for num_groups in (1, 2):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups):
+                    config = self.make_config(pp_size)
+                    cache = self.make_cache_config(num_groups)
+                    builders = []
+                    for pcp_size in (1, 2, 4):
+                        config.parallel_config.prefill_context_parallel_size = pcp_size
+                        mooncake_layerwise.validate_topology(config.parallel_config)
+                        builders.append(
+                            mooncake_layerwise.bind_layerwise_keys(
+                                vllm_config=config,
+                                kv_cache_config=cache,
+                                model_name="model",
+                                use_hybrid=num_groups > 1,
+                                grouped_block_size=[16 * (g + 1) for g in range(num_groups)],
+                            )
+                        )
+                    for group in range(num_groups):
+                        # One saving MLA head or two independent TP state shards.
+                        for heads in (1, 2):
+                            sets = []
+                            for builder in builders:
+                                keys = builder.make_hit_check_keys(group, "hash", heads)
+                                writers = [
+                                    builder.make_full_key(group, "hash", head, stage, pcp_rank)
+                                    for stage in range(pp_size)
+                                    for pcp_rank in range(builder.pcp_size)
+                                    for head in range(heads)
+                                ]
+                                self.assertEqual(keys, writers)
+                                self.assertEqual(len(set(keys)), pp_size * builder.pcp_size * heads)
+                                sets.append(set(keys))
+                            self.assertFalse(sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+
+    def test_pcp_does_not_enable_dcp(self):
+        with self.assertRaisesRegex(ValueError, "decode_context_parallel_size=2"):
+            mooncake_layerwise.validate_topology(
+                SimpleNamespace(prefill_context_parallel_size=4, decode_context_parallel_size=2)
+            )
+
+    def test_pcp_rejects_layer_sharded_kvpp(self):
+        config = self.make_config()
+        config.parallel_config.prefill_context_parallel_size = 4
+        config.additional_config = {"enable_kvpp": True}
+        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
+            mooncake_layerwise.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[16],
+            )
+
     @staticmethod
     def make_config(pp_size=1):
         return SimpleNamespace(
