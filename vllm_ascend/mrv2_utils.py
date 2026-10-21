@@ -92,12 +92,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         if getattr(model_config, "is_encoder_decoder", False) is True:
             reasons.append("encoder-decoder")
 
-    if _is_configured(getattr(vllm_config, "ec_transfer_config", None)):
-        reasons.append("VL encoder disaggregation")
-    elif _is_configured(model_config):
-        mm_config = getattr(model_config, "multimodal_config", None)
-        if getattr(mm_config, "mm_encoder_only", False) is True:
-            reasons.append("VL encoder-only")
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
         reasons.append("VL encoder graph")
@@ -137,7 +131,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
 
     * pooling KV (``runner_type="pooling"``)
     * encoder-decoder (Whisper)
-    * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * enable_dsa_cp
