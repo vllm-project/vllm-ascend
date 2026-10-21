@@ -1854,7 +1854,15 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, offload_kwargs=None
+    positions,
+    pad,
+    is_prefilling,
+    seq_lens_cpu=None,
+    *,
+    seq_lens_cpu_upper_bound=None,
+    attn_state=None,
+    parallel_config=None,
+    offload_kwargs=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -1873,6 +1881,8 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        if seq_lens_cpu_upper_bound is not None:
+            kwargs["seq_lens_cpu_upper_bound"] = seq_lens_cpu_upper_bound
         if offload_kwargs is not None:
             kwargs.update(offload_kwargs)
         return raw(*args, **kwargs)
