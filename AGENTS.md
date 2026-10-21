@@ -19,6 +19,7 @@ This document provides instructions for contributors to the vLLM Ascend project.
     - [Tensor item() Operations](#tensor-item-operations)
     - [Memory and Performance](#memory-and-performance)
 - [Model and Plugin Architecture](#model-and-plugin-architecture)
+    - [Ling Maintenance and Kimi K3 Reuse](#ling-maintenance-and-kimi-k3-reuse)
     - [vLLM Ascend Plugin Architecture](#vllm-ascend-plugin-architecture)
     - [Patching Requirement](#patching-requirement)
     - [Model Runner Changes](#model-runner-changes)
@@ -204,6 +205,17 @@ Additional NPU-specific best practices:
 ---
 
 ## Model and Plugin Architecture
+
+### Ling Maintenance and Kimi K3 Reuse
+
+When maintaining Ling, prioritize the shared implementations used by Kimi K3 so Ling can benefit from ongoing upstream optimization with minimal separate code.
+
+- Compare the actual attention, MoE, activation, quantization and cache contracts before adding a model-specific workaround.
+- Reuse shared kernels, runners, communication and cache management where the contracts match. Express necessary differences through existing configuration and capability interfaces; avoid copying a Kimi implementation into a separate Ling implementation.
+- Preserve checkpoint semantics: SiLU and SiTU, INT4/INT8 and MXFP, and different MTP outputs are not interchangeable. Do not approximate one activation with another or remove quantization corrections to reach an optimized path.
+- A Python branch or registered operator name does not prove that its device kernel is built or supported. Check the target image and hardware when selecting an implementation.
+- Keep unavoidable compatibility handling narrowly scoped and documented. Verify that A3, Kimi and other models retain their existing behavior.
+- Validate numerical behavior and execution paths before enabling an optimization. Report performance gains only when measured, and identify optimizations that remain unavailable.
 
 ### vLLM Ascend Plugin Architecture
 

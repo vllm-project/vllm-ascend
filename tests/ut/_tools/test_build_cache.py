@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import regex as re
@@ -26,6 +29,44 @@ def _load_engine(name: str):
     engine = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(engine)
     return engine
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "expected_sleeps"),
+    [(0.0, []), (0.12, [0.05, 0.05, 0.02]), (0.2, [0.05, 0.05, 0.05, 0.05])],
+)
+def test_timed_lock_stops_at_deadline(tmp_path: Path, monkeypatch, timeout_seconds, expected_sleeps):
+    engine = _load_engine("build_cache_lock_deadline")
+    clock = SimpleNamespace(now=0.0)
+    sleeps: list[float] = []
+    attempts = 0
+    events = []
+
+    def sleep(seconds):
+        assert len(sleeps) < len(expected_sleeps), "lock kept waiting after its deadline"
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    def locked(fd, operation):
+        nonlocal attempts
+        assert operation == fcntl.LOCK_EX | fcntl.LOCK_NB
+        attempts += 1
+        assert attempts <= len(expected_sleeps) + 1, "lock retried after its deadline"
+        raise BlockingIOError(errno.EAGAIN, "lock is held")
+
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(engine, "fcntl", SimpleNamespace(flock=locked, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB))
+    monkeypatch.setattr(engine, "_emit_event", lambda event, **fields: events.append({"event": event, **fields}))
+    path = tmp_path / "entry.lock"
+    with path.open("a+") as stream, pytest.raises(engine._LockTimeoutError) as exc:
+        engine._acquire_timed_lock(stream, path, kind="entry", timeout_seconds=timeout_seconds)
+
+    assert sleeps == pytest.approx(expected_sleeps)
+    assert attempts == len(expected_sleeps) + 1
+    assert exc.value.kind == "entry"
+    assert exc.value.path == path
+    assert exc.value.waited_seconds == pytest.approx(timeout_seconds)
+    assert events == [{"event": "lock_timeout", "lock": "entry", "path": str(path), "waited_seconds": timeout_seconds}]
 
 
 def _sha256_file(path: Path) -> str:

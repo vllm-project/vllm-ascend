@@ -2,6 +2,8 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib import import_module
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -25,6 +27,40 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
+# MLA models keep the FIA-compatible component-major cache layout on A5.
+# N1 is the post-TP local head count, not the global model configuration.
+MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+@lru_cache(maxsize=1)
+def _has_flashmla_module() -> bool:
+    """Whether the CANN ops-transformer distribution is discoverable."""
+    return find_spec("cann_ops_transformer") is not None
+
+
+def get_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two FlashMLA APIs in the active CANN operator package.
+
+    An absent package or API permits FIA selection before KV cache allocation.
+    Import failures inside an installed package remain errors rather than
+    silently selecting a different cache layout.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
+    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
 
 
 class PreprocessType(enum.Enum):

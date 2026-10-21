@@ -182,6 +182,67 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     assert metadata.block_size_scales == [[1]]
 
 
+def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
+    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
+    slot_elems = 128 * 576
+    nope_cache = torch.as_strided(
+        raw_cache,
+        size=(4, 128, 1, 512),
+        stride=(slot_elems, 512, 512, 1),
+        storage_offset=0,
+    )
+    rope_cache = torch.as_strided(
+        raw_cache,
+        size=(4, 128, 1, 64),
+        stride=(slot_elems, 64, 64, 1),
+        storage_offset=128 * 512,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=raw_cache.nbytes,
+                layers=["layer.0"],
+                layer_stride=raw_cache.nbytes,
+                block_stride=slot_elems * raw_cache.element_size(),
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.kv_cache_config = config
+    worker.engine_id = "engine-d"
+    worker.te_rpc_port = 9000
+    worker.block_size = 128
+    worker.side_channel_host = "10.0.0.1"
+    worker.handshake_port = 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", transfer_engine)
+    monkeypatch.setattr(base_worker, "validate_register_region_count", MagicMock())
+
+    worker.register_kv_caches({"layer.0": [nope_cache, rope_cache]})
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+    assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
+    assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
+    assert metadata.block_shapes == [[(slot_elems,)]]
+    assert metadata.block_size_scales == [[1]]
+
+
+def test_component_major_mla_binding_rejects_token_interleaved_parent() -> None:
+    spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
+    parent = torch.empty(4, 128, 1, 576, dtype=torch.float16)
+    nope_cache = parent[..., :512]
+    rope_cache = parent[..., 512:]
+
+    assert not base_worker._is_component_major_mla_binding(spec, (nope_cache, rope_cache))
+
+
 def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
     raw_cache = torch.empty(4 * 64, dtype=torch.float16)
     k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(32, 1), storage_offset=0)

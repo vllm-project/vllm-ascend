@@ -46,6 +46,19 @@ def _uses_causal_draft_attention(config) -> bool:
     return bool(getattr(config, "full_attention_causal", False))
 
 
+def _normalize_dspark_mla_cache(
+    kv_cache: object,
+    kv_lora_rank: int,
+) -> tuple[torch.Tensor, ...] | object:
+    """Expose the NoPE/RoPE logical views consumed by MLA writers."""
+    if isinstance(kv_cache, torch.Tensor):
+        return (
+            kv_cache[..., :kv_lora_rank],
+            kv_cache[..., kv_lora_rank:],
+        )
+    return kv_cache
+
+
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
     def __init__(
         self,
@@ -204,18 +217,33 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         cos, sin = get_cos_and_sin_mla(context_positions)
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.self_attn
+            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
+            if slots is None:
+                continue
+            kv_cache = attn.kv_cache
+            assert attn.impl.kv_lora_rank is not None
+            normalized_cache = _normalize_dspark_mla_cache(kv_cache, attn.impl.kv_lora_rank)
+            if attn.impl._cache_requires_prolog_v3_writer(normalized_cache):
+                attn.impl.exec_context_kv_prolog_v3(
+                    context_states,
+                    cos,
+                    sin,
+                    normalized_cache,
+                    slots,
+                )
+                continue
+
             assert attn.fused_qkv_a_proj is not None
             assert attn.q_lora_rank is not None
             qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
             kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
-            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
-            if slots is None:
-                continue
+            # Context writes bypass MLA forward's fused-cache view split.
+            kv_cache = normalized_cache
             attn.impl.exec_kv_prefill(
                 kv_no_split,
                 cos,
                 sin,
-                attn.kv_cache,
+                kv_cache,
                 slots,
             )
 

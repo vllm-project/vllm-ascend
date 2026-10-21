@@ -22,14 +22,20 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_mlp import _unified_apply_activation
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -40,6 +46,30 @@ from vllm_ascend.utils import (
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+_A5_W4A8_GROUP_SIZE = 256
+
+
+def _expand_a5_w4a8_scale(scale: torch.Tensor, packed_weight: torch.Tensor) -> torch.Tensor:
+    """Represent per-channel INT4 scales in A5's group-256 GMM layout once."""
+    if packed_weight.dim() != 3 or packed_weight.dtype != torch.int8:
+        raise ValueError("A5 ModelSlim W4A8 fallback requires one ND packed INT8 tensor per projection.")
+    experts, input_size, packed_output_size = packed_weight.shape
+    output_size = packed_output_size * 2
+    if input_size <= 0 or input_size % _A5_W4A8_GROUP_SIZE:
+        raise ValueError(f"A5 W4A8 GMM requires K divisible by {_A5_W4A8_GROUP_SIZE}, got {input_size}.")
+    if scale.dtype != torch.int64 or tuple(scale.shape) not in (
+        (experts, output_size),
+        (experts, 1, output_size),
+    ):
+        raise ValueError("A5 W4A8 fallback requires encoded INT64 per-channel scales matching the weights.")
+    # Repeat the existing bit-encoded scale, preserving the quantized weights.
+    # Materialize during loading so graph replay does not allocate scale buffers.
+    return (
+        scale.reshape(experts, 1, output_size)
+        .expand(experts, input_size // _A5_W4A8_GROUP_SIZE, output_size)
+        .contiguous()
+    )
 
 
 def _as_gmm_dequant_situ_quant_expert_weights(tensor_or_list: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
@@ -213,6 +243,37 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
+        # Limit the workaround to the verified Ling V3 SiLU weight contract;
+        # other models, including Kimi's SiTU path, keep their existing dispatch.
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_text_config", None)
+        if hf_config is None:
+            hf_config = getattr(model_config, "hf_config", None)
+        self._use_a5_ling_w4a8 = (
+            self.quant_method == ASCEND_QUANTIZATION_METHOD
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+            and getattr(model_config, "architecture", None) in ("BailingMoeV3ForCausalLM", "BailingMoeV3MTPModel")
+            and getattr(hf_config, "hidden_act", None) == "silu"
+        )
+        if self._use_a5_ling_w4a8:
+            if (
+                not vllm_config.parallel_config.enable_expert_parallel
+                or vllm_config.parallel_config.enable_eplb
+                or self.use_expert_weight_list
+                or get_ascend_config().enable_fused_mc2
+            ):
+                raise ValueError(
+                    "A5 Ling ModelSlim W4A8 fallback currently requires EP without EPLB, "
+                    "expert weight lists, or fused MC2."
+                )
+            # The A5 fused SiLU operator rejects Ling's required MSD assist matrix.
+            # Keep its correction in the existing unfused GMM bias arguments.
+            logger.warning_once(
+                "A5 Ling ModelSlim W4A8 uses the shared GMM1, activation/quantization, and GMM2 pipeline "
+                "to preserve MSD corrections. The fully fused GMM-activation-quantization operator is unavailable "
+                "for this weight format; SiLU retains BF16 rounding before dynamic quantization."
+            )
+
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -371,6 +432,21 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
 
     def process_weights_after_loading(self, layer):
+        if self._use_a5_ling_w4a8:
+            if self.use_expert_weight_list or hasattr(layer, "w13_weight_list") or hasattr(layer, "w2_weight_list"):
+                raise ValueError("A5 Ling ModelSlim W4A8 fallback does not support expert weight lists.")
+            self.process_weights_after_loading_modelslim(layer)
+            # ModelSlim loading above leaves the transposed weights in ND.
+            # Do not apply the A2/A3 NZ transform before packing INT4 into INT32.
+            for weight_name, scale_name in (
+                ("w13_weight", "w13_weight_scale"),
+                ("w2_weight", "w2_weight_scale"),
+            ):
+                weight = getattr(layer, weight_name)
+                scale = getattr(layer, scale_name)
+                scale.data = _expand_a5_w4a8_scale(scale.data, weight.data)
+                weight.data = self._pack_to_int32(weight.data)
+            return
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
@@ -557,43 +633,20 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     swiglu_out_scale = swiglu_out_scale.unsqueeze(-1)
                 return hidden_states, swiglu_out_scale
 
-            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
-            # activation with dynamic output quantization (Kimi K3 W4A8).
-            # W4A8 only supports per-channel weights (is_per_channel_weight is
-            # always True), so the A8W4 gmm scale must always be in [E, 1, N]
-            # layout (unsqueeze -2); otherwise the kernel tiling treats the
-            # flattened per-channel scale as the quant group count and fails.
-            scale = [item.to(w2_scale[0].dtype) if item.dtype != w2_scale[0].dtype else item for item in w1_scale]
-            scale = [item.unsqueeze(-2) for item in scale]
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=w1 if isinstance(w1, list) else [w1],
-                scale=scale,
-                bias=bias1,
-                per_token_scale=[pertoken_scale],
-                split_item=2,
-                group_type=0,
-                group_list=group_list,
-                group_list_type=group_list_type,
+        if mlp_compute_input.activation == MoEActivation.SITU or self._use_a5_ling_w4a8:
+            hidden_states = self._apply_dequantized_gmm1(
+                hidden_states,
+                pertoken_scale,
+                w1,
+                w1_scale,
+                w2_scale,
+                bias1,
+                group_list,
+                group_list_type,
                 output_dtype=torch.bfloat16 if bias1 is not None else w2_scale[0].dtype,
-            )[0]
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
-                x=hidden_states,
-                weight_scale=None,
-                activation_scale=None,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                # The kernel reads the per-expert row counts as INT64 and
-                # skips the dead tail rows of the worst-case expanded
-                # buffer; group_list arrives as int32 from routing.
-                group_index=(group_list.to(torch.int64) if group_list is not None else None),
-                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                activate_left=True,
-                quant_mode="dynamic",
             )
             dispose_tensor(mlp_compute_input.hidden_states)
+            hidden_states, swiglu_out_scale = self._apply_activation_quant(mlp_compute_input, hidden_states, group_list)
             return hidden_states, swiglu_out_scale
 
         hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
@@ -609,6 +662,60 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         dispose_tensor(mlp_compute_input.hidden_states)
         return hidden_states, swiglu_out_scale
+
+    def _apply_dequantized_gmm1(
+        self,
+        hidden_states,
+        pertoken_scale,
+        w1,
+        w1_scale,
+        w2_scale,
+        bias1,
+        group_list,
+        group_list_type,
+        *,
+        output_dtype,
+    ):
+        scale = [item.to(w2_scale[0].dtype) if item.dtype != w2_scale[0].dtype else item for item in w1_scale]
+        # Batched per-channel scales need [E, 1, N], expert-list scales [1, N].
+        # Already prepared group scales (including A5 Ling's [E, K/256, N])
+        # retain their buffers; unsqueeze only creates a view, never an expansion.
+        scale = [item.unsqueeze(-2) if item.ndim == weight.ndim - 1 else item for item, weight in zip(scale, w1)]
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=w1,
+            scale=scale,
+            bias=bias1,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_type=0,
+            group_list=group_list,
+            group_list_type=group_list_type,
+            output_dtype=output_dtype,
+        )[0]
+
+    def _apply_activation_quant(self, mlp_compute_input, hidden_states, group_list):
+        if mlp_compute_input.activation == MoEActivation.SITU:
+            return torch.ops._C_ascend.dequant_situ_quant(
+                x=hidden_states,
+                weight_scale=None,
+                activation_scale=None,
+                bias=None,
+                quant_scale=None,
+                quant_offset=None,
+                # Preserve SiTU's INT64 expert counts and dead-tail handling.
+                group_index=(group_list.to(torch.int64) if group_list is not None else None),
+                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
+                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
+                activate_left=True,
+                quant_mode="dynamic",
+            )
+        if mlp_compute_input.activation == MoEActivation.SILU:
+            # Keep the proven BF16 SwiGLU result before requantization. A fused
+            # activation/quant kernel may round differently and needs validation.
+            hidden_states = _unified_apply_activation(mlp_compute_input, hidden_states, self)
+            return self.apply_act_quant(mlp_compute_input, hidden_states)
+        raise ValueError(f"Unsupported W4A8 activation/quantization: {mlp_compute_input.activation}")
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
