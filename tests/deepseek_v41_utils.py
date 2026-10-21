@@ -22,6 +22,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
@@ -52,7 +53,8 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            storage_block_size=block_size // role.compress_ratio,
+            # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
+            **({"storage_block_size": block_size // role.compress_ratio} if vllm_version_is("0.31.0") else {}),
         )
         specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
@@ -61,7 +63,8 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
             model_version="deepseek_v41",
-            storage_block_size=block_size // role.compress_ratio,
+            # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
+            **({"storage_block_size": block_size // role.compress_ratio} if vllm_version_is("0.31.0") else {}),
             scale_dim=1,
             scale_dtype=torch.float16,
         )
@@ -312,7 +315,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
 
 
 def allocate_cache_views(config, device="cpu"):
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     backings, caches = [], {}

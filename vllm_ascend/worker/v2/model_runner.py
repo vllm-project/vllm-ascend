@@ -66,6 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -154,6 +155,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
+        self._uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -454,6 +456,11 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            self._uses_flashmla = any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -644,8 +651,7 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = (
             skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
         )
-        # Randomized profiling was added on the release branch after the verified main pin.
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
             try:
@@ -750,17 +756,12 @@ class NPUModelRunner(GPUModelRunner):
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        # The initial dummy profile bypasses PCP batch partitioning. Profile
-        # rank-local tokens; the existing MoE preparation still handles TP.
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        global_max_num_tokens: int = self.max_num_tokens
-        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and profile_max_num_tokens > mc2_tokens_capacity
+                and self.max_num_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -773,11 +774,14 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            self.max_num_tokens: int = profile_max_num_tokens
-            try:
-                super().profile_run(**profile_kwargs)
-            finally:
-                self.max_num_tokens = global_max_num_tokens
+            super().profile_run(**profile_kwargs)
+
+    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
+        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if self._uses_flashmla and batch_state is not None:
+            # The backend order must precede derived inputs and graph dispatch.
+            batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
@@ -998,8 +1002,7 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        # The PP sampling length field exists only in v0.31.0.
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np} if vllm_version_is("0.31.0") else {}
+        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1103,7 +1106,9 @@ class NPUModelRunner(GPUModelRunner):
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
-        if grammar_output is not None:
+        invalid_drafts = None
+        # A diffusion prefill has no logit rows even when a bitmask row arrived.
+        if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
@@ -1112,6 +1117,17 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
+            if not vllm_version_is("0.31.0"):
+                # vLLM main's rejection sampler rejects drafts that were verified
+                # against a permissive grammar row; v0.31.0 has neither the
+                # `invalid_drafts` argument nor the helper that builds it.
+                from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
+
+                invalid_drafts = grammar_invalid_drafts(
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.num_acceptable_drafts,
+                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
@@ -1125,34 +1141,21 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                *(() if vllm_version_is("0.31.0") else (invalid_drafts,)),
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     @contextmanager
-    def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
-        # Profiling can exceed the speculator's query buffer.
-        original_max_num_reqs = self.max_num_reqs
-        if self.speculator is not None and not uniform_decode:
-            # Speculators without num_query_per_req use one query row per request.
-            query_width = getattr(self.speculator, "num_query_per_req", 1)
-            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // query_width)
-        try:
-            yield
-        finally:
-            self.max_num_reqs = original_max_num_reqs
-
-    @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        # TODO: Remove this workaround once upstream dummy-batch preparation
+        # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
             # FULL modes can also pad requests; only change token-only PIECEWISE padding.
             self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
             and self.pcp_manager is None
-            # Hybrid models also need recurrent-state metadata to stay aligned.
-            # TODO: Verify whether this hybrid-model guard can be removed.
-            and not self.model_config.is_hybrid
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
@@ -1219,9 +1222,6 @@ class NPUModelRunner(GPUModelRunner):
             self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
-            # TODO: Remove this context and its use after the next main2main
-            # includes https://github.com/vllm-project/vllm/pull/56448.
-            self._cap_parallel_draft_dummy_reqs(uniform_decode),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
         ):

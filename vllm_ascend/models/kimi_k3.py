@@ -91,7 +91,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -1223,6 +1223,9 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
                 quant_config=vision_quant_config,
                 prefix=maybe_prefix(prefix, "mm_projector"),
                 enable_rotation=get_rotation_path(vllm_config) is not None,
+                # vLLM main made `out_hidden_size` a required argument; v0.31.0
+                # resolves the output size internally from the vision config.
+                **({} if vllm_version_is("0.31.0") else {"out_hidden_size": self.hidden_size}),
             )
         if vision_quant_config is not None:
             self.mm_projector = self.mm_projector.to(device=self.device)

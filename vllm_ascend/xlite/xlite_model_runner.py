@@ -28,7 +28,7 @@ from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 from vllm_ascend.xlite.utils import _TensorRepr
 from vllm_ascend.xlite.xlite import XliteWrapper
@@ -114,7 +114,7 @@ class XliteModelRunnerMixin:
 
 
 class XliteModelRunner(XliteModelRunnerMixin, NPUModelRunner):  # type: ignore[misc]
-    """xlite model runner for model runner V1 (`vllm_ascend/worker/model_runner_v1.py`).
+    """xlite model runner for model runner V1 (`vllm_ascend/worker/v1/model_runner.py`).
 
     Remove this class together with `NPUModelRunner` V1 when the V1 runner is dropped; the mixin and
     `XliteModelRunnerV2` below stay.

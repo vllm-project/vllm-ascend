@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
@@ -109,10 +110,10 @@ from vllm_ascend.utils import (
     enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -124,6 +125,21 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+# if true, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
+
+
+class _V1ModelRunnerFactory:
+    """Import the V1 model runner only when one is actually constructed."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+
+        return NPUModelRunner(*args, **kwargs)
+
+
+NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -545,6 +561,11 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        # FLA import-time capability queries must run on the selected worker
+        # device, and registration must finish before any model is constructed.
+        # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
+        # versions fix import-time NPU init and general registration is restored.
+        register_ascend_fla_customop()
         # Initialize workspace manager
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
@@ -626,11 +647,14 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
+
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(randomize_inputs=randomize_inputs)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -648,11 +672,14 @@ class NPUWorker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            set_current_vllm_config(self.vllm_config),
+        ):
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
@@ -831,7 +858,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -857,7 +884,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()

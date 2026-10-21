@@ -31,6 +31,19 @@ from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #60335 renamed the AR speculator class/module on main; the release
+# lane (v0.31.0) still ships `autoregressive.speculator.AutoRegressiveSpeculator`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
+        AutoRegressiveSpeculator,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
+
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
@@ -48,6 +61,9 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
+
+# vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main.
+_DP_SYNC_KWARG = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
 
 
 @pytest.fixture(autouse=True)
@@ -198,7 +214,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             side_effect=fake_replace,
         ),
         patch.object(
-            speculator_module.AutoRegressiveSpeculator,
+            AutoRegressiveSpeculator,
             "__init__",
             new=fake_parent_init,
         ),
@@ -453,7 +469,7 @@ def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pc
 
     group = SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
     with (
-        patch.object(speculator_module.AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
+        patch.object(AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
         patch.object(pcp_manager_module, "get_pcp_group", return_value=group) as get_group,
     ):
         result_last, result_hidden = speculator._run_model(4, None, None, None)
@@ -615,7 +631,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering(cudagraph_run
     local_slot_mappings = MagicMock()
 
     with patch.object(
-        speculator_module.AutoRegressiveSpeculator,
+        AutoRegressiveSpeculator,
         "_prefill",
     ) as parent_prefill:
         speculator._prefill(
@@ -882,7 +898,7 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool, num_steps: 
     speculator.prefill_cudagraph_manager.capture.side_effect = capture
     with (
         patch.object(speculator_module, "build_attn_metadata_wrapper") as metadata_wrapper,
-        patch.object(speculator_module.AutoRegressiveSpeculator, "_prefill") as upstream_prefill,
+        patch.object(AutoRegressiveSpeculator, "_prefill") as upstream_prefill,
     ):
         metadata_context = metadata_wrapper.return_value
         speculator.capture()
@@ -948,7 +964,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
                 dp_size=2,
                 dp_rank=0,
                 need_eager=True,
-                dp_sync=args[11],
+                **{_DP_SYNC_KWARG: args[11]},
             )
         assert sync.call_count == int(replicated_pcp)
         return expected
@@ -973,7 +989,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
         actual = speculator.propose(
             input_batch,
             *[MagicMock() for _ in range(10)],
-            dp_sync=target_sync,
+            **{_DP_SYNC_KWARG: target_sync},
         )
 
     assert actual is expected

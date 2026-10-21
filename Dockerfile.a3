@@ -60,8 +60,8 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-ARG FLA_VERSION="26.9.1+dev812ccc8"
-ARG FLA_RELEASE_TAG="v26.9.1-20261015-121515"
+ARG FLA_VERSION="26.9.1+dev5cc6990"
+ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -126,7 +126,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.6.0 --extra-index-url ${ASCEND_INDEX_URL} && \
+    python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
@@ -136,10 +136,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="eca7ecde3c5d311e00db6bed376899459b91433afb2c86a8513ad487825a3b8c" ;; \
+            FLA_SHA256="db137e15852a395adca3d54aeeaac68f931a119b4953f0388c2694245ed9aa98" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="81425360c763342ccbc872b077ee1d7eb62bba91f312d5d8cc128de917fb57d5" ;; \
+            FLA_SHA256="a21fcb404405bfe44aef1a05beaa04c4e543f05749abf8cedde091dc409ccf1f" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"; \

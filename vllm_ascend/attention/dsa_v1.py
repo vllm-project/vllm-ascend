@@ -53,6 +53,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -88,6 +89,31 @@ else:
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+
+
+class OProjBufferPool:
+    """Model-owned, address-stable OTP scratch storage shared by sequential layers."""
+
+    def __init__(self) -> None:
+        self.exchange: dict[tuple[tuple[int, ...], torch.dtype, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+        self.reduce_scatter: dict[tuple[tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
+
+    def get_exchange(
+        self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = (shape, dtype, device)
+        if key not in self.exchange:
+            send = torch.zeros(shape, dtype=dtype, device=device)
+            self.exchange[key] = (send, torch.empty_like(send))
+        return self.exchange[key]
+
+    def get_reduce_scatter(self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        key = (shape, dtype, device)
+        if key not in self.reduce_scatter:
+            self.reduce_scatter[key] = torch.empty(shape, dtype=dtype, device=device)
+        return self.reduce_scatter[key]
+
+
 CompressorMetadataOutput: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 _DSV4_DSA_OVERLAP_STREAM = None
@@ -236,6 +262,12 @@ class AscendDSABackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_DSA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
@@ -286,9 +318,17 @@ class AscendDSABackend(AttentionBackend):
             return AscendDSAPCPImpl
         return AscendDSAImpl
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8, 16, 32, 64, 128]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [2, 4, 8, 16, 32, 64, 128]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [2, 4, 8, 16, 32, 64, 128]
 
 
 class AscendDSAC4Backend(AscendDSABackend):
@@ -296,11 +336,21 @@ class AscendDSAC4Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-        return [128, 256, 512]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+            return [128, 256, 512]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+            return [128, 256, 512]
 
 
 class AscendDSAC128Backend(AscendDSABackend):
@@ -308,11 +358,21 @@ class AscendDSAC128Backend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-        return [4096, 8192, 16384]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+            return [4096, 8192, 16384]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            # Align with upstream's logical block-size contract: Ascend's physical
+            # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+            return [4096, 8192, 16384]
 
 
 class AscendDSASWABackend(AscendDSABackend):
@@ -320,9 +380,17 @@ class AscendDSASWABackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_SWA"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [32, 64, 128]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [32, 64, 128]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
@@ -330,9 +398,17 @@ class AscendDSAC4StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C4_STATE"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            return [2, 4, 8]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            return [2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
@@ -340,11 +416,21 @@ class AscendDSAC128StateBackend(AscendDSABackend):
     def get_name() -> str:
         return "ASCEND_DSA_C128_STATE"
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-            return [4, 8, 16]
-        return [8, 16, 32]
+    if vllm_version_is("0.31.0"):
+
+        @staticmethod
+        def get_supported_kernel_block_sizes() -> list[int]:
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
+                return [4, 8, 16]
+            return [8, 16, 32]
+
+    else:
+
+        @staticmethod
+        def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
+                return [4, 8, 16]
+            return [8, 16, 32]
 
 
 @dataclass
@@ -1776,6 +1862,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         **kwargs,
     ):
         self.vllm_config = kwargs["vllm_config"]
+        self._oproj_buffer_pool = OProjBufferPool()
         self.num_heads = n_heads
         self.n_local_heads = n_local_heads
         self.scale = scale
@@ -1892,9 +1979,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading
-        # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
-        # allocated lazily on the first _forward_o_proj call, which always runs
-        # before ACL graph capture (profiling run triggers it).
+        # dispatcher (only LinearMethodBase subclasses are). The owning model
+        # reserves OTP storage during construction, before KV memory profiling.
         pass
 
     def _wo_a_bmm(self, o_proj_input: torch.Tensor) -> torch.Tensor:
@@ -1924,6 +2010,32 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             batch_split_factor=1,
         )
 
+    def reserve_oproj_buffers(self, device: torch.device, dtype: torch.dtype) -> None:
+        """Reserve graph-stable OTP storage before KV cache capacity is measured."""
+        if not oproj_tp_enable():
+            return
+        if not hasattr(self, "_oproj_buffer_pool"):
+            self._oproj_buffer_pool = OProjBufferPool()
+        oproj_tp_size = get_otp_group().world_size
+        if self.n_local_groups % oproj_tp_size != 0:
+            raise ValueError(
+                f"n_local_groups={self.n_local_groups} must be divisible by oproj_tensor_parallel_size={oproj_tp_size}"
+            )
+        # Decode is graph-bound when OTP is enabled. Profiling may use a larger
+        # scheduler budget, but it only needs to exercise this decode capacity.
+        exchange_num_tokens = get_potential_max_tokens()
+        group_hidden_dim = self.n_local_heads * self.head_dim // self.n_local_groups
+        buf_shape = (
+            oproj_tp_size,
+            exchange_num_tokens,
+            self.n_local_groups // oproj_tp_size,
+            group_hidden_dim,
+        )
+        self._oproj_send_buf, self._oproj_recv_buf = self._oproj_buffer_pool.get_exchange(buf_shape, dtype, device)
+        self._oproj_rs_out_buf = self._oproj_buffer_pool.get_reduce_scatter(
+            (exchange_num_tokens, self.wo_b.output_size), dtype, device
+        )
+
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
@@ -1942,38 +2054,30 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
             o_proj_input = o_proj_input.view(num_tokens, oproj_tp_size, groups_per_rank, group_hidden_dim)
             # Pad to a static exchange size so the all_to_all / reduce_scatter
-            # shapes are identical across all ACL graph buckets — variable
-            # shapes desync the HCCL communicator during graph replay.
-            # Profiling can use the scheduler's full token budget even when
-            # the decode capacity is smaller. Freeze the larger capacity when
-            # allocating the buffers, then reuse it for capture and replay.
-            if hasattr(self, "_oproj_send_buf"):
-                exchange_num_tokens = self._oproj_send_buf.shape[1]
-            else:
-                exchange_num_tokens = max(
-                    get_potential_max_tokens(),
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                )
+            # shapes stay identical across ACL graph buckets. potential_max_tokens
+            # already covers the largest decode batch; a larger scheduler budget
+            # would only pad every decode step, so the guard below rejects it.
+            exchange_num_tokens = get_potential_max_tokens()
             if exchange_num_tokens < num_tokens:
                 scheduler_config = self.vllm_config.scheduler_config
                 raise ValueError(
                     f"oproj static exchange capacity ({exchange_num_tokens}) must cover "
                     f"local tokens ({num_tokens}). Fine-grained oproj TP requires "
-                    "capacity >= max_num_batched_tokens. Please set --max-num-batched-"
-                    "tokens to max_num_seqs * decode_query_len "
-                    f"(currently max_num_seqs={scheduler_config.max_num_seqs}), or "
-                    "raise the largest cudagraph_capture_sizes entry."
+                    "capacity >= the largest decode graph bucket. Please raise "
+                    "max_cudagraph_capture_size or the largest "
+                    "cudagraph_capture_sizes entry "
+                    f"(currently max_num_seqs={scheduler_config.max_num_seqs})."
                 )
-            # Lazily allocate static send/recv buffers on first call. The
-            # profiling run hits this path before ACL graph capture, so the
-            # buffers exist and keep a stable device address across all later
-            # capture/replay cycles (graph replay requires the same address
-            # that was recorded at capture; new_zeros per call would desync
-            # the HCCL operator).
+            # Model construction reserves these buffers before KV profiling.
+            # Keep the lazy fallback for standalone attention implementations.
             if not hasattr(self, "_oproj_send_buf"):
                 buf_shape = (oproj_tp_size, exchange_num_tokens, groups_per_rank, group_hidden_dim)
-                self._oproj_send_buf = torch.zeros(buf_shape, dtype=o_proj_input.dtype, device=o_proj_input.device)
-                self._oproj_recv_buf = torch.empty_like(self._oproj_send_buf)
+                pool = getattr(self, "_oproj_buffer_pool", None)
+                if pool is None:
+                    pool = self._oproj_buffer_pool = OProjBufferPool()
+                self._oproj_send_buf, self._oproj_recv_buf = pool.get_exchange(
+                    buf_shape, o_proj_input.dtype, o_proj_input.device
+                )
             send = self._oproj_send_buf
             recv = self._oproj_recv_buf
             # In-place fill into the address-stable buffer: zero the padding
@@ -1992,10 +2096,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # at capture during ACL graph replay — the same reason all_to_all
             # and the embedding TP path use raw dist + static buffers.
             if not hasattr(self, "_oproj_rs_out_buf"):
-                self._oproj_rs_out_buf = torch.empty(
-                    (exchange_num_tokens, o_proj_output.shape[-1]),
-                    dtype=o_proj_output.dtype,
-                    device=o_proj_output.device,
+                self._oproj_rs_out_buf = self._oproj_buffer_pool.get_reduce_scatter(
+                    (exchange_num_tokens, o_proj_output.shape[-1]), o_proj_output.dtype, o_proj_output.device
                 )
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
@@ -2039,9 +2141,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             self.turboquant._initialize(hidden_states.device)
         o_proj_input_shape = self._get_o_proj_input_shape(attn_metadata)
         if attn_metadata is None:
-            # Profiling run: run o_proj on zero input so HCCL collectives are
-            # captured by the ACL graph.  Non-OTP just zeros the output.
-            if oproj_tp_enable() or self.enable_pcp_o_proj_weight_sharding:
+            # Profiling uses the full scheduler batch for other operators, but
+            # OTP only runs on decode graphs. Exercise its largest decode shape
+            # so the collective and projection scratch are accounted for.
+            if oproj_tp_enable():
+                capacity = (
+                    self._oproj_send_buf.shape[1] if hasattr(self, "_oproj_send_buf") else get_potential_max_tokens()
+                )
+                profile_tokens = min(o_proj_input_shape[0], capacity)
+                output.zero_()
+                o_proj_input = hidden_states.new_zeros((profile_tokens, *o_proj_input_shape[1:]))
+                self._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif self.enable_pcp_o_proj_weight_sharding:
                 o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:
@@ -2064,6 +2175,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
         if actual_tokens == 0:
             output.zero_()
+            if oproj_tp_enable():
+                # Other OTP ranks may have active tokens and enter these
+                # collectives. Keep the empty rank in the same communication
+                # sequence using its already-zeroed projection input.
+                self._forward_o_proj(o_proj_input, output)
             notify_kv_cache_written(layer_name)
             with attention_transfer_window():
                 pass
