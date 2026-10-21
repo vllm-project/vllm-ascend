@@ -482,7 +482,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ) -> AscendMLAMetadata:
         self._pcp_context = common_attn_metadata.pcp_context
         self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        expanded_slot_mapping = (
+        pcp_split_slot_mapping = (
             common_attn_metadata.slot_mapping if uses_pcp_context(common_attn_metadata, self.use_pcp) else None
         )
         num_reqs = common_attn_metadata.num_reqs
@@ -549,8 +549,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
-        if expanded_slot_mapping is not None:
-            self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
+        if pcp_split_slot_mapping is not None:
+            self._finalize_pcp_metadata(metadata, pcp_split_slot_mapping)
             if self.is_pcp_decode_sharded:
                 # Decode rows lead the local positions, so a decode-only batch
                 # can refresh the graph-stable RoPE buffer that decode uses.

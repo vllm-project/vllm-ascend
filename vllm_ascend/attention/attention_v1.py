@@ -330,7 +330,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMetadata:
-        expanded_slot_mapping = (
+        pcp_split_slot_mapping = (
             common_attn_metadata.slot_mapping if uses_pcp_context(common_attn_metadata, self.use_pcp) else None
         )
         num_reqs = common_attn_metadata.num_reqs
@@ -460,8 +460,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
         )
-        if expanded_slot_mapping is not None:
-            self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
+        if pcp_split_slot_mapping is not None:
+            self._finalize_pcp_metadata(attn_metadata, pcp_split_slot_mapping)
         return attn_metadata
 
     def _finalize_pcp_metadata(
