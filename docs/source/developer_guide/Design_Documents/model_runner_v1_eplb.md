@@ -174,8 +174,7 @@ EPLB configuration is validated when the Ascend configuration is parsed
   `algorithm_execution_interval`, `num_redundant_experts`) must be integers;
   negative values are rejected.
 - `eplb_policy_type` must be one of `0`, `1`, `2`, `3`.
-- `eplb_heat_collection_stage` and `load_collection_phase` must be one of
-  `all`, `prefill`, `decode`.
+- `eplb_heat_collection_stage` must be one of `all`, `prefill`, `decode`.
 - Dynamic EPLB additionally requires the `DYNAMIC_EPLB` or
   `EXPERT_MAP_RECORD` environment variable as a safety guard.
 - At placement time, `(num_experts + num_redundant_experts)` must be

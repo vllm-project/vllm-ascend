@@ -122,22 +122,19 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --eplb-config.num_redundant_experts 16
 ```
 
-For short benchmark or accuracy-validation runs where you want quick load
+For short benchmark or accuracy-validation runs where you want quicker load
 feedback instead of production stability, shrink the load window and the
-rearrangement interval together and turn on balancedness logging. These values
-increase rearrangement frequency and logging overhead; do not use them as
-production defaults:
+rearrangement interval together (for example to `200`). These values
+increase rearrangement frequency; do not use them as production defaults:
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --enable-eplb \
-  --eplb-config.window_size 50 \
-  --eplb-config.step_interval 50 \
-  --eplb-config.num_redundant_experts 16 \
-  --eplb-config.log_balancedness true \
-  --eplb-config.log_balancedness_interval 1
+  --eplb-config.window_size 200 \
+  --eplb-config.step_interval 200 \
+  --eplb-config.num_redundant_experts 16
 ```
 
 MRv2 uses the upstream `EPLBConfig` fields:
@@ -149,8 +146,8 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `num_redundant_experts` | `0` | Number of redundant physical experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
 | `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
-| `log_balancedness` | `false` | Log expert balancedness metrics. Incurs extra communication, so keep it off in production. |
-| `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
+| `log_balancedness` | `false` | Log expert balancedness metrics. Incurs extra communication; recommended to leave disabled and only enable it temporarily when debugging. Do not set it in production configuration. |
+| `log_balancedness_interval` | `1` | Interval between balancedness log entries. Only relevant when `log_balancedness` is explicitly enabled for debugging. |
 | `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
@@ -500,7 +497,7 @@ under ideal load balance.
      after algorithm adjustment. The same values are exported as
      `eplb:expert_hotness:*` metrics when ms-service-metric collection is
      enabled.
-   - MRv2: enable `--eplb-config.log_balancedness true` to log
+   - MRv2: temporarily enable `--eplb-config.log_balancedness true` to log
      `EPLB step: ... balancedness=...` per window sample, and check
      `Ascend async EPLB cycle committed` lines for the per-cycle movement
      summary (`mean ... -> ...`, changed layers, transfer counts).
