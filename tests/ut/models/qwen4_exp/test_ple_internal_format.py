@@ -89,6 +89,7 @@ def test_compact_prefill_path_matches_upstream_state_semantics() -> None:
         )
     if original is None:
         pytest.skip("upstream uses the fused PLE prefill dispatcher")
+    assert original is not None
     expected = original(
         layer,
         x_p,
@@ -149,6 +150,7 @@ def test_compact_prefill_path_bounds_convolution_batch(
     conv1d = F.conv1d
 
     def record_batch_size(*args: object, **kwargs: object) -> torch.Tensor:
+        assert isinstance(args[0], torch.Tensor)
         batch_sizes.append(args[0].shape[0])
         return conv1d(*args, **kwargs)
 
