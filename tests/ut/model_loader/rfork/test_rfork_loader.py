@@ -342,7 +342,7 @@ def test_rfork_draft_load_passes_target_registered_blocks_to_session(monkeypatch
     monkeypatch.setattr(loader, "_ensure_rfork_session", lambda vc, mc: draft_session)
     monkeypatch.setattr(loader, "_requires_processed_layout_transfer", lambda mc: False)
 
-    class _Model:
+    class _Model(torch.nn.Module):
         def eval(self):
             return self
 

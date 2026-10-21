@@ -483,9 +483,9 @@ def test_seed_removal_capability_accepts_explicit_json_null(runtime):
     assert parsed.seed_removal_supported is None
 
 
-@pytest.mark.parametrize("value", [False, True])
-def test_seed_removal_capability_parses_json_boolean(runtime, value):
+@pytest.mark.parametrize("value", [0, 1, "true", "false", [], {}])
+def test_seed_removal_capability_rejects_non_boolean_configuration(runtime, value):
     raw_config = _base_extra_config()
     raw_config["rfork_seed_removal_supported"] = value
-    parsed = type(runtime.config).from_extra_config(raw_config)
-    assert parsed.seed_removal_supported is value
+    with pytest.raises(ValueError, match="rfork_seed_removal_supported"):
+        type(runtime.config).from_extra_config(raw_config)

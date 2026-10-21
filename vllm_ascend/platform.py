@@ -1732,8 +1732,9 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     ):
         raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
     load_format = vllm_config.load_config.load_format
-    if load_format not in ("auto", "safetensors", "dummy"):
-        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+    # RFork uses the default loader for local weights; Engram still preflights its indexed checkpoint.
+    if load_format not in ("auto", "safetensors", "rfork", "dummy"):
+        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors/rfork), or dummy weights.")
 
 
 def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:

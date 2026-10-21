@@ -17,6 +17,8 @@ The RFork loading flow in the current implementation is:
 5. If no compatible seed is returned, or RFork setup, seed acquisition, or transfer fails, RFork releases its registered memory and seed service, then falls back to the default loader. Fallback is conditional on that cleanup succeeding: if registered memory or the seed service cannot be released, RFork raises instead of allocating a second model while the old weights are still pinned.
 6. A successfully loaded model can publish a local seed service and send heartbeats to the planner. Publication waits for any source lease to be released.
 
+Engram shared-memory fallback has a known group-coordination limitation; see [Engram Host Offload](#engram-host-offload).
+
 ## Flowchart
 
 ![rfork flowchart](./images/rfork_flowchart.jpg)
@@ -37,6 +39,45 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 
 - Install the runtime dependency `YuanRong TransferEngine` on every RFork instance.
 - Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py).
+
+### Engram Host Offload
+
+RFork transfers NPU weights while offloaded DeepSeek V4.1 Engram tables are loaded
+from the local checkpoint. Every receiver therefore needs the matching indexed
+safetensors checkpoint, including the Engram weights and scales, even when a seed
+is available. RFork reuses the Engram shard reader and supports `dp_shared_memory=true`
+through its existing shared-writer synchronization. Host tables and process-local
+UVA pointers are not transferred.
+
+> **Known limitation:** With `dp_shared_memory=true`, RFork does not yet coordinate
+> fallback across the Engram sharing group. If only some ranks fall back after a
+> seed miss, registration failure, or transfer failure, rebuilding their models
+> re-enters shared-table collective operations while successful peers have already
+> returned. Startup can hang until a distributed timeout or process termination.
+> Successful transfers do not exercise this failure path. Group-coordinated fallback
+> remains unresolved. To avoid this shared-table fallback risk, use
+> `dp_shared_memory=false` where the model and topology permit it.
+
+The host table must finish loading before destination registration or shared-weight
+reuse. RFork records completion for the supported DeepSeek table implementation
+and checks tensor identity, storage address, and checkpoint binding before exempting
+its host tensors from the non-NPU state check. Other CPU model state is still
+rejected. After the default loader successfully returns, RFork records the same
+state so the locally loaded instance can publish its NPU weights as a seed.
+The model implementation and its default loading path require no RFork hooks.
+
+A seed miss or transfer failure can trigger default-loader fallback, subject to
+the shared-memory limitation above, and cause the Engram tables to be read again.
+The discarded host tables are explicitly released before constructing the fallback
+model; cleanup failure stops loading instead of allocating a second copy.
+RFork accelerates the NPU portion; it does not remove host-table disk I/O. Keep the
+local checkpoint and seed on the same model revision, and use a distinct model
+identity for different checkpoints.
+
+If model construction fails before returning a complete model with Engram CPU
+offload enabled, RFork stops instead of retrying through the default loader.
+Partially constructed host tables cannot be safely released through the model;
+fix the initialization error and restart the worker.
 
 ### Configuration Fields
 
@@ -106,6 +147,13 @@ Because the structural digest exists only after the model is built and its memor
 This means two instances must agree on model identity, tensor structure, and deployment topology before the planner will treat them as interchangeable seeds.
 The final manifest is still validated before transfer, and RFork falls back rather than copying incompatible tensors.
 
+For MTP drafts using `AscendDeepSeekMTP`, RFork prepares checkpoint-dependent head ownership and module aliases before
+registering tensors. It reads the names in the selected safetensors headers using the default loader's source,
+revision, and file-selection rules. Uncached remote checkpoints may be downloaded during this preparation. If the
+metadata cannot be read, including checkpoints selected in PT/bin format, RFork uses the default loader and does
+not publish that model as a seed. This adaptation stays within the RFork loader and reuses the model's existing
+head-ownership helper; other draft implementations do not require this metadata step.
+
 ### Planner Responsibilities
 
 The planner treats the seed key as an opaque compatibility identifier. RFork derives it from the model/configuration fingerprint, the structural digest of transferable tensors, and shard topology. A planner should:
@@ -124,7 +172,7 @@ RFork keeps the original seed protocol as the required baseline: `POST /add_seed
 
 Seed removal and draining are optional control-plane extensions. The default is `rfork_seed_removal_supported=false`, so RFork skips `/remove_seed`. A new planner that supports this capability should set `rfork_seed_removal_supported=true` explicitly, or set the JSON value to `null` to use auto-detection. Explicit `true` uses the administrator-confirmed contract (`200` means removed, `409` means draining, and `404` means that the seed record is absent). In auto mode, `200` or `409` proves that the route is supported, while an unknown `404` is not enough to declare removal successful; `405` and `501` are treated as unsupported. During shutdown or fallback cleanup, an unsupported or unknown removal result stops heartbeats and the metadata service but retains the published seed's registered memory and storage owner until a later withdrawal is confirmed and native cleanup succeeds, or the process exits. Other removal failures, such as a timeout or `5xx`, keep the HTTP service and registered memory available for retry. A confirmed draining response still requires native cleanup before these resources are released; a fixed sleep or the planner's heartbeat TTL is not proof that remote reads have ended.
 
-When a receiver has not published a seed, a failed legacy `/put_seed` is retained as pending bookkeeping and does not prevent native finalization. Shutdown makes one best-effort release attempt, subject to the planner request's connect/read inactivity timeout from `rfork_request_timeout_sec`; pending records and logs remain until the planner acknowledges the release, and a planner expiration policy must not be assumed to reclaim them. If local finalization has already completed, RFork continues reporting the pending bookkeeping until a later release acknowledgement. These rules preserve the receive path while allowing newer planners to use renewal, expiration, removal, and draining when they advertise those capabilities.
+When a receiver has not published a seed, a failed legacy `/put_seed` is retained as pending bookkeeping and does not prevent native finalization. Shutdown makes one best-effort release attempt unless a release request is already in flight, subject to the planner request's connect/read inactivity timeout from `rfork_request_timeout_sec`; pending records and logs remain until the planner acknowledges the release, and a planner expiration policy must not be assumed to reclaim them. If local finalization has already completed, RFork continues reporting the pending bookkeeping until a later release acknowledgement. These rules preserve the receive path while allowing newer planners to use renewal, expiration, removal, and draining when they advertise those capabilities.
 
 ### Quantized and NZ Models
 
@@ -219,7 +267,7 @@ Use the same RFork startup command for both the first instance and later instanc
 
 For the first instance, the planner usually has no compatible seed yet, so RFork falls back to the default loader. After loading finishes, the instance can publish a local seed service and report itself to the planner.
 
-For later instances, if the planner can allocate a compatible seed, RFork will try to transfer weights from the existing seed instance before falling back to the default loader.
+For later instances, RFork tries to transfer weights when the planner allocates a compatible seed. A seed miss or transfer failure triggers fallback subject to cleanup and the shared-memory limitation described above.
 
 ```shell
 export RFORK_CONFIG='{

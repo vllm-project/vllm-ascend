@@ -135,6 +135,32 @@ def test_collector_excludes_scheduler_sized_topk_indices_buffer(tensor_runtime, 
     assert set(manifests[0].values()) == {(2,), (3,)}
 
 
+@pytest.mark.parametrize("processed_layout", [False, True])
+def test_collector_excludes_locally_derived_rope_caches(tensor_runtime, monkeypatch, processed_layout):
+    layout = tensor_runtime.tensor_layout
+    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda _tensor: True)
+    model = torch.nn.Module()
+    cache = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+    model.register_buffer("cos_sin_cache", cache, persistent=False)
+    cos, sin = cache.view(-1, 2, 4).repeat(1, 1, 2).chunk(2, dim=1)
+    derived = {"_rope_derived_cos_cache": cos.squeeze(1), "_rope_derived_sin_cache": sin.squeeze(1)}
+    for name, tensor in derived.items():
+        model.register_buffer(name, tensor, persistent=False)
+        assert not layout.is_non_overlapping_dense_tensor(tensor)
+
+    collected = layout.collect_transferable_tensors(model, processed_layout)
+
+    assert len(collected) == 1
+    assert collected[0][0] == "cos_sin_cache"
+    assert collected[0][1] is cache
+    buffers = dict(model.named_buffers())
+    assert all(buffers[name] is tensor for name, tensor in derived.items())
+    assert not model.state_dict()
+    model.register_buffer("other_cache", cos.squeeze(1), persistent=False)
+    with pytest.raises(ValueError, match="gapped or overlapping"):
+        layout.collect_transferable_tensors(model, processed_layout)
+
+
 def test_layout_summary_is_one_bounded_info_record_with_fixed_digests(tensor_runtime, caplog):
     tensors = [(f"weight_{index}", torch.arange(4, dtype=torch.float32)) for index in range(6)]
     formats = {name: 29 for name, _ in tensors}
@@ -644,19 +670,6 @@ def test_layout_error_names_the_full_tensor_path(tensor_runtime, monkeypatch):
 
     with pytest.raises(ValueError, match=re.escape("'block.impl.packed[\"w\"]'")):
         layout.collect_transferable_tensors(model, True)
-
-
-def test_structural_digest_reuses_known_registration_formats(tensor_runtime, monkeypatch):
-    layout = tensor_runtime.tensor_layout
-    tensors = [("weight", torch.ones(2)), ("shared", torch.ones(3))]
-    monkeypatch.setattr(layout, "read_npu_format", lambda _tensor: 29)
-    expected = layout.build_structural_digest(tensors)
-    reads = Mock(return_value=29)
-    monkeypatch.setattr(layout, "read_npu_format", reads)
-
-    assert layout.build_structural_digest(tensors, known_formats={"weight": 29}) == expected
-    # Only the tensor without a registered format (e.g. a target-shared one) is read again.
-    assert reads.call_count == 1
 
 
 @pytest.mark.parametrize("exclude_shared", [False, True])

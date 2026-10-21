@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import sys
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from tests.ut.model_loader.rfork.session_test_utils import dummy_model, make_session, run_and_join
+
+from .rfork_test_support import _load_module
 
 
 @pytest.mark.parametrize("tp_rank", [0, 2])
@@ -252,3 +256,452 @@ def test_seed_service_refuses_advertisement_after_digest_drift(runtime, monkeypa
     assert session.start_seed_service(dummy_model(), True) is runtime.types.RForkSeedServiceStartResult.FAILED
     assert session.planner.structural_digest == "digest-a"
     assert "structure changed" in caplog.text
+
+
+class _SeedHandle:
+    def __init__(self):
+        self.is_alive = True
+
+    def stop(self):
+        self.is_alive = False
+        return True
+
+
+class _PausedRetryEvent:
+    """Keep a sleeping retry worker alive after stop to reproduce a shutdown scheduling race."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.waiting = threading.Event()
+        self.resume = threading.Event()
+
+    def set(self):
+        self.event.set()
+
+    def is_set(self):
+        return self.event.is_set()
+
+    def wait(self, timeout):
+        self.waiting.set()
+        stopped = self.event.wait(timeout)
+        assert self.resume.wait(3)
+        return stopped
+
+
+class _PausedResultLock:
+    """Pause the release worker immediately after it unlocks a recorded retryable response."""
+
+    def __init__(self, session):
+        self.lock = session._lock
+        self.session = session
+        self.pause_next_exit = False
+        self.recorded = threading.Event()
+        self.resume = threading.Event()
+
+    def __enter__(self):
+        return self.lock.__enter__()
+
+    def __exit__(self, *args):
+        pause = self.pause_next_exit and threading.current_thread() is self.session.lease_release_thread
+        if pause:
+            self.pause_next_exit = False
+        result = self.lock.__exit__(*args)
+        if pause:
+            self.recorded.set()
+            assert self.resume.wait(3)
+        return result
+
+
+def _session(runtime):
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    session.planner.bind_structural_digest("digest")
+    session.transfer_backend.finalize_transfer_engine.return_value = True
+    session.state = runtime.types.RForkLifecycleState.REGISTERED
+    return session
+
+
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_missing_removal_route_stops_metadata_but_retains_published_memory(runtime, monkeypatch, status):
+    session = _session(runtime)
+    handle = _SeedHandle()
+    session.seed_server = handle
+    session.state = runtime.types.RForkLifecycleState.SERVING
+    session.planner.last_advertisement = runtime.types.SeedAdvertisement("127.0.0.1", 1234, 0)
+    post = Mock(return_value=SimpleNamespace(status_code=status))
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+
+    assert not session.shutdown()
+    assert not handle.is_alive
+    assert session.seed_server is handle
+    assert session.planner.last_advertisement is not None
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+    session.transfer_backend.unregister_memory_region.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [409, 503])
+def test_pending_removal_keeps_metadata_available_for_existing_receivers(runtime, monkeypatch, status):
+    session = _session(runtime)
+    handle = _SeedHandle()
+    session.seed_server = handle
+    session.state = runtime.types.RForkLifecycleState.SERVING
+    session.planner.last_advertisement = runtime.types.SeedAdvertisement("127.0.0.1", 1234, 0)
+    monkeypatch.setattr(runtime.client.requests, "post", Mock(return_value=SimpleNamespace(status_code=status)))
+    monkeypatch.setattr(runtime.client, "SEED_REMOVAL_RETRY_BACKOFF_SEC", 0)
+
+    assert not session.shutdown()
+    assert handle.is_alive
+    assert session.seed_server is handle
+    assert session.planner.last_advertisement is not None
+    session.transfer_backend.finalize_transfer_engine.assert_not_called()
+
+
+def test_shutdown_returns_an_unreleased_legacy_lease_before_finalizing(runtime, monkeypatch):
+    session = _session(runtime)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    post = Mock(return_value=SimpleNamespace(status_code=200))
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+
+    assert session.shutdown()
+    assert session.seed_lease is None
+    assert session.state is runtime.types.RForkLifecycleState.FINALIZED
+    assert session.shutdown()
+    post.assert_called_once_with(
+        "http://planner/put_seed",
+        headers={"SEED_IP": "127.0.0.1", "SEED_PORT": "1234", "USER_ID": "private-user-id", "SEED_RANK": "0"},
+        timeout=0.1,
+        allow_redirects=False,
+    )
+    session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+
+
+def test_unresolved_legacy_quota_does_not_pin_unpublished_receiver_memory(runtime, monkeypatch, caplog):
+    session = _session(runtime)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    post = Mock(return_value=SimpleNamespace(status_code=503, text="unavailable"))
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+
+    assert not session.shutdown()
+    assert session.state is runtime.types.RForkLifecycleState.FINALIZED
+    assert session.seed_lease is not None
+    session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+    assert "legacy" in caplog.text.lower()
+    assert not session.shutdown()
+    assert post.call_count == 2
+    session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+
+
+def test_legacy_quota_acknowledgement_can_finish_after_receiver_finalization(runtime, monkeypatch):
+    session = _session(runtime)
+    callbacks = [session._atexit_callback]
+    monkeypatch.setattr(runtime.session.atexit, "unregister", callbacks.remove)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    entered, resume, finished = threading.Event(), threading.Event(), threading.Event()
+    outcomes = []
+
+    def post(*_args, **_kwargs):
+        entered.set()
+        assert resume.wait(3)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+    with session._lock:
+        session._release_seed_locked()
+        release_worker = session.lease_release_thread
+
+    def shutdown():
+        outcomes.append(session.shutdown())
+        finished.set()
+
+    shutdown_worker = threading.Thread(target=shutdown, daemon=True)
+    try:
+        assert entered.wait(1)
+        shutdown_worker.start()
+        assert finished.wait(1)
+        assert outcomes == [False]
+        assert session.state is runtime.types.RForkLifecycleState.FINALIZED
+        assert session.seed_lease is not None
+        assert callbacks == [session._atexit_callback]
+        session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+    finally:
+        resume.set()
+        release_worker.join(2)
+        if shutdown_worker.ident is not None:
+            shutdown_worker.join(2)
+
+    assert session.seed_lease is None
+    assert callbacks == []
+    assert session.shutdown()
+
+
+def test_legacy_shutdown_retains_backend_when_native_finalization_fails(runtime, monkeypatch):
+    session = _session(runtime)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    session.transfer_backend.finalize_transfer_engine.return_value = False
+    monkeypatch.setattr(runtime.client.requests, "post", Mock(return_value=SimpleNamespace(status_code=200)))
+
+    assert not session.shutdown()
+    assert session.seed_lease is None
+    assert session.state is not runtime.types.RForkLifecycleState.FINALIZED
+    session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+
+
+def test_legacy_shutdown_releases_quota_when_retry_worker_is_sleeping(runtime, monkeypatch):
+    session = _session(runtime)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    session.config = replace(runtime.config, lease_release_retry_interval_sec=30)
+    stop_event = _PausedRetryEvent()
+    session.lease_release_stop_event = stop_event
+    post = Mock(side_effect=[SimpleNamespace(status_code=503, text="unavailable"), SimpleNamespace(status_code=200)])
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+    with session._lock:
+        session._release_seed_locked()
+        worker = session.lease_release_thread
+
+    try:
+        assert stop_event.waiting.wait(1)
+        assert session.shutdown()
+        assert session.seed_lease is None
+        assert post.call_count == 2
+        session.transfer_backend.finalize_transfer_engine.assert_called_once_with()
+    finally:
+        stop_event.set()
+        stop_event.resume.set()
+        worker.join(2)
+
+
+def test_legacy_shutdown_observes_completed_release_result_atomically(runtime, monkeypatch):
+    session = _session(runtime)
+    session.seed_lease = replace(runtime.lease, lease_ttl_sec=None)
+    paused_lock = _PausedResultLock(session)
+    session._lock = paused_lock
+    record_result = session._record_lease_release_locked
+    post = Mock(side_effect=[SimpleNamespace(status_code=503, text="unavailable"), SimpleNamespace(status_code=200)])
+
+    def record(lease, result):
+        finished = record_result(lease, result)
+        if result is runtime.types.LeaseReleaseResult.RETRYABLE:
+            paused_lock.pause_next_exit = True
+        return finished
+
+    monkeypatch.setattr(runtime.client.requests, "post", post)
+    monkeypatch.setattr(session, "_record_lease_release_locked", record)
+    with session._lock:
+        session._release_seed_locked()
+        worker = session.lease_release_thread
+
+    try:
+        assert paused_lock.recorded.wait(1)
+        assert session.shutdown()
+        assert session.seed_lease is None
+        assert post.call_count == 2
+    finally:
+        paused_lock.resume.set()
+        worker.join(2)
+
+
+def _configure_real_session(runtime, monkeypatch, model, processed_layout):
+    prefix = "vllm_ascend.model_loader.rfork"
+    layout = sys.modules[f"{prefix}.tensor_layout"]
+    transfer = _load_module(monkeypatch, f"{prefix}.transfer_backend", "transfer_backend.py")
+    monkeypatch.setattr(runtime.session, "RForkTransferBackend", transfer.RForkTransferBackend)
+    monkeypatch.setattr(
+        runtime.client,
+        "build_seed_key",
+        lambda **kwargs: f"model-key:{kwargs['structural_digest']}",
+    )
+    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(layout, "read_npu_format", lambda tensor: 0)
+    monkeypatch.setattr(transfer, "read_npu_format", lambda tensor: 0)
+    monkeypatch.setattr(sys.modules[f"{prefix}.manifest"], "read_npu_format", lambda tensor: 0)
+
+    def memory_snapshot():
+        blocks = [
+            {
+                "address": tensor.data_ptr(),
+                "size": tensor.numel() * tensor.element_size(),
+                "state": "active_allocated",
+            }
+            for _, tensor in layout.collect_transferable_tensors(model, processed_layout)
+        ]
+        return [{"blocks": blocks}]
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(memory=SimpleNamespace(memory_snapshot=memory_snapshot)),
+        raising=False,
+    )
+
+    success = SimpleNamespace(is_error=lambda: False, to_string=lambda: "success")
+    session = runtime.session.RForkSession(runtime.config, runtime.identity)
+    backend = session.transfer_backend
+    backend.transfer_engine = SimpleNamespace(
+        batch_register_memory_ex=lambda registrations: success,
+        batch_unregister_memory=lambda addresses: success,
+        batch_transfer_sync_read=lambda *args: success,
+        finalize=lambda: success,
+    )
+    backend._memory_registration_cls = lambda *fields: fields
+    backend.transfer_session_id = "receiver-session"
+    backend._is_initialized = True
+
+    # Stub external scheduling hooks while exercising real registration and lifecycle logic.
+    monkeypatch.setattr(session, "_ensure_lease_release_retry_locked", lambda: None)
+    monkeypatch.setattr(session, "_run_seed_heartbeat", lambda *args: None)
+    monkeypatch.setattr(session.planner, "report_seed_once", lambda *args, **kwargs: True)
+    monkeypatch.setattr(session.planner, "remove_seed", lambda *args, **kwargs: True)
+    server = Mock(is_alive=True, port=1234, stop=Mock(return_value=True))
+    start_server = Mock(return_value=server)
+    monkeypatch.setattr(runtime.session, "start_rfork_server", start_server)
+    return session, backend, layout, start_server
+
+
+def _transfer_model(runtime, monkeypatch, session, backend, model, processed_layout):
+    seed_info = runtime.types.SeedTransferInfo(
+        "seed-session", dict(backend.weight_manifest), formats=dict(backend.weight_formats)
+    )
+    monkeypatch.setattr(runtime.session, "fetch_seed_transfer_info", lambda *args: seed_info)
+    session.state = runtime.types.RForkLifecycleState.LEASED
+    session.seed_lease = runtime.lease
+    assert session.transfer_from_seed(model, processed_layout)
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_post_load_rebinds_manifest_without_changing_seed_identity(runtime, monkeypatch, deferred):
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    session, backend, layout, start_server = _configure_real_session(runtime, monkeypatch, model, False)
+
+    try:
+        assert session.register_destination(model, False)
+        original_digest = session.planner.structural_digest
+        original_key = session.planner.seed_key
+        _transfer_model(runtime, monkeypatch, session, backend, model, False)
+        if not deferred:
+            session.seed_lease = None
+
+        model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2))
+        new_weight = model.weight
+        assert session.log_transferred_model_layout(model, False) != original_digest
+        compute_digest = Mock(wraps=runtime.session._compute_structural_digest)
+        verify_digest = Mock(wraps=session.planner.verify_structural_digest)
+        monkeypatch.setattr(runtime.session, "_compute_structural_digest", compute_digest)
+        monkeypatch.setattr(session.planner, "verify_structural_digest", verify_digest)
+
+        result = session.start_seed_service(model, False)
+
+        assert result is getattr(runtime.types.RForkSeedServiceStartResult, "DEFERRED" if deferred else "STARTED")
+        assert session.planner.structural_digest == original_digest
+        assert session.planner.seed_key == original_key
+        assert compute_digest.call_count == 0
+        assert verify_digest.call_count == 0
+        if deferred:
+            session.seed_lease = None
+            session._promote_deferred_seed()
+            assert session.state is runtime.types.RForkLifecycleState.SERVING
+
+        assert backend.weight_manifest["weight"][0] == new_weight.data_ptr()
+        assert backend.weight_manifest["weight"][3] == (3, 2)
+        if not deferred:
+            assert backend.registered_structural_digest == layout.build_structural_digest([("weight", new_weight)])
+        assert start_server.call_count == 1
+        advertised_info = start_server.call_args.args[1]
+        assert start_server.call_args.args[0] == original_key
+        assert advertised_info.weights["weight"][0] == new_weight.data_ptr()
+        assert advertised_info.weights["weight"][3] == (3, 2)
+        assert compute_digest.call_count == 0
+        assert verify_digest.call_count == 0
+    finally:
+        session.seed_lease = None
+        assert session.shutdown()
+
+
+def test_checkpoint_fallback_reuses_bound_seed_identity_for_new_registration(runtime, monkeypatch):
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    session, backend, layout, start_server = _configure_real_session(runtime, monkeypatch, model, False)
+
+    try:
+        assert session.register_destination(model, False)
+        original_digest = session.planner.structural_digest
+        original_key = session.planner.seed_key
+        assert session.prepare_for_fallback().can_schedule_seed
+
+        model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2))
+        new_weight = model.weight
+        compute_digest = Mock(wraps=runtime.session._compute_structural_digest)
+        verify_digest = Mock(wraps=session.planner.verify_structural_digest)
+        monkeypatch.setattr(runtime.session, "_compute_structural_digest", compute_digest)
+        monkeypatch.setattr(session.planner, "verify_structural_digest", verify_digest)
+
+        result = session.start_seed_service(model, False)
+
+        assert result is runtime.types.RForkSeedServiceStartResult.STARTED
+        assert session.planner.seed_key == original_key
+        assert session.planner.structural_digest == original_digest
+        assert backend.weight_manifest["weight"][0] == new_weight.data_ptr()
+        assert backend.weight_manifest["weight"][3] == (3, 2)
+        assert compute_digest.call_count == 0
+        assert verify_digest.call_count == 0
+        assert start_server.call_count == 1
+        assert start_server.call_args.args[0] == original_key
+    finally:
+        session.seed_lease = None
+        assert session.shutdown()
+
+
+def test_checkpoint_fallback_without_bound_identity_binds_successful_registration(runtime, monkeypatch):
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    session, backend, layout, start_server = _configure_real_session(runtime, monkeypatch, model, False)
+
+    try:
+        assert session.planner.structural_digest is None
+        result = session.start_seed_service(model, False)
+
+        assert result is runtime.types.RForkSeedServiceStartResult.STARTED
+        assert session.planner.structural_digest == backend.registered_structural_digest
+        assert session.planner.seed_key == f"model-key:{backend.registered_structural_digest}"
+        assert start_server.call_count == 1
+        assert start_server.call_args.args[0] == session.planner.seed_key
+    finally:
+        session.seed_lease = None
+        assert session.shutdown()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_processed_layout_live_shape_drift_rejects_seed_publication(runtime, monkeypatch, deferred):
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    session, backend, layout, start_server = _configure_real_session(runtime, monkeypatch, model, True)
+
+    try:
+        assert session.register_destination(model, True)
+        original_digest = session.planner.structural_digest
+        _transfer_model(runtime, monkeypatch, session, backend, model, True)
+        if not deferred:
+            session.seed_lease = None
+
+        verify_digest = Mock(wraps=session.planner.verify_structural_digest)
+        monkeypatch.setattr(session.planner, "verify_structural_digest", verify_digest)
+        if deferred:
+            result = session.start_seed_service(model, True)
+            assert result is runtime.types.RForkSeedServiceStartResult.DEFERRED
+            model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2))
+            live_digest = layout.build_structural_digest([("weight", model.weight)])
+            session.seed_lease = None
+            session._promote_deferred_seed()
+        else:
+            model.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2))
+            live_digest = layout.build_structural_digest([("weight", model.weight)])
+            result = session.start_seed_service(model, True)
+            assert result is runtime.types.RForkSeedServiceStartResult.FAILED
+
+        assert verify_digest.call_count == 1
+        verify_digest.assert_called_once_with(live_digest)
+        assert start_server.call_count == 0
+        assert session.state is runtime.types.RForkLifecycleState.INITIALIZED
+        assert session.planner.structural_digest == original_digest
+    finally:
+        session.seed_lease = None
+        assert session.shutdown()

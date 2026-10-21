@@ -18,6 +18,7 @@ import torch
 from torch import nn
 from vllm.logger import logger
 
+from vllm_ascend.model_loader.rfork.local_weights import get_local_tensor_ids
 from vllm_ascend.model_loader.rfork.manifest import (
     normalize_dtype_name,
     numel_from_shape,
@@ -29,10 +30,9 @@ TENSOR_LAYOUT_SAMPLE_LIMIT = 3
 # Exact types only: numeric subclasses can carry tensor attributes.
 _TENSOR_ATTRIBUTE_LEAF_TYPES = frozenset({str, bytes, int, float, bool, complex, type(None)})
 
-# Runtime scratch tensors are local execution state, not checkpoint-derived
-# model state.  They must keep the capacity selected by the receiving instance
-# instead of being copied from a seed that may use different scheduler limits.
-_RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer"})
+# Runtime scratch and locally derived caches are not checkpoint-derived model
+# state. Preserve receiver-owned capacity and storage instead of copying seed state.
+_RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer", "_rope_derived_cos_cache", "_rope_derived_sin_cache"})
 
 _PLAIN_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_]+")
 
@@ -450,11 +450,16 @@ def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> li
 
 
 def find_non_npu_state_tensors(model: Any) -> list[str]:
+    """Reject host state unless RFork completed its supported local loading."""
     if not isinstance(model, nn.Module):
         return []
+    local_tensor_ids = get_local_tensor_ids(model)
     return [
         name
         for iterator in (model.named_parameters(), model.named_buffers())
         for name, tensor in iterator
-        if not tensor.is_meta and tensor.numel() > 0 and not is_tensor_on_transfer_device(tensor)
+        if not tensor.is_meta
+        and tensor.numel() > 0
+        and not is_tensor_on_transfer_device(tensor)
+        and id(tensor) not in local_tensor_ids
     ]
