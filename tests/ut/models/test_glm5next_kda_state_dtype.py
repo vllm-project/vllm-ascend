@@ -55,7 +55,7 @@ def test_kda_state_dtype_matches_model_and_cache_spec(ssm_dtype, conv_dtype, exp
 
 def test_kda_rejects_unsupported_recurrent_state_dtype():
     layer, config = make_layer_and_config("float16")
-    with pytest.raises(ValueError, match="GLM KDA recurrent state supports only"):
+    with pytest.raises(ValueError, match="KDA recurrent state supports only"):
         layer.get_state_dtype()
-    with pytest.raises(ValueError, match="GLM KDA recurrent state supports only"):
+    with pytest.raises(ValueError, match="KDA recurrent state supports only"):
         Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config)
