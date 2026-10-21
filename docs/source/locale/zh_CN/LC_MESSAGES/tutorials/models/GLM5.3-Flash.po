@@ -726,15 +726,6 @@ msgstr ""
 "`lookup_rpc_port`；子连接器继承外层的 `engine_id`。Prefill 的查询端口为 `37000-37001`，Decode "
 "为 `37100-37107`。请保留第 5.3 节中各角色的 Mooncake KV 基础端口，其 worker 和调度器会根据拓扑计算各自的端口。"
 
-msgid ""
-"Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP\n"
-"    group. It synchronizes workers after Memcache initialization and before\n"
-"    NPU graph capture. Set it in the `AscendStoreConnector` child, as shown\n"
-"    above."
-msgstr ""
-"每个 DP 组的所有 rank 均须将 `memcache_dp_init_barrier` 设置为 `true`。它在 Memcache "
-"初始化后、NPU 图捕获前同步 worker。请如上所示，将该参数设置在 `AscendStoreConnector` 子连接器中。"
-
 msgid "**Start the Services**"
 msgstr "**启动服务**"
 
