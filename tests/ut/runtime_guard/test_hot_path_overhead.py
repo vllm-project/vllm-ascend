@@ -142,7 +142,7 @@ def test_is_fully_off_default_off(tmp_path: Path):
 
 
 def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
-    """dump_only (detectors off, dump on) ≠ fully off — sample still flushes eow."""
+    """Detectors off and dump on ≠ fully off — sample still flushes eow."""
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
     cfg._invalidate_hot_path_gates()
@@ -159,7 +159,7 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=None)
+        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
         eow.assert_not_called()
 
         def sample_fn():
@@ -178,7 +178,7 @@ def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
             speculative_config=None,
             use_async=False,
         )
-        eow.assert_called_once_with(allow_manual_dump=True)
+        eow.assert_called_once_with(has_scheduled_tokens=True)
     RuntimeGuardProcessor.reset_for_tests()
 
 
@@ -212,7 +212,7 @@ def test_sample_tokens_decorator_fully_off_bypasses_wrap(tmp_path: Path):
 
 
 def test_sync_for_step_dump_only_claims(tmp_path: Path):
-    """dump_only (detectors off, dump on): advance + claim; not fully off."""
+    """Detectors off and dump on: advance + claim; not fully off."""
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
     cfg._invalidate_hot_path_gates()
@@ -228,8 +228,8 @@ def test_sync_for_step_dump_only_claims(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=None)
-        proc.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
+        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
+        proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
         refresh.assert_not_called()
         claim.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
@@ -248,8 +248,8 @@ def test_sync_for_step_refreshes_when_reload_on_without_detectors(tmp_path: Path
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=None)
-        proc.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
+        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=None)
+        proc.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
         refresh.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
 
@@ -294,13 +294,13 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
         ),
     ):
         proc = _bind(cfg)
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=so_empty)
+        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so_empty)
         mark_calls = [c for c in calls if c[0] == "mark"]
         assert mark_calls, "mark_finished must fire on the empty final batch"
         # bound method: _mark(self, finished_req_ids) → args[1] is the id set.
         assert mark_calls[0][1][1] == {"r_final"}
         calls.clear()
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=so_busy)
+        proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so_busy)
         assert not [c for c in calls if c[0] == "mark"]
     RuntimeGuardProcessor.reset_for_tests()
 

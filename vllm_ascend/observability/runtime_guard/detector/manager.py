@@ -146,14 +146,14 @@ class DetectorManager:
 
     # ---- stage hooks ------------------------------------------------------
 
-    def any_enabled_for_spec(self) -> bool:
+    def spec_acceptance_enabled(self) -> bool:
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("spec_acceptance", "enabled", False))
         return bool(self._spec_det.enabled)
 
-    def any_after_sample_cpu_enabled(self) -> bool:
-        """``token_repeat`` (not logits_finite)."""
+    def token_repeat_enabled(self) -> bool:
+        """``token_repeat`` only. ``logits_finite`` does not use this path."""
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             # Live flag only; full refresh happens in check_all → _precheck.
             return bool(self._runtime_config.detector_get("token_repeat", "enabled", False))
@@ -206,11 +206,7 @@ class DetectorManager:
 
         # CPU snapshot only when there is something left to detect: no reqs,
         # CPU detectors off, or every req already stop-detected (max_per_req).
-        if (
-            not resolved_ids
-            or not self.any_after_sample_cpu_enabled()
-            or all(rid in skip for rid in resolved_ids if rid)
-        ):
+        if not resolved_ids or not self.token_repeat_enabled() or all(rid in skip for rid in resolved_ids if rid):
             return alerts, None
 
         snap = AfterSampleCpuSnapshot(
