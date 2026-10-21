@@ -171,9 +171,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def get_attn_backend(self):
         # Keep these imports lazy to avoid a model-inspection circular import.
         if self.compress_ratio == 4:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
+            from vllm_ascend.attention.dsa_v1 import AscendDSAIndexerBackend
 
-            return AscendDSAC4Backend
+            return AscendDSAIndexerBackend
         if self.compress_ratio == 128:
             from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
 
