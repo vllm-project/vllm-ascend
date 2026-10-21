@@ -167,15 +167,18 @@ def _flatten_recurrent_state_indices(
         return state_indices.reshape(-1).contiguous()
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
-    # Variable-length speculative sequences: compact on CPU (matches the 310P
-    # path); masked_select on NPU has a data-dependent output shape.
-    qsl_cpu = query_start_loc[: num_seqs + 1].cpu()
-    lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).clamp(min=0, max=num_slots)
-    valid = torch.arange(num_slots).unsqueeze(0) < lens_cpu.unsqueeze(1)
-    flat_cpu = state_indices[:num_seqs].cpu().masked_select(valid)[:total_tokens]
-    flat = torch.empty(flat_cpu.numel(), dtype=state_indices.dtype, device=state_indices.device)
-    flat.copy_(flat_cpu)
-    return flat
+    # Variable-length speculative sequences: map each token to its
+    # (sequence, slot) pair on device. The output length is host-known
+    # (total_tokens), so this path stays sync-free, unlike masked_select or
+    # a CPU compaction whose output shape depends on device data.
+    qsl = query_start_loc[: num_seqs + 1]
+    lens = (qsl[1:] - qsl[:-1]).clamp_(min=0, max=num_slots)
+    bounds = lens.cumsum(0)
+    starts = bounds - lens
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
+    slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
+    return state_indices[seq_ids, slot_ids].contiguous()
 
 
 def _split_head_first_conv_output(
