@@ -241,7 +241,8 @@ def test_receive_packed_weights_loads_model():
 
 
 @pytest.mark.parametrize("patterns", [["gate.tid2eid"], ["gate.attn_sink"], ["gate.tid2eid", "gate.attn_sink"]])
-def test_native_reload_retains_selected_current_parameters(patterns):
+@pytest.mark.parametrize("shared_module", [False, True])
+def test_native_reload_retains_selected_current_parameters(patterns, shared_module):
     """A partial reload preserves current values and shared kernel addresses."""
     from fnmatch import fnmatchcase
 
@@ -251,8 +252,10 @@ def test_native_reload_retains_selected_current_parameters(patterns):
     model = torch.nn.Module()
     model.gate = torch.nn.Module()
     model.gate.weight = torch.nn.Parameter(torch.full((2, 2), 0.25), requires_grad=False)
-    model.gate.tid2eid = torch.nn.Parameter(torch.tensor([[0, 1], [1, 0]], dtype=torch.int32), requires_grad=False)
+    model.gate.tid2eid = torch.nn.Parameter(torch.arange(16, dtype=torch.int32).reshape(8, 2), requires_grad=False)
     model.gate.attn_sink = torch.nn.Parameter(torch.tensor([0.5, 0.75]), requires_grad=False)
+    if shared_module:
+        model.gate_alias = model.gate
     model.attention = torch.nn.Module()
     model.attention.attn_sink = model.gate.attn_sink
     reload.record_metadata_for_reloading(model)

@@ -337,6 +337,8 @@ class RetentionProbe:
 
         model = self.model_runner.model
         parameters = {}
+        kernel_names: dict[int, str] = {}
+        aliases = {}
         meta_names = []
         for name, parameter in model.named_parameters():
             if not is_tracked(name):
@@ -349,9 +351,16 @@ class RetentionProbe:
                 assert info.kernel_tensors is not None
                 parameter = info.kernel_tensors[0][local_name]
                 meta_names.append(name)
+            # Separate meta placeholders may refer to one original parameter.
+            # Deduplicate by the resolved object, retaining the alias evidence.
+            if id(parameter) in kernel_names:
+                aliases[name] = kernel_names[id(parameter)]
+                continue
+            kernel_names[id(parameter)] = name
             parameters[name] = parameter
         return {
             "reload_meta_parameters": meta_names,
+            "reload_kernel_aliases": aliases,
             "parameters": {
                 name: {"sha256": digest(p), "ptr": p.data_ptr(), "shape": list(p.shape), "dtype": str(p.dtype)}
                 for name, p in parameters.items()

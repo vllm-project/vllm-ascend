@@ -169,11 +169,13 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 for name, parameter in self.model.named_parameters()
                 if any(fnmatchcase(name, pattern) for pattern in patterns)
             }
-            # Include all registrations of selected shared parameters, even when
-            # the caller selected only their canonical served-model name.
+            # Replay each owning module once. A shared module can have several
+            # model paths; loading all paths would count its weights repeatedly
+            # and trigger processing before its received weights arrive.
             retained = [
-                (name, parameter)
-                for name, parameter in self.model.named_parameters(remove_duplicate=False)
+                (module, name, parameter)
+                for module in self.model.modules()
+                for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
                 if id(parameter) in selected
             ]
 
@@ -181,8 +183,8 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # Worker has restored these current values after wake. Submit them to
         # the native loaders so partial layers materialize and count them like
         # received weights. Do not change process-global reload skip sets.
-        for name, value in retained:
-            parameter = self.model.get_parameter(name)
+        for module, name, value in retained:
+            parameter = getattr(module, name)
             if parameter is not value:
                 parameter.weight_loader(parameter, value)
 
