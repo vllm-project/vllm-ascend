@@ -2,9 +2,9 @@
 
 ## 1 Introduction
 
-[AntAngelMed](https://huggingface.co/MedAIBase/AntAngelMed) is a medical-domain mixture-of-experts (MoE) language model based on Ling-flash-2.0. This tutorial deploys the BF16 model on a single node with eight Ascend 910B3 NPUs and verifies structured output through the OpenAI-compatible API.
+[AntAngelMed](https://huggingface.co/MedAIBase/AntAngelMed) is a medical-domain mixture-of-experts (MoE) language model based on Ling-flash-2.0. This tutorial deploys the BF16 model on a single Atlas 800I A2 node (8 NPUs) and verifies structured output through the OpenAI-compatible API.
 
-The configuration below was validated with **vLLM Ascend v0.23.0**. The version is pinned to reproduce that validation; results do not establish compatibility with other releases.
+This document is written based on the vLLM-Ascend main branch. This model is supported on this branch.
 
 ## 2 Validated Features
 
@@ -21,9 +21,9 @@ See the [Feature Guide](../../user_guide/feature_guide/index.md) for configurati
 
 ## 3 Environment Preparation
 
-| Model weights | Tested hardware | Download links |
+| Model weights | Hardware Requirements | Download links |
 | --- | --- | --- |
-| AntAngelMed (BF16) | One node with 8 × Ascend 910B3, 64 GB HBM per NPU | [Hugging Face](https://huggingface.co/MedAIBase/AntAngelMed) / [ModelScope](https://modelscope.cn/models/MedAIBase/AntAngelMed) |
+| AntAngelMed (BF16) | 1 Atlas 800I A2 node (64GB × 8) | [Hugging Face](https://huggingface.co/MedAIBase/AntAngelMed) / [ModelScope](https://modelscope.cn/models/MedAIBase/AntAngelMed) |
 
 Download the complete model, including its configuration, tokenizer, and chat template, to `/home/weights/AntAngelMed` on the host. If you use a different directory, update the Docker mount below. The container path remains `/home/weights/AntAngelMed`.
 
@@ -35,27 +35,26 @@ npu-smi info
 
 ## 4 Installation
 
-### 4.1 Pull the image
+### 4.1 Docker Image Installation
+
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:v0.23.0
+docker pull quay.io/ascend/vllm-ascend:{tag}
 ```
-
-The tested image contained these packages; no dependency upgrades or source patches were applied:
-
-| Package | Version |
-| --- | --- |
-| vLLM | `0.23.0+empty` |
-| vLLM Ascend | `0.23.0` |
-| XGrammar | `0.2.3` |
 
 ### 4.2 Start the container
 
 Run on the host:
 
 ```bash
-docker run --rm -it \
-    --name antangelmed \
+# Set the vLLM Ascend image name.
+export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+export NAME=antangelmed
+
+# Start the container with the variables defined above.
+docker run --rm \
+    --name $NAME \
     --ipc=host \
     --net=host \
     --device /dev/davinci0 \
@@ -74,13 +73,13 @@ docker run --rm -it \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /home/weights/AntAngelMed:/home/weights/AntAngelMed:ro \
-    quay.io/ascend/vllm-ascend:v0.23.0 bash
+    -it $IMAGE bash
 ```
 
-Inside the container, check the installed versions:
+Adjust data volume mounts (for example, model weights) according to your environment. Inside the container, verify the installed versions:
 
 ```bash
-python3 -m pip show vllm vllm-ascend xgrammar
+pip show vllm-ascend vllm xgrammar
 ```
 
 ## 5 Deployment
@@ -90,30 +89,29 @@ Run inside the container:
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-taskset -c 0-23 python3 -m vllm.entrypoints.openai.api_server \
-    --model /home/weights/AntAngelMed \
+vllm serve /home/weights/AntAngelMed \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --served-model-name AntAngelMed \
+    --trust-remote-code \
+    --max-model-len 32768 \
     --max-num-seqs 200 \
     --tensor-parallel-size 4 \
     --data-parallel-size 2 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.97 \
-    --served-model-name AntAngelMed \
-    --max-model-len 32768 \
-    --port 8080 \
+    --gpu-memory-utilization 0.9 \
     --enable-prefix-caching \
     --block-size 128 \
     --async-scheduling \
-    --trust-remote-code \
     --structured-outputs-config.backend xgrammar
 ```
 
 - TP4 and DP2 use all eight NPUs; EP distributes the MoE experts across them.
 - `--max-num-seqs 200` is the per-engine scheduling limit. Client concurrency is distributed between the two DP engines.
 - `--max-model-len 32768` is the input-plus-output limit, not the length of every test request.
-- `taskset -c 0-23` reproduces the tested CPU affinity. Adjust the CPU set to the CPUs available on your host.
 - `--gpu-memory-utilization 0.97` reproduces the tested memory budget. It requires available device memory; reduce it if your environment encounters out-of-memory errors.
 
-In this image, the command enables chunked prefill and `FULL_AND_PIECEWISE` graph mode by default. Do not add `--enforce-eager` when reproducing the graph-mode test. Check startup logs for graph capture completion and inference logs for `Replaying aclgraph` on both DP engines.
+The command enables chunked prefill and `FULL_AND_PIECEWISE` graph mode by default. Do not add `--enforce-eager` when reproducing the graph-mode test. Check startup logs for graph capture completion and inference logs for `Replaying aclgraph` on both DP engines.
 
 ## 6 Functional Verification
 
@@ -337,4 +335,4 @@ The concurrency script in Section 6 is a correctness check with short requests. 
 
 ## 9 Conclusion
 
-AntAngelMed BF16 was validated on eight Ascend 910B3 NPUs with vLLM Ascend v0.23.0 using TP4, DP2, expert parallelism, graph execution, asynchronous scheduling, prefix caching, and XGrammar structured output. Use the accuracy and performance procedures above to evaluate the model with datasets and workload shapes appropriate to your application.
+AntAngelMed BF16 was validated on an Atlas 800I A2 node (eight NPUs) with vLLM-Ascend main using TP4, DP2, expert parallelism, graph execution, asynchronous scheduling, prefix caching, and XGrammar structured output. Use the accuracy and performance procedures above to evaluate the model with datasets and workload shapes appropriate to your application.
