@@ -11,7 +11,9 @@ on:
       - 'vllm_ascend/envs.py'
       - 'vllm_ascend/device/**'
       - 'tools/check_wheel_dependencies.py'
+      - 'tools/export_requirements.py'
       - 'tests/ut/test_wheel_dependencies.py'
+      - 'tests/ut/test_project_dependencies.py'
       - '.github/workflows/pr_dependency_metadata.yaml'
 
 permissions:

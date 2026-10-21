@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare a built wheel's runtime requirements with the setup.py input."""
+"""Compare a wheel's runtime requirements with project dependency declarations."""
 
 import argparse
+import sys
 import zipfile
 from collections import Counter
 from email.parser import BytesParser
@@ -9,6 +10,11 @@ from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def requirement_key(line):
@@ -38,8 +44,17 @@ def read_requirements(path, root):
     return requirements
 
 
-def check_wheel_dependencies(wheel, requirements):
-    expected = Counter(read_requirements(requirements, requirements.parent))
+def check_wheel_dependencies(wheel, source):
+    if source.suffix == ".toml":
+        with source.open("rb") as file:
+            project = tomllib.load(file).get("project", {})
+        if "dependencies" in project:
+            expected = Counter(requirement_key(line) for line in project["dependencies"])
+        else:
+            source = source.with_name("requirements.txt")
+            expected = Counter(read_requirements(source, source.parent))
+    else:
+        expected = Counter(read_requirements(source, source.parent))
     with zipfile.ZipFile(wheel) as archive:
         metadata_files = [
             name for name in archive.namelist() if name.count("/") == 1 and name.endswith(".dist-info/METADATA")
@@ -57,9 +72,11 @@ def check_wheel_dependencies(wheel, requirements):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
-    parser.add_argument("--requirements", type=Path, default=Path(__file__).resolve().parents[1] / "requirements.txt")
+    parser.add_argument(
+        "--source", "--requirements", type=Path, default=Path(__file__).resolve().parents[1] / "pyproject.toml"
+    )
     args = parser.parse_args()
-    check_wheel_dependencies(args.wheel, args.requirements)
+    check_wheel_dependencies(args.wheel, args.source)
     print(f"Runtime requirements match: {args.wheel}")
 
 

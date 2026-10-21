@@ -2,8 +2,13 @@
 
 ## Sources of truth
 
-`requirements.txt` is the runtime dependency input to `setup.py`'s
-`get_requirements()` and therefore to wheel `Requires-Dist` metadata.
+With static project metadata, `pyproject.toml`'s `[project].dependencies`
+declares wheel `Requires-Dist`. The generated `requirements.txt` preserves
+legacy preinstall/development commands; regenerate it with
+`python -m tools.export_requirements` and validate it with `--check`.
+For earlier revisions, the checker also supports `setup.py`'s legacy
+requirements input. Its default source is pyproject, with a fallback for
+revisions that do not yet declare static runtime metadata.
 `pyproject.toml`'s `[build-system].requires` describes the PEP 517 isolated
 build environment. These environments have different responsibilities;
 the two lists should not be mechanically mirrored.
@@ -25,6 +30,8 @@ and [the existing build/runtime contract PR](https://github.com/vllm-project/vll
 ## Verify a dependency change
 
 Run the focused regression checks and verify the actual built artifact:
+
+The checker requires `packaging` and, on Python 3.10, `tomli` to read TOML.
 
 ```bash
 python -m unittest tests.ut.test_wheel_dependencies -v

@@ -9,10 +9,14 @@ from tools.check_wheel_dependencies import check_wheel_dependencies, read_requir
 
 
 class WheelDependenciesTest(unittest.TestCase):
-    def check_metadata(self, dependencies, requirements="torch-npu==2.10.0.post4\nnumpy\n", extra_metadata=()):
+    def check_metadata(
+        self, dependencies, requirements="torch-npu==2.10.0.post4\nnumpy\n", extra_metadata=(), project=None
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "requirements.txt").write_text(requirements, encoding="utf-8")
+            if project is not None:
+                (root / "pyproject.toml").write_text(project, encoding="utf-8")
             wheel = root / "example.whl"
             with zipfile.ZipFile(wheel, "w") as archive:
                 archive.writestr(
@@ -22,7 +26,18 @@ class WheelDependenciesTest(unittest.TestCase):
                 )
                 for name in extra_metadata:
                     archive.writestr(name, "Name: embedded\nRequires-Dist: unrelated\n")
-            check_wheel_dependencies(wheel, root / "requirements.txt")
+            check_wheel_dependencies(wheel, root / ("pyproject.toml" if project is not None else "requirements.txt"))
+
+    def test_static_project_dependencies_are_the_authority(self):
+        self.check_metadata(
+            ["example>=1"], requirements="stale==99\n", project='[project]\ndependencies = ["example>=1"]\n'
+        )
+
+    def test_empty_static_project_dependencies(self):
+        self.check_metadata([], project="[project]\ndependencies = []\n")
+
+    def test_legacy_pyproject_uses_requirements_input(self):
+        self.check_metadata(["torch-npu==2.10.0.post4", "numpy"], project='[build-system]\nrequires = ["build-only"]\n')
 
     def test_normalized_names_and_whitespace(self):
         self.check_metadata(["torch_npu == 2.10.0.post4", "numpy"])
