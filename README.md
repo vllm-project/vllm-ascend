@@ -1,26 +1,3 @@
-<!--
-Fork note: this banner is added only on green-hand-shandong's fork.
--->
-> **ℹ️ About this fork** (green-hand-shandong) — used for upstream contributions and **Atlas 300I Duo (310P)** bring-up work:
->
-> - ✅ **[WeMM-Embedding](https://github.com/Tencent/WeMM-Embedding) (2B / 4B / 9B) verified on Atlas 300I Duo (310P3, FP16)** — text / image / video embeddings, Matryoshka truncation, model-card reference reproduction, ~473 tok/s (2B, batch). Upstream docs: PR [#17723](https://github.com/vllm-project/vllm-ascend/pull/17723)
->
-> **Benchmarked on 300I Duo (310P3, FP16)** — same-hardware comparison vs EmbeddingGemma-2 (0.7B, retrieval-specialized), same public test data:
->
-> | Benchmark | EG2 0.7B | WeMM-2B | WeMM-4B | WeMM-9B |
-> | --- | --- | --- | --- | --- |
-> | STS-B EN (Spearman, 1379 pairs) | **0.862** | 0.836 | 0.847 | 0.848 |
-> | STS-B ZH (Spearman, 1361 pairs) | 0.785 | 0.793 | 0.802 | **0.813** |
-> | COCO caption retrieval Hit@1 / @5 (100 pairs) | 67% / 86% | 71% / 92% | **76% / 93%** | 75% / 92% |
-> | COCO real-image ↔ caption cross-modal retrieval | — | 3/3, 15/15 | 3/3, 15/15 | 3/3, 15/15 |
->
-> ZH semantics and cross-modal retrieval: WeMM wins across the board; EN STS-B slightly behind the distilled retrieval specialist (expected).
-> - ✅ **[EmbeddingGemma2](https://huggingface.co/google/embeddinggemma-2) (Google, 740M) verified on Atlas 300I Duo (310P3, FP16)** — text / image / video / audio embeddings in one 768-dim space, MRL 768/512/256/128; STS-B EN 0.862 / ZH 0.785, COCO retrieval 67% / 86%. Upstream: PR [#18335](https://github.com/vllm-project/vllm-ascend/pull/18335), issue [#18337](https://github.com/vllm-project/vllm-ascend/issues/18337)
->
-> - 🛠 **`v0.26.0rc2-310p` release image is missing the `vllm_ascend_C` extension** (all Qwen3.5-based models crash on 310P): reported in [#17713](https://github.com/vllm-project/vllm-ascend/issues/17713) with an in-container rebuild workaround; fail-fast fix in PR [#17714](https://github.com/vllm-project/vllm-ascend/pull/17714)
->
-> Everything below is the upstream README.
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-dark.png">
@@ -99,7 +76,7 @@ Whether you are a performance tuner looking to deploy vLLM-Ascend in production 
 
 ## Accessing Ascend NPU
 
-If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
+If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the HiDevLab platform to apply for and use them.
 
 ## Getting Started
 
@@ -107,6 +84,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
+| v0.30.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/installation.html) for more details |
 | v0.26.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/installation.html) for more details |
 | v0.23.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
 
@@ -121,7 +99,7 @@ Below are the maintained branches:
 
 | Branch           | Status       | Note                                 |
 |------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.30.0 tag |
+| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.31.0 tag |
 | releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
 | releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
 | releases/v0.23.0 | Maintained   | CI commitment for vLLM 0.23.0 version |
