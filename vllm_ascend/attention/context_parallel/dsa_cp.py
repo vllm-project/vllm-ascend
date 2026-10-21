@@ -808,7 +808,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_input_tokens: int,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
-        is_noncausal: bool = False,
     ):
         """Return device local metadata, cached across kv-cache groups.
 
@@ -816,8 +815,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         all attention groups, so we compute once and cache the results.
         """
         build_local_metadata = None
-        cache_key = "_device_local_noncausal" if is_noncausal else "_device_local"
-        cache = self.common_ratio_to_sas_metadata.get(cache_key)
+        cache = self.common_ratio_to_sas_metadata.get("_device_local")
         if cache is None:
             local_start, local_end_with_pad, tokens_per_rank, num_tokens_pad = self._local_token_range(num_input_tokens)
             local_query_start_loc = self.local_query_start_loc[: num_reqs + 1]
@@ -833,7 +831,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         local_query_start_loc=self.local_query_start_loc,
                         local_seq_lens=self.local_seq_lens,
                         start_pos_out=self.start_pos_prefill,
-                        is_noncausal=is_noncausal,
                     )
 
             else:
@@ -845,9 +842,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     local_query_start_loc=self.local_query_start_loc,
                     local_seq_lens=self.local_seq_lens,
                     start_pos_out=self.start_pos_prefill,
-                    is_noncausal=is_noncausal,
                 )
-            self.common_ratio_to_sas_metadata[cache_key] = {
+            self.common_ratio_to_sas_metadata["_device_local"] = {
                 "local_start": local_start,
                 "local_end": local_end_with_pad,
                 "tokens_per_rank": tokens_per_rank,
@@ -903,7 +899,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """Build a single unified metadata for all requests (prefill + decode)."""
         num_reqs = common_attn_metadata.num_reqs
         has_prefill = self.num_prefills > 0
-        is_noncausal = not common_attn_metadata.causal and not has_prefill
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -921,7 +916,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_input_tokens=num_input_tokens,
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens[:num_reqs],
-            is_noncausal=is_noncausal,
         )
 
         # RoPE local slices (cached across kv-cache groups: same cos/sin,
@@ -940,17 +934,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_sin = None
 
         # ── CPU local metadata (cached) ──
-        cpu_cache_key = "_cpu_local_noncausal" if is_noncausal else "_cpu_local"
-        cpu_cache = self.common_ratio_to_sas_metadata.get(cpu_cache_key)
+        cpu_cache = self.common_ratio_to_sas_metadata.get("_cpu_local")
         if cpu_cache is None:
             _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
                 num_reqs=num_reqs,
                 num_input_tokens=num_input_tokens,
                 query_start_loc=query_start_loc_cpu,
                 seq_lens=self.seq_lens_cpu[:num_reqs],
-                is_noncausal=is_noncausal,
             )
-            self.common_ratio_to_sas_metadata[cpu_cache_key] = {
+            self.common_ratio_to_sas_metadata["_cpu_local"] = {
                 "qsl_cpu": local_query_start_loc_cpu.clone(),
                 "sl_cpu": local_seq_lens_cpu.clone(),
             }
@@ -978,30 +970,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         self.start_pos_prefill[valid_num_reqs:].fill_(0)
 
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
-        dspark_swa_indices = None
-        ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        if is_noncausal:
-            ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
-            if self.compressor_ratio <= 1:
-                assert self.speculative_config is not None
-                # Every local draft query sees the complete global draft block.
-                # Slot ids are physical: slice query rows only after global lookup.
-                global_indices, _ = build_dspark_swa_indices(
-                    self.block_table[:num_reqs],
-                    self.speculative_config.num_speculative_tokens,
-                    self.model_config.hf_config.sliding_window,
-                    self.storage_block_size,
-                    query_start_loc[: num_reqs + 1],
-                    self.seq_lens[:num_reqs],
-                    self.num_actual_tokens,
-                )
-                pad_rows = num_tokens_pad - global_indices.shape[0]
-                if pad_rows < 0:
-                    raise ValueError("DSA-CP sparse query rows exceed the padded token extent")
-                if pad_rows:
-                    global_indices = F.pad(global_indices, (0, 0, 0, 0, 0, pad_rows), value=-1)
-                dspark_swa_indices = global_indices[local_start:local_end_with_pad].contiguous()
-
         # --- Compressed positions ---
         full_compress_cos, full_compress_sin = None, None
         cu_cmp_seqlens = self._get_cmp_seqlens_for_metadata(has_prefill)
@@ -1048,8 +1016,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     num_reqs=num_reqs,
                     has_prefill=has_prefill,
                     cu_cmp_seqlen_list=cu_cmp_seqlens,
-                    ori_win_left=ori_win_left,
-                    ori_win_right=ori_win_right,
                 )
 
             def build_qli_metadata() -> None:
@@ -1087,8 +1053,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_reqs=num_reqs,
                 has_prefill=has_prefill,
                 cu_cmp_seqlen_list=cu_cmp_seqlens,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
             )
             qli_metadata = self._build_qli_metadata(
                 query_start_loc=local_query_start_loc,
@@ -1132,9 +1096,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_cmp_residual_k=self.qli_cmp_residual_k[:num_reqs] if self.compressor_ratio == 4 else None,
             device_local_metadata_group_id=device_local_metadata_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
-            dspark_swa_indices=dspark_swa_indices,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -1299,15 +1260,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs,
         has_prefill,
         cu_cmp_seqlen_list,
-        ori_win_left=None,
-        ori_win_right=0,
     ):
-        if ori_win_left is None:
-            ori_win_left = self.model_config.hf_config.sliding_window - 1
         cmp_ratio = self.compressor_ratio if self.compressor_ratio > 1 else 1
         cache_key = f"cp_sas_c{cmp_ratio}"
-        if ori_win_left != self.model_config.hf_config.sliding_window - 1 or ori_win_right:
-            cache_key = (cache_key, ori_win_left, ori_win_right)
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
         if metadata is None:
             cu_seqlens_ori_kv = (
@@ -1342,8 +1297,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_kv=max_seq_lens,
                 batch_size=num_reqs,
                 ori_mask_mode=4,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
+                ori_win_left=self.model_config.hf_config.sliding_window - 1,
+                ori_win_right=0,
                 layout_q="TND",
                 layout_kv=_dsa_layout_kv(self.vllm_config),
                 has_ori_kv=True,

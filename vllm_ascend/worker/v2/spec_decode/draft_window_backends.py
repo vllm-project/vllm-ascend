@@ -17,7 +17,6 @@ class DraftWindowProviderStatus(str, Enum):
     DIRECT_DENSE = "DIRECT_DENSE"
     DIRECT_MLA = "DIRECT_MLA"
     DIRECT_DSA = "DIRECT_DSA"
-    DIRECT_DSA_CP = "DIRECT_DSA_CP"
     DIRECT_SFA = "DIRECT_SFA"
     DIRECT_SFA_INDEXER = "DIRECT_SFA_INDEXER"
     PROVIDER_MISSING = "PROVIDER_MISSING"
@@ -300,7 +299,9 @@ def inventory_draft_window_groups(
                 and builder.compressor_ratio == 1
             ):
                 hf = builder.model_config.hf_config
-                if topology.prefill_context_parallel_size != 1 or topology.decode_context_parallel_size != 1:
+                if type(builder) is types.dsa_cp_builder:
+                    reason = "Legacy DSA-CP is rejected by the MRV2 startup contract; no Window provider is enabled"
+                elif topology.prefill_context_parallel_size != 1 or topology.decode_context_parallel_size != 1:
                     reason = "DSA PCP/DCP read coordinates need a separate provider"
                 elif builder._device_metadata_enabled:
                     reason = "Deferred DSA metadata needs an executor completion contract"
@@ -314,11 +315,7 @@ def inventory_draft_window_groups(
                 elif hf.sliding_window <= 0 or any(item.sliding_window != hf.sliding_window for item in consumer_specs):
                     reason = "DSA native-window kernel and resident cache geometry disagree"
                 else:
-                    status = (
-                        DraftWindowProviderStatus.DIRECT_DSA_CP
-                        if type(builder) is types.dsa_cp_builder
-                        else DraftWindowProviderStatus.DIRECT_DSA
-                    )
+                    status = DraftWindowProviderStatus.DIRECT_DSA
                     reason = "Native-window intersection with proposal-owned DSA derived state"
             elif (
                 types.sfa_backend is not None

@@ -1875,6 +1875,20 @@ def build_attn_metadata_factory(
     speculator path does not forward them. Attention state is left to the
     caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
+
+    This existing module interception requires the worker's serialized host
+    execution: nested scopes must exit in reverse entry order. Each scope saves
+    and restores the exact previous function, including on exceptions. It is
+    not a cross-thread context; asynchronous device execution does not change
+    that restriction. A nested wrapper deliberately starts from the Ascend
+    builder again and restores its enclosing factory when it exits.
+
+    Callbacks are forwarded explicitly to the builder, not invoked here. Each
+    callback slot has one owner: a second non-None callback is rejected rather
+    than composed, preventing a read projection from being applied twice.
+    Existing field and offload-argument precedence is unchanged. An upstream
+    instance-level metadata-builder hook would allow this interception to be
+    replaced while retaining these explicit callback arguments.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
 

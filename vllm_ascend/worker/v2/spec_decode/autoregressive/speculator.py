@@ -226,6 +226,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         num_tokens_padded: int,
         cudagraph_runtime_mode: CUDAGraphMode,
+        *,
+        build_metadata: bool = True,
     ) -> tuple[
         dict[str, Any] | None,
         dict[str, torch.Tensor] | None,
@@ -281,6 +283,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             slot_mappings_tensor,
             self.kv_cache_config,
         )
+        if not build_metadata:
+            # Window prefill builds its private metadata after this helper has
+            # restored the global Full table and write-slot coordinates.
+            return attn_metadata, slot_mappings
         # This is draft prefill, not the later one-token-per-request decode.
         # Query lengths may differ, so do not use _build_uniform_attn_metadata.
         attn_metadata = self._build_attn_metadata(
@@ -630,15 +636,17 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
+        runtime = getattr(self, "_draft_window_runtime", None)
+        window_active = runtime is not None and runtime.reads_active
         attn_metadata, slot_mappings = self._prepare_replicated_prefill_attn(
             attn_metadata,
             slot_mappings,
             num_reqs,
             num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            build_metadata=not window_active,
         )
-        runtime = getattr(self, "_draft_window_runtime", None)
-        if runtime is not None and runtime.reads_active:
+        if window_active:
             attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=BatchExecutionDescriptor(

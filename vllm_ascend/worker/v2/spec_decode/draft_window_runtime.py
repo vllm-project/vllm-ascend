@@ -132,11 +132,7 @@ class DraftWindowRuntime:
             if route.status in (DraftWindowProviderStatus.DIRECT_SFA, DraftWindowProviderStatus.DIRECT_SFA_INDEXER)
             for name in route.layers
         )
-        dsa_routes = tuple(
-            route
-            for route in routes
-            if route.status in (DraftWindowProviderStatus.DIRECT_DSA, DraftWindowProviderStatus.DIRECT_DSA_CP)
-        )
+        dsa_routes = tuple(route for route in routes if route.status is DraftWindowProviderStatus.DIRECT_DSA)
         self.dsa_layer_names = tuple(name for route in dsa_routes for name in route.layers)
         for route in dsa_routes:
             # The typed inventory checks every consumer's native spec against
@@ -186,7 +182,21 @@ class DraftWindowRuntime:
                 self._eagle_plans = None
                 self._proposal_mapping = None
 
-    def metadata_callback(self, step: int, num_reqs: int):
+    def metadata_callback(
+        self,
+        step: int,
+        num_reqs: int,
+        *,
+        prepared_exact_cpu: torch.Tensor | None = None,
+        prepared_exact_device: torch.Tensor | None = None,
+    ):
+        """Project current prepared lengths; CPU reuse requires an explicit pair.
+
+        The caller must have completed a copy from this device input into fresh
+        CPU storage in the active proposal and current request order. It must
+        not modify that snapshot afterward. A common CPU field alone is not an
+        exactness certificate. The proposal retains the supplied snapshot.
+        """
         if self._bypass:
             return None
         owner = self._owner
@@ -197,6 +207,30 @@ class DraftWindowRuntime:
             raise ValueError("Parallel Draft metadata step must match its actual query width")
         if self.method == "eagle3" and (step != self._next_step or step >= self.static_k):
             raise ValueError("Eagle3 metadata must advance exactly one configured step")
+
+        prepared_mapping = None
+        if (prepared_exact_cpu is None) != (prepared_exact_device is None):
+            raise ValueError("Prepared exact CPU lengths require their device input")
+        if prepared_exact_cpu is not None:
+            if (
+                not isinstance(prepared_exact_cpu, torch.Tensor)
+                or prepared_exact_cpu.device.type != "cpu"
+                or prepared_exact_cpu.dtype != torch.int32
+                or prepared_exact_cpu.shape != (num_reqs,)
+                or not prepared_exact_cpu.is_contiguous()
+            ):
+                raise ValueError("Prepared exact CPU lengths must be one contiguous int32 value per request")
+            if (
+                not isinstance(prepared_exact_device, torch.Tensor)
+                or prepared_exact_device.dtype != torch.int32
+                or prepared_exact_device.ndim != 1
+                or prepared_exact_device.numel() < num_reqs
+                or not prepared_exact_device.is_contiguous()
+            ):
+                raise ValueError("Prepared exact device input must cover the active int32 request prefix")
+            batch = self._input_batch
+            prepared_mapping = (tuple(batch.req_ids), tuple(int(row) for row in batch.idx_mapping_np[:num_reqs]))
+            self.pool.retain(owner, prepared_exact_cpu)
 
         # All direct-prefix groups use the same logical exact lengths and S.
         # The callback runs once per fresh common object, before each builder.
@@ -218,14 +252,27 @@ class DraftWindowRuntime:
             if exact is None:
                 request_ids = tuple(batch.req_ids)
                 rows = batch.idx_mapping_np[:num_reqs].copy()
-                # One exact D2H per metadata build, shared across groups. A CPU
-                # upper cannot select S after rejection. This synchronization
-                # remains a performance cost until preparation exposes exact CPU
-                # state; it must not be mislabeled as a no-sync implementation.
                 full_exact_input = common_metadata.seq_lens
-                exact = full_exact_input[:num_reqs].to(device="cpu", dtype=torch.int32, copy=True)
-                continuing = continuing_prefill_rows(batch, num_reqs)
                 mapping = (request_ids, tuple(int(row) for row in rows))
+                if prepared_exact_cpu is not None:
+                    if mapping != prepared_mapping:
+                        raise RuntimeError("Prepared exact lengths belong to another request mapping")
+                    if (
+                        full_exact_input.data_ptr() != prepared_exact_device.data_ptr()
+                        or full_exact_input.device != prepared_exact_device.device
+                        or full_exact_input.dtype != prepared_exact_device.dtype
+                        or full_exact_input.ndim != 1
+                        or full_exact_input.numel() < num_reqs
+                        or not full_exact_input.is_contiguous()
+                    ):
+                        raise ValueError("Prepared exact CPU lengths belong to another device input")
+                    exact = prepared_exact_cpu
+                else:
+                    # One exact D2H per build, shared across groups. The explicit
+                    # DSpark MLA snapshot avoids this duplicate copy; other
+                    # routes still synchronize here. An upper is never exact.
+                    exact = full_exact_input[:num_reqs].to(device="cpu", dtype=torch.int32, copy=True)
+                continuing = continuing_prefill_rows(batch, num_reqs)
                 if self._proposal_mapping is not None and self._proposal_mapping != mapping:
                     raise RuntimeError("Draft Window request mapping changed within a proposal")
                 self._proposal_mapping = mapping

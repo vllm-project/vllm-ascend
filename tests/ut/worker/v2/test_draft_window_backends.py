@@ -429,11 +429,15 @@ def dsa_types(types):
     )
 
 
-@pytest.mark.parametrize("builder,status", [(DSABuilder(), "DIRECT_DSA"), (DSACPBuilder(), "DIRECT_DSA_CP")])
+@pytest.mark.parametrize("builder,status", [(DSABuilder(), "DIRECT_DSA"), (DSACPBuilder(), "PROVIDER_MISSING")])
 def test_uncompressed_dsa_requires_native_window_and_actual_owner(types, topology, builder, status):
     (route,) = inventory(dsa_types(types), topology, specs=[DSASpec()], builders=[builder])
     assert route.status.value == status
     assert route.topology.dsa_cp_effective == isinstance(builder, DSACPBuilder)
+    if isinstance(builder, DSACPBuilder):
+        assert "MRV2 startup contract" in route.reason
+        with pytest.raises(NotImplementedError, match="Legacy DSA-CP"):
+            require_draft_window_providers((route,))
 
 
 @pytest.mark.parametrize(

@@ -466,3 +466,106 @@ def test_dsa_callback_uses_actual_native_phase_split_and_preserves_query(setup, 
         certificates = [value for value in runtime._owner.retained if isinstance(value, tuple)]
         assert certificates[0][0].first_token == 5
         assert certificates[0][1].first_token == 20
+
+
+@pytest.mark.parametrize("with_prepared_exact", [False, True])
+def test_prepared_exact_pair_is_explicit_and_retained_until_completion(setup, monkeypatch, with_prepared_exact):
+    runtime, spec, _, completions = setup
+    metadata = common()
+    # An available CPU mirror is not a certificate; only the explicit pair is.
+    metadata.seq_lens_cpu = metadata.seq_lens_cpu_upper_bound
+    snapshot = metadata.seq_lens[:2].clone()
+    original_to = torch.Tensor.to
+    exact_copies = []
+
+    def observe_to(tensor, *args, **kwargs):
+        if kwargs == {"device": "cpu", "dtype": torch.int32, "copy": True}:
+            exact_copies.append(tensor)
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", observe_to)
+    pair = {"prepared_exact_cpu": snapshot, "prepared_exact_device": metadata.seq_lens} if with_prepared_exact else {}
+    with runtime.proposal_context(spec, batch()):
+        owner = runtime._owner
+        runtime.metadata_callback(3, 2, **pair)(0, metadata)
+    assert len(exact_copies) == (0 if with_prepared_exact else 1)
+    assert metadata.seq_lens_cpu.tolist() == [12, 11, 0]
+    if with_prepared_exact:
+        assert any(value is snapshot for value in owner.retained)
+        assert snapshot.tolist() == [12, 27]
+    assert owner.state is DraftWindowOwnerState.SUBMITTED
+    runtime.pool.reclaim_completed()
+    assert owner.state is DraftWindowOwnerState.SUBMITTED
+    completions[0].complete = True
+    runtime.pool.reclaim_completed()
+    assert owner.state is DraftWindowOwnerState.RELEASED
+    assert owner.retained == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["unpaired", "float", "int64", "matrix", "short", "padded", "strided", "noncpu", "device-dtype", "device-short"],
+)
+def test_prepared_exact_pair_rejects_invalid_type_shape_or_device_prefix(setup, invalid):
+    runtime, spec, _, _ = setup
+    metadata = common()
+    cpu, device = metadata.seq_lens[:2].clone(), metadata.seq_lens
+    if invalid == "unpaired":
+        device = None
+    elif invalid == "float":
+        cpu = cpu.float()
+    elif invalid == "int64":
+        cpu = cpu.long()
+    elif invalid == "matrix":
+        cpu = cpu.reshape(1, 2)
+    elif invalid == "short":
+        cpu = cpu[:1]
+    elif invalid == "padded":
+        cpu = metadata.seq_lens.clone()
+    elif invalid == "strided":
+        cpu = torch.tensor([12, 0, 27, 0], dtype=torch.int32)[::2]
+    elif invalid == "noncpu":
+        cpu = torch.empty(2, dtype=torch.int32, device="meta")
+    elif invalid == "device-dtype":
+        device = device.long()
+    elif invalid == "device-short":
+        device = device[:1]
+    with pytest.raises(ValueError, match="Prepared exact"), runtime.proposal_context(spec, batch()):
+        runtime.metadata_callback(3, 2, prepared_exact_cpu=cpu, prepared_exact_device=device)
+
+
+@pytest.mark.parametrize("change", ["mapping", "device"])
+def test_prepared_exact_pair_cannot_be_applied_to_another_input(setup, change):
+    runtime, spec, _, _ = setup
+    state, metadata = batch(), common()
+    snapshot = metadata.seq_lens[:2].clone()
+    expected = "request mapping" if change == "mapping" else "device input"
+    with pytest.raises((RuntimeError, ValueError), match=expected), runtime.proposal_context(spec, state):
+        owner = runtime._owner
+        callback = runtime.metadata_callback(3, 2, prepared_exact_cpu=snapshot, prepared_exact_device=metadata.seq_lens)
+        if change == "mapping":
+            state.req_ids.reverse()
+            state.idx_mapping_np[:] = state.idx_mapping_np[::-1]
+        else:
+            metadata.seq_lens = metadata.seq_lens.clone()
+        callback(0, metadata)
+    assert owner.state is DraftWindowOwnerState.QUARANTINED
+    assert any(value is snapshot for value in owner.retained)
+
+
+def test_prepared_exact_pair_keeps_owner_and_step_guards(setup):
+    runtime, spec, _, _ = setup
+    metadata = common()
+    snapshot = metadata.seq_lens[:2].clone()
+    pair = {"prepared_exact_cpu": snapshot, "prepared_exact_device": metadata.seq_lens}
+    with pytest.raises(RuntimeError, match="no active proposal"):
+        runtime.metadata_callback(3, 2, **pair)
+    with runtime.proposal_context(spec, batch()):
+        with pytest.raises(ValueError, match="actual query width"):
+            runtime.metadata_callback(8, 2, **pair)
+        callback = runtime.metadata_callback(3, 2, **pair)
+        callback(0, metadata)
+    with pytest.raises(RuntimeError, match="stale proposal"):
+        callback(0, common())
+    with pytest.raises(RuntimeError, match="stale proposal"), runtime.proposal_context(spec, batch()):
+        callback(0, common())

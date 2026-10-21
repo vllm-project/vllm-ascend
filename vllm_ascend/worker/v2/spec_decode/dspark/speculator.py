@@ -381,6 +381,21 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
+        common_metadata_callback = None
+        if runtime is not None:
+            if not self.use_dcp and self.attn_architecture == "MLA":
+                # This helper completed a fresh CPU copy of the current draft
+                # preparation. Bind it to that exact device input and proposal;
+                # GQA and DCP CPU fields do not provide the same guarantee.
+                assert seq_lens_cpu is not None
+                common_metadata_callback = runtime.metadata_callback(
+                    step,
+                    num_reqs,
+                    prepared_exact_cpu=seq_lens_cpu[:num_reqs],
+                    prepared_exact_device=self.input_buffers.seq_lens[:num_reqs],
+                )
+            else:
+                common_metadata_callback = runtime.metadata_callback(step, num_reqs)
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
@@ -390,7 +405,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
-                common_metadata_callback=runtime.metadata_callback(step, num_reqs) if runtime is not None else None,
+                common_metadata_callback=common_metadata_callback,
                 metadata_builder_callback=runtime.metadata_builder_callback(step) if runtime is not None else None,
             ),
         ):

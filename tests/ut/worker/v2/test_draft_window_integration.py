@@ -543,3 +543,143 @@ def test_eagle_window_first_pass_keeps_multitoken_phase_at_real_consumer(contrac
         assert not native_calls
     assert metadata.attn_state is state.ChunkedPrefill
     assert metadata.actual_seq_lengths_q == [3]
+
+
+@pytest.mark.parametrize("contract", ["autoregressive"], indirect=True)
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("prefilling", [False, True])
+def test_eagle_replicated_prefill_builds_once_after_full_mapping_restore(contract, enabled, prefilling):
+    """Run the real replicated helper and metadata assembly, not its fixture stub."""
+    obj = contract.obj
+    del obj._prepare_replicated_prefill_attn
+    obj.replicated_pcp = True
+    contract.scope["AscendInputBatch"] = SimpleNamespace
+    slot_helper = _upstream_root() / "v1/worker/gpu/attn_utils.py"
+    _execute([_node(slot_helper, "build_slot_mappings_by_layer")], contract.scope, slot_helper)
+    obj.kv_cache_config.kv_cache_groups = [SimpleNamespace(layer_names=["draft.a", "draft.b"])]
+    obj.input_batch.num_reqs = 1
+    obj.input_batch.is_dummy = False
+    obj.input_batch.idx_mapping = torch.tensor([0])
+    obj.input_batch.query_start_loc = obj.input_buffers.query_start_loc
+    obj.input_batch.positions = contract.positions
+    obj.input_batch.is_prefilling_np[:] = prefilling
+    obj.block_tables.gather_block_tables = Mock()
+    restored_slots = torch.tensor([[31, 32, 33]])
+    obj.block_tables.slot_mappings = restored_slots
+    obj.block_tables.compute_slot_mappings = Mock(return_value=restored_slots)
+    if enabled:
+        obj._draft_window_runtime = SimpleNamespace(
+            reads_active=True,
+            metadata_callback=Mock(return_value=None),
+            metadata_builder_callback=Mock(return_value=None),
+            retain_metadata=Mock(),
+        )
+    target_value = object()
+    target_metadata = {"draft.a": target_value}
+    target_slots = {"draft.a": torch.tensor([7, 8, 9])}
+    obj._prefill(1, 3, target_metadata, target_slots, None, contract.mode.NONE)
+    obj.block_tables.gather_block_tables.assert_called_once_with(obj.input_batch.idx_mapping, num_reqs_padded=1)
+    obj.block_tables.compute_slot_mappings.assert_called_once_with(
+        obj.input_batch.idx_mapping,
+        obj.input_batch.query_start_loc,
+        obj.input_batch.positions,
+        num_tokens_padded=3,
+    )
+    assert contract.backend.build.call_count == 1
+    passed = contract.prefill_hook.call_args.args[1]
+    metadata = passed["attn_metadata"]["draft.a"]
+    assert metadata is not target_value
+    assert metadata.slot_mapping.untyped_storage().data_ptr() == restored_slots.untyped_storage().data_ptr()
+    assert (
+        passed["slot_mappings"]["draft.a"].untyped_storage().data_ptr() == restored_slots.untyped_storage().data_ptr()
+    )
+    assert metadata.query_start_loc_cpu.tolist() == [0, 3]
+    assert target_metadata["draft.a"] is target_value
+    assert target_slots["draft.a"].tolist() == [7, 8, 9]
+    expected = (
+        contract.scope["AscendAttentionState"].ChunkedPrefill
+        if enabled
+        else contract.scope["AscendAttentionState"].DecodeOnly
+    )
+    assert metadata.attn_state is expected
+    if enabled:
+        obj._draft_window_runtime.metadata_callback.assert_called_once_with(0, 1)
+        obj._draft_window_runtime.retain_metadata.assert_called_once()
+
+
+@pytest.mark.parametrize("contract", ["dspark"], indirect=True)
+@pytest.mark.parametrize("padded_rows", [1, 3])
+def test_dspark_mla_reuses_prepared_exact_cpu_without_another_transfer(contract, monkeypatch, padded_rows):
+    # Execute the actual DSpark helper, runtime, common metadata and proposal
+    # owner. Only backend discovery/completion/native builder are isolated.
+    modules = {}
+    for suffix in ("lifetime", "plan", "policy", "read", "runtime"):
+        name = f"vllm_ascend.worker.v2.spec_decode.draft_window_{suffix}"
+        path = ROOT / f"vllm_ascend/worker/v2/spec_decode/draft_window_{suffix}.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, module)
+        spec.loader.exec_module(module)
+        modules[suffix] = module
+    runtime_module = modules["runtime"]
+    runtime_class = runtime_module.DraftWindowRuntime
+    monkeypatch.setattr(runtime_class, "_validate_route", staticmethod(lambda spec: (0,)))
+    completion = SimpleNamespace(is_complete=lambda: False, wait=lambda: None)
+    monkeypatch.setattr(runtime_module, "_NPUCompletion", lambda: completion)
+    obj = contract.obj
+    del obj._prepare_draft_dcp_metadata_inputs  # Run the real completed CPU copy.
+    obj.attn_architecture = "MLA"
+    obj.input_buffers.seq_lens = torch.tensor([21] + [0] * (padded_rows - 1), dtype=torch.int32)
+    obj.input_buffers.query_start_loc = torch.tensor([0, 3] + [3] * (padded_rows - 1), dtype=torch.int32)
+    obj.block_tables.block_tables = [SimpleNamespace(gpu=contract.table)]
+    obj.block_tables.num_blocks = SimpleNamespace(np=np.array([[8]], dtype=np.int32))
+    obj.block_tables.kernel_block_sizes = [4]
+    obj.vllm_config = SimpleNamespace(max_concurrent_batches=2)
+    obj.draft_model_config = SimpleNamespace(enforce_eager=True)
+    obj.input_batch.num_reqs = 1
+    obj.input_batch.req_ids = ["current-request"]
+    obj.input_batch.idx_mapping_np = np.array([0])
+    obj.input_batch.num_computed_prefill_tokens_np = np.array([16])
+    obj.input_batch.prefill_len_np = np.array([16])
+    obj.input_batch.num_scheduled_tokens = np.array([3])
+    obj.input_batch.num_draft_tokens_per_req = np.array([2])
+    runtime = runtime_class(
+        obj, modules["policy"].resolve_draft_window_policy(requested_window_size=8, method="dspark")
+    )
+    obj._draft_window_runtime = runtime
+    original_to, original_copy = torch.Tensor.to, torch.Tensor.copy_
+    window_cpu_copies, prepared_cpu_copies = [], []
+
+    def observe_to(tensor, *args, **kwargs):
+        if kwargs == {"device": "cpu", "dtype": torch.int32, "copy": True}:
+            window_cpu_copies.append(tensor)
+        return original_to(tensor, *args, **kwargs)
+
+    def observe_copy(tensor, source, *args, **kwargs):
+        if source.data_ptr() == obj.input_buffers.seq_lens.data_ptr() and source.shape == (1,):
+            prepared_cpu_copies.append(tensor)
+        return original_copy(tensor, source, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", observe_to)
+    monkeypatch.setattr(torch.Tensor, "copy_", observe_copy)
+    with runtime.proposal_context(obj, obj.input_batch):
+        owner = runtime._owner
+        result = obj._build_attn_metadata(
+            1,
+            SimpleNamespace(num_reqs=padded_rows, num_tokens=3, cg_mode=contract.mode.NONE),
+            np.array([0, 3], dtype=np.int32),
+            torch.tensor([30], dtype=torch.int32),  # Deliberately not exact.
+            3,
+        )
+    assert len(prepared_cpu_copies) == 1  # Existing blocking helper copy remains.
+    assert len(window_cpu_copies) == 0  # The feature adds no second exact copy.
+    prepared = prepared_cpu_copies[0]
+    assert any(isinstance(value, torch.Tensor) and value.data_ptr() == prepared.data_ptr() for value in owner.retained)
+    assert owner.state is modules["lifetime"].DraftWindowOwnerState.SUBMITTED
+    assert owner.completion is completion
+    common = result["draft.a"]
+    assert common.seq_lens_cpu.tolist() == [9] + [0] * (padded_rows - 1)
+    assert common.seq_lens.tolist() == [9] + [0] * (padded_rows - 1)
+    assert common.slot_mapping.untyped_storage().data_ptr() == contract.slots.untyped_storage().data_ptr()
+    assert obj.input_buffers.seq_lens.tolist() == [21] + [0] * (padded_rows - 1)
+    assert contract.table.tolist() == [list(range(8))]
