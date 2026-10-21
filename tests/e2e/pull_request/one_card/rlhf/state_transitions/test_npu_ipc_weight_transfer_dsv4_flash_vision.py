@@ -592,6 +592,21 @@ def test_retention_with_vision_reload(packed: bool, tmp_path: Path):
                 }
             )
 
+        # Preservation is not a load filter: supplied new values must win.
+        full_engine = trainer(server, source, packed)
+        _post(server, "pause")
+        _post(server, "sleep", params={"level": 2})
+        assert len(rpc(server, "wsc_saved_state")["saved"]) == 12
+        _post(server, "wake_up", params={"tags": ["weights"]})
+        same_parameters(rpc(server, "wsc_state"), expected)
+        full_engine.send_weights()
+        torch.npu.empty_cache()
+        _post(server, "wake_up", params={"tags": ["kv_cache"]})
+        supplied_state = rpc(server, "wsc_state")
+        same_parameters(supplied_state, initial)
+        assert utils.generation_signature(client, case.model, image_prompt=True) == references[0]
+        evidence["supplied_retained_reload"] = supplied_state
+
         # Full-update control: unfreeze the parameters and load different values.
         rpc(server, "wsc_configure", "full")
         full_engine = trainer(server, source, packed)

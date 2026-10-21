@@ -179,21 +179,30 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 if id(parameter) in selected
             ]
 
+        self._retained_parameters = retained
         initialize_layerwise_reload(self.model)
-        # Worker has restored these current values after wake. Submit them to
-        # the native loaders so partial layers materialize and count them like
-        # received weights. Do not change process-global reload skip sets.
-        for module, name, value in retained:
-            parameter = getattr(module, name)
-            if parameter is not value:
-                parameter.weight_loader(parameter, value)
 
     def finish_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        finalize_layerwise_reload(self.model, self.model_config)
+        try:
+            # Only fill omitted parameters after all trainer weights arrive.
+            # Replaying them at start could complete a layer early and suppress
+            # a later trainer-supplied value for a preserved parameter.
+            for module, name, value in getattr(self, "_retained_parameters", []):
+                parameter = getattr(module, name)
+                if parameter is value:
+                    continue
+                from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+                info = get_layerwise_info(module)
+                if not any(loaded_name == name for loaded_name, _ in info.loaded_weights):
+                    parameter.weight_loader(parameter, value)
+            finalize_layerwise_reload(self.model, self.model_config)
+        finally:
+            self._retained_parameters = []
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.

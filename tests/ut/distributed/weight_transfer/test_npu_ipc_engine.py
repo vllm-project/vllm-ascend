@@ -279,6 +279,16 @@ def test_native_reload_retains_selected_current_parameters(patterns, shared_modu
             assert parameter.data_ptr() == original_ptrs[name]
         assert model.gate.attn_sink is model.attention.attn_sink
         assert skip_sets == (meta.SKIP_LOAD_TENSORS, meta.SKIP_TENSORS)
+        # Sleep preservation must not suppress a trainer-supplied new value.
+        full_updates = {n: torch.full_like(p, cycle + 5) for n, p in model.named_parameters()}
+        engine.start_weight_update()
+        for name, value in full_updates.items():
+            parameter = model.get_parameter(name)
+            parameter.weight_loader(parameter, value)
+        engine.finish_weight_update()
+        for name, parameter in model.named_parameters():
+            assert torch.equal(parameter, full_updates[name]), name
+            assert parameter.data_ptr() == original_ptrs[name]
         # The next update must preserve this new current value, not the first load.
         with torch.no_grad():
             for name, parameter in model.named_parameters():
