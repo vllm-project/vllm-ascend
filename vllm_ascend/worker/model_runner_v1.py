@@ -3885,6 +3885,7 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_padded = num_tokens
         if num_reqs_padded is None:
             num_reqs_padded = num_reqs
+        resolved_num_reqs_padded: int = num_reqs_padded
         if self.sparse_kv_offload_enabled:
             update_sparse_kv_offload_metadata(
                 num_tokens,
@@ -4140,7 +4141,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if (
                 isinstance(builder, QSAMetadataBuilder)
-                and num_reqs_padded > num_reqs
+                and resolved_num_reqs_padded > num_reqs
             ):
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc. QSA's metadata builder uses the CPU
