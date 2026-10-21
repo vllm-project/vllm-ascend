@@ -1476,8 +1476,8 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
             "for_cudagraph_capture": self.for_cudagraph_capture,
             "num_actual_reqs": kwargs["num_actual_reqs"],
-            "pcp_context": kwargs.get("pcp_context"),
-            "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
+            "pcp_context": common_attn_metadata.pcp_context,
+            "pcp_cache_group_idx": common_attn_metadata.pcp_cache_group_idx,
             "formatted_slot_mapping": kwargs.get("formatted_slot_mapping"),
             "full_graph_mode": kwargs.get("full_graph_mode"),
         }
@@ -2118,20 +2118,21 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
 
 class _PrefillStateBuilder:
-    consumes_pcp_context = False
-
     def __init__(self):
         self.extra_kwargs = None
+        self.common_attn_metadata = None
 
     def build(self, common_prefix_len, common_attn_metadata, **kwargs):
         assert common_prefix_len == 0
         self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
         return common_attn_metadata.is_prefilling
 
 
 class _CaptureStateBuilder(_PrefillStateBuilder):
     def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
         self.extra_kwargs = kwargs
+        self.common_attn_metadata = common_attn_metadata
         return common_attn_metadata.is_prefilling
 
 
@@ -2186,13 +2187,9 @@ def test_dsa_builder_receives_full_graph_mode(capture, full_graph):
         assert call["full_graph_mode"] is (capture or full_graph)
 
 
-@pytest.mark.parametrize("cache_only_backend", [False, True])
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
-def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture, cache_only_backend):
-    sfa_builder_cls = type("UnrelatedSFABuilder", (), {}) if cache_only_backend else _PrefillStateBuilder
-    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", sfa_builder_cls)
+def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_capture):
     builder = _CaptureStateBuilder() if for_cudagraph_capture else _PrefillStateBuilder()
-    builder.consumes_pcp_context = cache_only_backend
     attn_group = SimpleNamespace(
         layer_names=["layer.0"],
         get_metadata_builder=lambda _: builder,
@@ -2223,10 +2220,9 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     )
 
     assert metadata["layer.0"] is is_prefilling
-    assert builder.extra_kwargs == {
-        "pcp_context": pcp_context,
-        "pcp_cache_group_idx": 0,
-    }
+    assert builder.extra_kwargs == {}
+    assert builder.common_attn_metadata.pcp_context is pcp_context
+    assert builder.common_attn_metadata.pcp_cache_group_idx == 0
 
 
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])

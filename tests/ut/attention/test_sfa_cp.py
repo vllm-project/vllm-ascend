@@ -63,7 +63,7 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
     metadata.pcp_has_global_prefill = True
     metadata.num_input_tokens = 2
     metadata.num_decode_tokens = 1
-    common_metadata = SimpleNamespace()
+    common_metadata = SimpleNamespace(pcp_context=context, pcp_cache_group_idx=1)
     group = SimpleNamespace(world_size=2, rank_in_group=1)
     with (
         patch.object(builder, "_build_pcp_ordered_indexer_slot_mapping", return_value=None),
@@ -71,7 +71,7 @@ def test_sfa_pcp_dcp_compact_kv_selects_only_allocated_blocks(first_block_id):
         patch.object(builder, "_build", return_value=metadata) as build,
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=group),
     ):
-        assert builder.build(0, common_metadata, pcp_context=context, pcp_cache_group_idx=1) is metadata
+        assert builder.build(0, common_metadata) is metadata
 
     build.assert_called_once_with(common_metadata, draft_index=None, pcp_context=context)
     torch.testing.assert_close(metadata.pcp_prolog_local_slots, torch.tensor([0, 2], dtype=torch.int32))
@@ -1505,8 +1505,9 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
         ),
         patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
     ):
-        metadata = builder.build(0, common, pcp_context=context)
-        draft_metadata = builder.build_for_drafting(common, draft_index=0, pcp_context=context)
+        common.pcp_context = context
+        metadata = builder.build(0, common)
+        draft_metadata = builder.build_for_drafting(common, draft_index=0)
     assert metadata.num_prefills == 0
     assert metadata.pcp_has_global_prefill is global_has_prefill
     assert not draft_metadata.pcp_has_global_prefill
@@ -1531,7 +1532,8 @@ def test_sfa_pcp_builder_prepares_local_prolog_slots():
         ),
         patch("vllm_ascend.attention.sfa_v1.get_pcp_group", return_value=group),
     ):
-        metadata = builder.build(0, common, pcp_context=context)
+        common.pcp_context = context
+        metadata = builder.build(0, common)
     assert metadata.num_decode_tokens == 1
     torch.testing.assert_close(metadata.pcp_prolog_local_slots, torch.tensor([0, -1, 3, -1]))
     torch.testing.assert_close(metadata.pcp_prolog_global_slots, torch.tensor([1, 2, -1, -1, 3, -1]))

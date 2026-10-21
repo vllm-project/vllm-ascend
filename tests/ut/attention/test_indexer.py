@@ -422,14 +422,12 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     )
 
     builder = _make_builder(pcp_size=2, dcp_size=2)
-    build_kwargs = dict(
-        pcp_context=pcp_context,
-        pcp_cache_group_idx=0,
-    )
+    common.pcp_context = pcp_context
+    common.pcp_cache_group_idx = 0
     if for_cudagraph_capture:
-        metadata = builder.build_for_cudagraph_capture(common, **build_kwargs)
+        metadata = builder.build_for_cudagraph_capture(common)
     else:
-        metadata = builder.build(0, common, **build_kwargs)
+        metadata = builder.build(0, common)
 
     torch.testing.assert_close(
         metadata.block_table,
