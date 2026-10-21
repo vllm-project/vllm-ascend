@@ -1,0 +1,4 @@
+pr: 18064
+entries:
+  - category: performance
+    text: Improved split-QKV RMSNorm MRoPE performance with direct half RoPE, paired rows for eligible long token partitions, and head parallelism for qualified single-token inputs. The public operator interface and M1 fallback remain unchanged.
