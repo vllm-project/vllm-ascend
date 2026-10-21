@@ -3,6 +3,7 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
@@ -199,7 +200,7 @@ class TestQwen4ExpInputAdapterDispatch(unittest.TestCase):
             num_computed_tokens_cpu=np.array([3], dtype=np.int32),
             token_ids_cpu=np.array([[7, 8, 9]], dtype=np.int32),
         )
-        model_kwargs = {}
+        model_kwargs: dict[str, Any] = {}
 
         runner._maybe_add_qwen4_exp_inputs(
             model_kwargs,

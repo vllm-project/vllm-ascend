@@ -1,6 +1,6 @@
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.vllm_ascend_C  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 from vllm_ascend.models.qwen4_exp.lightning_indexer import (
     qsa_select_paged_tokens_lightning,
