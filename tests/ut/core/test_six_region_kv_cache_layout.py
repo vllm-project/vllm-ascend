@@ -306,9 +306,7 @@ def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_
         kv_transfer_config=kv_transfer_config,
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
-    runner.model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(model_type="qwen4_exp")
-    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
     runner.dcp_size = 1
     runner.use_sparse = False
     runner.use_compress = False
@@ -357,9 +355,7 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
         cache_config=SimpleNamespace(cache_dtype="auto"),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
-    runner.model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(model_type="qwen4_exp")
-    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
     runner.dcp_size = 1
     runner.use_sparse = False
     runner.use_compress = False
