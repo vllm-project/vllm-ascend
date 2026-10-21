@@ -286,7 +286,7 @@ class AscendCompiler(CompilerInterface):
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             _initialize_static_kernel_runtime(self.vllm_config)
-
+# testls
     def compile(
         self,
         graph: fx.GraphModule,
