@@ -63,7 +63,7 @@ def test_truncate_token_id_fields_caps_and_flags():
 
 
 def test_truncate_nested_token_ids_with_empty_step():
-    """Empty speculative step must not disable nested truncation."""
+    """Nested truncation keeps empty steps and caps long int lists."""
     long_step = list(range(20))
     detail = {"window_token_ids": [[1, 2], [], long_step]}
     out = truncate_token_id_fields(

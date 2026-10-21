@@ -150,7 +150,6 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         if not req_ids:
             return []
 
-        # postprocess_sampled may not have stashed nums (or stashed None).
         if accepted_token_nums is None:
             return []
 

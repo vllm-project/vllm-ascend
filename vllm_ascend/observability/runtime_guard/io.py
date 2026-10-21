@@ -29,12 +29,7 @@ from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
 
 def is_int_list(value: Any) -> bool:
-    """True when ``value`` is a ``list[int]`` (bool excluded; empty allowed).
-
-    Empty steps (e.g. speculative decode with zero accepted tokens) must still
-    classify as int lists so nested ``list[list[int]]`` can be truncated for
-    reports instead of leaking full token-id payloads.
-    """
+    """True when ``value`` is a ``list[int]`` (bool excluded; empty allowed)."""
     return isinstance(value, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in value)
 
 
