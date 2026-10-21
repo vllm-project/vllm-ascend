@@ -54,7 +54,10 @@ class TestAscendDSAPCPMetadataBuilderWithoutContext:
         context; it must build the ordinary DSA metadata like PCP=1."""
         builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
         builder._is_decode_sharded = True
-        common = SimpleNamespace(pcp_context=None, pcp_cache_group_idx=None)
+        builder.use_pcp = True
+        common = SimpleNamespace(
+            pcp_context=None, pcp_cache_group_idx=None, slot_mapping=torch.zeros(1), num_input_tokens=1
+        )
         sas_metadata: dict[Any, Any] = {}
         ordinary = object()
         with (

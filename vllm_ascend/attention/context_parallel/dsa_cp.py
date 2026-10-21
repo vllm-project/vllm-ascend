@@ -33,7 +33,6 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_or_register_attention_buffer,
-    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -2252,6 +2251,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             metadata_cls=dsa_v1.AscendDSAMetadata,
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
         self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._hidden_restore_idx_buffer = torch.empty(
@@ -2480,7 +2480,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert common_ratio_to_sas_metadata is not None
-        if not uses_pcp_context(common_attn_metadata, is_pcp_enabled()):
+        if not uses_pcp_context(common_attn_metadata, self.use_pcp):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
             # ordinary DSA metadata that the impl executes without PCP.

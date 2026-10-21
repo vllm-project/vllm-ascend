@@ -262,6 +262,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             raise NotImplementedError("V4.1 PCP currently requires DCP=1 for replicated caches.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, build_local_compressor_metadata=True)
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
         self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -379,7 +380,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     ) -> AscendDSAV41Metadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        if not uses_pcp_context(common_attn_metadata, is_pcp_enabled()):
+        if not uses_pcp_context(common_attn_metadata, self.use_pcp):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
             # ordinary V4.1 metadata that the impl executes without PCP.
