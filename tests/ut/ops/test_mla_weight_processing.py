@@ -103,7 +103,7 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     profile.supports.return_value = False
     with (
         patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
-        patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
+        patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),
         patch(
             "vllm_ascend.attention.mla_v1.get_ascend_config",
             return_value=SimpleNamespace(mlapo_keep_prefill_weights=False),

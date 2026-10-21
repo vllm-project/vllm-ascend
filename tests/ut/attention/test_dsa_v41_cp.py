@@ -1372,7 +1372,7 @@ class TestProjectionLayout:
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
     config = {"legacy": legacy, "pcp": pcp}
     monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: config["pcp"])
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
     if legacy and pcp:
         with pytest.raises(ValueError, match="cannot be enabled"):
             dsa_v41_cp.get_v41_cp_classes()
