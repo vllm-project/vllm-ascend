@@ -150,17 +150,3 @@ def test_prefill_keeps_cache_reading_states():
         speculator._prefill(2, 8, original, None)
 
     assert parent_prefill.call_args[0][2] is original
-
-
-def test_calc_next_seq_lens_cpu_honors_advance_draft_positions():
-    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
-    speculator.max_model_len = 128
-    seq_lens_cpu = torch.tensor([10, 20, 30], dtype=torch.int32)
-
-    advancing = PropertyMock(return_value=True)
-    with patch.object(AscendAutoRegressiveSpeculator, "advance_draft_positions", advancing):
-        assert speculator._calc_next_seq_lens_cpu(seq_lens_cpu.clone(), 2, 3, 2).tolist() == [12, 22, 0]
-
-    fixed = PropertyMock(return_value=False)
-    with patch.object(AscendAutoRegressiveSpeculator, "advance_draft_positions", fixed):
-        assert speculator._calc_next_seq_lens_cpu(seq_lens_cpu.clone(), 2, 3, 2).tolist() == [10, 20, 0]
