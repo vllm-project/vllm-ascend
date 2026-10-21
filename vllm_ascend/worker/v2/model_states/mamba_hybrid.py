@@ -357,6 +357,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
 
+        # Keep recurrent queries logical while attention inputs include graph padding.
+        # TODO: Remove this dummy-padding special case once the common metadata
+        # path handles padded attention inputs separately from logical queries.
+        num_input_tokens = num_tokens
+        if cudagraph_mode == CUDAGraphMode.PIECEWISE and input_batch.is_dummy:
+            num_input_tokens = input_batch.num_tokens_after_padding
+
         is_prefilling_np = input_batch.is_prefilling_np
         if input_batch.prefill_runs_as_decode_np is not None:
             # vLLM #58400 runs one-token prompt tails as decodes. Their
@@ -405,6 +412,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
             num_actual_tokens=input_batch.num_tokens,
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             max_query_len=input_batch.num_scheduled_tokens.max().item(),

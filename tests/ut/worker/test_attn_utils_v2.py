@@ -2292,6 +2292,45 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     return layer
 
 
+def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
+    layer_name = "language_model.model.layers.3.self_attn.attn"
+    layer = _make_mla_layer(sparse_c8=True)
+    layer.kv_lora_rank = 512
+    layer.qk_rope_head_dim = 0
+    source_spec = layer.get_kv_cache_spec(None)
+    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(**{**vars(source_spec), "head_size": 512})
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(block_size=16, cache_dtype="int8"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0),
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+
+    assert attn_utils.enable_sfa(vllm_config)
+    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.cache_sparse_sfa_c8
+    assert spec.head_size == 528
+    assert spec.dtype == torch.int8
+
+
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     vllm_config = SimpleNamespace(
