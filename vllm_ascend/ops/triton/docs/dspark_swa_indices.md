@@ -28,7 +28,7 @@
 | `num_speculative_tokens` | Input (attribute) | Number of draft tokens per request; output row-tile height is `next_pow2(num_speculative_tokens + 1)` | int32 | scalar |
 | `window_size` | Input (attribute) | Sliding-window size of the SWA cache (model constant) | int32 | scalar |
 | `block_size` | Input (attribute) | DSA KV-cache block size; must be a power of two | int32 | scalar |
-| `index_width` | Input (attribute) | Aligned index width of the output (`ceil((window_size + num_speculative_tokens) / 128) * 128`) | int32 | scalar |
+| `index_width` | Input (attribute) | Aligned index width of the output (`ceil((window_size + num_speculative_tokens + 1) / 128) * 128`; an explicit width must cover `window_size + num_query_per_req`) | int32 | scalar |
 | `num_decode_tokens` | Input (attribute) | Total active output rows (`sum(query_lens)`), supplied by the caller to avoid a D2H sync | int32 | scalar |
 | `max_num_reqs` | Input (attribute) | Capture-time request-slot capacity sizing the fixed grid; optional (defaults to `num_reqs`) | int32 | scalar |
 | `num_query_per_req` | Input (attribute) | Row-expansion factor per request slot; defaults to `num_speculative_tokens + 1`, anchor-sampling mode passes `num_speculative_tokens` | int32 | scalar |
@@ -39,7 +39,7 @@
 
 - `block_size` must be a power of two (`//` and `%` lower to shift/mask).
 - `next_pow2(num_blocks)` must not exceed 8192 (UB-preload tile cap; the host gate falls back to the eager chain beyond it).
-- `q_len <= num_speculative_tokens + 1` for every request (uniform-query contract of DSpark drafting); the 2D output tile relies on it.
+- `q_len <= num_query_per_req <= num_speculative_tokens + 1` for every request (uniform-query contract of DSpark drafting); the 2D output tile relies on it. The query count is a caller-provided host bound, not inferred from device values. With no bound, reserve `num_speculative_tokens + 1`; a known anchor count permits an explicit width of `window_size + num_speculative_tokens`.
 - `indices_output` must be int32. When a persistent `indices_output` is passed for graph capture, the FULL buffer (`buffer`, not `buffer[:num_rows]`) must be provided so the pad-row cleanup stays armed; an active-sized slice disables the cleanup and triggers a `UserWarning`.
 - `lens_output` / the freshly allocated lens is always int64. This is an intentional API difference: the eager chain's `per_token_lens` follows the dtype of `seq_lens` (int32 with int32 runtime metadata), while the fused kernel fixes lens at int64. Slot values are identical; production call sites currently discard the lens output.
 - Padded rows `[num_rows, num_rows_padded)` are reset to `slots = -1`, `lens = 0` in place — a strict superset of the eager behavior, which leaves those rows stale.
@@ -57,7 +57,7 @@
 
 ## Test Cases
 
-Accuracy tests use the real inference shapes of DeepSeek V4.1 DSpark drafting (`window_size=944`, `block_size=128`, `index_width=1088`, the DFlash uniform-query contract `num_query_per_req = num_speculative_tokens + 1`, graph-capture pad-row cleanup, the wide-window and narrow-block-table boundary cases) plus a broader generic parameter space (varying request counts, block sizes 4-128, long contexts, 8192-wide block tables). As this is an integer index-building operator, the unified precision tolerance is bit-exact (`rtol=0, atol=0`) on the slot values; the lens output is compared as values (the eager result cast to the kernel's fixed int64) per the intentional dtype difference noted under Parameters.
+Accuracy tests use the real inference shapes of DeepSeek V4.1 DSpark drafting (`window_size=944`, `block_size=128`, `index_width=1088`, the DFlash uniform-query contract `num_query_per_req = num_speculative_tokens + 1`, graph-capture pad-row cleanup, the wide-window and narrow-block-table boundary cases) plus a broader generic parameter space (varying request counts, block sizes 4-128, long contexts, 8192-wide block tables). The alignment-boundary cases (`window_size=120`, `num_speculative_tokens=8`, query count 8 or 9) independently compare every visible physical slot with the complete logical interval, including the last non-anchor slot. As this is an integer index-building operator, the unified precision tolerance is bit-exact (`rtol=0, atol=0`) on the slot values; the lens output is compared as values (the eager result cast to the kernel's fixed int64) per the intentional dtype difference noted under Parameters.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_swa_indices.py
