@@ -60,7 +60,7 @@ def runner_cls(mamba_state_cls):
     namespace = {"Parent": Parent, "MambaHybridModelState": mamba_state_cls}
     utils = ast.parse((source.parents[2] / "utils.py").read_text())
     predicate = next(
-        node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v41"
+        node for node in utils.body if isinstance(node, ast.FunctionDef) and node.name == "is_deepseek_v4_family"
     )
     module = ast.fix_missing_locations(ast.Module(body=[predicate, cls], type_ignores=[]))
     exec(compile(module, str(source), "exec", flags=__future__.annotations.compiler_flag), namespace)
@@ -170,3 +170,56 @@ def test_deferred_mamba_postprocess_restores_batch_rows(
         torch.testing.assert_close(input_tables, request_tables[idx_mapping.clamp_min(0).long()])
     else:
         assert torch.all(input_tables == -1)
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text"])
+@pytest.mark.parametrize("representation", ["object", "dict", "nested_object", "nested_dict", "dspark_class"])
+def test_v4_family_config_detection(runner_cls, model_type, representation):
+    predicate = runner_cls.postprocess_sampled.__globals__["is_deepseek_v4_family"]
+    config = SimpleNamespace(model_type=model_type)
+    if representation == "dict":
+        config = {"model_type": model_type}
+    elif representation == "nested_object":
+        config = SimpleNamespace(model_type="wrapper", text_config=config)
+    elif representation == "nested_dict":
+        config = {"model_type": "wrapper", "text_config": {"model_type": model_type}}
+    elif representation == "dspark_class":
+        config = type("ModelConfig", (), {"model_type": model_type})()
+        config.model_type = "dspark"
+    assert predicate(config)
+    assert not predicate(SimpleNamespace(model_type="other_model"))
+    assert not predicate({"model_type": "other_model", "text_config": None})
+    assert not predicate(None)
+
+
+@pytest.mark.parametrize(
+    "model_type", ["deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text", "other"]
+)
+@pytest.mark.parametrize("pp_sync", [False, True])
+@pytest.mark.parametrize("owns_speculator", [False, True])
+def test_v4_device_lengths_skip_host_sync_unless_pp_requires_it(runner_cls, model_type, pp_sync, owns_speculator):
+    runner = runner_cls.__new__(runner_cls)
+    runner.use_pp = False
+    runner.speculator = object() if owns_speculator else None
+    runner.sync_spec_pp_cpu_counts = pp_sync
+    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type))
+    runner.events = []
+    runner.device_count = 19
+    runner.num_computed_tokens_cpu = torch.tensor([35, -1])
+    runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: runner.events.append("wait"))
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"cached": 0, "new": 1}, num_computed_tokens_cpu=torch.tensor([35, 128])
+    )
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(2, dtype=torch.int32))
+    runner.postprocess_sampled(None, None, 2, 2)
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"cached": 4, "new": 8},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["cached"]),
+    )
+    runner._update_seq_lens_cpu(scheduler, ["cached", "new"])
+
+    needs_sync = pp_sync or (owns_speculator and model_type == "other")
+    assert runner.device_count == 17
+    assert runner.events == (["reject", "copy", "wait"] if needs_sync else ["reject"])
+    assert runner.req_states.num_computed_tokens_cpu.tolist() == [17 if needs_sync else 35, 128]
+    assert runner.input_buffers.seq_lens_cpu.tolist() == [21 if needs_sync else 39, 136]

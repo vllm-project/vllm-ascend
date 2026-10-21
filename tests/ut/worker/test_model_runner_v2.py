@@ -1898,16 +1898,18 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     assert runner.kv_block_zeroer is delegate
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v41", "other_model"])
+@pytest.mark.parametrize(
+    "model_type", ["deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text", "other_model"]
+)
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("pp_sync", [False, True])
-def test_cpu_length_sync_preserves_original_condition_except_v41(model_type, speculative, pp_sync):
+def test_cpu_length_sync_preserves_original_condition_except_v4_family(model_type, speculative, pp_sync):
     runner, output, batch, _ = _prepare_inputs_runner(speculator=speculative)
     output.scheduled_cached_reqs.req_ids = batch.req_ids
     runner.model_config.hf_config.model_type = model_type
     runner.sync_spec_pp_cpu_counts = pp_sync
     runner._copy_num_computed_tokens_to_cpu = MagicMock()
-    expected = pp_sync or (speculative and model_type != "deepseek_v41")
+    expected = pp_sync or (speculative and model_type == "other_model")
     with patch.object(GPUModelRunner, "postprocess_sampled"):
         runner.postprocess_sampled("idx", "tok", 3, 2)
     assert runner._copy_num_computed_tokens_to_cpu.call_count == int(expected)
@@ -1917,10 +1919,11 @@ def test_cpu_length_sync_preserves_original_condition_except_v41(model_type, spe
         torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu[:2], runner.num_computed_tokens_cpu[:2])
 
 
-def test_device_only_postprocess_keeps_device_update_without_d2h():
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text"])
+def test_device_only_postprocess_keeps_device_update_without_d2h(model_type):
     runner = _make_runner()
     runner.speculator = object()
-    runner.model_config.hf_config.model_type = "deepseek_v41"
+    runner.model_config.hf_config.model_type = model_type
     runner._copy_num_computed_tokens_to_cpu = MagicMock()
     with patch.object(GPUModelRunner, "postprocess_sampled") as parent:
         runner.postprocess_sampled("idx", "tok", 3, 2, query_start_loc="q")
@@ -1928,9 +1931,10 @@ def test_device_only_postprocess_keeps_device_update_without_d2h():
     runner._copy_num_computed_tokens_to_cpu.assert_not_called()
 
 
-def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text"])
+def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait(model_type):
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
-    runner.model_config.hf_config.model_type = "deepseek_v41"
+    runner.model_config.hf_config.model_type = model_type
     before = runner.req_states.num_computed_tokens_cpu.clone()
     runner._update_seq_lens_cpu(output, batch.req_ids)
     runner.num_computed_tokens_event.synchronize.assert_not_called()

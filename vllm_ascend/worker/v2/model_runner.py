@@ -101,7 +101,7 @@ from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProces
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
-    is_deepseek_v41,
+    is_deepseek_v4_family,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -1274,11 +1274,11 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # TODO: Gate CPU length synchronization by backend requirements, not
-        # speculative decoding alone. V4.1 uses device lengths; extend this
+        # speculative decoding alone. V4/V4.1 use device lengths; extend this
         # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
         if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+            self.speculator is not None and not is_deepseek_v4_family(self.model_config.hf_config)
         ) or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
@@ -1314,7 +1314,7 @@ class NPUModelRunner(GPUModelRunner):
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
         if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+            self.speculator is not None and not is_deepseek_v4_family(self.model_config.hf_config)
         ) or self.sync_spec_pp_cpu_counts:
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()

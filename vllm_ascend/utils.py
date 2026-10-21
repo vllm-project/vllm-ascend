@@ -165,6 +165,19 @@ def is_deepseek_v41(hf_config: Any) -> bool:
     )
 
 
+def is_deepseek_v4_family(hf_config: Any) -> bool:
+    """Identify V4/V4.1 configs whose attention uses device sequence lengths."""
+    model_types = ("deepseek_v4", "deepseek_v4_text", "deepseek_v41", "deepseek_v41_text")
+    if isinstance(hf_config, dict):
+        return hf_config.get("model_type") in model_types or is_deepseek_v4_family(hf_config.get("text_config"))
+    # DSpark can replace the instance model_type; preserve the config-class identity.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v4_family(hf_config.text_config))
+    )
+
+
 def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     """Prepare runtime defaults not supplied by upstream's released config."""
     for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
