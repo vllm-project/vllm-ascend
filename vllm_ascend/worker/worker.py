@@ -1521,6 +1521,15 @@ class NPUWorker(WorkerBase):
             logger.error("query NPU card %s fail: %s", self.local_rank, e)
         return
 
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        # Elastic EP state machine entry point: ElasticEPScalingState drives
+        # the worker through model_executor.collective_rpc("elastic_ep_execute",
+        # ...) (see vllm/distributed/elastic_ep/elastic_state.py). Mirrors
+        # vllm/v1/worker/gpu_worker.py Worker.elastic_ep_execute. The
+        # executor itself is mounted in __init__ (or replaced by the
+        # afd-plugin NPU executor subclass on the elastic AFD path).
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
+
 
 def parse_text_output(output) -> None:
     lines = output.strip().split("\n")
