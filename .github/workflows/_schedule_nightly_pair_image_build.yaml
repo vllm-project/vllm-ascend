@@ -58,6 +58,11 @@ on:
         type: string
         default: ''
         description: "Branch used to resolve the base image tag. Defaults to vllm_ascend_branch."
+      build_type:
+        required: false
+        type: string
+        default: 'daily'
+        description: "Matrix shape for the nightly test image: 'daily' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
       should_push:
         required: false
         type: boolean
@@ -106,9 +111,10 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: ${{ inputs.target }}
-      os: ${{ inputs.os }}
+      os_filter: ${{ inputs.os }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
     secrets:
