@@ -1401,7 +1401,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                 self.kv_cache_spec, ["layer_0", "layer_1"], self.mock_vllm_config, self.mock_device
             )
         mock_enable_dcp.assert_called_once_with()
-        self.assertTrue(builder.dcp_enabled)
+        self.assertTrue(builder.use_dcp)
         ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=True))
         with (
             patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
@@ -1420,7 +1420,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
         # Without DCP, preserve the original classification even on a PD consumer.
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
-        builder.dcp_enabled = False
+        builder.use_dcp = False
         for pcp_size in (1, 2):
             with (
                 self.subTest(pcp_size=pcp_size),

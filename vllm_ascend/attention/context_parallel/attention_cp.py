@@ -131,7 +131,7 @@ class AscendAttentionDCPMetadataBuilder(
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = enable_dcp()
         self.pcp_group = get_pcp_group()
         self._pcp_context: AscendPCPAttentionContext | None = None
         self._pcp_cache_group_idx: int | None = None
@@ -159,7 +159,7 @@ class AscendAttentionDCPMetadataBuilder(
                 not self.use_pcp
                 and (
                     self.speculative_config is not None
-                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                    or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 )
             ),
         )

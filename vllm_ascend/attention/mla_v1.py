@@ -97,8 +97,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = enable_dcp()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
             return AscendMlaDCPMetadataBuilder
@@ -116,8 +116,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = enable_dcp()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 
             return AscendMlaDCPImpl
@@ -289,7 +289,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = enable_dcp()
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -491,10 +491,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.use_pcp or self.dcp_enabled)
+                    not (self.use_pcp or self.use_dcp)
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
-                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                    or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 ),
             )
         )
@@ -796,7 +796,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+        if self.use_dcp and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
         # Keep backend-specific PCP context on the same build path as replay.
         return self.build(0, capture_metadata, **kwargs)
@@ -895,7 +895,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1179,7 +1179,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # captured tensor addresses remain valid while the values follow
             # the reloaded source weights and scales.
             self._refresh_prolog_v3_weights()
-        elif not getattr(self, "dcp_enabled", False):
+        elif not getattr(self, "use_dcp", False):
             self._prepare_prolog_v3_weights_after_loading()
 
     def _prepare_prolog_v3_weights_after_loading(self) -> None:
@@ -3012,10 +3012,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._cache_requires_prolog_v3_writer(kv_cache)
             and not self.use_pcp
             and not self.is_pcp_decode_sharded
-            and (not decode_requires_current_kv or self.dcp_enabled)
-            and (not prefill_requires_current_kv or self.dcp_enabled)
+            and (not decode_requires_current_kv or self.use_dcp)
+            and (not prefill_requires_current_kv or self.use_dcp)
             and (
-                not self.dcp_enabled
+                not self.use_dcp
                 or (
                     dcp_current_kv_buffers is not None
                     and num_decode_tokens <= dcp_current_kv_buffers[2].numel()

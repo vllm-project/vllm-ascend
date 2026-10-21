@@ -1218,7 +1218,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.enable_mlapo = False
             impl.fa_quant_layer = False
             impl.use_pcp = use_pcp
-            impl.dcp_enabled = False
+            impl.use_dcp = False
             impl.supports_prolog_v3_writer = lambda: True
             layer.impl = impl
             layer.indexer = None
@@ -1457,7 +1457,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(
             fa_quant_layer=False,
             enable_kv_nz=True,
-            dcp_enabled=False,
+            use_dcp=False,
             use_pcp=False,
             is_pcp_decode_sharded=False,
             supports_prolog_v3_writer=lambda: False,
@@ -1493,7 +1493,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
         attn_module.impl.is_pcp_decode_sharded = False
 
-        attn_module.impl.dcp_enabled = True
+        attn_module.impl.use_dcp = True
         attn_module.impl.supports_prolog_v3_writer = lambda: True
         runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
         attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
@@ -1515,7 +1515,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
         attn_module.impl._dcp_current_kv_buffers = None
-        attn_module.impl.dcp_enabled = False
+        attn_module.impl.use_dcp = False
         attn_module.impl.supports_prolog_v3_writer = lambda: True
         with patch(
             "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
