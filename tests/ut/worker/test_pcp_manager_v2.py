@@ -1020,6 +1020,52 @@ def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
     assert runner.pcp_manager_cls is AscendPCPManager
 
 
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
+    is_last_pp_rank: bool,
+) -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    local_batch = _make_local_pcp_batch()
+    global_batch = _make_global_pcp_batch()
+    manager._global_batch = global_batch
+    runner.pcp_manager = manager
+    runner.is_last_pp_rank = is_last_pp_rank
+    runner.speculator = None
+    # Dump contract from the production initializer; helpers no-op on None.
+    runner.debugger = None
+    runner._debugger_started = False
+    runner.prompt_logprobs_worker = None
+    # vLLM main added these ExecuteModelState fields.
+    state_kwargs: dict = {}
+    state_kwargs["dp_sync"] = None
+    state_kwargs["cudagraph_stats"] = None
+    runner.execute_model_state = vllm_model_runner.ExecuteModelState(
+        input_batch=local_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        **state_kwargs,
+    )
+    grammar_output = object()
+    expected_output = object()
+
+    with patch.object(
+        vllm_model_runner.GPUModelRunner,
+        "sample_tokens",
+        return_value=expected_output,
+    ) as parent_sample_tokens:
+        actual_output = runner.sample_tokens(grammar_output)
+
+    expected_batch = local_batch if is_last_pp_rank else global_batch
+    assert runner.execute_model_state.input_batch is expected_batch
+    assert actual_output is expected_output
+    parent_sample_tokens.assert_called_once_with(grammar_output)
+
+
 def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     manager = _make_replicated_pcp_manager()
     manager.vllm_config = _make_pcp_config(

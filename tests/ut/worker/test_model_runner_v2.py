@@ -1235,6 +1235,24 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.decode_query_len == 2
 
 
+def test_sample_tokens_non_last_pp_uses_global_batch():
+    runner = _make_runner()
+    runner.is_last_pp_rank = False
+    runner.speculator = None
+    global_batch = object()
+    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
+    runner.pcp_manager.global_batch = global_batch
+    state = Mock(aux_hidden_states=None)
+    replaced = object()
+    state._replace.return_value = replaced
+    runner.execute_model_state = state
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="out") as parent:
+        assert runner.sample_tokens(None) == "out"
+    state._replace.assert_called_once_with(input_batch=global_batch)
+    assert runner.execute_model_state is replaced
+    parent.assert_called_once_with(None)
+
+
 def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     runner = _make_runner()
     runner.is_last_pp_rank = True

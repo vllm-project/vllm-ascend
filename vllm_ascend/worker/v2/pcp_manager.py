@@ -288,6 +288,14 @@ class AscendPCPManager(PCPManager):
         return last_hidden_states, hidden_states
 
     @property
+    def global_batch(self) -> AscendInputBatch:
+        """Return the scheduled batch retained before PCP partitioning."""
+        global_batch = self._global_batch
+        if not isinstance(global_batch, AscendInputBatch):
+            raise RuntimeError("PCP global batch is unavailable before partition_batch().")
+        return global_batch
+
+    @property
     def is_last_pp_rank(self) -> bool:
         """Whether this PCP manager belongs to the last PP stage."""
         return get_pp_group().is_last_rank
