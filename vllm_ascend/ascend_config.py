@@ -96,6 +96,15 @@ class AscendConfig:
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)
 
+        from vllm_ascend.observability.runtime_config import (
+            build_runtime_config_from_additional,
+        )
+
+        runtime_boot = build_runtime_config_from_additional(additional_config)
+        self.runtime_config_path = runtime_boot.path
+        self.runtime_config_hot_reload = runtime_boot.hot_reload
+        self.runtime_config = runtime_boot.runtime_config
+
         # Log configuration
         self.ascend_log_path = additional_config.get(
             "ascend_log_path",
