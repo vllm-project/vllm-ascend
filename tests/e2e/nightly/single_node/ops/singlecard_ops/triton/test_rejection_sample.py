@@ -15,11 +15,13 @@ from vllm_ascend.ops.triton.reject_sample import (
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import (
     expand_pytorch,
-    rejection_greedy_sample_pytorch,
-    rejection_greedy_sample_spec_len_1_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
     sample_recovered_tokens_pytorch,
+)
+from vllm_ascend.worker.v2.sample.rejection_greedy import (
+    rejection_greedy_sample_pytorch,
+    rejection_greedy_sample_spec_len_1_pytorch,
 )
 
 KERNEL_TEST_ITERS = 1
