@@ -24,7 +24,7 @@ from contextlib import contextmanager
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.device_allocator import AllocationData, HandleType  # noqa: F401
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType  # noqa: F401
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.logger import logger
 from vllm.utils.system_utils import find_loaded_library
@@ -177,7 +177,15 @@ class CaMemAllocator(CuMemAllocator):
         # avoids rtMemcpy errors observed when releasing the mappings too early.
         torch.npu.synchronize()
 
+        has_policy_conflict = False
+
         for ptr, data in self.pointer_to_data.items():
+            if data.is_asleep:
+                requests_offload = data.tag in offload_tags
+                was_offloaded = data.cpu_backup_tensor is not None
+                if requests_offload != was_offloaded:
+                    has_policy_conflict = True
+                continue
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
@@ -192,15 +200,62 @@ class CaMemAllocator(CuMemAllocator):
             finally:
                 data.is_asleep = True
 
+        if has_policy_conflict:
+            logger.warning(
+                "CaMemAllocator: sleep cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
         gc.collect()
         torch.npu.empty_cache()
+
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Discard mapped allocations with the given tags without CPU backup."""
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        has_policy_conflict = False
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags:
+                continue
+            if data.is_asleep:
+                if data.cpu_backup_tensor is not None:
+                    has_policy_conflict = True
+                continue
+            torch.accelerator.synchronize(data.handle[0])
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            discarded_bytes += data.handle[1]
+
+        logger.info(
+            "CaMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
+        )
+
+        if has_policy_conflict:
+            logger.warning(
+                "CaMemAllocator: discard cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory."""
-        restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
+        memory, and the rest of the data will have empty memory.
+
+        Args:
+            tags: The deferrable tags (weights, kv_cache) to load back to GPU
+                memory; every other tag is always loaded back. If None, all
+                memory allocation will be loaded back to NPU memory.
+        """
+        restore_count = sum(
+            1
+            for data in self.pointer_to_data.values()
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS
+        )
         logger.info(
             "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
             restore_count,
@@ -208,7 +263,9 @@ class CaMemAllocator(CuMemAllocator):
             tags or "all",
         )
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
+            if not data.is_asleep:
+                continue
+            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
