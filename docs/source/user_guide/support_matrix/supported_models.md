@@ -56,6 +56,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |-------|---------|------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------------------|--------------------|--------------------|---------------|-----|
     | Qwen3-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 20k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
     | Qwen3-30B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen3-30B-A3B](../../tutorials/models/Qwen3-30B-A3B.md) |
+| Hy-Memory-30B-A3B | 🔵 | FP16; requires vLLM Ascend ≥ v0.27.1rc1 (v0.26.0rc2 hy_v3 output degrades on 310P); TP2 on a single card (2 chips) or across cards; weights ~60GB so TP≥2 is mandatory | ❌ | Atlas 300I DUO | 🟡 | ✅ | ✅ | ❌ | 🟡 | 🟡 | ✅ | ❌ | 🟡 | 🟡 | 4096 (tested) | [Hy-Memory-30B-A3B](../../tutorials/models/Hy-Memory-30B-A3B.md) |
 
 #### Extended Compatible Models
 
