@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Adapt the generic CANN GBSA operator to Qwen4Exp QSA semantics."""
+
 import torch
 
 from vllm_ascend.ops.gbsa import (
@@ -229,3 +232,6 @@ def qsa_gbsa_attention(
     )
     output.copy_(result)
     return output
+
+
+__all__ = ["is_qsa_gbsa_cache_compatible", "qsa_gbsa_attention"]

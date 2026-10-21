@@ -3,12 +3,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 
-from vllm_ascend.models.input_adapter import ModelInputContext
+
+@dataclass(frozen=True)
+class Qwen4ExpInputContext:
+    """Runtime state required to prepare Qwen4Exp auxiliary inputs."""
+
+    num_reqs: int
+    num_reqs_padded: int
+    is_dummy: bool
+    query_start_loc: torch.Tensor
+    num_computed_tokens: np.ndarray
+    token_ids: np.ndarray
 
 
 def pad_ple_graph_inputs(
@@ -106,7 +117,7 @@ class Qwen4ExpPLEInputAdapter:
 
     def _build_runtime_context(
         self,
-        context: ModelInputContext,
+        context: Qwen4ExpInputContext,
     ) -> torch.Tensor:
         runtime_context = np.full(
             (context.num_reqs_padded, self.context_len),
@@ -127,7 +138,7 @@ class Qwen4ExpPLEInputAdapter:
     def prepare(
         self,
         model_kwargs: dict[str, Any],
-        context: ModelInputContext,
+        context: Qwen4ExpInputContext,
     ) -> None:
         """Populate graph-stable PLE inputs for one target or dummy forward."""
         if not 0 < context.num_reqs_padded <= self.max_num_reqs:
@@ -163,4 +174,27 @@ class Qwen4ExpPLEInputAdapter:
         model_kwargs["query_start_loc"] = static_query_start_loc
 
 
-__all__ = ["Qwen4ExpPLEInputAdapter", "pad_ple_graph_inputs"]
+def build_qwen4_exp_input_adapter(
+    model_config: Any,
+    *,
+    max_num_reqs: int,
+    device: torch.device,
+) -> Qwen4ExpPLEInputAdapter | None:
+    """Build the Qwen4Exp PLE adapter when the model enables PLE."""
+    text_config = getattr(model_config, "hf_text_config", None)
+    if text_config is None or not getattr(text_config, "ple_layer_ids", None):
+        return None
+
+    return Qwen4ExpPLEInputAdapter(
+        text_config,
+        max_num_reqs=max_num_reqs,
+        device=device,
+    )
+
+
+__all__ = [
+    "Qwen4ExpInputContext",
+    "Qwen4ExpPLEInputAdapter",
+    "build_qwen4_exp_input_adapter",
+    "pad_ple_graph_inputs",
+]
