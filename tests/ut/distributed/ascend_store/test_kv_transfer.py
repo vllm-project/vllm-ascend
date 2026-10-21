@@ -25,6 +25,7 @@ import numpy as np
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
@@ -600,8 +601,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         # Uncompressed groups report only the block this put stored.
         events = t.get_kv_events()
-        self.assertEqual([event.block_hashes for event in events], [[b"h1"]])
-        self.assertEqual([event.parent_block_hash for event in events], [b"h0"])
+        self.assertEqual([event.block_hashes for event in events], [[maybe_convert_block_hash(b"h1")]])
+        self.assertEqual([event.parent_block_hash for event in events], [maybe_convert_block_hash(b"h0")])
         self.assertEqual([event.token_ids for event in events], [list(range(16, 32))])
         self.assertEqual(events[0].block_size, 16)
         store.exists.assert_called_once()
@@ -639,7 +640,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(store.put_calls, [])
         events = t.get_kv_events()
-        self.assertEqual([event.block_hashes for event in events], [[b"h0"], [b"h1"]])
+        self.assertEqual(
+            [event.block_hashes for event in events],
+            [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h1")]],
+        )
         self.assertEqual([event.block_size for event in events], [16, 16])
 
     def test_uncompressed_lookup_hits_do_not_publish_cpu_events(self):
@@ -675,8 +679,11 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
         events = t.get_kv_events()
-        self.assertEqual([event.block_hashes for event in events], [[b"h0"], [b"h2"]])
-        self.assertEqual([event.parent_block_hash for event in events], [None, b"h1"])
+        self.assertEqual(
+            [event.block_hashes for event in events],
+            [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h2")]],
+        )
+        self.assertEqual([event.parent_block_hash for event in events], [None, maybe_convert_block_hash(b"h1")])
         self.assertEqual(
             [event.token_ids for event in events],
             [list(range(128)), list(range(256, 384))],
@@ -714,7 +721,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         with self.assertLogs("vllm", level="ERROR"):
             t._handle_request(req)
-        self.assertEqual([event.block_hashes for event in t.get_kv_events()], [[b"h0"]])
+        self.assertEqual([event.block_hashes for event in t.get_kv_events()], [[maybe_convert_block_hash(b"h0")]])
 
     def test_cpu_events_skip_empty_or_partial_grains(self):
         t, _ = self._make_thread(enable_kv_event=True, block_size=128)
@@ -748,7 +755,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 events = t._build_cpu_stored_events(req, 0, block_size, ratio, block_size, [(0, block_size)])
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0].block_size, block_size)
-                self.assertEqual(events[0].block_hashes, [b"h0"])
+                self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
 
     def test_store_job_lifecycle(self):
         t, _ = self._make_thread()
