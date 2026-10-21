@@ -28,8 +28,8 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
-from vllm_ascend.worker import model_runner_v1
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1 import model_runner as model_runner_v1
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def _groups() -> list[KVCacheGroupSpec]:
@@ -298,11 +298,23 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
 @pytest.mark.parametrize("kv_transfer_config", [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")])
 def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_config) -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    runner.ascend_config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    runner.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="qwen4_exp")
+    )
+    runner.dcp_size = 1
     runner.use_sparse = False
     runner.use_compress = False
+    runner.sparse_kv_offload_enabled = False
     runner._get_layer_kv_cache_specs = Mock(return_value={})
+    runner._kv_cache_spec_attn_group_iterator = lambda: []
     runner._uses_page_strided_shared_backing = Mock(return_value=False)
     runner._allocate_int8_cache_tensor = Mock()
     layout = SimpleNamespace(slot_count=1, slot_backing_size=16, owners=[])
@@ -338,11 +350,17 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
     runner.device = torch.device("cpu")
     runner.ascend_config = SimpleNamespace(
         kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
-        cache_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
+    runner.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="qwen4_exp")
+    )
+    runner.dcp_size = 1
     runner.use_sparse = False
     runner.use_compress = False
     runner.use_hybrid_blocks = False
@@ -350,7 +368,7 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
     runner.sparse_kv_offload_enabled = False
     runner._kv_cache_spec_attn_group_iterator = lambda: [
         SimpleNamespace(
-            backend=SimpleNamespace(),
+            backend=SimpleNamespace(is_sparse=lambda: False),
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
         )
