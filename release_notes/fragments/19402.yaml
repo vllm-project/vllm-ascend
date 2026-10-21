@@ -1,0 +1,4 @@
+pr: 19402
+entries:
+  - category: bugfix
+    text: Fixed AscendStore losing allocated prefix block IDs when it loads no external tokens, including when used with MultiConnector.
