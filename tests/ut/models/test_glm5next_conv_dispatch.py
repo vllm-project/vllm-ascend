@@ -22,6 +22,7 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
     indices = torch.tensor([[1, 3, 2, 0], [2, 1, 3, 0]], dtype=torch.int32)
     starts = torch.tensor([0, 1, 2], dtype=torch.int32)
     x = torch.ones(2, 8)
+    output = x + 2
     calls = []
 
     def copy_state(cache, staging, ids, query_starts, staging_ids, *, write_back):
@@ -43,7 +44,7 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
             assert kwargs["conv_states"] is state
         first_slot = 0 if dim_first else 1
         kwargs["conv_states"][first_slot : first_slot + 2].fill_(5)
-        return x + 2
+        return output
 
     def decode(x, state, weight, **kwargs):
         kwargs["cache_indices"] = kwargs["conv_state_indices"]
@@ -54,8 +55,36 @@ def test_conv_dispatch_passes_contiguous_indices_and_stages_only_ds(monkeypatch,
     monkeypatch.setattr(conv_ops, "causal_conv1d_fn", prefill)
     monkeypatch.setattr(conv_ops, "causal_conv1d_update", decode)
     result = conv_ops.causal_conv1d(x, torch.ones(4, 8), state, starts, indices, run_mode=run_mode)
+    assert result is output
     torch.testing.assert_close(result, x + 2)
     assert calls == ([False, True] if dim_first else [])
     torch.testing.assert_close(state[1:3], torch.full_like(state[1:3], 5))
     assert torch.count_nonzero(state[0]).item() == 0
     assert torch.count_nonzero(state[3:]).item() == 0
+
+
+@pytest.mark.parametrize("run_mode", [0, 1])
+@pytest.mark.parametrize("tokens", [0, 4])
+def test_conv_without_requests_preserves_shape_and_state(monkeypatch, run_mode, tokens):
+    x = torch.full((tokens, 8), float("nan"), dtype=torch.bfloat16)
+    state = torch.full((4, 3, 8), 7, dtype=x.dtype)
+    saved = state.clone()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("An empty request batch must not run convolution or update its cache")
+
+    monkeypatch.setattr(conv_ops, "causal_conv1d_fn", unexpected)
+    monkeypatch.setattr(conv_ops, "causal_conv1d_update", unexpected)
+    monkeypatch.setattr(conv_ops, "copy_conv_state", unexpected)
+    result = conv_ops.causal_conv1d(
+        x,
+        torch.ones(4, 8, dtype=x.dtype),
+        state,
+        torch.zeros(1, dtype=torch.int32),
+        torch.empty(0, dtype=torch.int32),
+        run_mode=run_mode,
+    )
+    assert result.shape == x.shape
+    assert result.dtype == x.dtype
+    assert result.device == x.device
+    torch.testing.assert_close(state, saved)

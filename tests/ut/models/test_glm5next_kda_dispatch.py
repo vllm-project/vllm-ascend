@@ -9,9 +9,14 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
-@pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    ("speculative", "spec_only", "prefill_only"),
+    [(False, False, False), (False, False, True), (True, False, False), (True, True, False)],
+)
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
+    monkeypatch, speculative, spec_only, prefill_only, dim_first
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
@@ -29,6 +34,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
     tokens = 2 if spec_only else (5 if speculative else 4)
+    if prefill_only:
+        tokens = 3
     metadata = object.__new__(model_kda.GDNAttentionMetadata)
     values = dict(
         has_initial_state=torch.tensor([True, False]),
@@ -66,6 +73,14 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
     if spec_only:
         values.update(num_prefills=0, non_spec_token_indx=None)
+    if prefill_only:
+        values.update(
+            has_initial_state=torch.tensor([False]),
+            non_spec_query_start_loc=torch.tensor([0, 3]),
+            non_spec_state_indices_tensor=torch.tensor([5]),
+            num_decodes=0,
+            num_decode_tokens=0,
+        )
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -157,6 +172,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     calls = []
 
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
+        assert torch.isnan(out).all()
         events.append("state_write")
         calls.append("recurrent")
         assert kwargs.get("output_buffer") is None
@@ -165,6 +181,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
+        if prefill_only:
+            assert torch.isnan(out).all()
         events.append("state_write")
         calls.append("prefill")
         assert q.shape[1] == 3
@@ -175,13 +193,17 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
     qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
-    out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
+    # Prefill and mixed dispatch receive an output sized to the scheduled token
+    # groups. Start with NaNs to check that their writeback covers every row.
+    out = torch.full((1, tokens, 1, 128), float("nan"), dtype=torch.bfloat16)
     layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
-    expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
+    if not prefill_only:
+        expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
-    assert torch.count_nonzero(out[:, tokens:]) == 0
-    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    assert torch.isfinite(out).all()
+    expected_calls = ["recurrent"] if spec_only else (["prefill"] if prefill_only else ["recurrent", "prefill"])
+    assert calls == expected_calls
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
 
@@ -280,7 +302,8 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []
-        assert torch.count_nonzero(target) == 0
+        # Metadata with no tokens has no output to consume.
+        assert torch.isnan(target).all()
         return
     assert calls == [True]
     torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)
