@@ -14,7 +14,7 @@ Delivering substantial gains over Qwen3.5/Qwen3.6 across coding, professional wo
 
 This document focuses on text serving on Ascend NPUs. It describes the main validation steps for the model, including supported features, prerequisites, installation, multi-node deployment, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features.
+It is **recommended to use the `v0.30.0` version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features.
 
 ## 2 Supported Features
 
@@ -30,10 +30,13 @@ The following model weights are available:
 
 |  Weight Version                              | Hardware Requirements | Download Links |
 |----------------------------------------------|-----------------------|----------------|
-| `Qwen3.8-27B` (BF16 version)                 | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node <br>or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
-| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 950PR Products (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
+| `Qwen3.8-27B` (BF16 version)                 | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node <br>or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
+| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 950PR Products (128GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
 | `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
+| `Qwen3.8-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node |  |
 | `Qwen3.8-27B-w8a8-310p` (Quantized version)  | 1 Atlas 300I DUO  | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p) |
+
+- `Qwen3.8-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -50,7 +53,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -82,7 +85,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "A3 series"
+=== "Atlas 800I A3"
 
     Start the docker image on each node.
 
@@ -123,7 +126,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "A2 series"
+=== "Atlas 800I A2"
 
     Start the docker image on each node.
 
@@ -230,14 +233,14 @@ Before starting the service:
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=512
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     # To reduce memory fragmentation and avoid out of memory
 
-    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8) or a local directory path
     # Ensure the model path matches the directory recorded during download
 
     vllm serve $MODEL_PATH \
@@ -246,6 +249,7 @@ Before starting the service:
         --data-parallel-size 1 \
         --tensor-parallel-size 1 \
         --quantization ascend \
+        --kv-cache-dtype mxfp8 \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
         --max-model-len 131072 \
@@ -255,7 +259,7 @@ Before starting the service:
         --gpu-memory-utilization 0.85 \
         --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}'
+        --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true}'
     ```
 
     Key Parameter Descriptions:
@@ -269,6 +273,8 @@ Before starting the service:
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
+    - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.8-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
+    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.8-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
     - `--enable-prefix-caching` enables automatic prefix caching.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
@@ -328,9 +334,9 @@ Before starting the service:
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
     - `--additional-config '{"enable_cpu_binding":true}'` binds OMP threads to fixed CPU cores. On a single 950PR Products this is the single largest lever measured: single-stream decode goes from 32 tok/s without it to 63 tok/s with it.
 
-=== "Atlas 800 A3 / Atlas 800 A2"
+=== "Atlas 800I A3 / Atlas 800I A2"
 
-    The following example is for Atlas 800 A3 / Atlas 800 A2.
+    The following example is for Atlas 800I A3 / Atlas 800I A2.
 
     ```bash
     #!/bin/sh
@@ -542,6 +548,8 @@ After about several minutes, you can get the performance evaluation result.
 > **Note**: The current documentation focuses on the rapid adaptation and validation of the Qwen3.8-27B model on Ascend NPUs. Performance tuning results have not yet been fully verified. Recommended configurations for typical scenarios (e.g., long context, low latency, and high throughput) will be supplemented and updated here once the corresponding validation is completed. In the meantime, please refer to [Section 9.2](#92-tuning-guidelines) for general tuning guidance.
 >
 > **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
+>
+> **950PR&950DT Products**: The `Qwen3.8-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU on 950DT Products, 128 GB on 950PR Products). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.8-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
 ### 9.2 Tuning Guidelines
 
