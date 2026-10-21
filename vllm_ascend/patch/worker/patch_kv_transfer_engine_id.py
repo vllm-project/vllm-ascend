@@ -25,23 +25,18 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-def _apply_patch() -> None:
-    original_sync = kv_transfer_state._sync_engine_id_across_tp
-    if getattr(original_sync, "_ascend_pcp_engine_id_sync", False):
-        return
-
-    @wraps(original_sync)
-    def sync_engine_id_with_pcp(vllm_config: "VllmConfig") -> None:
-        original_sync(vllm_config)
-        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-            kv_config = vllm_config.kv_transfer_config
-            assert kv_config is not None
-            # TP/PP broadcasts leave independent PCP replicas with different
-            # IDs. Select PCP rank 0 without crossing DP engine boundaries.
-            kv_config.engine_id = get_pcp_group().broadcast_object(kv_config.engine_id, src=0)
-
-    sync_engine_id_with_pcp._ascend_pcp_engine_id_sync = True
-    kv_transfer_state._sync_engine_id_across_tp = sync_engine_id_with_pcp
+_original_sync_engine_id_across_tp = kv_transfer_state._sync_engine_id_across_tp
 
 
-_apply_patch()
+@wraps(_original_sync_engine_id_across_tp)
+def sync_engine_id_with_pcp(vllm_config: "VllmConfig") -> None:
+    _original_sync_engine_id_across_tp(vllm_config)
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        kv_config = vllm_config.kv_transfer_config
+        assert kv_config is not None
+        # TP/PP broadcasts leave independent PCP replicas with different
+        # IDs. Select PCP rank 0 without crossing DP engine boundaries.
+        kv_config.engine_id = get_pcp_group().broadcast_object(kv_config.engine_id, src=0)
+
+
+kv_transfer_state._sync_engine_id_across_tp = sync_engine_id_with_pcp

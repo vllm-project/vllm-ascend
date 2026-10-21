@@ -1026,7 +1026,7 @@
 #       IDs remain different across PCP replicas and Mooncake rejects worker
 #       handshake metadata belonging to the same logical engine.
 #    How:
-#       Install an idempotent wrapper during each NPU worker's initialization,
+#       Replace the function at module import during NPU worker initialization,
 #       before ensure_kv_transfer_initialized creates the worker connector.
 #       Run the upstream TP/PP synchronization, then broadcast the resulting
 #       ID from PCP rank 0 when PCP > 1. The final ID comes from PP0/PCP0/TP0;
