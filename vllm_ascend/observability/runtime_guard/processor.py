@@ -233,7 +233,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """All-rank runtime_config sync. Must not be skipped on early PP.
 
         Manual-dump arming is gated by ``sync_for_step`` /
-        ``end_of_wave_sync(allow_manual_dump=…)``, not by this method.
+        ``end_of_wave_sync(has_scheduled_tokens=…)``, not by this method.
         """
         logger.debug("[runtime_guard sync] enter stage=refresh_config")
         prev_so = self._scheduler_output_for_step
@@ -253,7 +253,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def sync_for_step(
         self,
         *,
-        allow_manual_dump: bool = True,
+        has_scheduled_tokens: bool = True,
         scheduler_output: Any | None = None,
     ) -> None:
         """Lockstep runtime_guard sync for one engine wave (real step or idle dummy).
@@ -286,27 +286,29 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             except Exception:
                 pp = "?"
             logger.debug(
-                "[runtime_guard sync] enter sync_for_step allow_manual_dump=%s dp=%s tp=%s pp=%s",
-                allow_manual_dump,
+                "[runtime_guard sync] enter sync_for_step has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
+                has_scheduled_tokens,
                 dp,
                 tp,
                 pp,
             )
         self._scheduler_output_for_step = scheduler_output
         try:
-            self.wave_tracker.advance(allow_manual_dump=allow_manual_dump)
+            self.wave_tracker.advance(has_scheduled_tokens=has_scheduled_tokens)
             cfg = self.runtime_config
-            # dump_only: no detectors / manual trigger, hot-reload off; dump may
-            # still be on (not fully off). No config bus — claim or drop.
-            dump_only = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
-            if dump_only and not cfg.hot_reload_enabled:
+            # No detectors, no manual dump, hot-reload off: nothing to broadcast.
+            # Claim already-armed auto-dump jobs, or drop them if dump is inactive.
+            skip_config_bus = (
+                not cfg.hot_reload_enabled and not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
+            )
+            if skip_config_bus:
                 if cfg.dump_enabled():
                     self._claim_dump_jobs_to_deferred_via_tp()
                 elif self._kv_dump_jobs:
                     # Dump inactive: drop with per-arm refund (quota was
                     # consumed at arm time; no D2H will happen).
                     self._drop_pending_dump_jobs()
-                self._end_of_wave_sync_if_no_sample(allow_manual_dump=allow_manual_dump)
+                self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
                 return
             self.refresh_config(scheduler_output=scheduler_output)
             if self.needs_sample_phase_hooks():
@@ -315,23 +317,23 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 if finished and int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) == 0:
                     self.mark_finished(finished)
                 self._reap_finished_requests()
-            self._end_of_wave_sync_if_no_sample(allow_manual_dump=allow_manual_dump)
+            self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
         finally:
             self._scheduler_output_for_step = None
             if debug_on:
                 logger.debug(
-                    "[runtime_guard sync] leave sync_for_step allow_manual_dump=%s dp=%s tp=%s pp=%s",
-                    allow_manual_dump,
+                    "[runtime_guard sync] leave sync_for_step has_scheduled_tokens=%s dp=%s tp=%s pp=%s",
+                    has_scheduled_tokens,
                     dp,
                     tp,
                     pp,
                 )
 
-    def _end_of_wave_sync_if_no_sample(self, *, allow_manual_dump: bool) -> None:
+    def _end_of_wave_sync_if_no_sample(self, *, has_scheduled_tokens: bool) -> None:
         """Safety-net end-of-wave when this wave will not ``run_sample_phase``."""
-        if allow_manual_dump:
+        if has_scheduled_tokens:
             return
-        self.end_of_wave_sync(allow_manual_dump=False)
+        self.end_of_wave_sync(has_scheduled_tokens=False)
 
     def _cache_prompt_token_ids_from_scheduler_output(
         self,
@@ -392,7 +394,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def should_check_after_spec(self) -> bool:
         if not self.action_executor.can_run_detection():
             return False
-        return self.detectors.any_enabled_for_spec()
+        return self.detectors.spec_acceptance_enabled()
 
     def needs_sample_phase_hooks(self) -> bool:
         """True when sample-phase runtime_guard hooks must run (else pure ``sample_fn``)."""
@@ -488,7 +490,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if not self.needs_sample_phase_hooks():
             result = sample_fn()
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
-            self.end_of_wave_sync(allow_manual_dump=True)
+            self.end_of_wave_sync(has_scheduled_tokens=True)
             return result
 
         # Runner's sample work (sample + draft + bookkeeping + output + profiling + eplb)
@@ -532,7 +534,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 ),
             )
         # Hook 7: end-of-wave config+dump gate (collectives — no soft-fail).
-        self.end_of_wave_sync(allow_manual_dump=True)
+        self.end_of_wave_sync(has_scheduled_tokens=True)
         return result
 
     def check_before_sample(
