@@ -110,10 +110,10 @@ class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
         )
 
 
-class TestModelInputAdapterDispatch(unittest.TestCase):
+class TestQwen4ExpInputAdapterDispatch(unittest.TestCase):
     def test_runner_delegates_auxiliary_inputs(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.model_input_adapter = MagicMock()
+        runner.qwen4_exp_input_adapter = MagicMock()
         runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1], dtype=torch.int32))
         runner.input_batch = SimpleNamespace(
             num_computed_tokens_cpu=np.array([3], dtype=np.int32),
@@ -121,13 +121,13 @@ class TestModelInputAdapterDispatch(unittest.TestCase):
         )
         model_kwargs = {}
 
-        runner._maybe_add_model_inputs(
+        runner._maybe_add_qwen4_exp_inputs(
             model_kwargs,
             num_reqs=1,
             num_reqs_padded=1,
         )
 
-        call_args = runner.model_input_adapter.prepare.call_args.args
+        call_args = runner.qwen4_exp_input_adapter.prepare.call_args.args
         self.assertIs(call_args[0], model_kwargs)
         self.assertEqual(call_args[1].num_reqs, 1)
         self.assertEqual(call_args[1].num_reqs_padded, 1)

@@ -140,3 +140,11 @@ def generic_block_sparse_attention(
         is_consistent_topk=is_consistent_topk,
         attention_out_dtype=attention_out_dtype,
     )
+
+
+__all__ = [
+    "GBSAMaskMode",
+    "GBSAQuantMode",
+    "generic_block_sparse_attention",
+    "generic_block_sparse_attention_metadata",
+]
