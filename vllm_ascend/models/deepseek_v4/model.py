@@ -66,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -334,16 +335,20 @@ class DeepseekV4MoE(nn.Module):
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         self.gate.bias_vl = None
         if getattr(config, "vision_n_layers", 0) > 0:
+            # Deterministic dummy-startup value. Real checkpoints may supply
+            # a trained VL correction bias; load_weights replaces this value.
             self.gate.bias_vl = nn.Parameter(
-                torch.empty(
+                torch.zeros(
                     config.n_routed_experts,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
             )
         if self.hash:
-            # MC2 dispatch/combine fails
-            # in the dummy profile run if a token repeats an expert id
+            # MC2 dispatch/combine fails in the dummy profile run if a token
+            # repeats an expert id, so spread the hash-router table
+            # deterministically instead of using empty/zero storage (zeros also
+            # route every token to the same expert set).
             token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
             expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
             token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
@@ -355,7 +360,9 @@ class DeepseekV4MoE(nn.Module):
             self.gate.e_score_correction_bias = None
         else:
             self.gate.tid2eid = None
-            self.gate.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
+            # Dummy startup and intentionally omitted bias tensors need a defined
+            # value. Checkpoint/update loads still replace this initial value.
+            self.gate.e_score_correction_bias = nn.Parameter(torch.zeros(config.n_routed_experts, dtype=torch.float32))
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
@@ -807,7 +814,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
-
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
@@ -905,6 +911,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
+
+        self._register_sleep_buffers()
+
+    def _register_sleep_buffers(self) -> None:
+        # Expose weightless RMSNorm identity tensors to the existing Worker backup.
+        # Keep the original object/address used by the kernel, without adding a
+        # checkpoint parameter or a second CPU snapshot implementation.
+        for module in self.modules():
+            if isinstance(module, RMSNorm) and not module.has_weight:
+                module.register_buffer("_sleep_norm_weight", module.weight, persistent=False)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1057,6 +1073,35 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     }
     model_cls = DeepseekV4Model
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.hc_head.hc_": "model.hc_head_"},
+        orig_to_new_substr={
+            "self_attn.compressor.indexer.position_bias": "self_attn.indexer.compressor.ape",
+            "self_attn.compressor.indexer.kv_proj.weight": "self_attn.indexer.compressor.wkv.weight",
+            "self_attn.compressor.indexer.gate_proj.weight": "self_attn.indexer.compressor.wgate.weight",
+            "self_attn.compressor.indexer.kv_norm.weight": "self_attn.indexer.compressor.norm.weight",
+            "self_attn.compressor.indexer.q_b_proj.weight": "self_attn.indexer.wq_b.weight",
+            "self_attn.compressor.indexer.scorer.weights_proj.weight": "self_attn.indexer.weights_proj.weight",
+            "self_attn.compressor.position_bias": "self_attn.compressor.ape",
+            "self_attn.compressor.kv_proj.weight": "self_attn.compressor.wkv.weight",
+            "self_attn.compressor.gate_proj.weight": "self_attn.compressor.wgate.weight",
+            "self_attn.compressor.kv_norm.weight": "self_attn.compressor.norm.weight",
+            "self_attn.q_a_proj.weight": "self_attn.wq_a.weight",
+            "self_attn.q_a_norm.weight": "self_attn.q_norm.weight",
+            "self_attn.q_b_proj.weight": "self_attn.wq_b.weight",
+            "self_attn.kv_proj.weight": "self_attn.wkv.weight",
+            "self_attn.o_a_proj.weight": "self_attn.wo_a.weight",
+            "self_attn.o_b_proj.weight": "self_attn.wo_b.weight",
+            ".attn_hc.fn": ".hc_attn_fn",
+            ".attn_hc.base": ".hc_attn_base",
+            ".attn_hc.scale": ".hc_attn_scale",
+            ".ffn_hc.fn": ".hc_ffn_fn",
+            ".ffn_hc.base": ".hc_ffn_base",
+            ".ffn_hc.scale": ".hc_ffn_scale",
+            ".self_attn.sinks": ".self_attn.attn_sink",
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1179,7 +1224,22 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         heads_per_rank = self.config.num_attention_heads // tp_size
         head_start = tp_rank * heads_per_rank
 
-        for name, loaded_weight in weights:
+        def unpack_experts(weights):
+            for name, weight in weights:
+                if name.endswith(".mlp.experts.gate_up_proj"):
+                    prefix = name.removesuffix("gate_up_proj")
+                    gate, up = weight.chunk(2, dim=1)
+                    for expert in range(weight.shape[0]):
+                        yield f"{prefix}{expert}.gate_proj.weight", gate[expert].contiguous()
+                        yield f"{prefix}{expert}.up_proj.weight", up[expert].contiguous()
+                elif name.endswith(".mlp.experts.down_proj"):
+                    prefix = name.removesuffix("down_proj")
+                    for expert in range(weight.shape[0]):
+                        yield f"{prefix}{expert}.down_proj.weight", weight[expert].contiguous()
+                else:
+                    yield name, weight
+
+        for name, loaded_weight in unpack_experts(self.hf_to_vllm_mapper.apply(weights)):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model

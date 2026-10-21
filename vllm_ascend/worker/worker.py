@@ -20,7 +20,7 @@
 import copy
 import gc
 import logging
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
@@ -341,6 +341,14 @@ class NPUWorker(WorkerBase):
                 "automatically."
             )
         allocator = CaMemAllocator.get_instance()
+        # Free any ordinary-allocator cache blocks (e.g. layerwise reload
+        # temporaries, packed IPC consumer clones) BEFORE re-mapping the
+        # sleep-mode allocations.  Without this, ``wake_up(tags=['kv_cache'])``
+        # after a weight update hits aclrtMallocPhysical OOM (207001) because
+        # the physical memory is still held by the reclaimable cache.
+        gc.collect()
+        with suppress(Exception):  # pluggable allocator may reject it
+            torch.npu.empty_cache()
         allocator.wake_up(tags=tags)
 
         # Do not access or consume saved weights when only the KV pool wakes.

@@ -149,6 +149,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # Set from the trainer-supplied init info at the handshake; defaults
         # are only for the (unreachable) receive-before-init case.
         self.packed = False
+        self._packed_pending: list[tuple[str, torch.Tensor]] = []
 
     def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
         """Record the trainer-supplied wire params so the worker decodes
@@ -156,17 +157,18 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
+        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
+        self._packed_pending = []
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
+        # vLLM processes a complete update, independently of IPC chunk boundaries.
+        pending, self._packed_pending = self._packed_pending, []
+        if pending:
+            self.model.load_weights(pending)
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
@@ -225,7 +227,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        if self.packed:
+            self._packed_pending.extend(weights)
+        else:
+            self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass

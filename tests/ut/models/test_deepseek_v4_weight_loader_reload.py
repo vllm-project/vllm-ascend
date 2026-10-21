@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.model_loader.reload import meta as reload_meta
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -67,6 +68,8 @@ class _SinkOnlyModel(nn.Module):
         self.num_redundant_experts = 0
         self.quant_config = None
         self.rotation_path = None
+
+    hf_to_vllm_mapper = target_module.AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper
 
     # Keep the actual predicates/mappings, including the MTP block container.
     no_mtp_block_in_name = mtp_module.DeepSeekV4MTP.no_mtp_block_in_name
@@ -172,8 +175,12 @@ def test_attention_sink_layerwise_reload(sink_path, dsa_cp):
 
     for offset in (100, 200):
         initialize_layerwise_reload(case.model)
-        assert case.attention.attn_sink.is_meta
-        assert case.attention.attn_sink.weight_loader.__name__ == "online_process_loader"
+        if "attn_sink" in reload_meta.SKIP_LOAD_TENSORS:
+            assert not case.attention.attn_sink.is_meta
+            assert case.attention.attn_sink is original_param
+        else:
+            assert case.attention.attn_sink.is_meta
+            assert case.attention.attn_sink.weight_loader.__name__ == "online_process_loader"
         new_weight = initial_weight + offset
         assert case.load(new_weight) == {case.parameter_name}
         finalize_layerwise_reload(case.model, SimpleNamespace(dtype=torch.float32))

@@ -1,0 +1,9 @@
+pr: 19248
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek-V4 Flash Vision weight updates across sleep and wake,
+      including packed NPU IPC transfers and explicitly retained routing
+      parameters. Runtime buffers use the existing Worker backup and restore
+      path while the standard weights pool releases memory during sleep.
+    model: deepseek-v4-flash-vision

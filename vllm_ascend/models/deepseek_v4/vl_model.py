@@ -268,6 +268,8 @@ class AscendDeepseekV4ForConditionalGeneration(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
+        # Marker values can change on every update; rebuild the derived table.
+        self._sentinel_table = None
         params = dict(self.named_parameters())
         loaded_vision: set[str] = set()
 

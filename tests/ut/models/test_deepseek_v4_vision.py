@@ -80,8 +80,7 @@ def test_sentinel_table_rebuilt_on_device_change(vision_wrapper):
     vision_wrapper.embed_input_ids(ids)
     assert vision_wrapper._sentinel_table.device.type == "cpu"
 
-    # The table is a plain attribute and does not follow nn.Module.to();
-    # a device move after the first forward must invalidate the cache.
+    # An explicitly requested device change must rebuild the cache.
     meta_table = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("meta"))
     assert meta_table.device.type == "meta"
     assert vision_wrapper._sentinel_table is meta_table
@@ -100,3 +99,20 @@ def test_embed_input_ids_without_image_params_is_passthrough(vision_wrapper):
     base = vision_wrapper.language_model.embed_input_ids.return_value
     assert torch.equal(out, base)
     assert vision_wrapper._sentinel_table is None
+
+
+def test_weight_updates_invalidate_sentinel_cache(vision_wrapper):
+    model = vision_wrapper
+    model.language_model.load_weights.side_effect = lambda weights: set(name for name, _ in weights)
+    names = ("image_start", "image_pad", "image_newline", "image_end")
+    for update in (10, 20):
+        previous = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+        payload = [(name, torch.full_like(getattr(model, name), update + i)) for i, name in enumerate(names)]
+        assert model.load_weights(payload) == set(names)
+        assert model._sentinel_table is None
+        refreshed = model._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+        expected = torch.stack(
+            [model.image_start, model.image_pad, model.image_pad, model.image_newline, model.image_end]
+        )
+        assert refreshed is not previous
+        torch.testing.assert_close(refreshed, expected.to(torch.bfloat16))

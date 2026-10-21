@@ -328,3 +328,92 @@ def test_hash_layer_router_bias_is_skipped_when_unused(monkeypatch):
     assert "model.layers.0.mlp.gate.e_score_correction_bias" not in loaded_params
     assert "model.layers.1.mlp.gate.e_score_correction_bias" in loaded_params
     assert torch.allclose(dense_layer.mlp.gate.e_score_correction_bias, dense_bias)
+
+
+def test_runtime_hook_keeps_latest_loaded_parameters(monkeypatch):
+    """Reloaded parameters must not revert to a snapshot of the first load."""
+    cfg = SimpleNamespace(
+        n_routed_experts=4,
+        n_shared_experts=None,
+        num_attention_heads=2,
+        vocab_size=4,
+        num_experts_per_tok=2,
+    )
+    layer = _make_gate_owner(with_correction_bias=False, num_experts=4)
+    layer.layer_idx = 0
+    layer.mlp.gate.tid2eid = nn.Parameter(torch.zeros(4, 2, dtype=torch.int32), requires_grad=False)
+    layer.mlp.gate.bias_vl = nn.Parameter(torch.zeros(4))
+    layer.self_attn = nn.Module()
+    layer.self_attn.attn_sink = nn.Parameter(torch.zeros(2))
+    inner = deepseek_v4_module.DeepseekV4Model.__new__(deepseek_v4_module.DeepseekV4Model)
+    nn.Module.__init__(inner)
+    inner.config = cfg
+    inner.layers = nn.ModuleList([layer])
+    inner.embed_tokens = nn.Embedding(4, 2)
+    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
+    nn.Module.__init__(model)
+    model.model = inner
+    model.config = cfg
+    model.num_redundant_experts = 0
+    monkeypatch.setattr(deepseek_v4_module, "fused_moe_make_expert_params_mapping", lambda *a, **k: [])
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_v4_module, "get_ascend_config", lambda: SimpleNamespace(mix_placement=False))
+    monkeypatch.setattr(deepseek_v4_module.rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False)
+    monkeypatch.setattr(deepseek_v4_module, "enable_dsa_cp", lambda: False)
+    table = torch.arange(8, dtype=torch.int32).reshape(4, 2) % 4
+    sink = torch.tensor([3.0, 5.0])
+    model.load_weights(
+        [
+            ("model.embed_tokens.weight", torch.ones(4, 2)),
+            ("model.layers.0.mlp.gate.tid2eid", table),
+            ("model.layers.0.self_attn.attn_sink", sink),
+        ]
+    )
+
+    new_table = table.roll(1, dims=0)
+    new_sink = sink + 7
+    pointers = (layer.mlp.gate.tid2eid.data_ptr(), layer.self_attn.attn_sink.data_ptr())
+    model.load_weights(
+        [
+            ("model.layers.0.mlp.gate.tid2eid", new_table),
+            ("model.layers.0.self_attn.attn_sink", new_sink),
+        ]
+    )
+    inner._register_sleep_buffers()
+    assert torch.equal(layer.mlp.gate.tid2eid, new_table)
+    assert torch.equal(layer.self_attn.attn_sink, new_sink)
+    assert (layer.mlp.gate.tid2eid.data_ptr(), layer.self_attn.attn_sink.data_ptr()) == pointers
+    assert not hasattr(inner, "_runtime_tensor_backup")
+
+
+@pytest.mark.parametrize("value", [0.125, 0.375])
+def test_weightless_norm_uses_worker_buffer_retention(monkeypatch, value):
+    class RuntimeNorm(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.has_weight = False
+            self.weight = torch.ones(3)
+
+    monkeypatch.setattr(deepseek_v4_module, "RMSNorm", RuntimeNorm)
+    model = deepseek_v4_module.DeepseekV4Model.__new__(deepseek_v4_module.DeepseekV4Model)
+    nn.Module.__init__(model)
+    model.runtime_norm = RuntimeNorm()
+    gate = nn.Module()
+    gate.tid2eid = nn.Parameter(torch.tensor([[2, 0], [1, 2]]), requires_grad=False)
+    for name in ("bias_vl", "e_score_correction_bias", "attn_sink"):
+        gate.register_parameter(name, nn.Parameter(torch.full((3,), value)))
+    model.gate = gate
+    before = {n: (p.detach().clone(), p.data_ptr()) for n, p in model.named_parameters()}
+    weight = model.runtime_norm.weight
+    for _ in range(2):
+        model._register_sleep_buffers()
+        assert model.runtime_norm._sleep_norm_weight is weight
+        assert "runtime_norm._sleep_norm_weight" in dict(model.named_buffers())
+        assert "runtime_norm._sleep_norm_weight" not in model.state_dict()
+        assert model.runtime_norm.weight is weight
+        for name, param in model.named_parameters():
+            expected, pointer = before[name]
+            torch.testing.assert_close(param, expected)
+            assert param.data_ptr() == pointer
+    assert not hasattr(model, "_runtime_tensor_backup")
