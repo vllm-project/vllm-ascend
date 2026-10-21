@@ -1463,6 +1463,7 @@ def _run_prepare_inputs(
     *,
     prefill_inputs=None,
     combine_tokens=None,
+    input_batch_factory=None,
 ):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
@@ -1484,7 +1485,11 @@ def _run_prepare_inputs(
             "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
-        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.AscendInputBatch",
+            return_value=batch,
+            side_effect=input_batch_factory,
+        ),
         patch.object(
             vllm_model_runner,
             "pcp",
@@ -1501,6 +1506,46 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+def test_prepare_inputs_forwards_pp_prefill_caps_in_request_order():
+    runner, scheduler_output, batch_state, batch_desc = _prepare_inputs_runner(use_pp=True)
+    runner.req_states.max_seq_len = np.array([101, 202, 303, 404], dtype=np.int32)
+    runner.req_states.req_id_to_index = {"r3": 3, "r1": 1}
+    batch_state.req_ids = ["r3", "r1"]
+    batch_state.idx_mapping_np = np.array([3, 1], dtype=np.int32)
+    scheduler_output.num_scheduled_tokens = {"r3": 2, "r1": 2}
+    # Exercise the real dataclass constructor, including the newly forwarded
+    # keyword, rather than copying the gather expression into the test.
+    factory = Mock(wraps=AscendInputBatch)
+
+    output, _ = _run_prepare_inputs(runner, scheduler_output, batch_state, batch_desc, input_batch_factory=factory)
+
+    assert isinstance(output, AscendInputBatch)
+    np.testing.assert_array_equal(factory.call_args.kwargs["max_seq_len_np"], [404, 202])
+    np.testing.assert_array_equal(output.max_seq_len_np, [404, 202])
+    np.testing.assert_array_equal(output.idx_mapping_np, [3, 1])
+    assert output.max_seq_len_np.dtype == np.int32
+
+
+@pytest.mark.parametrize(("use_pp", "has_prefill"), [(False, True), (False, False), (True, False)])
+def test_prepare_inputs_skips_cap_gather_without_pp_prefill(use_pp, has_prefill):
+    runner, scheduler_output, batch_state, batch_desc = _prepare_inputs_runner(use_pp=use_pp)
+    batch_state.has_prefill = has_prefill
+    if not has_prefill:
+        batch_state.is_prefilling_np[:] = False
+        batch_state.num_computed_prefill_tokens_np = batch_state.prefill_len_np.copy()
+    max_seq_len = MagicMock()
+    max_seq_len.__getitem__.side_effect = AssertionError("No request-cap gather is needed")
+    runner.req_states.max_seq_len = max_seq_len
+    factory = Mock(wraps=AscendInputBatch)
+
+    output, _ = _run_prepare_inputs(runner, scheduler_output, batch_state, batch_desc, input_batch_factory=factory)
+
+    assert isinstance(output, AscendInputBatch)
+    assert factory.call_args.kwargs["max_seq_len_np"] is None
+    assert output.max_seq_len_np is None
+    max_seq_len.__getitem__.assert_not_called()
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
