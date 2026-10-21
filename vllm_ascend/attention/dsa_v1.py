@@ -27,7 +27,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
@@ -1164,9 +1164,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_topk_length: torch.Tensor,
         ori_topk: int,
     ) -> torch.Tensor:
-        metadata_kwargs = get_dsa_attn_kv_plan(self.vllm_config).get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device
-        )
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         call_kwargs = dict(
             num_heads_q=self.model_config.hf_config.num_attention_heads
             // self.vllm_config.parallel_config.tensor_parallel_size,
@@ -1187,7 +1186,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         call_kwargs.update(metadata_kwargs)
         call_kwargs.update(_draft_sparse_flash_mla_kwargs())
-        return sparse_flash_mla_metadata(**call_kwargs)
+        return kv_plan.get_dsa_sparse_attn_metadata_op()(**call_kwargs)
 
     def _build_qli_metadata(
         self,

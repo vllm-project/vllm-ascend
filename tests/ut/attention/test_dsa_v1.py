@@ -301,7 +301,6 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
     plan.layout_kv = "PA_BBND"
 
     with (
-        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
         patch(
             "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
             return_value=use_sparse_flash,
@@ -386,12 +385,11 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
     metadata_op = MagicMock(return_value=sas_result)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_kwargs={},
-        get_dsa_sparse_attn_metadata_op=MagicMock(),
+        get_dsa_sparse_attn_metadata_op=metadata_op,
     )
     plan.layout_kv = "PA_BBND"
 
     with (
-        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
