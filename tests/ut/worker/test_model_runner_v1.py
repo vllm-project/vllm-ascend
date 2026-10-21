@@ -83,6 +83,7 @@ class TestPPSequenceParallelLayout(unittest.TestCase):
         for num_tokens in (17, runner.max_num_tokens):
             dummy = runner._get_pp_intermediate_tensors(num_tokens)
             self.assertEqual(dummy["hidden_states"].shape, (num_tokens, 4))
+            assert runner.intermediate_tensors is not None
             self.assertEqual(runner.intermediate_tensors["hidden_states"].shape, (runner.max_num_tokens, 4))
         factory.assert_called_once_with(batch_size=runner.max_num_tokens, dtype=runner.dtype, device=runner.device)
 
