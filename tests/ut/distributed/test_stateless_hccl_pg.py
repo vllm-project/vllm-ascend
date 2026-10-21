@@ -7,7 +7,7 @@ elastic EP creates *standby* groups via
 which delegates device PG construction to
 ``NPUPlatform.stateless_init_device_torch_dist_pg``.
 
-Before building any elastic AFD machinery on top of it, we must prove on
+Before building any elastic scaling machinery on top of it, we must prove on
 real hardware that a stateless HCCL process group can:
 
 1. be created outside torch.distributed's global world state,

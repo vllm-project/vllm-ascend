@@ -973,7 +973,7 @@ class NPUWorker(WorkerBase):
         )
         return output
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
@@ -993,7 +993,10 @@ class NPUWorker(WorkerBase):
             empty_cache_context = nullcontext()
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
-            self.model_runner.load_model()
+            # Elastic EP standby workers load dummy weights first and receive
+            # the real weights over the standby groups afterwards (mirrors
+            # vllm/v1/worker/gpu_worker.py Worker.load_model).
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1525,9 +1528,8 @@ class NPUWorker(WorkerBase):
         # Elastic EP state machine entry point: ElasticEPScalingState drives
         # the worker through model_executor.collective_rpc("elastic_ep_execute",
         # ...) (see vllm/distributed/elastic_ep/elastic_state.py). Mirrors
-        # vllm/v1/worker/gpu_worker.py Worker.elastic_ep_execute. The
-        # executor itself is mounted in __init__ (or replaced by the
-        # afd-plugin NPU executor subclass on the elastic AFD path).
+        # vllm/v1/worker/gpu_worker.py Worker.elastic_ep_execute; the
+        # executor itself is mounted in __init__.
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
