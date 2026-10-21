@@ -62,6 +62,11 @@ on:
         required: false
         default: ''
         description: 'Filename suffix for release coverage, such as v0.30.0rc2. Empty keeps coverage.tar.'
+      coverage-upload:
+        type: string
+        required: false
+        default: obs
+        description: 'Publish assembled coverage to obs, or to a workflow artifact for verification.'
       timeout-minutes:
         type: number
         required: false
@@ -441,6 +446,7 @@ jobs:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
         OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
         COVERAGE_FILE_SUFFIX: ${{ inputs.coverage-file-suffix }}
+        COVERAGE_BASE_REF: ${{ inputs.base_ref }}
       steps:
         - name: Checkout vllm-ascend source code
           uses: actions/checkout@v7
@@ -594,7 +600,55 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
+        - name: Record current release coverage branch
+          run: |
+            python3 - <<'PY'
+            import os
+
+            def is_release_branch(name: str) -> bool:
+                prefix = "releases/v"
+                if not name.startswith(prefix):
+                    return False
+                version = name[len(prefix):]
+                if not version or not version[0].isdigit():
+                    return False
+                allowed = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-")
+                return all(char in allowed for char in version)
+
+            base_ref = os.environ.get("COVERAGE_BASE_REF", "")
+            pointer = "coverage_release_branch.txt"
+            if not is_release_branch(base_ref):
+                print(f"Skip release branch pointer for {base_ref or 'main'}")
+                raise SystemExit(0)
+            with open(pointer, "w", encoding="utf-8") as handle:
+                handle.write(base_ref + "\n")
+            print(f"Recorded current release coverage branch: {base_ref}")
+            PY
+
+        - name: Stage coverage artifact
+          if: ${{ inputs.coverage-upload == 'artifact' }}
+          run: |
+            set -euo pipefail
+            mkdir -p coverage-artifact
+            cp coverage.tar "coverage-artifact/$(basename "${COVERAGE_OBJECT_TAR}")"
+            cp coverage_version.txt "coverage-artifact/$(basename "${COVERAGE_OBJECT_VERSION}")"
+            cp test_case_map.json "coverage-artifact/$(basename "${COVERAGE_OBJECT_MAP}")"
+            if [ -s coverage_release_branch.txt ]; then
+              cp coverage_release_branch.txt coverage-artifact/coverage_release_branch.txt
+            fi
+            ls -lh coverage-artifact
+
+        - name: Upload coverage artifact
+          if: ${{ inputs.coverage-upload == 'artifact' }}
+          uses: actions/upload-artifact@v7
+          with:
+            name: precision-test-coverage${{ inputs.coverage-file-suffix && format('-{0}', inputs.coverage-file-suffix) || '' }}
+            path: coverage-artifact
+            if-no-files-found: error
+            retention-days: 14
+
         - name: Upload coverage to OBS
+          if: ${{ inputs.coverage-upload != 'artifact' }}
           run: |
             pip install esdk-obs-python --quiet
             python3 - <<'EOF'
@@ -613,6 +667,11 @@ jobs:
                 ('coverage_version.txt', os.environ['COVERAGE_OBJECT_VERSION']),
                 ('test_case_map.json', os.environ['COVERAGE_OBJECT_MAP']),
             ]
+            if os.path.isfile('coverage_release_branch.txt'):
+                uploads.append((
+                    'coverage_release_branch.txt',
+                    'ci/precision-test/coverage_release_branch.txt',
+                ))
             for local_path, obs_path in uploads:
                 resp = client.putFile(OBS_BUCKET, obs_path, local_path)
                 if resp.status < 300:
@@ -623,6 +682,7 @@ jobs:
 
         - name: Prune extra tests already present in coverage
           id: prune-extra
+          if: ${{ inputs.coverage-upload != 'artifact' }}
           continue-on-error: true
           run: |
             set +e
@@ -657,7 +717,7 @@ jobs:
             exit 0
 
         - name: Upload pruned extra_recommended_tests.yaml to OBS
-          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
+          if: ${{ success() && inputs.coverage-upload != 'artifact' && steps.prune-extra.outputs.pruned == 'true' }}
           continue-on-error: true
           run: |
             set -euo pipefail
