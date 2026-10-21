@@ -9,7 +9,6 @@ seam is required when the upstream CPUOffloadingWorker is used on NPU.
 from __future__ import annotations
 
 import torch
-
 from vllm.v1.kv_offload.base import CanonicalKVCacheRef
 from vllm.v1.kv_offload.transfer_backend import (
     KVTransferBackend,
