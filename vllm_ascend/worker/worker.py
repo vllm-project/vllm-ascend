@@ -858,7 +858,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -884,7 +884,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
