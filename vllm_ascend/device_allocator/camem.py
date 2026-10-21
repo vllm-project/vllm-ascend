@@ -16,6 +16,7 @@
 #
 # CANN-mem-based pytorch pluggable allocator to implement sleep mode.
 #
+import atexit
 import gc
 import os
 from collections.abc import Callable
@@ -109,7 +110,20 @@ class CaMemAllocator(CuMemAllocator):
         assert camem_available, "camem allocator is not available"
         if CaMemAllocator.instance is None:
             CaMemAllocator.instance = CaMemAllocator()
+            # Ensure MemPool/allocator wrappers are released before interpreter
+            # finalization tears down PyTorch allocator internals.
+            atexit.register(CaMemAllocator._shutdown_singleton)
         return CaMemAllocator.instance
+
+    @staticmethod
+    def _shutdown_singleton() -> None:
+        instance = CaMemAllocator.instance
+        if instance is None:
+            return
+        try:
+            instance.release_pools()
+        except Exception:
+            logger.exception("CaMemAllocator singleton shutdown failed")
 
     def __init__(self):
         conf = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
@@ -173,7 +187,10 @@ class CaMemAllocator(CuMemAllocator):
                 dest_max = cpu_ptr + size_in_bytes * 2
                 memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
                 data.cpu_backup_tensor = cpu_backup_tensor
-            unmap_and_release(handle)
+            try:
+                unmap_and_release(handle)
+            finally:
+                data.is_asleep = True
 
         gc.collect()
         torch.npu.empty_cache()
@@ -194,6 +211,7 @@ class CaMemAllocator(CuMemAllocator):
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -226,7 +244,7 @@ class CaMemAllocator(CuMemAllocator):
             # the memory pool.
             # to avoid the issue, we keep a reference of the data.
             # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools[tag] = data
+            self.allocator_and_pools.setdefault(tag, []).append(data)
             yield
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see

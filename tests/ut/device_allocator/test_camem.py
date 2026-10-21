@@ -90,6 +90,28 @@ class TestCaMem(PytestBase):
         instance2 = CaMemAllocator.get_instance()
         assert instance1 is instance2
 
+    def test_release_pools_clears_all_tags(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        pools = {
+            "weights": [(MagicMock(name="weights_pool"), MagicMock(name="weights_allocator"))],
+            "kv_cache": [(MagicMock(name="kv_pool"), MagicMock(name="kv_allocator"))],
+        }
+        monkeypatch.setattr(allocator, "allocator_and_pools", pools)
+
+        allocator.release_pools()
+        assert allocator.allocator_and_pools == {}
+
+        # Cleanup is safe to call repeatedly, including during shutdown.
+        allocator.release_pools()
+
+    def test_shutdown_singleton_releases_pools(self, monkeypatch):
+        allocator = MagicMock()
+        monkeypatch.setattr(CaMemAllocator, "instance", allocator)
+
+        CaMemAllocator._shutdown_singleton()
+
+        allocator.release_pools.assert_called_once_with()
+
     @patch("vllm_ascend.device_allocator.camem.torch.cuda.synchronize")
     @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
     def test_python_malloc_and_free_callback(self, mock_npu_sync, mock_cuda_sync):
