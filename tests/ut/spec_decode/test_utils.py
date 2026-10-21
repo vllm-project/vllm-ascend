@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for vllm_ascend.spec_decode.utils.
+"""Unit tests for vllm_ascend.worker.v1.spec_decode.utils.
 
 These exercise the CPU/GPU correction helpers used by the async spec-decode
 path on Ascend.
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from vllm_ascend.spec_decode.utils import (
+from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,

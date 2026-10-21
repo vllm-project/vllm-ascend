@@ -20,7 +20,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker

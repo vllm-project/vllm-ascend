@@ -66,7 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     validate_register_region_count,
 )
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.v1.spec_decode.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata

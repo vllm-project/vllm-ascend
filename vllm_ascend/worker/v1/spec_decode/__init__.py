@@ -18,24 +18,24 @@
 #
 
 
-from vllm_ascend.spec_decode.dflash2_proposer import AscendDflash2Proposer, is_dflash2_draft
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
+from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer, is_dflash2_draft
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
+from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
+from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import (
     AscendMultiKVCacheGroupMTPProposer,
     is_multi_kv_cache_group_mtp,
 )
-from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
-from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
-from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
-from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
+from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
+from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
