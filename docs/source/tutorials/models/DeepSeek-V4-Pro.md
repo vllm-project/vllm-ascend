@@ -31,8 +31,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version             | Hardware Requirements                                               | Download Links |
 |-----------------------------|---------------------------------------------------------------------|----------------|
-| `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
-| `DeepSeek-V4-Pro-0813-w4a8` | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
+| `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
+| `DeepSeek-V4-Pro-0813-w4a8` | 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
 | `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
@@ -149,7 +149,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Multi-Node Online Deployment
 
-The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. Run the following scripts on each node respectively.
+The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes. Run the following scripts on each node respectively.
 
 === "A2 series"
 
@@ -486,11 +486,11 @@ We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggrega
 
 In the standard deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) separation addresses this by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows a deployment with one Prefill pool and one Decode pool on Atlas 800 A3 (128GB × 8). The example uses two physical nodes for each pool.
+This section shows a deployment with one Prefill pool and one Decode pool on Atlas 800I A3 (128GB × 8). The example uses two physical nodes for each pool.
 
 Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on all nodes. It includes the DSpark draft weights, so no separate draft-model path is required. Replace the model path, IP addresses, and network interface names below with your environment's values.
 
@@ -800,7 +800,7 @@ Before you start, please:
 
 #### 5.2.2 A2 Series PD Separation Deployment
 
-This section shows a deployment with one Prefill pool and one Decode pool on Atlas 800 A2 (64GB × 8). The example uses four physical nodes for each pool.
+This section shows a deployment with one Prefill pool and one Decode pool on Atlas 800I A2 (64GB × 8). The example uses four physical nodes for each pool.
 
 Before you start, please:
 
@@ -1177,8 +1177,8 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
 | GPQA | - | accuracy | gen | 91.41 | 0831 official W4A8 weight with DSpark enabled |
-| GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800 A3 (128GB × 8) |
-| GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800 A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800I A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800I A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 97.54 | 950PR&950DT Products, w4a4c8 |
 
 > **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
