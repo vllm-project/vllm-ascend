@@ -24,16 +24,16 @@ from vllm_ascend.observability.runtime_guard.state import DumpQuota, WaveTracker
 
 
 class _Cfg:
-    def dump_max_times(self):
+    def auto_dump_max_times(self):
         return 2
 
-    def dump_cooldown_seconds(self):
+    def auto_dump_cooldown_seconds(self):
         return 0
 
 
 def test_wave_tracker_sample_stamp():
     wt = WaveTracker()
-    wt.advance(allow_manual_dump=True)
+    wt.advance(has_scheduled_tokens=True)
     wt.record_sample_waves(["a", "b"])
     assert wt.take_sample_wave("a") == 1
     assert wt.take_sample_wave("a") is None

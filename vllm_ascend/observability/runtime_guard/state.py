@@ -162,8 +162,8 @@ class WaveTracker:
         self._wave = 0
         self._sample_waves: dict[str, deque[int]] = {}
 
-    def advance(self, *, allow_manual_dump: bool = True) -> None:
-        if not allow_manual_dump:
+    def advance(self, *, has_scheduled_tokens: bool = True) -> None:
+        if not has_scheduled_tokens:
             return
         with self._lock:
             self._wave += 1
@@ -230,8 +230,8 @@ class DumpQuota:
         self.sync_from_config()
 
     def sync_from_config(self) -> None:
-        self._max_times = int(self._runtime_config.dump_max_times())
-        self._cooldown = float(self._runtime_config.dump_cooldown_seconds())
+        self._max_times = int(self._runtime_config.auto_dump_max_times())
+        self._cooldown = float(self._runtime_config.auto_dump_cooldown_seconds())
 
     @property
     def total_count(self) -> int:
