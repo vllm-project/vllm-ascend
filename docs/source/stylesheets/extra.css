@@ -1,5 +1,52 @@
 /* vLLM Ascend docs custom styles */
 
+/* Keep long GLM tables of contents navigable without changing other pages. */
+.md-nav--secondary .glm-toc-branch {
+  position: relative;
+}
+
+.md-nav--secondary .glm-toc-branch > .md-nav__link {
+  padding-inline-end: 1.5rem;
+}
+
+.md-nav--secondary .glm-toc-branch > nav[hidden] {
+  display: none !important;
+}
+
+.glm-toc-toggle {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 0.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  color: var(--md-default-fg-color--light);
+  cursor: pointer;
+}
+
+.glm-toc-toggle:hover,
+.glm-toc-toggle:focus-visible {
+  color: var(--md-accent-fg-color);
+}
+
+.glm-toc-toggle:focus-visible {
+  outline: 0.1rem solid currentColor;
+  outline-offset: 0.05rem;
+  border-radius: 0.1rem;
+}
+
+.glm-toc-toggle span {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.glm-toc-toggle[aria-expanded="true"] span {
+  transform: rotate(90deg);
+}
+
 /* Center the logo on the home page */
 .md-typeset .figure {
   display: flex;
