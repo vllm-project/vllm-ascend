@@ -255,7 +255,6 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
 class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     """Build PCP-local queries and scheduler-global cache-write controls."""
 
-    consumes_pcp_context: ClassVar[bool] = True
     _request_capacity_factor: ClassVar[int] = 2
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):

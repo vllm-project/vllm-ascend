@@ -530,7 +530,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     """
 
     reorder_batch_threshold = None
-    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -954,17 +953,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             copy_rope=self.speculative_config is not None,
             pcp_context=common_attn_metadata.pcp_context,
             pcp_cache_group_idx=common_attn_metadata.pcp_cache_group_idx,
-            **kwargs,
-        )
-
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        **kwargs,
-    ) -> AscendSFAIndexerMetadata:
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
             **kwargs,
         )
 
