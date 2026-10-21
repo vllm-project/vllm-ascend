@@ -956,7 +956,7 @@ public:
             ReduceSumARAPerf(reduceLocal, mixes02ReduceLocal, curRowFactor,
                 tilingData->hcMult, tilingData->hcMult);
             Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                curRowFactor * tilingData->hcMult);
+                curRowFactor * tilingData->hcMultAlign);
             PipeBarrier<PIPE_V>();
             DivABABrcInline(combFragLocal, mixes02ReduceLocal, reduceLocal,
                 curRowFactor, tilingData->hcMult, tilingData->hcMult);
@@ -972,7 +972,7 @@ public:
                 ReduceSumARAPerf(reduceLocal, combFragLocal, curRowFactor,
                     tilingData->hcMult, tilingData->hcMult);
                 Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                    curRowFactor * tilingData->hcMult);
+                    curRowFactor * tilingData->hcMultAlign);
                 PipeBarrier<PIPE_V>();
                 DivABABrcInline(combFragLocal, combFragLocal, reduceLocal,
                     curRowFactor, tilingData->hcMult, tilingData->hcMult);
@@ -1353,7 +1353,7 @@ public:
                 SoftmaxFP32Perf(mixes02ReduceLocal, mixes02ReduceLocal, reduceLocal, hcBrcbLocal1,
                 curRowFactor * tilingData->hcMult, tilingData->hcMult, tilingData->hcEps);
                 ReduceSumARAPerf(reduceLocal, mixes02ReduceLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
+                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMultAlign);
                 PipeBarrier<PIPE_V>();
                 DivABABrcInline(combFragLocal, mixes02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult,
                                 tilingData->hcMult);
@@ -1369,7 +1369,7 @@ public:
                     ReduceSumARAPerf(reduceLocal, combFragLocal, curRowFactor,
                     tilingData->hcMult, tilingData->hcMult);
                     Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                    curRowFactor * tilingData->hcMult);
+                    curRowFactor * tilingData->hcMultAlign);
                     PipeBarrier<PIPE_V>();
                     DivABABrcInline(combFragLocal, combFragLocal, reduceLocal,
                     curRowFactor, tilingData->hcMult, tilingData->hcMult);
