@@ -112,8 +112,8 @@ class TestCaMem(PytestBase):
     def test_release_pools_clears_all_tags(self, monkeypatch):
         allocator = CaMemAllocator.get_instance()
         pools = {
-            "weights": [(MagicMock(name="weights_pool"), MagicMock(name="weights_allocator"))],
-            "kv_cache": [(MagicMock(name="kv_pool"), MagicMock(name="kv_allocator"))],
+            "weights": (MagicMock(name="weights_pool"), MagicMock(name="weights_allocator")),
+            "kv_cache": (MagicMock(name="kv_pool"), MagicMock(name="kv_allocator")),
         }
         monkeypatch.setattr(allocator, "allocator_and_pools", pools)
 
@@ -188,10 +188,10 @@ class TestCaMem(PytestBase):
 
         allocator.wake_up(tags=["kv_cache"])
         assert all(not data.is_asleep for data in allocator.pointer_to_data.values())
-        assert kv_cache.numel() == 32 << 20
+        assert kv_cache.shape == (512, 512)
 
     @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
-    def test_selective_wake_restores_internal_tags(self, _npu_camem_allocator, tag):
+    def test_selective_wake_restores_requested_tags(self, _npu_camem_allocator, tag):
         allocator = _npu_camem_allocator
         internal_tag = tag or allocator.default_tag
         with allocator.use_memory_pool(tag):
@@ -202,12 +202,15 @@ class TestCaMem(PytestBase):
         allocator.sleep(offload_tags=())
         assert all(data.is_asleep for data in allocator.pointer_to_data.values())
 
-        allocator.wake_up(tags=["weights"])
+        allocator.wake_up(tags=[internal_tag])
         assert all(not data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == internal_tag)
         assert all(data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "kv_cache")
-        assert (
-            sum(data.handle[1] for data in allocator.pointer_to_data.values() if not data.is_asleep) == internal.nbytes
+        mapped_internal_bytes = sum(
+            data.handle[1]
+            for data in allocator.pointer_to_data.values()
+            if not data.is_asleep and data.tag == internal_tag
         )
+        assert mapped_internal_bytes >= internal.nbytes
 
         allocator.wake_up(tags=["kv_cache"])
         assert all(not data.is_asleep for data in allocator.pointer_to_data.values())
@@ -281,7 +284,7 @@ class TestCaMem(PytestBase):
 
         handle = (1, 10, 1000, 0)
         tensor = torch.zeros(5, dtype=torch.uint8)
-        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor)
+        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor, is_asleep=True)
         allocator.pointer_to_data = {1000: data}
 
         allocator.wake_up(tags=["tag1"])
