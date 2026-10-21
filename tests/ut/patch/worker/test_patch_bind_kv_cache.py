@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.models.qwen4_exp.common.qsa_cache import QSAKeyStateCache
 
@@ -18,6 +20,18 @@ class _TestMambaLayer(MambaBase):
     @property
     def mamba_type(self):
         return None
+
+
+class _TensorOnlyAttentionLayer:
+    """Models upstream attention hooks that only accept canonical tensors."""
+
+    def __init__(self) -> None:
+        self.kv_cache: object = torch.empty(0)
+        self.bind_called = False
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        self.bind_called = True
+        self.kv_cache = kv_cache.squeeze(1)
 
 
 def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views() -> None:
@@ -89,6 +103,23 @@ def test_bind_kv_cache_calls_packed_mamba_layer_hook_and_preserves_state_dtypes(
     assert temporal_state.untyped_storage().data_ptr() == allocated.untyped_storage().data_ptr()
     assert conv_state.storage_offset() == 0
     assert temporal_state.storage_offset() == 3
+
+
+def test_bind_kv_cache_preserves_materialized_attention_tuple() -> None:
+    """Tuple K/V views must not enter tensor-only upstream attention hooks."""
+    layer_name = "model.layers.0.self_attn"
+    layer = _TensorOnlyAttentionLayer()
+    key_cache = torch.zeros(2, 16, 1, 8)
+    value_cache = torch.zeros(2, 16, 1, 8)
+    allocated = (key_cache, value_cache)
+
+    patch_bind_kv_cache.bind_kv_cache_to_layers(
+        {layer_name: allocated},
+        {layer_name: cast(AttentionLayerBase, layer)},
+    )
+
+    assert layer.bind_called is False
+    assert layer.kv_cache is allocated
 
 
 @pytest.mark.parametrize("container_type", [list, tuple])
