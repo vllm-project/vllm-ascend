@@ -177,6 +177,7 @@ class EngramModelState(AscendModelState):
         if self.pcp_manager is not None and not input_batch.is_dummy:
             pcp_context = self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
         if pcp_context is not None:
+            assert self.pcp_manager is not None
             global_batch = pcp_context.global_batch
             global_reqs = global_batch.num_reqs
             global_replay_np = np.where(

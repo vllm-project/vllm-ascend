@@ -4,7 +4,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -15,6 +15,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.math_utils import round_up
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run
@@ -128,17 +129,22 @@ class DecoderReplayState:
         gathered_rows = get_pcp_group().all_gather(padded_rows.contiguous(), dim=0)
         order = torch.argsort(gathered_rows)
         restore_idx = order[torch.searchsorted(gathered_rows[order], global_rows)]
-        compact_batch = replace(
-            global_batch,
-            num_tokens=int(global_kept_lens.sum()),
-            num_tokens_after_padding=int(global_kept_lens.sum()),
-            num_scheduled_tokens=global_kept_lens,
-            num_computed_tokens_np=global_batch.seq_lens_np[:num_reqs] - global_kept_lens,
-            query_start_loc_np=global_offsets,
-            query_start_loc=torch.as_tensor(global_offsets, device=self.rows.device),
-            input_ids=global_batch.input_ids.index_select(0, global_rows),
-            positions=global_batch.positions.index_select(0, global_rows),
-            max_query_len=int(global_kept_lens.max(initial=0)),
+        # replace keeps the runtime subclass, while mypy needs the base dataclass
+        # to resolve its inherited fields.
+        compact_batch = cast(
+            AscendInputBatch,
+            replace(
+                cast(InputBatch, global_batch),
+                num_tokens=int(global_kept_lens.sum()),
+                num_tokens_after_padding=int(global_kept_lens.sum()),
+                num_scheduled_tokens=global_kept_lens,
+                num_computed_tokens_np=global_batch.seq_lens_np[:num_reqs] - global_kept_lens,
+                query_start_loc_np=global_offsets,
+                query_start_loc=torch.as_tensor(global_offsets, device=self.rows.device),
+                input_ids=global_batch.input_ids.index_select(0, global_rows),
+                positions=global_batch.positions.index_select(0, global_rows),
+                max_query_len=int(global_kept_lens.max(initial=0)),
+            ),
         )
         return replace(
             context,
@@ -239,6 +245,7 @@ class DecoderReplayState:
         self.dropped_before.copy_to_gpu(num_reqs + 1)
         self._gather(replay_inputs)
         if pcp_replay is not None:
+            assert inputs.pcp_context is not None
             global_batch = inputs.pcp_context.global_batch
             global_lens = np.diff(global_batch.query_start_loc_np[: global_batch.num_reqs + 1])
             global_trim = (
