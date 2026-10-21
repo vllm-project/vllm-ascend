@@ -18,6 +18,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -69,9 +70,6 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.debugger = None
-    runner.max_num_reqs = 32
-    runner.max_num_tokens = 256
-    runner.speculator = None
     runner.adaptive_verification = adaptive_verification
     runner.ascend_config = SimpleNamespace(xlite_graph_config=SimpleNamespace(enabled=False))
     runner.eplb = Mock()
@@ -175,7 +173,7 @@ def test_propose_adaptive_draft_negotiates_its_own_dp_shape(monkeypatch, adaptiv
         next_prefill_tokens=None,
         temperature=None,
         seeds=None,
-        dp_sync=target_sync,
+        **{"dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state": target_sync},
         dummy_run=dummy_run,
         is_profile=is_profile,
     )

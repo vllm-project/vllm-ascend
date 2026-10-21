@@ -34,7 +34,6 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
-    DeepSeekV4TPPolicy,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -58,6 +57,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -316,9 +316,6 @@ class NPUPlatform(Platform):
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
-            from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import register_legacy_replay_argument
-
-            register_legacy_replay_argument(parser)
             quant_action = parser._option_string_actions.get("--quantization")
             if quant_action and hasattr(quant_action, "choices") and quant_action.choices:
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
@@ -353,9 +350,13 @@ class NPUPlatform(Platform):
         # Upstream derives this threshold only for CUDA/XPU. Without an Ascend
         # default, an explicit SP/MMRS request is disabled during VllmConfig
         # validation before the graph fusion pass can observe it.
-        pass_config = vllm_config.compilation_config.pass_config
-        if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
-            pass_config.sp_min_token_num = 1
+        # vLLM #60517 removed PassConfig.enable_sp/fuse_gemm_comms/
+        # sp_min_token_num on main; the pass-based SP this defaulted no longer
+        # exists there.
+        if vllm_version_is("0.31.0"):
+            pass_config = vllm_config.compilation_config.pass_config
+            if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
+                pass_config.sp_min_token_num = 1
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
         # restoration once MC2 is no longer used.
@@ -551,12 +552,6 @@ class NPUPlatform(Platform):
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
-
-        # Replay may have been disabled by the scheduler-mode checks above.
-        from vllm_ascend.patch.platform.patch_swa_bounded_replay_legacy import apply_legacy_replay_patch
-
-        if getattr(vllm_config.cache_config, "swa_bounded_replay", False):
-            apply_legacy_replay_patch(vllm_config)
 
         # 9.Validate SFA / DCP / KV and SP consistency (vllm_config)
         _validate_sfa_dcp_kv_sp(vllm_config)
@@ -1230,7 +1225,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
     if (xlite_config := ascend_config.xlite_graph_config).enabled:
         spec_config = vllm_config.speculative_config
         mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
-        decode_mode = CUDAGraphMode.NONE if spec_config is None else compilation_config.cudagraph_mode.decode_mode()
+        # TODO(SijieFu): properly resolve cudagraph_mode when xlite is enabled
+        decode_mode = (
+            CUDAGraphMode.NONE
+            if spec_config is None or vllm_config.use_v2_model_runner
+            else compilation_config.cudagraph_mode.decode_mode()
+        )
         if not decode_mode or mixed_mode == decode_mode:
             compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
         else:
@@ -1239,7 +1239,7 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             spec_config.enforce_eager = enforce_eager
         enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
         model_config.enforce_eager = enforce_eager
-        logger.info(
+        logger.info_once(
             "Xlite graph enabled; falling back `compilation_config.cudagraph_mode` to %s (enforce_eager: %s)",
             compilation_config.cudagraph_mode,
             enforce_eager,
@@ -1322,7 +1322,13 @@ def _setup_compile_backend(
         and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
-        sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
+        # vLLM #60517 removed `update_sizes_for_sequence_parallelism` on main;
+        # inline its behaviour (keep sizes that are multiples of tp_size).
+        if vllm_version_is("0.31.0"):
+            sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
+        else:
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
             raise AssertionError(
                 f"cudagraph_capture_sizes {original_sizes} does not contain"
@@ -1866,16 +1872,9 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any)
         return
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size
-    tp_policy = get_current_hardware_profile().deepseek_v4_tp_policy
-    if tp_policy is DeepSeekV4TPPolicy.SINGLE_RANK_ONLY and tp_size > 1:
-        raise ValueError(f"DeepSeek {variant} does not support tensor parallelism on A5. Got tp_size={tp_size}.")
-
-    if tp_policy is not DeepSeekV4TPPolicy.STANDARD_LIMITS:
-        return
-
     max_tp_size = 16 if variant == "V4 Pro" else 8
     if tp_size > max_tp_size:
-        raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size} on this device. Got tp_size={tp_size}.")
+        raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

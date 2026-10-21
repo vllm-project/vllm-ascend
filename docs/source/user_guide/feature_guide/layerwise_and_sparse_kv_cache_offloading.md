@@ -1,5 +1,8 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
+Layerwise and sparse KV cache offloading are supported only in disaggregated
+Prefill/Decode (PD) deployments. Colocated Prefill/Decode serving is not supported.
+
 This guide explains how to configure:
 
 - Layerwise KV cache offloading during the Prefill phase
@@ -20,47 +23,13 @@ model families:
 
 Other sparse-attention models have not been validated.
 
-## 1. Install Dependencies
+## 1. Preparation
 
-The installation steps are grouped by hardware. A3 and 950PR&950DT Products are supported.
-On 950PR&950DT Products nodes, set the MemFabric transfer protocol to `device_urma` as described
-in sections 2 and 3.
-
-### Prefill Build Dependencies
+### Prefill Nodes
 
 === "A3 series"
 
-    Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this
-    order.
-
-    #### MemFabric Hybrid
-
-    Install MemFabric Hybrid release 1.2 on every Prefill node. This release
-    requires NPU driver `25.5.1` or later.
-
-    ```bash
-    pip uninstall -y memfabric_hybrid
-    git clone -b release/1.2 https://gitcode.com/Ascend/memfabric_hybrid.git
-    cd memfabric_hybrid
-    bash script/build_and_pack_run.sh
-    bash output/memfabric_hybrid-1.2.0_linux_aarch64.run
-    ```
-
-    #### Memcache Hybrid
-
-    Install Memcache Hybrid after MemFabric Hybrid:
-
-    ```bash
-    git clone https://gitcode.com/Ascend/memcache.git
-    cd memcache
-    git submodule update --recursive --init
-    git -c submodule.3rdparty/memfabric_hybrid.branch=release/1.2 \
-        submodule update --remote --recursive 3rdparty/memfabric_hybrid
-    bash script/build_and_pack_run.sh --build_mode RELEASE
-    bash output/memcache_hybrid-*_linux_aarch64.run
-    ```
-
-    Configure `mmc-meta.conf`:
+    Prefill offload relies on memcache service. Here we provide a simple guidance to launch memcache service. Configure `mmc-meta.conf`:
 
     ```ini
     ock.mmc.meta_service_url = tcp://<META_HOST>:5000
@@ -80,107 +49,29 @@ in sections 2 and 3.
     ock.mmc.local_service.dram.size = 10GB
     ```
 
-    The two files must use the same MetaService endpoint. The LocalService
-    Config Store endpoint must match the MetaService Config Store endpoint.
-
-    - Set `world_size` to the maximum supported LocalService rank count.
-    - Use `device_sdma` with HCCS.
-    - Set `dram.size` to at least the total KV cache size required by the target
-      sequence length and concurrency divided by the number of Prefill ranks.
-      Round the result up to a whole GiB.
-
-    > **Note:** The configuration paths below assume Python 3.11.10. If you use
-    > another Python version, replace the Python installation and
-    > `site-packages` directories with those of the active environment. Locate
-    > its `site-packages` directory with:
-    >
-    > `python -c "import site; print(site.getsitepackages())"`
-
     Start MetaService in a separate process:
 
     ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_META_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-meta.conf
+    export MMC_META_CONFIG_PATH=/path/to/config/mmc-meta.conf
     python -c "from memcache_hybrid import MetaService; MetaService.main()"
     ```
 
     Prepare every Prefill node before starting vLLM:
 
     ```bash
-    source /usr/local/memcache_hybrid/set_env.sh
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.11.10/lib/python3.11/site-packages/memcache_hybrid/latest/config/mmc-local.conf
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH=/path/to/config/mmc-local.conf
     ```
 
-### Decode Build Dependencies
+### Decode Nodes
 
-=== "A3 series"
-
-    > **Important:** MemFabric Hybrid release 1.2 must be installed on both
-    > Prefill and Decode nodes. Memcache Hybrid is required only on Prefill.
-
-    Use the same MemFabric Hybrid build and installation commands shown above.
-    Decode also requires Clang and OpenMP. Prepare every Decode node:
-
-    ```bash
-    source /usr/local/memfabric_hybrid/set_env.sh
-    export MEMFABRIC_HYBRID_EXTEND_LIB_PATH=/usr/local/memfabric_hybrid/1.2.0/aarch64-linux/lib64
-    clang --version
-    ls "$(clang --print-resource-dir)/include/omp.h"
-    ```
-
-    If Clang or OpenMP is missing:
-
-    ```bash
-    apt-get update
-    apt-get install -y clang libomp-dev
-    ```
-
-    If the image provides a specific Clang version, install the matching OpenMP
-    package, for example `libomp-17-dev` for Clang 17.
-
-### Fused Copy-SFA Operators
-
-Decode sparse offload uses fused LIM and Copy-SFA by default. The Python integration requires
-these operators in the installed `_C_ascend` extension:
-
-- `npu_fused_lightning_indexer_manage`
-- `npu_fused_quant_lightning_indexer_manage` (LIM C8)
-- `npu_fused_scatter_copy_sparse_flash_attention`
-
-The expected interfaces are from
-[vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
-revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
-Python integration; it does not bundle these native kernels or their bindings.
-An operator-enabled native build is required to run the fused_copy_sfa path.
-
-LIM C8 uses `npu_fused_quant_lightning_indexer_manage`, which is included on
-this branch. Enable it with `--attention_config.indexer_kv_dtype int8`. The
-indexer then Hadamard-rotates and int8-quantizes query and key, and
-`_lim_select` forwards that int8 query and the fp16 dequant scales to the C8
-LIM. The 19-parameter management ABI matches BF16 LIM, so Copy-SFA and miss H2D
-stay unchanged. The C8 kernel is int8-only; `indexer_kv_dtype fp8` is not a
-LIM C8 serving path.
-
-Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
-by registered MemFabric memory. Its native adapter must permit those CPU views;
-the referenced PR revision needs this device-check adjustment. The remaining
-inputs stay on NPU. Ordinary CPU allocations are not valid replacements for
-registered DRAM, and the Python integration does not move the host cache to NPU.
-
-For launch settings, see [Configure Fused LIM and Copy-SFA](#configure-fused-lim-and-copy-sfa).
+There is no extra work to do on decode nodes.
 
 ## 2. Layerwise KV Cache Offload on Prefill
 
-Use this mode on a dedicated Prefill node with:
+Requirements and limitations:
 
-- `kv_role: "kv_producer"`;
-- the Memcache backend;
-- an MLA, SFA, or DSA attention backend; and
-- eager execution.
+- Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
+- `SfaRemoteD2HConnector` is the only supported connector to be used with prefill offload and decode offload.
 
 For a combined deployment, Prefill TP must be greater than or equal to Decode
 TP and divisible by it.
@@ -220,20 +111,8 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 
 | Parameter | Description |
 | :--- | :--- |
-| `layerwise_num_shared_buffers` | Number of reusable NPU buffers. Start with two to four and tune for memory and transfer bandwidth. |
+| `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
-
-`SfaRemoteD2HConnector` defaults to MemFabric, SDMA, and layerwise transfer;
-omit its `kv_connector_extra_config` for this configuration. The explicit
-Memcache and layerwise settings in the `AscendStoreConnector` entry above
-belong to that separate connector and are still needed.
-
-The `SfaRemoteD2HConnector` entry accepts the following options:
-
-| Parameter | Description |
-| :--- | :--- |
-| `transfer_backend` | Transfer backend. Defaults to `memfabric`, the only supported value. |
-| `memfabric_transfer_protocol` | MemFabric data-path protocol: `sdma` (default) and `device_rdma` for A3 series, `device_urma` for 950PR&950DT Products. Must be set to the same value on Prefill and Decode. Invalid values abort startup. |
 
 The following log confirms that buffer reuse is enabled:
 
@@ -243,30 +122,25 @@ Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... b
 
 ## 3. Sparse KV Cache Offload on Decode
 
-Requirements:
+Requirements and limitations:
 
-- use disaggregated Prefill/Decode deployment;
-- enable the feature only on Decode; and
-- use Model Runner V1 or V2 on Decode. Keep Decode at pipeline parallel size 1;
-  Prefill can use pipeline parallelism with the producer connector.
+- Sparse Decode Offload is currently not supported on 950PR&950DT Products. We are actively working on it to support it in the near future.
+- Use disaggregated Prefill/Decode deployment and enable sparse offload only on Decode.
+- The main SFA KV cache must use BF16. Packed main KV caches (C8 or TQ4) are
+  not supported. INT8 indexer KV is supported separately through
+  `--attention_config.indexer_kv_dtype int8`; it does not enable main-cache C8.
+- Sparse Decode Offload supports DP and TP on Decode; CP are not supported.
+- Sparse Decode Offload and `PreemptOffloadConnector` are mutually exclusive,
+  including when the connector is configured inside `MultiConnector`. Use only
+  one of these offload mechanisms on a Decode node.
 
-MemFabric configuration-store ownership stays on Prefill, using the official
-transfer-engine initialization. No additional store-role or preconnection
-configuration is needed. Deploy the same connector protocol version on both
-sides, and validate actual remote KV reads rather than relying on `/health`.
-
-For the validated GLM-5.2 Prefill PP2 deployment on 16 NPUs, use DP1 × PP2 ×
-TP8, not DP2 × PP2 × TP8. Set `VLLM_PP_LAYER_PARTITION=38,40`: each stage
-must contain the full Indexer owner for its shared Indexer layers. A balanced
-39/39 partition is rejected by the existing stage-boundary guard; cross-stage
-TopK sharing is not supported. Decode remains DP2 × TP8 with PP size 1.
-
-Add the following options to the Decode launch command:
+The current decode offload use a different host pool compared to prefill. So the configuration on decode node is slightly different. Add the following options to the Decode launch command:
 
 ```bash
 --additional-config '{
     "sparse_kv_offload_config": {
-        "enabled": true
+        "enabled": true,
+        "dram_size_per_dp_GB": 110
     }
 }' \
 --kv-transfer-config '{
@@ -280,156 +154,18 @@ On Decode, reserve
 `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
 starting from `kv_port`.
 
-On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"` to
-`kv_connector_extra_config` on both Prefill and Decode.
-
 | Parameter | Description |
 | :--- | :--- |
-| `use_fused_overlap` | Defaults to `false`, selecting fused LIM and Copy-SFA. Set to `true` to select the alternative fused sparse-attention overlap operator. |
-| `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. See the requirements below. |
-| `dram_size_per_dp_GB` | Defaults to `128` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool. |
+| `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
+| `dram_size_per_dp_GB` | Defaults to `110` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
 | `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |
 
-### Configure Fused LIM and Copy-SFA
-
-After installing the [native operators](#fused-copy-sfa-operators),
-enable sparse offload in the Decode node's `--additional-config`.
-Fused LIM and Copy-SFA are selected by default:
-
-```json
-{
-    "sparse_kv_offload_config": {
-        "enabled": true
-    }
-}
-```
-
-The default hot buffer is `(1 + num_speculative_tokens) * 2048` tokens:
-2048 without speculation, or 8192 with MTP3. There is no need to set
-`topk_buffer_size`, `keep_device_kv_cache`, or `use_fused_overlap` explicitly.
-The host pool defaults to 128 GiB per DP rank; set `dram_size_per_dp_GB` only
-to override that budget for your deployment.
-
-Merge this object with any existing additional settings and pass
-`--additional-config` once. Keep the Prefill configuration from section 2;
-enable these fused operators only on Decode in a PD deployment.
-
-The fused path has these additional requirements:
-
-- The model must use `index_topk=2048` and a cache block size of `128`.
-- Let `Q_max = 1 + num_speculative_tokens`, or `1` without speculative decoding.
-  `Q_max` must be between `1` and `14`.
-- `topk_buffer_size` must be a multiple of `256`, at least `Q_max * 2048`,
-  and at most `32512` (the largest aligned value within LIM's `32640` limit).
-  The runtime allocates two additional tail blocks;
-  do not add them to this setting.
-- Keep `use_fused_overlap=false` for this path. Setting it to `true` selects
-  the alternative overlap operator instead.
-- Use BF16 for the main KV cache. Sparse SFA C8 is not supported.
-  Sparse LI C8 serving is supported for the device-resident indexer:
-  add `--attention_config.indexer_kv_dtype int8` so fused Copy-SFA
-  selects `npu_fused_quant_lightning_indexer_manage`.
-
-| Draft tokens | `Q_max` | Default / minimum `topk_buffer_size` |
-| :--- | :--- | :--- |
-| No speculative decoding | 1 | 2048 |
-| MTP1 | 2 | 4096 |
-| MTP2 | 3 | 6144 |
-| MTP3 | 4 | 8192 |
-| MTP5 | 6 | 12288 |
-| DSpark8 | 9 | 18432 |
-
-For example, the following A3 Decode command uses GLM-5.2 W4A8 with DP2 TP8,
-MTP3, and `FULL_DECODE_ONLY` target graphs. Replace the model path and size
-the model length, concurrency and host-cache budget for your deployment.
-The command assumes the dependency environment from section 1 is already set.
-
-```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/GLM-5.2-w4a8 \
-    --host 0.0.0.0 \
-    --port 8200 \
-    --tensor-parallel-size 8 \
-    --data-parallel-size 2 \
-    --enable-expert-parallel \
-    --quantization ascend \
-    --block-size 128 \
-    --max-model-len 131072 \
-    --max-num-seqs 4 \
-    --max-num-batched-tokens 8192 \
-    --no-enable-prefix-caching \
-    --speculative-config '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16]}' \
-    --additional-config '{
-        "sparse_kv_offload_config": {
-            "enabled": true
-        }
-    }' \
-    --kv-transfer-config '{
-        "kv_connector": "SfaRemoteD2HConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": 20050
-    }'
-```
-
-Here, `enforce_eager` applies only to the MTP draft model. The target uses the
-graph mode configured by `--compilation-config`; do not add a top-level
-`--enforce-eager` when using this graph example. Decode prefix caching is
-disabled, and `keep_device_kv_cache=false` keeps the full main KV in the host
-pool. With DP2, the example reserves `2 * 128 = 256` GiB of host KV memory.
-
-Model Runner V2 uses the same sparse-offload configuration, including MTP and
-`fused_copy_sfa`: set `VLLM_USE_V2_MODEL_RUNNER=1`. For an eager V2 launch,
-replace the graph compilation option with a top-level `--enforce-eager`.
-
-### DSpark with Sparse Decode Offload
-
-GLM MLA DSpark requires Model Runner V2 on both Prefill and Decode. Configure
-the same draft checkpoint and speculative-token count on both nodes, for example:
-
-```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/target \
-    --speculative-config '{"method":"dspark","model":"/path/to/GLM-MLA-draft","num_speculative_tokens":8}' \
-    ...
-```
-
-Keep Prefill eager and disable local vLLM prefix caching on both nodes. Auxiliary capture
-layers are resolved from the draft checkpoint; no separate layer-ID setting is
-needed. Prefill projects the target's prompt features locally and writes its
-own draft KV. The SFA producer connector transfers those pages alongside target
-KV, and Decode waits for both transfers before decoding. Hidden features are
-not sent to Decode for prompt-KV reconstruction.
-
-The Prefill Memcache layerwise store can reuse external prefixes independently
-of the local prefix-caching switch. It saves draft KV under checkpoint-specific
-companion keys, without placing the live draft pages in target scratch buffers.
-A prefix is usable only when every target stage and every final-stage draft TP
-rank has saved it. Prefill restores draft pages into the new request's NPU block
-table, projects only the remaining prompt features, then transfers the completed
-target and draft KV to Decode. The final Eagle recomputation block is retained
-even on a complete store hit. Missing draft companions make the prefix a miss;
-load failures after lookup fail closed rather than using uninitialized draft KV.
-
-Enable sparse offload only on Decode, with the consumer connector and
-default Copy-SFA configuration above. For draft8, omitting `topk_buffer_size`
-automatically selects `18432`; explicitly set `20480` only if extra hot-cache
-capacity is desired. These are
-kernel/layout bounds, not a draft-checkpoint whitelist or a guarantee that every
-width has been validated end to end. Both nodes must use the same cache block
-size. Remote DSpark draft-KV transfer does not support PCP or DCP.
-
-Only the target's main KV is offloaded to the host. The loaded draft supplies
-its cache-layer ownership, and its full context KV stays in device memory.
-Layerwise Prefill Offload excludes draft pages from its shared scratch pool.
-The paired prefix-store path also keeps draft save/load separate from target
-layer hooks, including when target buffers are not reused. Other store paths
-retain their original registration and addressing.
-Account for this context-dependent HBM cost when sizing long-context serving;
-target offload alone does not establish 1M-context DSpark support.
+Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are
-ready, start the proxy:
+ready, start the layerwise proxy:
 
 ```bash
 python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py \
@@ -443,17 +179,3 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_exa
 
 For multi-node deployment, advertise reachable addresses instead of
 `0.0.0.0`. Send inference requests to the proxy port (`9000` in this example).
-
-## 5. Limitations
-
-- Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
-- Context parallelism has not been validated with Layerwise Prefill Offload.
-- Sparse Decode Offload supports DP and TP on Decode; CP and Decode-side PP
-  are not supported. Prefill-side PP is supported with the producer connector.
-- MemFabric is the only supported `SfaRemoteD2HConnector` transfer backend.
-- The MemFabric data-path protocol is selected by launch configuration instead
-  of hardware detection: use `sdma` (default) or `device_rdma` on A3 series and
-  `device_urma` on 950PR&950DT Products, identically on Prefill and Decode.
-- Layerwise buffer reuse cannot currently be combined with
-  `MooncakeLayerwiseConnector` because per-buffer transfer completion gating is
-  not yet implemented. Support is planned in a follow-up update.

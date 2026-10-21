@@ -56,7 +56,8 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self.input_batch.num_accepted_tokens_cpu[" not in source
 
 
-def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
+@pytest.mark.parametrize("decoder_replay_dummy", [False, True])
+def test_model_forward_updates_mtp_full_graph_params_before_replay(decoder_replay_dummy: bool) -> None:
     runner = object.__new__(NPUModelRunner310)
     runner.uses_mrope = False
     runner.enable_enpu = False
@@ -71,6 +72,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     def fake_model(**kwargs):
         assert "is_dummy_run" not in kwargs
+        assert "decoder_replay_dummy" not in kwargs
         calls.append("model")
         return torch.ones(1)
 
@@ -89,6 +91,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
             8,
             input_ids=torch.tensor([1]),
             positions=torch.tensor([0]),
+            decoder_replay_dummy=decoder_replay_dummy,
         )
 
     assert calls == ["update", "model"]
@@ -109,7 +112,7 @@ def test_graph_dispatch_does_not_treat_later_prefill_chunk_as_decode() -> None:
     runner.speculative_config = None
 
     with patch(
-        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._determine_batch_execution_and_padding",
+        "vllm_ascend.worker.v1.model_runner.NPUModelRunner._determine_batch_execution_and_padding",
         return_value="dispatch-result",
     ) as parent_dispatch:
         result = runner._determine_batch_execution_and_padding(

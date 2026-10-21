@@ -502,6 +502,7 @@ def test_mla_dcp_fia_v2_preserves_strided_cache_and_lse(monkeypatch, fia_v2_boun
         cp_seq_len=[4] * num_decodes,
     )
     metadata = SimpleNamespace(
+        external_flashmla=None,
         causal=False,
         decode=decode,
         attn_state=AscendAttentionState.DecodeOnly,
@@ -626,7 +627,9 @@ def test_mla_dcp_split_fia_v2_returns_lse(monkeypatch, fia_v2_boundary, mla_fia_
 def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.speculative_config = object() if use_spec_decode else None
-    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends))
+    metadata = SimpleNamespace(
+        external_flashmla=None, causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends)
+    )
     with patch(
         "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
         SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
@@ -805,7 +808,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         patch.object(mla_cp, "fused_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
-        metadata = SimpleNamespace(decode=decode, causal=True)
+        metadata = SimpleNamespace(external_flashmla=None, decode=decode, causal=True)
         assert impl._decode_requires_current_kv(metadata)
         assert not AscendMLAImpl.__new__(AscendMLAImpl)._decode_requires_current_kv(metadata)
         actual = impl._forward_decode(

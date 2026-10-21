@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
@@ -21,6 +21,7 @@ def state(monkeypatch):
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=32),
+        cache_config=SimpleNamespace(block_size=2),
         parallel_config=SimpleNamespace(data_parallel_size=1, tensor_parallel_size=1),
     )
     layers = AscendDecoderReplayLayers(2, lambda *states: states, [])
@@ -37,9 +38,34 @@ def inputs(*, dummy=False):
         query_start_loc_np=np.array([0, 1, 7, 13], dtype=np.int32),
         is_prefilling_np=np.array([False, True, True]),
         idx_mapping_np=np.array([2, 0, 1]),
+        seq_lens_np=np.array([1, 6, 6], dtype=np.int32),
         is_dummy=dummy,
     )
     return replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 13), [], torch.zeros(3, dtype=torch.int32))
+
+
+def test_gather_uses_current_kernel_argument_order(state, monkeypatch):
+    gather = Mock()
+    monkeypatch.setattr(replay_mod, "gather_replay_batch", gather)
+    batch = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([3], dtype=torch.int32),
+        positions=torch.arange(3),
+    )
+    slots = torch.empty((1, 3), dtype=torch.int64)
+    encoder_start = torch.zeros(1, dtype=torch.int32)
+    replay_mod.DecoderReplayState._gather(
+        state, replay_mod.DecoderReplayInputs(batch, (), slots, [], encoder_start), warmup=True
+    )
+
+    args = gather.call_args.args
+    assert len(args) == 13
+    assert args[2] is batch.seq_lens
+    assert args[3] is encoder_start
+    assert args[4] is batch.positions
+    assert args[5] is slots
+    assert gather.call_args.kwargs == {"warmup": True}
 
 
 def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
@@ -48,6 +74,27 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state.num_actual_tokens == 9
     assert state.dropped_before.np[:4].tolist() == [0, 0, 0, 4]
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
+
+
+def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
+    class Backend:
+        def get_builder_cls(self):
+            assert get_current_vllm_config() is state.config
+            return object
+
+    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
+    state.slots = None
+    group = SimpleNamespace(kv_cache_spec=object(), backend=Backend())
+    replay_inputs = inputs()
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        replay_inputs.batch,
+        replay_inputs.block_tables,
+        replay_inputs.slot_mappings,
+        [[group]],
+        replay_inputs.encoder_replay_start,
+    )
+    state.prepare(replay_inputs, CUDAGraphMode.FULL)
+    state._gather.assert_called_once()
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
@@ -102,7 +149,7 @@ def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
 def test_request_reuse_refreshes_prompt_logprob_retention(state, monkeypatch, prompt_logprobs):
     monkeypatch.setattr(AscendModelState, "add_request", lambda *args: None)
     model_state = EngramModelState.__new__(EngramModelState)
-    model_state.decoder_replay = state
+    model_state.decoder_replay_state = state
     model_state._replay_start_np = np.zeros(4, dtype=np.int32)
     state.keeps_rows[1] = True
     request = SimpleNamespace(replay_start=7, sampling_params=SimpleNamespace(prompt_logprobs=prompt_logprobs))

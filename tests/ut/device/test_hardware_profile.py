@@ -57,7 +57,6 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
-        HardwareCapability.GMM_DEQUANT_SITU_QUANT,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,

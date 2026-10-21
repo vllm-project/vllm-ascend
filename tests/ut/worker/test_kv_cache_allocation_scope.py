@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
 
@@ -140,6 +140,7 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
 def _make_sleep_worker(model: torch.nn.Module) -> NPUWorker:
     with patch.object(NPUWorker, "__init__", lambda *_args, **_kwargs: None):
         worker = NPUWorker()
+    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
     worker.model_runner = SimpleNamespace(model=model)
     worker._sleep_saved_buffers = {}
     worker.sleep_wakeup_manager = MagicMock()

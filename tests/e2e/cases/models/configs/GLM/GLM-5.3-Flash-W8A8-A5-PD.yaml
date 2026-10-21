@@ -1,100 +1,159 @@
-# Deployment parameters: docs/source/tutorials/models/GLM5.3-Flash.md section 5.3.
-# CI adaptations: shared checkpoint path, dynamic ports/network, default served name.
-# Public checkpoint replaces the self-test's local requantized copy; revalidate results.
+# PR #17516, GLM5.3-Flash.md section 5.3, 950DT products.
+# Two A5 nodes: Prefill DP1/TP8, Decode DP8/TP1; FP8 KV, MTP5.
 test_name: "GLM-5.3-Flash-W8A8-A5-PD"
-model: "/root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8"
-dp_load_balancing: external
+model: "Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8"
 num_nodes: 2
 npu_per_node: 8
+dp_load_balancing: external
+
 routing:
-  type: disaggregated_prefill
+  type: "disaggregated_prefill"
   groups:
     prefiller: [0]
     decoder: [1]
+
 config:
-  - {"node_index":0,"port_start":9081,"dp_rpc_port":12325,"dp_size":1,"dp_size_local":1,"dp_rank_start":0,"tp_size":8,"dp_address":"${NODE_0_IP}"}
-  - {"node_index":1,"port_start":9900,"dp_rpc_port":12325,"dp_size":8,"dp_size_local":8,"dp_rank_start":0,"tp_size":1,"dp_address":"${NODE_1_IP}"}
+  - node_index: 0
+    port_start: 8000
+    dp_rpc_port: 12325
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 8
+    dp_address: "${NODE_0_IP}"
+  - node_index: 1
+    port_start: 8000
+    dp_rpc_port: 12325
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  # DSA CP in the reference Prefill configuration requires Model Runner V1.
+  VLLM_USE_V2_MODEL_RUNNER: "0"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  SERVER_PORT: "${PORT}"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  TORCH_EXTENSIONS_DIR: "/tmp/torch_extensions/glm53_flash_a5_pd"
+
 templates:
   - node_index: 0
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "0"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "1024"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+      <<: *env_common
+      HCCL_BUFFSIZE: "3072"
     server_cmd_template:
-      - "--host"
+      - --host
       - "0.0.0.0"
-      - "--port"
-      - "${PORT}"
-      - "--data-parallel-size"
-      - "1"
-      - "--tensor-parallel-size"
-      - "8"
-      - "--enable-expert-parallel"
-      - "--seed"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
       - "1024"
-      - "--quantization"
-      - "ascend"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-model-len"
+      # AISBench addresses the checkpoint ID rather than the guide's "glm" alias.
+      - --served-model-name
+      - ${MODEL}
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --kv-cache-dtype
+      - "fp8"
+      - --max-num-seqs
+      - "256"
+      - --max-model-len
       - "133120"
-      - "--max-num-batched-tokens"
-      - "8192"
-      - "--trust-remote-code"
-      - "--gpu-memory-utilization"
+      - --max-num-batched-tokens
+      - "24576"
+      - --trust-remote-code
+      - --quantization
+      - "ascend"
+      - --tool-call-parser
+      - "glm47"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "glm47"
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt
+      - '{"image": 1, "video": 0}'
+      - --gpu-memory-utilization
       - "0.9"
-      - "--limit-mm-per-prompt"
-      - "{\"image\":1,\"video\":0}"
-      - "--speculative-config"
-      - "{\"num_speculative_tokens\":5,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
-      - "--kv-transfer-config"
-      - "{\"kv_connector\":\"MooncakeConnectorV2\",\"kv_role\":\"kv_producer\",\"kv_port\":\"28000\"}"
+      - --compilation-config
+      - '{"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+      - --additional-config
+      - '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_dsa_cp": true, "enable_fused_mc2": 0, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 1}}}'
+
   - node_index: 1
     envs:
-      VLLM_USE_V2_MODEL_RUNNER: "0"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *env_common
       HCCL_BUFFSIZE: "1024"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
     server_cmd_template:
-      - "--host"
+      - --host
       - "0.0.0.0"
-      - "--port"
-      - "${PORT}"
-      - "--data-parallel-size"
-      - "${DP_SIZE}"
-      - "--data-parallel-rank"
-      - "${DP_RANK}"
-      - "--data-parallel-address"
-      - "${DP_ADDRESS}"
-      - "--data-parallel-rpc-port"
-      - "${DP_RPC_PORT}"
-      - "--tensor-parallel-size"
-      - "${TP_SIZE}"
-      - "--enable-expert-parallel"
-      - "--seed"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
       - "1024"
-      - "--quantization"
-      - "ascend"
-      - "--max-num-seqs"
-      - "10"
-      - "--max-model-len"
+      - --served-model-name
+      - ${MODEL}
+      - --safetensors-load-strategy
+      - "prefetch"
+      - --kv-cache-dtype
+      - "fp8"
+      - --max-num-seqs
+      - "30"
+      - --max-model-len
       - "133120"
-      - "--max-num-batched-tokens"
-      - "60"
-      - "--trust-remote-code"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--limit-mm-per-prompt"
-      - "{\"image\":1,\"video\":0}"
-      - "--compilation-config"
-      - "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"
-      - "--speculative-config"
-      - "{\"num_speculative_tokens\":5,\"method\":\"deepseek_mtp\",\"enforce_eager\":true}"
-      - "--kv-transfer-config"
-      - "{\"kv_connector\":\"MooncakeConnectorV2\",\"kv_role\":\"kv_consumer\",\"kv_port\":\"28100\"}"
+      - --max-num-batched-tokens
+      - "120"
+      - --trust-remote-code
+      - --quantization
+      - "ascend"
+      - --tool-call-parser
+      - "glm47"
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - "glm47"
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt
+      - '{"image": 1, "video": 0}'
+      - --gpu-memory-utilization
+      - "0.95"
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}'
+      - --additional-config
+      - '{"enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30800", "kv_connector_extra_config": {"prefill": {"dp_size": 1, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 1}}}'
+
 test_content:
   - chat_completion
 chat_prompts:
@@ -102,10 +161,32 @@ chat_prompts:
 api_keyword_args:
   max_tokens: 16
   temperature: 0.0
-# Initial accuracy gate; calibrate on the two-node A5 P/D deployment.
-# Provision GSM8K-lite on the shared A5 volume before running offline CI.
+
 benchmarks:
-  accuracy_placeholder_gsm8k:
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 8
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1024
+    batch_size: 64
+    request_rate: 0
+    # Bootstrap measurement only; replace with a measured A5 PD baseline.
+    baseline: 0
+    threshold: 0.97
+  acc_gsm8k:
     case_type: accuracy
     dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
@@ -113,5 +194,6 @@ benchmarks:
     max_out_len: 4096
     batch_size: 4
     temperature: 0
+    # Initial correctness target, not a measured A5 PD score.
     baseline: 90
     threshold: 10

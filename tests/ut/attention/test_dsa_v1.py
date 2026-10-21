@@ -2777,8 +2777,8 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
-@pytest.mark.parametrize("decode_capacity,scheduler_capacity", [(4, 6), (6, 4), (6, 6)])
-def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, scheduler_capacity):
+def test_o_proj_capacity_covers_decode_batch(tp_size):
+    decode_capacity, scheduler_capacity = 4, 6
     impl = AscendDSAImpl.__new__(AscendDSAImpl)
     impl.n_local_groups = tp_size
     impl.support_fp8_attention = False
@@ -2788,7 +2788,6 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
         scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_capacity, max_num_seqs=4)
     )
     group = SimpleNamespace(world_size=tp_size, device_group=object())
-    capacity = max(decode_capacity, scheduler_capacity)
 
     def exchange(recv, send, *, group):
         recv.copy_(send)
@@ -2797,39 +2796,39 @@ def test_o_proj_capacity_covers_profile_and_decode(tp_size, decode_capacity, sch
         return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
     def reduce_scatter(out, partial, *, group):
-        out.copy_(partial.reshape(tp_size, capacity, 2).sum(0))
+        out.copy_(partial.reshape(tp_size, decode_capacity, 2).sum(0))
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity) as get_capacity,
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=decode_capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", side_effect=matmul),
     ):
         buffers = None
-        # A full profiling batch, a smaller decode batch, and an idle rank
-        # must all use the same collective shapes and buffer addresses.
-        for num_tokens in (capacity, 1, 0):
+        # A full decode batch, a smaller batch and an idle rank must reuse the
+        # same buffers so every collective keeps its shape.
+        for num_tokens in (decode_capacity, 1, 0):
             x = torch.arange(num_tokens * tp_size * 2, dtype=torch.float32).reshape(num_tokens, tp_size, 2)
             output = torch.empty(num_tokens, 2)
             impl._forward_o_proj(x, output)
-            expected = x.sum((1, 2)).unsqueeze(1).expand(-1, 2)
-            torch.testing.assert_close(output, expected)
-            current_buffers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
-            assert impl._oproj_send_buf.shape[1] == capacity
+            torch.testing.assert_close(output, x.sum((1, 2)).unsqueeze(1).expand(-1, 2))
             assert torch.count_nonzero(impl._oproj_send_buf[:, num_tokens:]) == 0
+            current_buffers = (impl._oproj_send_buf, impl._oproj_recv_buf, impl._oproj_rs_out_buf)
             if buffers is None:
                 buffers = current_buffers
-                get_capacity.return_value = capacity + 2
             else:
                 assert all(current is original for current, original in zip(current_buffers, buffers))
 
-        with pytest.raises(ValueError, match=r"capacity \(\d+\) must cover local tokens \(\d+\)"):
-            impl._forward_o_proj(torch.zeros(capacity + 1, tp_size, 2), torch.empty(capacity + 1, 2))
+        assert impl._oproj_send_buf.shape[1] == decode_capacity
+
+        # A batch sized by the larger scheduler budget must fail fast instead
+        # of inflating the static exchange buffers.
+        with pytest.raises(ValueError, match=r"capacity \(4\) must cover local tokens \(6\)"):
+            impl._forward_o_proj(torch.zeros(scheduler_capacity, tp_size, 2), torch.empty(scheduler_capacity, 2))
 
     assert a2a.call_count == rs.call_count == 3
-    get_capacity.assert_called_once()
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
@@ -2866,7 +2865,7 @@ def test_a5_fp8_o_proj_keeps_otp_collectives(tp_size, num_tokens):
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_otp_group", return_value=group),
-        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=4),
+        patch("vllm_ascend.attention.dsa_v1.get_potential_max_tokens", return_value=capacity),
         patch("vllm_ascend.attention.dsa_v1.dist.all_to_all_single", side_effect=exchange) as a2a,
         patch("vllm_ascend.attention.dsa_v1.dist.reduce_scatter_tensor", side_effect=reduce_scatter) as rs,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant", side_effect=quantize),

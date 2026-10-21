@@ -102,7 +102,7 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-      toc_depth: 3
+      toc_depth: 4
   # Python Markdown Extensions
   - pymdownx.arithmatex:
       generic: true
