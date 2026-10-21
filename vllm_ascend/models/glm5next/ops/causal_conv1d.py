@@ -22,9 +22,7 @@ def causal_conv1d(
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
     if cache_indices.shape[0] == 0:
-        # No requests have valid output rows. Keep the shape without launching
-        # an initialization kernel; the nonempty path returns FLA's own output.
-        return torch.empty_like(x)
+        return torch.zeros_like(x)
     kernel_state = conv_state
     # GLM metadata shares a contiguous vector across this group's layers.
     # Standalone callers can still pass a matrix, using its first column.
