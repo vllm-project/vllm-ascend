@@ -13,7 +13,7 @@ import ctypes
 import mmap
 from functools import cache
 from multiprocessing import shared_memory
-from typing import cast
+from typing import NamedTuple, cast
 from unittest.mock import patch
 
 import torch
@@ -122,6 +122,71 @@ def gather_dequantize_engram_int8(
         num_warps=4,
     )
     return output
+
+
+class EngramLayerLookupPlan(NamedTuple):
+    """Prebuilt inputs for the fused multi-layer Engram gather launch.
+
+    Pointer tables follow the ``HostUvaBuffer`` chunking: slot
+    ``layer * max_chunks + c`` addresses rows ``[c * CHUNK_ROWS,
+    (c + 1) * CHUNK_ROWS)`` of that layer's table, whatever backs it
+    (registered host memory or a device weight tensor).
+    """
+
+    codes_ptrs: torch.Tensor  # [layers, max_chunks] int64 device addresses
+    scales_ptrs: torch.Tensor | None  # same layout, None for BF16 storage
+    vocab_starts: torch.Tensor  # [layers] int64
+    vocab_ends: torch.Tensor  # [layers] int64
+    head_start: int
+    local_heads: int
+    dim: int
+    quantized: bool
+    mxfp8: bool
+
+
+def gather_dequantize_engram_layers(
+    plan: EngramLayerLookupPlan,
+    out_ptrs: torch.Tensor,
+    ids: torch.Tensor,
+) -> None:
+    """One fused launch gathering every Engram layer's shard.
+
+    ``ids`` is the [tokens, layers, n_hash_cols] hash buffer; any layout with a
+    unit inner stride works (the per-layer slice of a contiguous hash needs no
+    copy). ``out_ptrs`` holds one bf16 base per layer; the kernel writes that
+    rank's own head shard packed at column 0 of its first ``tokens`` rows, and
+    every element is written (out-of-range ids store zeroes), so per-layer
+    ``torch.zeros`` priming and the strided ``contiguous()`` copies disappear.
+    """
+    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+    tokens, layers = ids.shape[0], ids.shape[1]
+    rows = tokens * plan.local_heads
+    if rows == 0 or layers == 0:
+        return
+    init_device_properties_triton()
+    from vllm_ascend.ops.triton.engram_lookup import _engram_layers_gather_dequant_kernel
+
+    _engram_layers_gather_dequant_kernel[(rows, layers)](
+        plan.codes_ptrs,
+        plan.scales_ptrs if plan.scales_ptrs is not None else plan.codes_ptrs,
+        out_ptrs,
+        ids,
+        rows,
+        plan.codes_ptrs.shape[1],
+        plan.vocab_starts,
+        plan.vocab_ends,
+        ids.stride(0),
+        ids.stride(1),
+        CHUNK=CHUNK_ROWS,
+        WIDTH=plan.dim,
+        GROUP=SCALE_GROUP,
+        HEAD_START=plan.head_start,
+        LOCAL_HEADS=plan.local_heads,
+        QUANTIZED=plan.quantized,
+        MXFP8=plan.mxfp8,
+        num_warps=4,
+    )
 
 
 @cache
