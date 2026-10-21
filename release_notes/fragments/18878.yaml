@@ -1,4 +1,0 @@
-pr: 18878
-entries:
-  - category: bugfix
-    text: Fixed GLM-5-Next CausalConv1d invalid state accesses that could crash inference when decode graphs contain padded requests.
