@@ -38,7 +38,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_dcp,
+    is_dcp_enabled,
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
@@ -132,7 +132,7 @@ class AscendAttentionDCPMetadataBuilder(
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.use_dcp = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.pcp_group = get_pcp_group()
         self._pcp_context: AscendPCPAttentionContext | None = None
         self._pcp_cache_group_idx: int | None = None

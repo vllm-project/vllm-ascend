@@ -50,8 +50,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
-    enable_dcp,
     enabling_mlapo,
+    is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
     notify_kv_cache_written,
@@ -117,7 +117,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        use_dcp = enable_dcp()
+        use_dcp = is_dcp_enabled()
         if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
@@ -136,7 +136,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        use_dcp = enable_dcp()
+        use_dcp = is_dcp_enabled()
         if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 
@@ -310,7 +310,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
-        self.use_dcp = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -1460,7 +1460,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
-            and not enable_dcp()
+            and not is_dcp_enabled()
             # Sharded PCP uses the unfused projections to gather current KV.
             and not self.is_pcp_decode_sharded
             and self.vllm_config.kv_transfer_config is not None

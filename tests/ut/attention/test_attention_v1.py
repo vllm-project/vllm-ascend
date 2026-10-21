@@ -140,17 +140,17 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
@@ -161,14 +161,14 @@ class TestAscendAttentionBackend(TestBase):
         self.assertFalse(OtherAttentionBackend.supports_pcp())
 
     def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_impl_cls(),
                 AscendAttentionDCPImpl,
             )
 
     def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_builder_cls(),
                 AscendAttentionDCPMetadataBuilder,

@@ -484,7 +484,7 @@ def test_dcp_split_uses_builder_config_without_current_context(
         patch(
             "vllm_ascend.attention.context_parallel.attention_cp.DCPMetadataBuilderMixin.__init__", return_value=None
         ),
-        patch("vllm_ascend.attention.context_parallel.attention_cp.enable_dcp", return_value=True) as dcp,
+        patch("vllm_ascend.attention.context_parallel.attention_cp.is_dcp_enabled", return_value=True) as dcp,
         patch(
             "vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group",
             return_value=SimpleNamespace(world_size=1, rank_in_group=0),
@@ -514,7 +514,7 @@ def test_dcp_split_uses_builder_config_without_current_context(
             return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.attention_cp.enable_dcp",
+            "vllm_ascend.attention.context_parallel.attention_cp.is_dcp_enabled",
             side_effect=AssertionError("use cached DCP state"),
         ),
     ):

@@ -41,7 +41,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_dcp,
+    is_dcp_enabled,
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -916,7 +916,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.use_dcp = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:

@@ -30,8 +30,8 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_pcp,
     get_or_register_attention_buffer,
+    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -287,7 +287,7 @@ class AscendDSABackend(AttentionBackend):
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
+        use_pcp = is_pcp_enabled()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
@@ -319,7 +319,7 @@ class AscendDSABackend(AttentionBackend):
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
+        use_pcp = is_pcp_enabled()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
