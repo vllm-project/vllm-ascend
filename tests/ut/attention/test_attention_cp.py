@@ -121,12 +121,12 @@ def test_gqa_pcp_dcp_metadata_separates_current_prefix_and_dcp_history(
         assert prefill.chunked_context.pcp_query_restore_idx.tolist() == [0, 1, 4, 5, 6, 7, 2, 3]
         assert prefill.chunked_context.pcp_local_query_indices.tolist() == ([0, 1, 6, 7] if rank == 0 else [2, 3, 4, 5])
         impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+        impl.use_pcp = True
         gathered_query = torch.tensor([0, 1, 6, 7, 2, 3, 4, 5]).view(8, 1, 1)
         impl.pcp_group = SimpleNamespace(all_gather=Mock(return_value=gathered_query))
         impl._dcp_all_gather_fragments = Mock(side_effect=lambda query, dim: (query,))
-        impl.use_pcp = True
         restored_query = impl._prefill_query_all_gather(
-            SimpleNamespace(prefill=prefill, pcp_local_num_input_tokens=4), gathered_query[rank * 4 : (rank + 1) * 4]
+            SimpleNamespace(prefill=prefill), gathered_query[rank * 4 : (rank + 1) * 4]
         )
         torch.testing.assert_close(restored_query, torch.arange(8).view(8, 1, 1))
         local_query = gathered_query[rank * 4 : (rank + 1) * 4]
@@ -169,16 +169,16 @@ def test_gqa_first_prefill_uses_current_kv_prefixes_without_cache_tables() -> No
 @pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
 def test_gqa_current_attention_routes_local_q_and_ordered_kv(use_pcp, causal) -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    impl.use_pcp = use_pcp
     impl.num_heads, impl.num_kv_heads = 4, 1
     impl.scale = 0.5
     ordered = [1, 2, 5, 6, 7, 8, 3, 4]
     kv_rows = [1, 2] + ordered if causal else ordered * 2
     kv_ends = [2, 10] if causal else [8, 16]
-    # Only PCP-context metadata carries the current-KV prefix selection.
     prefill = AscendMetadataForPrefill(
         actual_seq_lengths_q=[2, 4],
-        pcp_current_kv_indices=torch.tensor(kv_rows) if use_pcp else None,
-        pcp_actual_seq_lengths_kv=kv_ends if use_pcp else None,
+        pcp_current_kv_indices=torch.tensor(kv_rows),
+        pcp_actual_seq_lengths_kv=kv_ends,
     )
     metadata = AscendAttentionDCPMetadata(
         num_decode_tokens=1,
@@ -186,9 +186,7 @@ def test_gqa_current_attention_routes_local_q_and_ordered_kv(use_pcp, causal) ->
         causal=causal,
         attn_mask=torch.ones(4, 4, dtype=torch.bool),
         prefill=prefill,
-        pcp_local_num_input_tokens=7 if use_pcp else None,
     )
-    impl.use_pcp = use_pcp
     query = torch.arange(7 * 4 * 2).float().view(7, 4, 2)
     key = torch.arange(9 * 2).float().view(9, 1, 2)
     value = key + 1000
@@ -286,6 +284,7 @@ def test_gqa_pcp_dcp_merges_history_only_for_local_query_fragments(has_history, 
 
 def test_gqa_chunked_prefill_uses_shared_dcp_merge_for_pcp_overlap() -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
+    impl.use_pcp = False
     impl.num_heads = 4
     impl.num_kv_heads = 1
     impl.head_size = 2

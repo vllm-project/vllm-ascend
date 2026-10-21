@@ -518,7 +518,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
         """Use the global PCP request table for DCP prefill KV loading."""
-        if not self._uses_pcp_slot_layout(attn_metadata):
+        if not self.use_pcp:
             return super().get_context_block_table(attn_metadata)
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None

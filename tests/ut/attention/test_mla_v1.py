@@ -434,23 +434,6 @@ def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
     impl.exec_kv_prefill.assert_called_once()
 
 
-def test_mla_replicated_draft_decode_writes_local_slots() -> None:
-    impl = AscendMLAImpl.__new__(AscendMLAImpl)
-    impl.use_pcp = True
-    impl.is_pcp_decode_sharded = True
-    impl.use_mla_rope = False
-    impl._exec_kv_no_rope = MagicMock(return_value=("k_pe", "k_nope"))
-    metadata = _make_pcp_metadata(num_actual_tokens=2, num_decode_tokens=2)
-    metadata.num_input_tokens = 2
-    metadata.slot_mapping = torch.tensor([5, 7], dtype=torch.int64)
-    kv = torch.zeros(2, 4)
-    with patch("vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs") as gather:
-        impl.exec_kv_prefill(kv, None, None, (), metadata.slot_mapping, attn_metadata=metadata)
-    # An unexpanded slot mapping means the step is replicated: no PCP gather.
-    gather.assert_not_called()
-    impl._exec_kv_no_rope.assert_called_once_with(kv, (), metadata.slot_mapping)
-
-
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.is_pcp_decode_sharded = False
@@ -3002,7 +2985,6 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.num_actual_tokens = 4
         num_prefill_tokens = 2
         attn_metadata.slot_mapping = torch.arange(4)
-        attn_metadata.prefill.pcp_local_num_input_tokens = None
         attn_metadata.decode.cos = torch.randn(2, 64)
         attn_metadata.decode.sin = torch.randn(2, 64)
         attn_metadata.prefill.cos = torch.randn(2, 64)
@@ -3110,7 +3092,7 @@ class TestAscendMLAImpl(TestBase):
                     num_decode_tokens=num_decode_tokens,
                     num_actual_tokens=num_actual_tokens,
                     slot_mapping=torch.arange(4),
-                    prefill=SimpleNamespace(cos=None, sin=None, pcp_local_num_input_tokens=None),
+                    prefill=SimpleNamespace(cos=None, sin=None),
                 )
                 result = self.impl.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, metadata)
 

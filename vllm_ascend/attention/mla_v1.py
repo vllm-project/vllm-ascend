@@ -2303,15 +2303,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             quantize_query=False,
         )
 
-    def _uses_pcp_slot_layout(self, attn_metadata: AscendMLAMetadata | None) -> bool:
-        # Only PCP-context metadata expands the slot mapping to every rank's
-        # padded tokens; a replicated draft decode keeps its local slots.
-        return (
-            self.use_pcp
-            and attn_metadata is not None
-            and attn_metadata.slot_mapping.numel() > attn_metadata.num_input_tokens
-        )
-
     def exec_kv_prefill(
         self,
         kv_no_split: torch.Tensor,
@@ -2323,8 +2314,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: AscendMLAMetadata | None = None,
     ):
         pcp_local_range = None
-        uses_pcp_slot_layout = self._uses_pcp_slot_layout(attn_metadata)
-        if uses_pcp_slot_layout:
+        if self.use_pcp:
             assert attn_metadata is not None
             # Gather before any RoPE-specific writer. use_mla_rope=False used
             # to return first and store rank-local KV with the expanded slots.
@@ -2371,7 +2361,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.qk_rope_head_dim == 0:
                 # The PCP gather carries rank padding with slot -1.
                 k_pe, k_nope = self._exec_kv_mla_nope(
-                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=uses_pcp_slot_layout
+                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.use_pcp
                 )
             else:
                 cache_mode = "PA"
@@ -2794,7 +2784,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         attn_metadata: AscendMLAMetadata,
     ) -> int:
-        if self._uses_pcp_slot_layout(attn_metadata):
+        if self.use_pcp:
             prefill_metadata = attn_metadata.prefill
             assert prefill_metadata is not None
             local_num_input_tokens = prefill_metadata.pcp_local_num_input_tokens
@@ -2919,7 +2909,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         # Sharded decode writes other ranks' KV even without local queries; a
         # replicated draft decode keeps its local slots and per-path writes.
-        writes_sharded_pcp_kv = self.is_pcp_decode_sharded and self._uses_pcp_slot_layout(attn_metadata)
+        writes_sharded_pcp_kv = (
+            self.is_pcp_decode_sharded and attn_metadata.slot_mapping.numel() > attn_metadata.num_input_tokens
+        )
         should_write_kv_cache = has_decode or has_prefill or writes_sharded_pcp_kv
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)

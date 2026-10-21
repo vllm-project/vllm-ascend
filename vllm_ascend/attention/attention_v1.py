@@ -1360,8 +1360,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query, key, value, kv_cache, attn_metadata, output
                 )
             else:
-                # The DCP impl keys its PCP query paths on this field.
-                assert not self.use_pcp or attn_metadata.pcp_local_num_input_tokens is None
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
                 )
