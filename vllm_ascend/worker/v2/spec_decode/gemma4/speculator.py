@@ -33,11 +33,15 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
 
-_vllm_ar_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.autoregressive.speculator")
+if vllm_version_is("0.31.0"):
+    _vllm_ar_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.autoregressive.speculator")
+else:
+    _vllm_ar_speculator = importlib.import_module("vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator")
 
 
 @contextmanager
