@@ -1,0 +1,4 @@
+pr: 19347
+entries:
+  - category: bugfix
+    text: Fixed a Model Runner V1 pipeline-parallel intermediate-tensor shape mismatch when sequence parallelism is enabled and no current vLLM configuration context is active.
