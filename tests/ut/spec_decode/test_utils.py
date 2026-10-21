@@ -189,6 +189,22 @@ def test_cpu_and_gpu_corrections_agree():
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
 
 
+def test_position_correction_preserves_postprocessed_state_slot_counts():
+    computed = torch.tensor([10, 20], dtype=torch.int32)
+    state_counts = torch.tensor([1, 2], dtype=torch.int32)
+    update_num_computed_tokens_for_batch_change(
+        computed,
+        state_counts,
+        torch.tensor([0, 1]),
+        torch.tensor([3, 4]),
+        torch.tensor([5, 5]),
+        torch.tensor([16, 26]),
+        update_accepted_tokens=False,
+    )
+    torch.testing.assert_close(computed, torch.tensor([13, 24], dtype=torch.int32))
+    torch.testing.assert_close(state_counts, torch.tensor([1, 2], dtype=torch.int32))
+
+
 def test_sliding_window_updates_host_length_mirrors():
     adapter = SlidingWindowAdapter(
         window_size=128,
