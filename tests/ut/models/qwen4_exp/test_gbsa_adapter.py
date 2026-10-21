@@ -26,7 +26,7 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
         for row in range(query.shape[0]):
             explicit = indices[0, row, : counts[0, row]].tolist()
             sequence_length = int(kwargs["seqused_kv"][row])
-            selected_tokens = []
+            selected_tokens: list[int] = []
             for block in explicit:
                 selected_tokens.extend(range(block * 4, block * 4 + 4))
             selected_tokens.extend(range(sequence_length - tail_tokens, sequence_length))
