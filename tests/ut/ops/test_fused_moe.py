@@ -1155,6 +1155,7 @@ def _make_shared_expert_events():
 @pytest.mark.parametrize("limit,alpha,beta", [(10.0, 1.0, 0.0), (0.0, 1.0, 0.0), (10.0, 1.7, 1.0)])
 def test_shared_clipped_swiglu_official_dispatch(monkeypatch, device_type, limit, alpha, beta):
     shared = AscendSharedExperts.__new__(AscendSharedExperts)
+    shared._shared_swiglu_cache = MagicMock()
     shared.situ_activation = None
     shared.swiglu_limit, shared.swiglu_alpha, shared.swiglu_beta = limit, alpha, beta
     shared.layer = SimpleNamespace(gate_up_proj=MagicMock(), down_proj=MagicMock())
@@ -1182,7 +1183,11 @@ def test_shared_clipped_swiglu_official_dispatch(monkeypatch, device_type, limit
     assert output is down_output
     if use_official:
         official.assert_called_once_with(
-            submitted.gate_up, shared.layer.gate_up_proj.weight_scale_fp32, submitted.gate_up_input_scale, limit
+            submitted.gate_up,
+            shared.layer.gate_up_proj.weight_scale_fp32,
+            submitted.gate_up_input_scale,
+            limit,
+            cache=shared._shared_swiglu_cache,
         )
         legacy.assert_not_called()
     else:
