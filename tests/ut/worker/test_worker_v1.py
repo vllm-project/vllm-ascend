@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -20,6 +21,51 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
+
+
+class TestPPSequenceParallelTransport(unittest.TestCase):
+    @patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("No current config"))
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    def test_transport_without_current_config(self, tp_group, pp_group, ascend_config, _current_config):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        ascend_config.return_value.msmonitor_use_daemon = False
+        pp_group.return_value.is_first_rank = False
+        pp_group.return_value.is_last_rank = False
+        pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
+        for sp_enabled in (False, True):
+            for forward_pass in (False, True):
+                with self.subTest(sp=sp_enabled, forward=forward_pass):
+                    pp_group.return_value.reset_mock()
+                    worker = NPUWorker.__new__(NPUWorker)
+                    worker.vllm_config = SimpleNamespace(
+                        parallel_config=SimpleNamespace(
+                            use_sequence_parallel_moe=sp_enabled,
+                            distributed_executor_backend="mp",
+                        )
+                    )
+                    worker.log_memory_stats = MagicMock()
+                    worker._pp_send_work = []
+                    worker.profiler = None
+                    worker.use_v2_model_runner = False
+                    output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
+                    output.kv_connector_output = None
+                    worker.model_runner = MagicMock()
+                    worker.model_runner.execute_model.return_value = output
+                    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=int(forward_pass))
+
+                    self.assertIsNone(worker.execute_model(scheduler_output))
+
+                    group = None if sp_enabled else tp_group.return_value
+                    if forward_pass:
+                        pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
+                    else:
+                        pp_group.return_value.irecv_tensor_dict.assert_not_called()
+                    pp_group.return_value.isend_tensor_dict.assert_called_once_with(
+                        output.tensors, all_gather_group=group
+                    )
 
 
 class TestNPUWorker(TestBase):
