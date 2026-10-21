@@ -21,10 +21,11 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType  # noqa: F401
+from vllm.device_allocator import AllocationData, HandleType  # noqa: F401
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.logger import logger
 from vllm.utils.system_utils import find_loaded_library
@@ -133,6 +134,27 @@ class CaMemAllocator(CuMemAllocator):
             "for the latest updates."
         )
         super().__init__()
+        self.current_tag: str = CaMemAllocator.default_tag
+        self.allocator_and_pools: dict[str, Any] = {}
+
+    def release_pools(self) -> None:
+        """Drop Python references to MemPool/pluggable allocators eagerly."""
+        if not self.allocator_and_pools:
+            return
+
+        pool_entries = list(self.allocator_and_pools.values())
+        self.allocator_and_pools.clear()
+
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
+        pool_entries.clear()
+
+        # Phase 1: drop MemPool refs while allocators are still strongly held.
+        mem_pools.clear()
+        gc.collect()
+
+        # Phase 2: now it is safe to release allocator wrappers.
+        allocators.clear()
 
     def _python_free_callback(self, ptr: int) -> HandleType:
         """Release an allocation after draining pending NPU work."""
@@ -244,18 +266,8 @@ class CaMemAllocator(CuMemAllocator):
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
-        memory, and the rest of the data will have empty memory.
-
-        Args:
-            tags: The deferrable tags (weights, kv_cache) to load back to GPU
-                memory; every other tag is always loaded back. If None, all
-                memory allocation will be loaded back to NPU memory.
-        """
-        restore_count = sum(
-            1
-            for data in self.pointer_to_data.values()
-            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS
-        )
+        memory, and the rest of the data will have empty memory."""
+        restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
             "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
             restore_count,
@@ -265,7 +277,7 @@ class CaMemAllocator(CuMemAllocator):
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
-            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
+            if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
@@ -301,7 +313,7 @@ class CaMemAllocator(CuMemAllocator):
             # the memory pool.
             # to avoid the issue, we keep a reference of the data.
             # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools.setdefault(tag, []).append(data)
+            self.allocator_and_pools[tag] = data
             yield
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see
