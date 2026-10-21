@@ -296,10 +296,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         try:
             self.wave_tracker.advance(allow_manual_dump=allow_manual_dump)
             cfg = self.runtime_config
-            idle = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
-            if idle and not cfg.hot_reload_enabled:
-                # Static idle: no config bus. Claim leftover auto jobs only when
-                # dump is active (shared gate → all ranks take the same branch).
+            # dump_only: no detectors / manual trigger, hot-reload off; dump may
+            # still be on (not fully off). No config bus — claim or drop.
+            dump_only = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
+            if dump_only and not cfg.hot_reload_enabled:
                 if cfg.dump_enabled():
                     self._claim_dump_jobs_to_deferred_via_tp()
                 elif self._kv_dump_jobs:
@@ -397,6 +397,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def needs_sample_phase_hooks(self) -> bool:
         """True when sample-phase runtime_guard hooks must run (else pure ``sample_fn``)."""
         return bool(self.runtime_config.needs_sample_phase_hooks())
+
+    def is_fully_off(self) -> bool:
+        """True when fully off — skip hot shells (see RuntimeConfig.is_fully_off)."""
+        return bool(self.runtime_config.is_fully_off())
 
     def _soft_fail(self, hook: str, fn: Callable[[], Any]) -> Any:
         # Guard hooks are observational: any exception must stay inside the

@@ -808,6 +808,26 @@ class RuntimeConfig:
         """
         return bool(self._hot_path_gates_cached()["needs_sample_phase_hooks"])
 
+    def is_fully_off(self) -> bool:
+        """True when observability is fully off (default-off cold path).
+
+        Requires: hot-reload off, no detectors, no dump, no manual trigger.
+        Distinct from dump-only (detectors off but dump still active) — that
+        path still runs wave advance / claim / end-of-wave.
+
+        When True, hooks skip sync/sample shells entirely. Enabling any axis
+        needs restart if hot-reload is off; with hot-reload on this is always
+        False and full shells run.
+        """
+        if self.hot_reload_enabled:
+            return False
+        gates = self._hot_path_gates_cached()
+        return (
+            not gates["needs_sample_phase_hooks"]
+            and not gates["dump_enabled"]
+            and int(gates["manual_trigger_count"]) <= 0
+        )
+
     # Detector section order comes from ``detector_catalog``.
     DETECTOR_SECTIONS = _CATALOG_DETECTOR_SECTIONS
 

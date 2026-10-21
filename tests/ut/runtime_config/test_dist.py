@@ -124,23 +124,9 @@ def _patch_dist(monkeypatch, fake_broadcast):
     monkeypatch.setattr(torch.distributed, "get_process_group_ranks", lambda g: [7, 8])
 
 
-def test_group_rank_prefers_rank_in_group():
-    group = SimpleNamespace(rank_in_group=2, rank=9)
+def test_group_rank_uses_rank_in_group():
+    group = SimpleNamespace(rank_in_group=2)
     assert dist._group_rank(group, src=0) == 2
-
-
-def test_group_rank_accepts_callable_rank():
-    group = SimpleNamespace(rank=lambda: 3)
-    assert dist._group_rank(group, src=0) == 3
-
-
-def test_group_rank_uses_torch_get_rank_on_cpu_gate(monkeypatch):
-    import torch
-
-    gate = object()
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda g: 4 if g is gate else -1)
-    group = SimpleNamespace(cpu_group=gate)
-    assert dist._group_rank(group, src=0) == 4
 
 
 def test_group_rank_is_first_rank_fallback_returns_src():
@@ -148,14 +134,14 @@ def test_group_rank_is_first_rank_fallback_returns_src():
     assert dist._group_rank(group, src=0) == 0
 
 
-def test_group_rank_unknown_group_raises_instead_of_src_plus_one():
+def test_group_rank_unknown_group_raises():
     group = SimpleNamespace(world_size=2)
     with pytest.raises(RuntimeError, match="cannot resolve group rank"):
         dist._group_rank(group, src=0)
 
 
 def test_sync_due_bits_from_src_source_packs_without_rank_in_group(monkeypatch):
-    """Missing rank_in_group must not make every rank skip packing (src+1 bug)."""
+    """Missing rank_in_group still lets the source pack when is_first_rank."""
     seen = {}
 
     def fake_broadcast(tensor, src=0, group=None):

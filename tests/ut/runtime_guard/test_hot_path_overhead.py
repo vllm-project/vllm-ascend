@@ -124,34 +124,35 @@ def test_hot_path_gates_cache_and_local_interval_skip(tmp_path: Path):
     assert cfg.needs_sample_phase_hooks() is True
 
 
-def test_sync_for_step_skips_refresh_when_reload_off_idle(tmp_path: Path):
-    """T1 idle shell: reload=0 + idle gates → advance only, no refresh."""
+def test_is_fully_off_default_off(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.0)
-    assert cfg.hot_reload_enabled is False
-    with (
-        patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
-        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
-        patch(
-            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
-            side_effect=Exception("no pp"),
-        ),
-    ):
-        proc = _bind(cfg)
-        proc.sync_for_step(allow_manual_dump=True, scheduler_output=None)
-        proc.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
-        refresh.assert_not_called()
-        # dump defaults off → skip TP claim bus entirely (lockstep).
-        claim.assert_not_called()
-    RuntimeGuardProcessor.reset_for_tests()
+    assert cfg.is_fully_off() is True
+
+    cfg._data["detector"]["token_repeat"]["enabled"] = True
+    cfg._invalidate_hot_path_gates()
+    assert cfg.is_fully_off() is False
+
+    cfg = _cfg(tmp_path, reload=0.0)
+    cfg._data["dump"]["auto_max_times"] = 1
+    cfg._invalidate_hot_path_gates()
+    assert cfg.is_fully_off() is False
+
+    cfg = _cfg(tmp_path, reload=5.0)
+    assert cfg.is_fully_off() is False
 
 
-def test_idle_allow_manual_dump_defers_end_of_wave_to_sample(tmp_path: Path):
-    """Static idle + allow_manual_dump=True must not end_of_wave at sync; sample does once."""
+def test_dump_only_still_end_of_wave_on_sample(tmp_path: Path):
+    """dump_only (detectors off, dump on) ≠ fully off — sample still flushes eow."""
     cfg = _cfg(tmp_path, reload=0.0)
+    cfg._data["dump"]["auto_max_times"] = 1
+    cfg._invalidate_hot_path_gates()
+    assert cfg.is_fully_off() is False
     assert cfg.needs_sample_phase_hooks() is False
+    assert cfg.dump_enabled() is True
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config"),
         patch.object(RuntimeGuardProcessor, "end_of_wave_sync") as eow,
+        patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp"),
         patch(
             "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
@@ -181,13 +182,43 @@ def test_idle_allow_manual_dump_defers_end_of_wave_to_sample(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_claims_dump_when_idle_but_dump_on(tmp_path: Path):
-    """Static idle with dump active still claims (TP bus may run)."""
+def test_sample_tokens_decorator_fully_off_bypasses_wrap(tmp_path: Path):
+    """Decorator must call bare sample_tokens when fully off (no wrap/eow)."""
+    from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_sample_tokens
+
+    cfg = _cfg(tmp_path, reload=0.0)
+    assert cfg.is_fully_off() is True
+    proc = _bind(cfg)
+    runner = proc.runner
+    runner.runtime_guard = proc
+    calls: list[str] = []
+
+    def bare_sample(self, grammar_output):
+        calls.append("bare")
+        return "out"
+
+    wrapped = runtime_guard_sample_tokens(bare_sample)
+    with (
+        patch.object(proc, "run_sample_phase") as rsp,
+        patch(
+            "vllm_ascend.observability.runtime_guard.hooks.wrap_postprocess_sampled",
+        ) as wrap_pp,
+    ):
+        assert wrapped(runner, None) == "out"
+        assert calls == ["bare"]
+        rsp.assert_not_called()
+        wrap_pp.assert_not_called()
+    RuntimeGuardProcessor.reset_for_tests()
+
+
+def test_sync_for_step_dump_only_claims(tmp_path: Path):
+    """dump_only (detectors off, dump on): advance + claim; not fully off."""
     cfg = _cfg(tmp_path, reload=0.0)
     cfg._data["dump"]["auto_max_times"] = 1
     cfg._invalidate_hot_path_gates()
     assert cfg.dump_enabled() is True
     assert cfg.needs_sample_phase_hooks() is False
+    assert cfg.is_fully_off() is False
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
         patch.object(RuntimeGuardProcessor, "_claim_dump_jobs_to_deferred_via_tp") as claim,
@@ -198,13 +229,14 @@ def test_sync_for_step_claims_dump_when_idle_but_dump_on(tmp_path: Path):
     ):
         proc = _bind(cfg)
         proc.sync_for_step(allow_manual_dump=True, scheduler_output=None)
+        proc.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
         refresh.assert_not_called()
         claim.assert_called_once()
     RuntimeGuardProcessor.reset_for_tests()
 
 
-def test_sync_for_step_refreshes_when_reload_on_idle(tmp_path: Path):
-    """T2 idle: hot-reload on → always refresh (broadcast lockstep)."""
+def test_sync_for_step_refreshes_when_reload_on_without_detectors(tmp_path: Path):
+    """Hot-reload on (never fully off): refresh even with detectors off."""
     cfg = _cfg(tmp_path, reload=5.0)
     cfg._last_reload_ts = time.time()
     cfg._initial_broadcast_done = True
