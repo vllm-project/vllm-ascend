@@ -73,6 +73,7 @@ class TestBulkFullBlocks(unittest.TestCase):
         scheduler.use_block_key_layerwise = False
         scheduler.use_layerwise_transfer = False
         scheduler.use_layerwise = False
+        scheduler.num_speculative_blocks_by_group = {1: 0}
         scheduler._discard_partial_chunks = discard
         scheduler.cache_transfer_granularity = 896
         scheduler.client = SimpleNamespace(lookup=self.worker.lookup_scheduler)
@@ -270,3 +271,16 @@ class TestBulkFullBlocks(unittest.TestCase):
         self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (1791, False))
         self.assertEqual(scheduler._get_layerwise_hit_tokens.call_args.args[1], 1792)
         self.assertEqual(scheduler.load_specs["req"].kvpool_store_skip_tokens, 1792)
+
+    def test_attention_only_bulk_keeps_full_hit_replay_behavior(self):
+        for discard in (False, True):
+            with self.subTest(discard=discard):
+                scheduler = self.scheduler(discard)
+                scheduler.num_speculative_blocks_by_group = {}
+                scheduler.client = SimpleNamespace(lookup=MagicMock(return_value=1792))
+                request = SimpleNamespace(
+                    request_id="req", prompt_token_ids=list(range(1792)), num_tokens=1792, block_hashes=self.hashes
+                )
+                self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (1791, False))
+                self.assertEqual(scheduler.client.lookup.call_args.args[0], 1792)
+                self.assertEqual(scheduler.load_specs["req"].kvpool_store_skip_tokens, 1792)

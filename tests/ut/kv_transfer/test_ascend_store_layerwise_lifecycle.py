@@ -365,8 +365,10 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             cache.fill_(-1)
     assert run_request("warm", producer + [128], 128) == 128
     assert scheduler.reset_prefix_cache()
-    # Preserve main's complete-hit policy: reserve the final token for replay.
-    assert run_request("complete-hit", producer, 127) == 127
+    # A recurrent state at 128 cannot be rewound to replay token 127. Restore
+    # the checkpoint at 96 and recompute the whole final 32-token interval.
+    complete_hit = 96 if recurrent_type is not None else 127
+    assert run_request("complete-hit", producer, complete_hit) == complete_hit
     assert scheduler.reset_prefix_cache()
     assert run_request("boundary", producer[:-1], 96) == 96
     assert scheduler.reset_prefix_cache()
