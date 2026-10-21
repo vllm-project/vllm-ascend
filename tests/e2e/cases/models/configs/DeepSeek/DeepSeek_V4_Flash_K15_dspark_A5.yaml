@@ -82,7 +82,7 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 11
+        baseline: 2241.98294
         threshold: 0.95
         temperature: 0
         ignore_eos: True
@@ -114,7 +114,7 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 11
+        baseline: 2414.56025
         threshold: 0.95
         temperature: 0
         ignore_eos: True
