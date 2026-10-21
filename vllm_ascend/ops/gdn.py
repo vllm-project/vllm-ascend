@@ -161,7 +161,10 @@ def _flatten_recurrent_state_indices(
     convention; 2D indices keep the first ``query_len`` slots of each row.
     """
     if state_indices.ndim == 1:
-        return state_indices[:total_tokens].contiguous()
+        # Plain slice: zero device work. The block-table column view is
+        # strided and the kernel accepted strided input here before the fix,
+        # so forcing contiguity would add a per-layer copy on the hot path.
+        return state_indices[:total_tokens]
     num_seqs, num_slots = state_indices.shape
     if total_tokens == num_seqs * num_slots:
         return state_indices.reshape(-1).contiguous()
