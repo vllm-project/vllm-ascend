@@ -3528,10 +3528,9 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     ###### Prefill Engine Script (Pooled)
 
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
-    PP node rank, API port, local IP, instance leader IP, instance ID, and
-    visible devices. Both PP stages of one instance use the same master
-    address and partition. The two independent instances have different
-    master addresses.
+    PP node rank, API port, local IP, instance leader IP, and visible devices.
+    Both PP stages of one instance use the same master address and partition.
+    The two independent instances have different master addresses.
 
     ```shell
     #!/usr/bin/env bash
@@ -3541,8 +3540,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     PORT=${2:-8000}
     LOCAL_IP=${3:?need local_ip}
     INSTANCE_LEADER_IP=${4:?need instance_leader_ip}
-    INSTANCE_ID=${5:?need instance_id}
-    VISIBLE_DEVICES=${6:-0,1,2,3,4,5,6,7}
+    VISIBLE_DEVICES=${5:-0,1,2,3,4,5,6,7}
     : "${MODEL_PATH:?export MODEL_PATH}"
     : "${NIC_NAME:?export NIC_NAME}"
     : "${MEMCACHE_ROOT:?export MEMCACHE_ROOT}"
@@ -3783,16 +3781,16 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
         ```shell
         # P0: instance 0 leader and API server
-        bash start_p_pool.sh 0 8000 "<PREFILL_NODE0_IP>" "<PREFILL_NODE0_IP>" 0 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 0 8000 "<PREFILL_NODE0_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
 
         # P1: instance 0 headless PP partner
-        bash start_p_pool.sh 1 8000 "<PREFILL_NODE1_IP>" "<PREFILL_NODE0_IP>" 0 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 1 8000 "<PREFILL_NODE1_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
 
         # P2: instance 1 leader and API server
-        bash start_p_pool.sh 0 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE2_IP>" 1 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 0 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
 
         # P3: instance 1 headless PP partner
-        bash start_p_pool.sh 1 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE2_IP>" 1 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 1 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
         ```
 
     3. Export the settings from [Prepare MemCache](#glm53-pool-a2-prepare)
