@@ -1018,6 +1018,161 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens_event = MagicMock()
         return runner
 
+    @staticmethod
+    def _enable_async_pp(runner):
+        runner._use_async_pp_spec_decode = True
+        runner._accepted_token_req_ids = []
+        runner._accepted_tokens_by_req = {}
+        runner._valid_sampled_count_ready = False
+        runner.input_batch.req_ids = ["A", "B", "C"]
+        runner.requests = {req_id: SimpleNamespace(output_token_ids=[]) for req_id in runner.input_batch.req_ids}
+
+    def test_pp_state_counts_survive_unscheduled_gap_and_row_reuse(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner._accepted_token_req_ids = ["A", "B", "C"]
+        runner.num_accepted_tokens.np[:3] = [2, 1, 4]
+        runner.requests["D"] = SimpleNamespace(output_token_ids=[])
+        runner.input_batch.req_ids = ["C", "A", "D"]
+
+        runner._sync_num_accepted_tokens(3, has_prev_mapping=False)
+        np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], [4, 2, 1])
+        # A leaves InputBatch for another PP microbatch, then returns in a new row.
+        runner.input_batch.req_ids = ["D"]
+        runner._sync_num_accepted_tokens(1, has_prev_mapping=False)
+        runner.input_batch.req_ids = ["D", "A"]
+        runner._sync_num_accepted_tokens(2, has_prev_mapping=False)
+        np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 2])
+
+    def test_pp_request_reset_cannot_restore_an_old_state_snapshot(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner._accepted_tokens_by_req = dict.fromkeys(["A", "B", "C", "D", "E"], 4)
+        runner._accepted_token_req_ids = ["A", "B", "C", "D", "E"]
+        runner._update_replay_requests = MagicMock()
+        runner._track_tmp_encoder_cache_refs = MagicMock()
+        output = SimpleNamespace(
+            finished_req_ids={"A"},
+            preempted_req_ids={"C"},
+            scheduled_new_reqs=[SimpleNamespace(req_id="D")],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[], resumed_req_ids={"B"}),
+            kv_cache_block_copies=[],
+        )
+        with patch.object(GPUModelRunner, "_update_states", return_value=None):
+            runner._update_states(output)
+        self.assertEqual(runner._accepted_tokens_by_req, {"E": 4})
+        self.assertEqual(runner._accepted_token_req_ids, [None, None, None, None, "E"])
+
+    def test_pp_transfers_padded_mtp_samples_and_runs_local_state_update(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner.device = torch.device("cpu")
+        runner.num_spec_tokens = 5
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.req_ids = ["A", "B"]
+        runner.input_batch.num_tokens_no_spec = np.array([4, 4])
+        runner.input_batch.num_tokens = np.array([4, 4])
+        runner.input_batch.token_ids_cpu = np.zeros((2, 16), dtype=np.int32)
+        runner.input_batch.is_token_ids = np.zeros((2, 16), dtype=bool)
+        runner.discard_request_mask = SimpleNamespace(np=np.array([False, True]))
+        runner._copy_valid_sampled_token_count = MagicMock()
+        runner._update_states_after_model_execute = MagicMock()
+        sampled = torch.tensor([[11, 12, 13, -1], [21, -1, -1, -1]], dtype=torch.int32)
+        pp = SimpleNamespace(is_last_rank=True, last_rank=8, device_group=object())
+        wire = []
+
+        def broadcast(tensor, **kwargs):
+            self.assertEqual(kwargs, {"src": 8, "group": pp.device_group})
+            if pp.is_last_rank:
+                wire.append(tensor.clone())
+            else:
+                tensor.copy_(wire[0])
+
+        output = SimpleNamespace()
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=pp),
+            patch("vllm_ascend.worker.model_runner_v1.dist.broadcast", side_effect=broadcast),
+        ):
+            runner._sync_pp_spec_decode_samples(sampled, output)
+            pp.is_last_rank = False
+            runner._sync_pp_spec_decode_samples(None, output)
+
+        self.assertEqual(tuple(wire[0].shape), (2, 6))
+        torch.testing.assert_close(wire[0][:, :4], sampled)
+        next_ids, counts = runner._copy_valid_sampled_token_count.call_args.args
+        torch.testing.assert_close(next_ids, torch.tensor([13, 21], dtype=torch.int32))
+        torch.testing.assert_close(counts, torch.tensor([3, 1]))
+        self.assertEqual(runner.input_batch.prev_req_id_to_index, {"A": 0})
+        self.assertEqual(runner.requests["A"].output_token_ids, [-1])
+        self.assertEqual(runner.requests["B"].output_token_ids, [])
+        runner._update_states_after_model_execute.assert_called_once()
+        torch.testing.assert_close(runner._update_states_after_model_execute.call_args.args[0], wire[0])
+
+    def test_non_final_pp_trims_rejected_placeholders_before_prefill_mask(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner._update_replay_requests = MagicMock()
+        runner._track_tmp_encoder_cache_refs = MagicMock()
+        runner.requests["A"] = SimpleNamespace(
+            output_token_ids=[-1] * 8,
+            num_prompt_tokens=6,
+            num_computed_tokens=10,
+            prev_num_draft_len=5,
+        )
+        runner.input_batch.req_id_to_index = {"A": 0}
+        runner.input_batch.num_tokens_no_spec = np.array([14])
+        runner.input_batch.update_req_spec_token_ids = MagicMock()
+        output = SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=None,
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["A"],
+                resumed_req_ids=set(),
+                num_output_tokens=[2],
+                num_computed_tokens=[10],
+            ),
+            scheduled_spec_decode_tokens={"A": [11, 12]},
+            kv_cache_block_copies=[],
+        )
+        with (
+            patch.object(GPUModelRunner, "_update_states", return_value=None),
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(is_last_rank=False)),
+        ):
+            runner._update_states(output)
+        self.assertEqual(len(runner.requests["A"].output_token_ids), 2)
+        self.assertEqual(runner.input_batch.num_tokens_no_spec[0], 8)
+        runner.input_batch.update_req_spec_token_ids.assert_called_once_with(
+            runner.requests["A"], output.scheduled_spec_decode_tokens
+        )
+
+    def test_non_final_pp_sample_call_consumes_its_execution_context_once(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner.execute_model_state = None
+        runner.kv_connector_output = None
+        output = runner._pp_scheduler_output = SimpleNamespace()
+        runner._sync_pp_spec_decode_samples = MagicMock()
+        pp = SimpleNamespace(world_size=2)
+        with patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=pp):
+            self.assertIsNone(runner.sample_tokens(None))
+            self.assertIsNone(runner.sample_tokens(None))
+        runner._sync_pp_spec_decode_samples.assert_called_once_with(None, output)
+        self.assertIsNone(runner._pp_scheduler_output)
+
+    def test_pp_does_not_read_sample_counts_before_a_copy_was_recorded(self):
+        runner = self._build_runner()
+        self._enable_async_pp(runner)
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.valid_sampled_token_count_cpu = torch.tensor([3 << 32])
+        runner.input_batch.prev_sampled_token_ids = torch.tensor([[11]])
+        self.assertEqual(runner._get_valid_sampled_token_count(), [])
+        runner.valid_sampled_token_count_event.synchronize.assert_not_called()
+        runner.valid_sampled_token_count_cpu[:] = 3
+        runner._valid_sampled_count_ready = True
+        self.assertEqual(runner._get_valid_sampled_token_count(), [3])
+        runner.valid_sampled_token_count_event.synchronize.assert_called_once()
+
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
         with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):

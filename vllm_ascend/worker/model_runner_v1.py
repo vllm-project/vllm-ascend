@@ -660,6 +660,19 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
+        self._use_async_pp_spec_decode = (
+            self.use_async_scheduling
+            and self.num_spec_tokens > 0
+            and self.speculative_config.method in ("mtp", "deepseek_mtp")
+            and self.model_config.is_hybrid
+            and self.parallel_config.pipeline_parallel_size > 1
+            and not self.broadcast_pp_output
+            and not self._is_pd_prefill_worker()
+        )
+        self._pp_scheduler_output: SchedulerOutput | None = None
+        self._accepted_token_req_ids: list[str | None] = []
+        self._accepted_tokens_by_req: dict[str, int] = {}
+        self._valid_sampled_count_ready = False
 
         self.update_stream: torch.npu.Stream | None = None
 
@@ -925,6 +938,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> None:
+        if getattr(self, "_use_async_pp_spec_decode", False):
+            return
         pp = get_pp_group()
         if (
             not self.use_async_scheduling
@@ -988,6 +1003,18 @@ class NPUModelRunner(GPUModelRunner):
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         self._update_replay_requests(scheduler_output)
+        if getattr(self, "_use_async_pp_spec_decode", False):
+            reset_req_ids = (
+                scheduler_output.finished_req_ids
+                | (scheduler_output.preempted_req_ids or set())
+                | scheduler_output.scheduled_cached_reqs.resumed_req_ids
+                | {req.req_id for req in scheduler_output.scheduled_new_reqs}
+            )
+            for req_id in reset_req_ids:
+                self._accepted_tokens_by_req.pop(req_id, None)
+            self._accepted_token_req_ids = [
+                req_id if req_id not in reset_req_ids else None for req_id in self._accepted_token_req_ids
+            ]
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -1022,6 +1049,22 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_block_copies=[],
             )
         sampling_metadata = super()._update_states(scheduler_output)
+        if (
+            getattr(self, "_use_async_pp_spec_decode", False)
+            and req_data.req_ids
+            and not get_pp_group().is_last_rank
+        ):
+            # Mirror the final rank's rejection of optimistic placeholders.
+            # Inflated history otherwise makes decode rows look like prefill.
+            for req_id, num_output_tokens in zip(req_data.req_ids, req_data.num_output_tokens):
+                req_state = self.requests[req_id]
+                if len(req_state.output_token_ids) <= num_output_tokens:
+                    continue
+                del req_state.output_token_ids[num_output_tokens:]
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    self.input_batch.num_tokens_no_spec[req_index] = req_state.num_prompt_tokens + num_output_tokens
+                    self.input_batch.update_req_spec_token_ids(req_state, scheduler_output.scheduled_spec_decode_tokens)
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
@@ -1063,6 +1106,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
         assert self.num_accepted_tokens_event is not None
         self.num_accepted_tokens_event.record()
+        if getattr(self, "_use_async_pp_spec_decode", False):
+            self._accepted_token_req_ids = self.input_batch.req_ids.copy()
 
     def _get_ascend_mamba_state_copy_funcs(self):
         """Bridge the copy-func tuple-to-mapping contract from vLLM #53896."""
@@ -1076,7 +1121,17 @@ class NPUModelRunner(GPUModelRunner):
             accepted[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             return
 
-        if has_prev_mapping:
+        if getattr(self, "_use_async_pp_spec_decode", False):
+            # The caller has awaited the snapshot's D2H event. InputBatch may
+            # have removed a request for a PP scheduling gap in the meantime.
+            for index, req_id in enumerate(self._accepted_token_req_ids):
+                if req_id is not None and req_id in self.requests:
+                    self._accepted_tokens_by_req[req_id] = int(accepted[index])
+            self._accepted_token_req_ids = []
+            accepted[:num_reqs] = [
+                self._accepted_tokens_by_req.get(req_id, 1) for req_id in self.input_batch.req_ids[:num_reqs]
+            ]
+        elif has_prev_mapping:
             prev_idx = self.prev_positions.np[:num_reqs]
             new_mask = prev_idx < 0
             # Advanced indexing reads the snapshot before overwriting its rows.
@@ -1085,6 +1140,40 @@ class NPUModelRunner(GPUModelRunner):
         else:
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
+
+    def _sync_pp_spec_decode_samples(
+        self, sampled_token_ids: torch.Tensor | None, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Share this batch's verified samples, including MTP's padded columns."""
+        pp = get_pp_group()
+        num_reqs = self.input_batch.num_reqs
+        sampled = torch.full(
+            (num_reqs, self.num_spec_tokens + 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=self.device
+        )
+        if pp.is_last_rank:
+            assert sampled_token_ids is not None
+            sampled[:, : sampled_token_ids.shape[1]].copy_(sampled_token_ids)
+        dist.broadcast(sampled, src=pp.last_rank, group=pp.device_group)
+        if pp.is_last_rank:
+            return
+
+        valid_counts = (sampled != PLACEHOLDER_TOKEN_ID).sum(dim=1)
+        last_indices = (valid_counts - 1).clamp(min=0).unsqueeze(1)
+        next_token_ids = sampled.gather(1, last_indices).squeeze(1)
+        self._copy_valid_sampled_token_count(next_token_ids, valid_counts)
+
+        discarded = set(np.flatnonzero(self.discard_request_mask.np[:num_reqs]))
+        self.input_batch.prev_req_id_to_index = {
+            req_id: index for index, req_id in enumerate(self.input_batch.req_ids) if index not in discarded
+        }
+        for req_id, index in self.input_batch.prev_req_id_to_index.items():
+            self.requests[req_id].output_token_ids.append(PLACEHOLDER_TOKEN_ID)
+            pos = self.input_batch.num_tokens_no_spec[index]
+            self.input_batch.token_ids_cpu[index, pos] = PLACEHOLDER_TOKEN_ID
+            self.input_batch.is_token_ids[index, pos] = True
+            self.input_batch.num_tokens_no_spec[index] = pos + 1
+            self.input_batch.num_tokens[index] = pos + 1
+        self._update_states_after_model_execute(sampled, scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1619,6 +1708,7 @@ class NPUModelRunner(GPUModelRunner):
                 valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 computed_token_tensor_cpu,
+                update_accepted_tokens=not getattr(self, "_use_async_pp_spec_decode", False),
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
@@ -1995,11 +2085,17 @@ class NPUModelRunner(GPUModelRunner):
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
+        self._valid_sampled_count_ready = True
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+    def _get_valid_sampled_token_count(self) -> list[int]:
+        if getattr(self, "_use_async_pp_spec_decode", False) and not self._valid_sampled_count_ready:
+            return []
+        return super()._get_valid_sampled_token_count()
 
     def propose_draft_token_ids(
         self,
@@ -2724,6 +2820,8 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
+                    if getattr(self, "_use_async_pp_spec_decode", False):
+                        self._pp_scheduler_output = scheduler_output
                     self._finalize_dump_data()
                     if self.dynamic_eplb:
                         self.eplb_updator.forward_end(self.eplb_heat_collection_status)
@@ -2876,6 +2974,10 @@ class NPUModelRunner(GPUModelRunner):
         use_pp_spec_decode = self.speculative_config is not None and pp.world_size > 1
 
         if self.execute_model_state is None:
+            if getattr(self, "_use_async_pp_spec_decode", False) and self._pp_scheduler_output is not None:
+                scheduler_output = self._pp_scheduler_output
+                self._pp_scheduler_output = None
+                self._sync_pp_spec_decode_samples(None, scheduler_output)
             # Nothing to do (PP non-final rank case), output isn't used.
             if not kv_connector_output:
                 return None  # noqa
@@ -2917,6 +3019,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        if getattr(self, "_use_async_pp_spec_decode", False):
+            self._sync_pp_spec_decode_samples(sampler_output.sampled_token_ids, scheduler_output)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
