@@ -1,0 +1,8 @@
+pr: 19328
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DeepSeek-V4 Flash Vision weight updates across sleep and wake,
+      including preservation of explicitly selected parameters omitted by the
+      trainer while applying trainer-supplied new values.
+    model: deepseek-v4-flash-vision

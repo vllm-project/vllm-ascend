@@ -792,6 +792,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def _register_weightless_norm_buffers(model: nn.Module) -> None:
+    # Quantization modules overload apply() for execution, so traverse modules().
+    # Preserve the original attribute/object while making Worker backup and
+    # Module.to manage this non-checkpoint identity tensor.
+    for module in model.modules():
+        if isinstance(module, RMSNorm) and not module.has_weight and "weight" not in module._buffers:
+            weight = module.weight
+            del module.weight
+            module.register_buffer("weight", weight, persistent=False)
+
+
 @support_torch_compile
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
@@ -905,6 +916,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
+
+        _register_weightless_norm_buffers(self)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
