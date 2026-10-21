@@ -29,6 +29,7 @@ def _norm_rope(
     other_weight_ptr,
     SPLIT_HEADS: tl.constexpr,
 ):
+    # blacklist
     cols = tl.arange(0, HEAD_DIM)
     heads = tl.arange(0, HEADS)
     x = tl.load(input_ptr + heads[:, None] * HEAD_DIM + cols[None, :]).to(tl.float32)
