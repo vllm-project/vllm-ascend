@@ -4695,7 +4695,7 @@ class NPUModelRunner(GPUModelRunner):
         registry = getattr(self, "jit_warmup_registry", None)
         return registry.activate() if registry is not None else nullcontext()
 
-    def load_model(self) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -4708,6 +4708,12 @@ class NPUModelRunner(GPUModelRunner):
 
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
+
+        if load_dummy_weights:
+            # Elastic EP standby path: instantiate the model with dummy
+            # weights; the real weights are transferred over the standby
+            # groups afterwards (mirrors gpu_model_runner.load_model).
+            self.load_config.load_format = "dummy"
 
         if self.ascend_config.mix_placement:
             # TODO: Enabling the mix placement in deepseek_v2.py
