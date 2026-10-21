@@ -1002,7 +1002,7 @@ def embedding_tp_enable() -> bool:
 
 
 def oproj_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
 def mlp_tp_enable() -> bool:

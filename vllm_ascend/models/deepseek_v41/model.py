@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
@@ -975,6 +976,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             lambda prefix: self.decoder_layer_cls(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers:
+            if isinstance(layer, DeepseekV41DecoderLayer):
+                impl = layer.self_attn.dsa_attn.dsa_attn.impl
+                if not isinstance(impl, AscendDSAImpl):
+                    continue
+                impl._oproj_buffer_pool = self._oproj_buffer_pool
+                impl.reserve_oproj_buffers(torch.device(self.device), vllm_config.model_config.dtype)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
