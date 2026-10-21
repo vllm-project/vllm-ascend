@@ -227,7 +227,7 @@ def checkpoint_loader(monkeypatch, rfork_helpers):
 
         def _prepare_weights(self, *args):
             calls.append(args)
-            return "unused", *selections[args[0]]
+            return "unused", *selections[args[0]], "model.safetensors.index.json"
 
     _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
     return SimpleNamespace(Source=CheckpointSource, calls=calls, selections=selections, configs=configs)
@@ -263,8 +263,18 @@ def test_checkpoint_names_follow_selected_sources_and_prefixes(rfork_helpers, ch
     assert load_config.model_loader_extra_config == {"rfork_scheduler_url": "planner"}
 
 
-@pytest.mark.parametrize("metadata", ["pt", "corrupt", "empty", "missing"])
-def test_checkpoint_names_reject_unavailable_metadata(rfork_helpers, checkpoint_loader, tmp_path, metadata):
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        ("pt", "requires safetensors checkpoint metadata"),
+        ("corrupt", "could not read checkpoint metadata"),
+        ("empty", "received empty checkpoint metadata"),
+        ("missing", "model.safetensors"),
+    ],
+)
+def test_checkpoint_names_reject_unavailable_metadata(
+    rfork_helpers, checkpoint_loader, tmp_path, metadata, expected_error
+):
     path = tmp_path / "model.safetensors"
     if metadata == "corrupt":
         path.write_bytes(b"invalid safetensors")
@@ -273,7 +283,7 @@ def test_checkpoint_names_reject_unavailable_metadata(rfork_helpers, checkpoint_
     checkpoint_loader.selections["model"] = ([str(path)], metadata != "pt")
     config = SimpleNamespace(load_format="rfork", model_loader_extra_config={})
 
-    with pytest.raises((OSError, ValueError)):
+    with pytest.raises((OSError, ValueError), match=expected_error):
         rfork_helpers.loader._get_checkpoint_weight_names(
             Module(), SimpleNamespace(model="model", revision=None), config
         )

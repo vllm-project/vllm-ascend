@@ -223,7 +223,7 @@ def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_
     ]
     weight_names: set[str] = set()
     for source in sources:
-        _, files, use_safetensors = loader._prepare_weights(
+        _, files, use_safetensors, _ = loader._prepare_weights(
             source.model_or_path,
             source.subfolder,
             source.revision,
