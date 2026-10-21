@@ -1351,8 +1351,8 @@ def _make_wide_draft_impl():
     impl.fused_qkv_a_proj = SimpleNamespace(input_size=14336, weight=torch.empty(1))
     impl.support_fp8_attention = True
     impl.is_draft_model = True
-    impl.pcp_enabled = False
-    impl.dcp_enabled = False
+    impl.use_pcp = False
+    impl.use_dcp = False
     impl.is_pcp_decode_sharded = False
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=257),
@@ -1371,7 +1371,7 @@ def test_prolog_writer_checks_projection_input_instead_of_model_hidden_size(inpu
     assert impl.supports_prolog_v3_writer() is (input_size in (7168, 8192))
 
 
-@pytest.mark.parametrize("excluded", ["pcp_enabled", "dcp_enabled", "enable_kv_nz", "fa_quant_layer"])
+@pytest.mark.parametrize("excluded", ["use_pcp", "use_dcp", "enable_kv_nz", "fa_quant_layer"])
 def test_wide_draft_adapter_preserves_existing_exclusions(excluded):
     impl = _make_wide_draft_impl()
     setattr(impl, excluded, True)
