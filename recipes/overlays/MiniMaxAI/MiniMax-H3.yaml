@@ -1,0 +1,119 @@
+# Source: https://github.com/vllm-project/vllm-omni/blob/24f0cf37b94076baece79a685dbf04f66b14aef4/recipes/models/MiniMaxAI/MiniMax-H3.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+meta:
+  hardware:
+    ascend_950pr: verified
+variants:
+  default:
+    hardware_overrides:
+      ascend_950pr:
+        docker_image: quay.io/ascend/vllm-omni:minimax-h3
+        extra_args:
+          - '--num-gpus'
+          - '1'
+          - '--tensor-parallel-size'
+          - '1'
+          - '--usp'
+          - '1'
+          - '--ring'
+          - '1'
+          - '--text-encoder-tp-size'
+          - '1'
+          - '--vae-patch-parallel-size'
+          - '1'
+          - '--quantization'
+          - int8
+          - '--init-timeout'
+          - '14400'
+          - '--stage-init-timeout'
+          - '14400'
+        extra_env:
+          VLLM_OMNI_VIDEO_SYNC_TIMEOUT: '14400'
+omni:
+  tasks:
+    t2va:
+      hardware_overrides:
+        ascend_950pr:
+          vram_minimum_gb: 128
+          extra_args:
+            - '--task-type'
+            - fl2va
+          curl: |
+            curl -sS -X POST http://localhost:8000/v1/videos/sync \
+              -F 'prompt=In a snowy blue-purple forest, Ori carefully walks past a sleeping giant; footsteps crunch in the snow while the creature breathes and softly snorts.' \
+              -F 'width=1024' \
+              -F 'height=576' \
+              -F 'aspect_ratio=16:9' \
+              -F 'fps=24' \
+              -F 'num_inference_steps=60' \
+              -F 'flow_shift=12' \
+              -F 'seed=1101' \
+              -F 'extra_params={"task":"t2va","duration":5.0,"audio_flow_shift":3.0}' \
+              -o t2va.mp4
+dependencies:
+  - note: 'Ascend pip path: build vLLM v0.26.0 with the NPU target and vLLM Ascend from the matching release branch. This replaces the CUDA wheel shown in the pip tab above.'
+    command: |
+      git clone --depth 1 --branch v0.26.0 https://github.com/vllm-project/vllm.git
+      cd vllm && VLLM_TARGET_DEVICE=empty pip install -e . && cd ..
+      git clone --depth 1 --branch releases/v0.26.0rc https://github.com/vllm-project/vllm-ascend.git
+      cd vllm-ascend && git submodule update --init --recursive && pip install -e . && cd ..
+    install_modes:
+      - pip
+    brand: Huawei
+guide_sections:
+  section1: |+
+    ## Launch — single Ascend 950PR NPU (INT8)
+
+    vLLM-Omni serves H3 on Ascend through the `vllm-ascend` platform plugin, on a
+    CPU-only aarch64 PyTorch build with `torch_npu` — no CUDA runtime is present.
+    One 950PR holds a single DiT partition, so this profile serves the `FL2VA`
+    directory and uses online INT8 in place of the sharding levers the multi-GPU
+    profiles rely on.
+
+    Three Ascend-specific constraints come before the command:
+
+    - **Attention backend.** `CUDNN_ATTN`, `FLASHINFER_ATTN`, `TRTLLM_ATTN`, and the
+    SageAttention backends are CUDA-only; selecting one on NPU fails with a
+    `NotImplementedError` out of `forward_npu`. The NPU platform default resolves
+    to `FLASH_ATTN` when MindIE-SD is installed and `TORCH_SDPA` otherwise, and
+    `FLASH_ATTN` is where H3's NPU memory work lives: a mask-free packed varlen
+    path that never materializes the quadratic padding mask, plus K/V prefix
+    slicing. Install MindIE-SD *before* passing
+    `--diffusion-attention-backend FLASH_ATTN` — the backend imports `mindiesd`
+    lazily and otherwise raises `ImportError` at the first denoise step. Once
+    installed the platform default picks it up on its own.
+    - **Shared memory.** Decoded video crosses the diffusion-worker process boundary
+    through POSIX shared memory — roughly 0.9 GiB for a 5 s 1024×576 clip. The
+    64 MiB Docker default is large enough for the control-plane queues, so the
+    server starts and the denoise loop reaches 100% before the write into
+    `/dev/shm` raises SIGBUS and kills the worker with `Bus error (core dumped)`.
+    Check `df -h /dev/shm` and start the container with `--shm-size=8g` or
+    `--ipc=host`. It cannot be changed on a running container, and an in-container
+    `mount -o remount` needs `CAP_SYS_ADMIN`.
+    - **No `--enforce-eager`.** It disables regional compilation and only slows the
+    steady state; the first request is a warmup either way. `--cfg-parallel-size`
+    must stay 1, as everywhere else in this recipe.
+
+    ```bash
+    ASCEND_RT_VISIBLE_DEVICES=0 \
+    VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    VLLM_OMNI_VIDEO_SYNC_TIMEOUT=14400 \
+    vllm serve /path/to/MiniMax-H3/FL2VA \
+      --omni \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --trust-remote-code \
+      --num-gpus 1 \
+      --tensor-parallel-size 1 \
+      --usp 1 \
+      --ring 1 \
+      --text-encoder-tp-size 1 \
+      --vae-patch-parallel-size 1 \
+      --vae-parallel-mode tile \
+      --vae-use-tiling \
+      --init-timeout 14400 \
+      --stage-init-timeout 14400 \
+      --quantization int8
+    ```
+
+# End of extracted Ascend guide.
