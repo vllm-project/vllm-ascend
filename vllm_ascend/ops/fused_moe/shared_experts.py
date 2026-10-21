@@ -37,6 +37,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     RoutedMoEMilestones,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.fused_moe.shared_dequant_swiglu_quant import shared_dequant_swiglu_quant
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
@@ -543,6 +544,18 @@ class AscendSharedExperts:
                 linear_beta=self.situ_activation.linear_beta or 0.0,
                 activate_left=True,
                 quant_mode="dynamic",
+            )
+        elif (
+            get_current_hardware_profile().supports(HardwareCapability.SHARED_SWIGLU_ONE_GROUP)
+            and self.swiglu_limit > 0
+            and self.swiglu_alpha == 1.0
+            and self.swiglu_beta == 0.0
+        ):
+            quantized_x, swiglu_out_scale = shared_dequant_swiglu_quant(
+                submitted_gate_up.gate_up,
+                self.layer.gate_up_proj.weight_scale_fp32,
+                pertoken_scale,
+                self.swiglu_limit,
             )
         else:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
