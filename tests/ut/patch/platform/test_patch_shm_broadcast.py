@@ -3,6 +3,9 @@
 
 import pickle
 import re
+import threading
+import time
+import zlib
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -77,6 +80,10 @@ def test_enqueue_snapshots_buffers_before_async_send(payload_type, size, readers
         socket.send_multipart.assert_called_once()
         assert socket.send_multipart.call_args.kwargs == {"copy": False}
         buffers = socket.send_multipart.call_args.args[0]
+        if socket is queue.remote_socket:
+            header, *buffers = buffers
+            assert header[:4] == patch_module._FRAME_MAGIC
+            assert len(header) == patch_module._FRAME_HEADER.size
         assert len(buffers) == (1 if size < _MIB else 2)
         if size >= _MIB:
             assert isinstance(buffers[1], bytes)
@@ -116,7 +123,8 @@ def test_enqueue_preserves_shared_memory_format(size, n_remote_reader):
     np.testing.assert_array_equal(restored, np.ones(size, dtype=np.uint8))
 
     if n_remote_reader:
-        buffers = queue.remote_socket.send_multipart.call_args.args[0]
+        frames = queue.remote_socket.send_multipart.call_args.args[0]
+        _, *buffers = frames
         remote_restored = pickle.loads(buffers[0], buffers=buffers[1:])
         np.testing.assert_array_equal(remote_restored, restored)
     else:
@@ -146,6 +154,7 @@ def test_enqueue_propagates_write_timeout(diagnostic_logger):
 def test_patch_is_installed_on_upstream_class():
     assert shm_broadcast.MessageQueue.enqueue is patch_module.enqueue
     assert shm_broadcast.MessageQueue.recv is patch_module.recv
+    assert shm_broadcast.MessageQueue.dequeue is patch_module.dequeue
 
 
 @pytest.mark.parametrize("readers,transport", [((0, 1), "remote"), ((1, 0), "local"), ((1, 1), "remote")])
@@ -161,6 +170,11 @@ def test_enqueue_failure_reports_type_and_frame_sizes(diagnostic_logger, readers
 
     assert caught.value is error
     buffers = socket.send_multipart.call_args.args[0]
+    if transport == "remote":
+        # The integrity header is added after serialization and must not show
+        # up in the payload summary.
+        assert buffers[0][:4] == patch_module._FRAME_MAGIC
+        buffers = buffers[1:]
     sizes = [len(buffer) for buffer in buffers]
     summary = _error_summary(diagnostic_logger)
     assert f"stage={transport}_zmq_send" in summary
@@ -272,3 +286,83 @@ def test_retryable_send_failures_are_quiet(diagnostic_logger, error):
         shm_broadcast.MessageQueue.enqueue(queue, "message")
     assert caught.value is error
     diagnostic_logger.error.assert_not_called()
+
+
+def test_remote_frames_carry_integrity_header():
+    queue, _ = _make_queue(0, 1, max_chunk_bytes=128)
+    payload = {"data": np.arange(8, dtype=np.uint8)}
+    shm_broadcast.MessageQueue.enqueue(queue, payload)
+
+    frames = queue.remote_socket.send_multipart.call_args.args[0]
+    header, main_frame, *_ = frames
+    magic, length, checksum, sequence = patch_module._FRAME_HEADER.unpack(header)
+    assert magic == patch_module._FRAME_MAGIC
+    assert length == len(main_frame)
+    assert checksum == zlib.crc32(main_frame) & 0xFFFFFFFF
+    assert sequence == 0
+    # A second message on the same queue advances the sequence.
+    shm_broadcast.MessageQueue.enqueue(queue, payload)
+    header = queue.remote_socket.send_multipart.call_args.args[0][0]
+    assert patch_module._FRAME_HEADER.unpack(header)[3] == 1
+
+
+def test_recv_rejects_corrupted_remote_frame(diagnostic_logger):
+    queue, _ = _make_queue(0, 1, max_chunk_bytes=128)
+    shm_broadcast.MessageQueue.enqueue(queue, {"private": "payload"})
+    header, main_frame = queue.remote_socket.send_multipart.call_args.args[0][:2]
+    corrupted = bytearray(main_frame)
+    corrupted[0] = 0x20  # the field signature: invalid load key, ' '
+
+    socket = queue.remote_socket
+    socket.poll.return_value = True
+    socket.recv_multipart.return_value = [header, bytes(corrupted)]
+
+    with pytest.raises(patch_module.MessageQueueFrameCorruptionError) as caught:
+        shm_broadcast.MessageQueue.recv(socket, timeout=0.5)
+
+    detail = str(caught.value)
+    assert "seq=0" in detail
+    assert "head=" in detail
+    summary = _error_summary(diagnostic_logger)
+    assert "frame integrity failure" in summary
+    assert "frame_count=2" in summary
+    assert "private" not in summary
+
+
+def test_recv_accepts_legacy_frame_without_header(diagnostic_logger):
+    socket = MagicMock()
+    socket.poll.return_value = True
+    socket.recv_multipart.return_value = [pickle.dumps({"value": 1}), b"oob"]
+
+    assert shm_broadcast.MessageQueue.recv(socket, timeout=None) == {"value": 1}
+    diagnostic_logger.error.assert_not_called()
+
+
+def test_dequeue_is_serialized_per_queue(monkeypatch):
+    queue, _ = _make_queue(1, 0, max_chunk_bytes=128)
+    state = {"active": 0, "max_active": 0}
+    guard = threading.Lock()
+
+    def slow_dequeue(self, timeout=None, indefinite=False):
+        with guard:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+        time.sleep(0.01)
+        with guard:
+            state["active"] -= 1
+        return "ok"
+
+    monkeypatch.setattr(patch_module, "_upstream_dequeue", slow_dequeue)
+    results = []
+
+    def reader():
+        results.append(shm_broadcast.MessageQueue.dequeue(queue, timeout=0))
+
+    threads = [threading.Thread(target=reader) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert state["max_active"] == 1
+    assert results == ["ok", "ok"]

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import pickle
 import sys
+import time
 import weakref
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from multiprocessing.synchronize import Lock as LockType
+from typing import Any
 
+import cloudpickle  # type: ignore[import-untyped]
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.logger import logger
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
@@ -19,6 +24,10 @@ from vllm.v1.executor.multiproc_executor import (
     UnreadyWorkerProcHandle,
     WorkerProc,
     set_multiprocessing_worker_envs,
+)
+
+from vllm_ascend.patch.platform.patch_shm_broadcast import (
+    MessageQueueFrameCorruptionError,
 )
 
 
@@ -35,7 +44,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
             f"_parallel_size ({pp_parallel_size}) x prefill_context"
-            f"_parallel_size ({pcp_parallel_size}). "
+            f"_parallel_size ({pcp_parallel_size})"
         )
 
         # Set multiprocessing envs
@@ -139,12 +148,102 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
         self.output_rank = self._get_output_rank()
 
+    def collective_rpc(  # type: ignore[override]
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+        unique_reply_rank: int | None = None,
+        kv_output_aggregator: Any | None = None,
+        ec_output_aggregator: Any | None = None,
+    ) -> Any:
+        """Mirror of ``MultiprocExecutor.collective_rpc`` with a corruption retry.
+
+        A reply that fails the transport integrity check is not a worker
+        failure: the step never produced a usable result.  For RPCs with a
+        single reply rank (``execute_model`` / ``sample_tokens`` /
+        ``take_draft_token_ids``) the same request is sent once more and the
+        fresh reply is consumed, so the step is re-executed instead of being
+        lost.  Every other rank stays silent for these RPCs, so the retry
+        cannot leave a stale reply behind in another queue.
+        """
+        assert self.rpc_broadcast_mq is not None, "collective_rpc should not be called on follower node"
+        rpc_broadcast_mq = self.rpc_broadcast_mq
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        kwargs = kwargs or {}
+
+        aggregators = [a for a in (kv_output_aggregator, ec_output_aggregator) if a]
+        aggregate: Callable[[Any], Any]
+        if aggregators:
+            output_rank = None
+
+            def _aggregate(outputs: Any) -> Any:
+                rank = unique_reply_rank or 0
+                result = outputs[rank]
+                for a in aggregators:
+                    result = a.aggregate(outputs, output_rank=rank)
+                return result
+
+            aggregate = _aggregate
+        else:
+            output_rank = unique_reply_rank
+            aggregate = lambda x: x
+
+        if isinstance(method, str):
+            send_method = method
+        else:
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        request = (send_method, args, kwargs, output_rank)
+        rpc_broadcast_mq.enqueue(request)
+
+        response_mqs: Sequence[MessageQueue] = self.response_mqs
+        if output_rank is not None:
+            response_mqs = (response_mqs[output_rank],)
+
+        def get_response():
+            attempts = 2 if output_rank is not None else 1
+            for attempt in range(attempts):
+                try:
+                    responses = []
+                    for mq in response_mqs:
+                        dequeue_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                        try:
+                            status, result = mq.dequeue(timeout=dequeue_timeout)
+                        except TimeoutError as e:
+                            raise TimeoutError(f"RPC call to {method} timed out.") from e
+                        if status != WorkerProc.ResponseStatus.SUCCESS:
+                            raise RuntimeError(
+                                f"Worker failed with error '{result}', please check the"
+                                " stack trace above for the root cause"
+                            )
+                        responses.append(result)
+                    return responses[0] if output_rank is not None else responses
+                except MessageQueueFrameCorruptionError:
+                    if attempt + 1 >= attempts:
+                        raise
+                    logger.warning(
+                        "Corrupted worker reply for %s; re-sending the request once (attempt %d/%d)",
+                        method,
+                        attempt + 1,
+                        attempts,
+                    )
+                    rpc_broadcast_mq.enqueue(request)
+
+        future = FutureWrapper(self.futures_queue, get_response=get_response, aggregate=aggregate)
+
+        return future if non_block else future.result()
+
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"global world_size ({self.world_size}) must be "
             f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
+            f"({self.parallel_config.nnodes_within_dp})"
         )
         self.local_world_size = self.parallel_config.local_world_size
         tp_size = self.parallel_config.tensor_parallel_size

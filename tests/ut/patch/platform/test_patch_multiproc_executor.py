@@ -79,3 +79,73 @@ def test_eplb_worker_can_start_manager(monkeypatch, executor_modules):
             handle.proc.join(timeout=30)
         handle.ready_pipe.close()
         handle.death_writer.close()
+
+
+def _make_executor(mq, rank):
+    """Build an AscendMultiprocExecutor without starting any worker."""
+    from collections import deque
+    from unittest.mock import MagicMock
+
+    import vllm_ascend.patch.platform.patch_multiproc_executor as patch_module
+
+    executor = object.__new__(patch_module.AscendMultiprocExecutor)
+    executor.is_failed = False
+    executor.rpc_broadcast_mq = MagicMock()
+    executor.response_mqs = [mq]
+    executor.futures_queue = deque()
+    return executor
+
+
+def test_collective_rpc_retries_corrupted_reply():
+    from unittest.mock import MagicMock
+
+    from vllm.v1.executor.multiproc_executor import WorkerProc
+
+    import vllm_ascend.patch.platform.patch_multiproc_executor as patch_module
+
+    mq = MagicMock()
+    mq.dequeue.side_effect = [
+        patch_module.MessageQueueFrameCorruptionError("corrupt"),
+        (WorkerProc.ResponseStatus.SUCCESS, "value"),
+    ]
+    executor = _make_executor(mq, 0)
+
+    assert executor.collective_rpc("execute_model", args=(7,), unique_reply_rank=0) == "value"
+
+    # The same request is re-sent, not a different one.
+    assert executor.rpc_broadcast_mq.enqueue.call_count == 2
+    first, second = executor.rpc_broadcast_mq.enqueue.call_args_list
+    assert first.args[0] == second.args[0]
+
+
+def test_collective_rpc_does_not_retry_multi_reply_rpc():
+    from unittest.mock import MagicMock
+
+    import vllm_ascend.patch.platform.patch_multiproc_executor as patch_module
+
+    mq = MagicMock()
+    mq.dequeue.side_effect = patch_module.MessageQueueFrameCorruptionError("corrupt")
+    executor = _make_executor(mq, 0)
+
+    with pytest.raises(patch_module.MessageQueueFrameCorruptionError):
+        executor.collective_rpc("take_draft_token_ids")
+
+    assert executor.rpc_broadcast_mq.enqueue.call_count == 1
+
+
+def test_collective_rpc_gives_up_after_one_retry():
+    from unittest.mock import MagicMock
+
+    import vllm_ascend.patch.platform.patch_multiproc_executor as patch_module
+
+    mq = MagicMock()
+    mq.dequeue.side_effect = [
+        patch_module.MessageQueueFrameCorruptionError("corrupt"),
+        patch_module.MessageQueueFrameCorruptionError("corrupt again"),
+    ]
+    executor = _make_executor(mq, 0)
+
+    with pytest.raises(patch_module.MessageQueueFrameCorruptionError):
+        executor.collective_rpc("execute_model", unique_reply_rank=0)
+
+    assert executor.rpc_broadcast_mq.enqueue.call_count == 2

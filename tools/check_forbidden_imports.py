@@ -46,6 +46,8 @@ CHECK_IMPORTS = {
             # Backport the upstream MessageQueue pickle protocol and test its wire format.
             "vllm_ascend/patch/platform/patch_shm_broadcast.py",
             "tests/ut/patch/platform/test_patch_shm_broadcast.py",
+            # Mirror upstream collective_rpc, which serializes callables with cloudpickle.
+            "vllm_ascend/patch/platform/patch_multiproc_executor.py",
         },
     ),
     "re": ForbiddenImport(
@@ -58,6 +60,8 @@ CHECK_IMPORTS = {
             "tests/e2e/doctests/scripts/doctest_helper.py",
             # Verify that the upstream stdlib re.Pattern copyreg reducer is preserved.
             "tests/ut/patch/platform/test_patch_shm_broadcast.py",
+            # Mirror upstream collective_rpc, which serializes callables with cloudpickle.
+            "vllm_ascend/patch/platform/patch_multiproc_executor.py",
         },
     ),
     "triton": ForbiddenImport(
