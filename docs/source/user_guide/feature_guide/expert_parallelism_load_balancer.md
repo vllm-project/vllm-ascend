@@ -66,7 +66,7 @@ The following table summarizes the code paths supported by MRv2 EPLB. W8A8 is co
 | W4A8 | Enabled | Uses persistent per-expert weight, scale, and scale-bias tensors. |
 | W4A4 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
 | W8A8 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
-| W4A8 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. The layout is enabled in code but has not completed independent EPLB validation. |
+| W4A8 MXFP | Rejected | The expert-weight layout does not support EPLB movement; startup fails with `EPLB is not supported ...`. |
 | W4A16 | Rejected | The expert-weight layout does not support EPLB movement; startup fails with `EPLB is not supported ...`. |
 | W4A16 MXFP | Rejected | The expert-weight layout does not support EPLB movement; startup fails with `EPLB is not supported ...`. |
 
