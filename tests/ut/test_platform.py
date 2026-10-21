@@ -18,6 +18,7 @@ from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
+    _validate_deepseek_v41_pp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_parallel_config,
@@ -32,6 +33,64 @@ from vllm_ascend.utils import (
     dsv4_skips_indexer_topk,
     vllm_version_is,
 )
+
+
+@pytest.mark.parametrize(
+    "partition,valid",
+    [
+        ("20,20", True),
+        ("8,12,20", True),
+        ("8,6,6,20", True),
+        ("10,10,10,10", False),
+        ("14,26", True),
+        ("15,25", False),
+        ("2,6,6,6,20", False),
+    ],
+)
+def test_v41_pp_keeps_shared_cache_sources_on_the_consumer_stage(partition, valid):
+    config = SimpleNamespace(
+        num_hidden_layers=40,
+        kv_source_layer_ids=[2, 8, 14, 20],
+        index_source_layer_ids=[2, 8, 14, 20, 24, 28, 32, 36],
+        candidate_source_layer_id=20,
+    )
+    runtime = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(architecture="DeepseekV41ForCausalLM", hf_text_config=config),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=len(partition.split(",")), prefill_context_parallel_size=1
+        ),
+    )
+    with patch("vllm.envs.VLLM_PP_LAYER_PARTITION", partition):
+        if valid:
+            _validate_deepseek_v41_pp_config(runtime)
+        else:
+            with pytest.raises(ValueError, match="source|dependency"):
+                _validate_deepseek_v41_pp_config(runtime)
+
+
+def test_v41_pp_rejects_pcp_before_resolving_cache_sources():
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(architecture="DeepseekV41ForCausalLM"),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2, prefill_context_parallel_size=2),
+    )
+    with pytest.raises(ValueError, match="requires PCP=1"):
+        _validate_deepseek_v41_pp_config(config)
+    config.parallel_config.pipeline_parallel_size = 1
+    _validate_deepseek_v41_pp_config(config)
+
+
+def test_v41_pp_requires_v2_without_changing_non_pp_v1():
+    config = SimpleNamespace(
+        use_v2_model_runner=False,
+        model_config=SimpleNamespace(architecture="DeepseekV41ForCausalLM"),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=2, prefill_context_parallel_size=1),
+    )
+    with pytest.raises(ValueError, match="requires Model Runner V2"):
+        _validate_deepseek_v41_pp_config(config)
+    config.parallel_config.pipeline_parallel_size = 1
+    _validate_deepseek_v41_pp_config(config)
 
 
 @pytest.mark.parametrize(
@@ -285,6 +344,7 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
 def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
     config = SimpleNamespace(
         use_v2_model_runner=True,
+        model_config=SimpleNamespace(architecture="DeepseekV3ForCausalLM"),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1, tensor_parallel_size=4, decode_context_parallel_size=4
         ),

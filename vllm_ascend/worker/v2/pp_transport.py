@@ -54,6 +54,7 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
             architectures=frozenset(
                 {
                     "DeepseekV4ForCausalLM",
+                    "DeepseekV41ForCausalLM",
                     "GlmMoeDsaForCausalLM",
                     "KimiLinearForCausalLM",
                     "KimiK3ForCausalLM",

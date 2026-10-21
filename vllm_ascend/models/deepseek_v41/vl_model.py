@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator
 
 import torch
 from torch import nn
+from vllm.distributed import get_pp_group
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
@@ -72,7 +73,11 @@ class AscendDeepseekV41ForCausalLM(
         self.config = config
         self.multimodal_config = model_config.multimodal_config
 
-        image_enabled = config.vision_n_layers > 0 and self.multimodal_config.get_limit_per_prompt("image") > 0
+        image_enabled = (
+            config.vision_n_layers > 0
+            and self.multimodal_config.get_limit_per_prompt("image") > 0
+            and get_pp_group().is_first_rank
+        )
         with self._mark_tower_model(vllm_config, {"image"}):
             self.vision: DeepseekV41ViT | None = None
             self.aligner: DeepseekV41Aligner | None = None

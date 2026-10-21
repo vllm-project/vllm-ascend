@@ -71,7 +71,7 @@ def test_composite_config_selects_checkpoint_aux_layers():
         assert runner._get_eagle3_aux_layers_from_config() == (38, 39, 40)
 
 
-def test_target_exports_residual_entering_selected_layers(monkeypatch):
+def test_target_exports_post_residual_at_selected_boundaries(monkeypatch):
     monkeypatch.setattr(
         "vllm_ascend.models.deepseek_v41.model.get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
@@ -92,12 +92,15 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
     model = SimpleNamespace(
         hc_mult=4,
         decoder_replay_layers=None,
+        _capture_aux_after_layer=True,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
         aux_hidden_state_layers=(1, 3),
         shared_attention_state=SimpleNamespace(reset=lambda: None),
         layers=[Layer(i) for i in range(3)],
+        start_layer=0,
+        end_layer=3,
         norm=lambda hidden: hidden,
     )
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
@@ -110,8 +113,8 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    torch.testing.assert_close(aux[0], hidden)
-    torch.testing.assert_close(aux[1], hidden + 3)
+    torch.testing.assert_close(aux[0], hidden + 1)
+    torch.testing.assert_close(aux[1], hidden + 6)
     torch.testing.assert_close(output, hidden + 6)
 
 
@@ -134,6 +137,11 @@ def test_v41_draft_routes_to_v41(cp):
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
         patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
+        patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_pcp", return_value=False),
+        patch(
+            "vllm_ascend.attention.dsa_v41.get_ascend_config",
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+        ),
         patch.object(
             deepseek_v41_dspark_module.DeviceOperator,
             "get_dsv41_packed_cache_ops",
