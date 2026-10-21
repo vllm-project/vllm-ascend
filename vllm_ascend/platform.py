@@ -579,6 +579,7 @@ class NPUPlatform(Platform):
             get_mrv2_in_profile_run,
             select_moe_comm_method,
             use_cann_megamoe,
+            use_cann_zercmoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -636,6 +637,9 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            is_decode=cudagraph_runtime_mode != CUDAGraphMode.NONE,
+            with_prefill=in_profile_run
+            or any(getattr(metadata, "num_prefills", 0) > 0 for metadata in (attn_metadata or {}).values()),
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -654,6 +658,7 @@ class NPUPlatform(Platform):
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
             "use_mega_moe": use_cann_megamoe(vllm_config),
+            "use_zerc_moe": use_cann_zercmoe(vllm_config),
             "is_decode_only_node": _is_decode_only_node(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
@@ -1160,6 +1165,24 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
 
 
+def _configure_zercmoe_cudagraph_mode(vllm_config: VllmConfig) -> None:
+    """Keep decode graphs while leaving the ZercMoE prefill path eager."""
+    from vllm.config import CUDAGraphMode
+
+    from vllm_ascend.ascend_forward_context import is_zercmoe_active_by_config
+
+    compilation_config = vllm_config.compilation_config
+    if (
+        compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        and not vllm_config.model_config.enforce_eager
+        and is_zercmoe_active_by_config(vllm_config)
+    ):
+        compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        logger.warning_once(
+            "Demoting cudagraph_mode from FULL to FULL_DECODE_ONLY for ZercMoE eager prefill; decode graphs are kept."
+        )
+
+
 def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
     """Update compilation / cudagraph modes.
 
@@ -1187,6 +1210,7 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
 
     # Update compilation mode in some cases
     enforce_eager: bool = getattr(model_config, "enforce_eager", False)
+    _configure_zercmoe_cudagraph_mode(vllm_config)
 
     # Update cudagraph_mode in some cases (read ascend_config.xlite_graph_config)
     if (xlite_config := ascend_config.xlite_graph_config).enabled:

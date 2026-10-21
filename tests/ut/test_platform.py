@@ -16,6 +16,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _configure_zercmoe_cudagraph_mode,
     _setup_compile_backend,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
@@ -2428,3 +2429,70 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+@pytest.mark.parametrize(
+    ("mode", "active", "enforce_eager", "expected"),
+    [
+        (CUDAGraphMode.FULL, True, False, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.FULL, False, False, CUDAGraphMode.FULL),
+        (CUDAGraphMode.FULL, True, True, CUDAGraphMode.FULL),
+        (CUDAGraphMode.FULL_DECODE_ONLY, True, False, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.NONE, True, False, CUDAGraphMode.NONE),
+    ],
+)
+def test_zercmoe_keeps_decode_graphs_and_demotes_full_prefill_graphs(mode, active, enforce_eager, expected):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(enforce_eager=enforce_eager),
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+    )
+    with patch("vllm_ascend.ascend_forward_context.is_zercmoe_active_by_config", return_value=active):
+        _configure_zercmoe_cudagraph_mode(config)
+
+    assert config.compilation_config.cudagraph_mode == expected
+
+
+@pytest.mark.parametrize(
+    ("prefill_counts", "profile_run", "graph_mode", "expected_prefill"),
+    [
+        ([0, 1], False, CUDAGraphMode.NONE, True),
+        ([0, 0], False, CUDAGraphMode.NONE, False),
+        (None, False, CUDAGraphMode.NONE, False),
+        (None, True, CUDAGraphMode.NONE, True),
+        ([0, 0], False, CUDAGraphMode.FULL, False),
+    ],
+)
+def test_zercmoe_v2_context_selects_from_batch_phase(prefill_counts, profile_run, graph_mode, expected_prefill):
+    metadata = (
+        {f"layer.{index}": SimpleNamespace(num_prefills=count) for index, count in enumerate(prefill_counts)}
+        if prefill_counts is not None
+        else None
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    comm_method = object()
+    with (
+        patch("vllm_ascend.platform.is_moe_model", return_value=True),
+        patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=8),
+        patch("vllm.distributed.get_dp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg", return_value=0),
+        patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER
+        ) as select,
+        patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+        patch("vllm_ascend.ascend_forward_context._is_decode_only_node", return_value=False),
+        patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
+        patch("vllm_ascend.ascend_forward_context.use_cann_zercmoe", return_value=True),
+        patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=comm_method),
+        override_mrv2_in_profile_run(profile_run),
+    ):
+        context = NPUPlatform.set_additional_forward_context(
+            metadata, config, None, num_tokens=128, cudagraph_runtime_mode=graph_mode
+        )
+
+    assert select.call_args.kwargs["with_prefill"] is expected_prefill
+    assert select.call_args.kwargs["is_decode"] is (graph_mode != CUDAGraphMode.NONE)
+    assert context["use_zerc_moe"] is True
+    assert context["moe_comm_method"] is comm_method

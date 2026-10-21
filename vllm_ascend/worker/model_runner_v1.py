@@ -2562,6 +2562,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
                 skip_compiled=has_encoder_input,
+                with_prefill=self.with_prefill,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
@@ -4269,6 +4270,7 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
+                with_prefill=with_prefill,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
@@ -4345,7 +4347,7 @@ class NPUModelRunner(GPUModelRunner):
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2, MoECommType.ZERC_MOE}:
             # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
             with disable_compilation(self.get_model()):
                 self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)

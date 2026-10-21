@@ -1,3 +1,6 @@
+import builtins
+import importlib.util
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +16,32 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+
+class TestMemfabricLazyImport(unittest.TestCase):
+    def test_importing_manager_does_not_load_memfabric(self):
+        module_name = f"{manager_module.__name__}_lazy_import_test"
+        spec = importlib.util.spec_from_file_location(module_name, manager_module.__file__)
+        module = importlib.util.module_from_spec(spec)
+        offload = SimpleNamespace()
+        memfabric = SimpleNamespace(offload=offload)
+
+        with (
+            patch.dict(sys.modules, {module_name: module, "memfabric_hybrid": memfabric}),
+            patch("builtins.__import__", wraps=builtins.__import__) as import_module,
+        ):
+            spec.loader.exec_module(module)
+            self.assertFalse(any(call.args[0] == "memfabric_hybrid" for call in import_module.call_args_list))
+
+            self.assertIs(module._get_memfabric_offload(), offload)
+            self.assertEqual(sum(call.args[0] == "memfabric_hybrid" for call in import_module.call_args_list), 1)
+
+    def test_missing_memfabric_fails_only_when_offload_is_used(self):
+        with (
+            patch.dict(sys.modules, {"memfabric_hybrid": None}),
+            self.assertRaises(ModuleNotFoundError),
+        ):
+            manager_module._get_memfabric_offload()
 
 
 class _FakeKVCacheSpec:
@@ -317,9 +346,8 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                     ),
                     patch.object(
                         manager_module,
-                        "offload",
-                        offload_backend,
-                        create=True,
+                        "_get_memfabric_offload",
+                        return_value=offload_backend,
                     ),
                     patch.object(
                         manager_module.torch,
@@ -385,7 +413,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 "get_sparse_kv_offload_cpu_pool_size_bytes",
                 return_value=(1 << 30) + 1,
             ),
-            patch.object(manager_module, "offload", offload_backend, create=True),
+            patch.object(manager_module, "_get_memfabric_offload", return_value=offload_backend),
             patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
             patch.object(manager_module.torch, "empty", return_value=MagicMock()),
             patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),

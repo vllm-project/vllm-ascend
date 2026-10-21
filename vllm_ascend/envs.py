@@ -36,6 +36,10 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Enable ZercMoE for unquantized BF16 A2 MoE prefill. Default: 0.
+    # Valid values: 0 or 1; not sensitive. Requires additional_config.enable_fused_mc2=1
+    # and a compatible zercmoe wheel. additional_config.enable_zerc_moe takes precedence.
+    "VLLM_ASCEND_ENABLE_ZERC_MOE": lambda: int(_strict_binary_env("VLLM_ASCEND_ENABLE_ZERC_MOE")),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

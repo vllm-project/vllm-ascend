@@ -30,11 +30,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe, use_cann_zercmoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -117,7 +118,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        use_zercmoe = enable_fused_mc2 and use_cann_zercmoe(get_current_vllm_config())
+        if use_zercmoe:
+            moe_utils.validate_zercmoe_layer(layer, self.moe)
+            # Retain ND weights for ALLGATHER decode and one additional zN
+            # copy for fused ZercMoE prefill. Packing happens once, before
+            # either the NZ conversion or the per-expert list conversion.
+            zercmoe = moe_utils.load_zercmoe_ops()
+            layer.w13_weight_zr, layer.w2_weight_zr = zercmoe.pack_weights(layer.w13_weight.data, layer.w2_weight.data)
+        elif enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -206,6 +215,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
         )
+
+    def get_zercmoe_weights(self, layer):
+        """Use the packed copies while leaving ND weights for decode."""
+        return MoEWeights(w1=layer.w13_weight_zr, w2=layer.w2_weight_zr)
 
     def get_mlp_weights(self, layer):
         w13_weight_list = getattr(layer, "w13_weight_list", None)

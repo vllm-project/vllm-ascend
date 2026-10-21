@@ -291,6 +291,7 @@ nav:
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
+        - user_guide/feature_guide/zercmoe.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md

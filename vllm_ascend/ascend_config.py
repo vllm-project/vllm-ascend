@@ -28,6 +28,7 @@ from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
@@ -49,6 +50,22 @@ def is_mega_moe_supported() -> bool:
     if _MEGA_MOE_SUPPORTED is None:
         _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
+
+
+def is_zercmoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+    """Shape contract of the BF16 ZercMoE wheel and its flat zN weights."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return False
+    hf_config = model_config.hf_text_config
+    hidden = getattr(hf_config, "hidden_size", None)
+    if hidden is None and hasattr(model_config, "get_hidden_size"):
+        hidden = model_config.get_hidden_size()
+    intermediate = getattr(hf_config, "moe_intermediate_size", None)
+    if hidden is None or intermediate is None:
+        return False
+    hidden, intermediate = int(hidden), int(intermediate)
+    return 1024 <= hidden <= 8192 and hidden % 16 == 0 and 512 <= intermediate <= 3072 and intermediate % 16 == 0
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -571,8 +588,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -606,6 +624,12 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Opt-in ZercMoE branch; explicit additional_config overrides the env default.
+    enable_zerc_moe: Literal[0, 1] = dataclasses.field(default_factory=lambda: ascend_envs.VLLM_ASCEND_ENABLE_ZERC_MOE)
+    # Shared across one EP group; use a unique port per job. None uses local bootstrap.
+    zercmoe_ipport: str | None = None
+    # Positive MB per rank, or None to let the wheel size the symmetric heap.
+    zercmoe_shmem_mb: int | None = None
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -655,6 +679,13 @@ class AscendConfig:
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
     _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+
+    @field_validator("zercmoe_shmem_mb", mode="before")
+    @classmethod
+    def _validate_zercmoe_shmem_mb(cls, value):
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError("zercmoe_shmem_mb must be a positive integer")
+        return value
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -845,7 +876,24 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        # ZercMoE's zN shape contract is less restrictive than MegaMoE's NZ
+        # contract. Keep the shared switch enabled for compatible BF16 A2 models.
+        zercmoe_shape_exemption = False
+        if self.enable_zerc_moe == 1 and get_current_hardware_profile().supports(HardwareCapability.ZERCMOE):
+            import torch
+
+            zercmoe_shape_exemption = (
+                vc.model_config is not None
+                and vc.model_config.dtype == torch.bfloat16
+                and not vc.model_config.is_quantized
+                and is_zercmoe_supported_by_config(vc)
+            )
+        if (
+            self.enable_fused_mc2 == 1
+            and is_mega_moe_supported()
+            and not self._is_megamoe_supported_by_config(vc)
+            and not zercmoe_shape_exemption
+        ):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."

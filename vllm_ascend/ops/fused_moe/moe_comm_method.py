@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import cast
@@ -49,12 +50,20 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
+# All ranks in an EP group must use the same address. Concurrent jobs need
+# distinct ports via additional_config.zercmoe_ipport.
+_ZERCMOE_DEFAULT_IPPORT = "tcp://127.0.0.1:28765"
+
 
 def _moe_config_key(
     moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
 ) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
     _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
+    if moe_comm_type == MoECommType.ZERC_MOE:
+        # A ZercMoE SHMEM buffer owns the complete execution shape, including
+        # models whose routed layers use different widths or top-k values.
+        _CONFIG_KEY_FIELDS += ("experts_per_token", "hidden_dim", "intermediate_size_per_partition")
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))
 
 
@@ -71,6 +80,7 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.MC2, moe_config)] = MC2CommImpl(moe_config)
         _MoECommMethods[_moe_config_key(MoECommType.FUSED_MC2, moe_config)] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[_moe_config_key(MoECommType.ZERC_MOE, moe_config)] = ZercMoECommImpl(moe_config)
     else:
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 
@@ -327,7 +337,7 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(is_fused_mc2=True)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -611,5 +621,142 @@ class FusedMC2CommImpl(MoECommMethod):
             raise ValueError(f"Wrong value of {self.enable_fused_mc2=}")
         return FusedExpertsResult(
             routed_out=out,
+            expert_tokens=expert_tokens,
+        )
+
+
+class ZercMoECommImpl(MoECommMethod):
+    """A2 BF16 Dispatch-GMM-SwiGLU-GMM-Combine over a SHMEM heap.
+
+    Bootstrap is lazy: unrelated workers never load SHMEM, and every EP
+    rank initializes the same config-sized buffer on its first ZERC_MOE
+    prefill. MC2 prepare/finalize provides TP token sharding and gathering;
+    the fused operator produces complete routed outputs without another
+    TP all-reduce. Decode continues to use the original ND weights.
+    """
+
+    def __init__(self, moe_config):
+        super().__init__(moe_config)
+        self._zercmoe = None
+        self.zerc_symm_buffer = None
+
+    def pad_and_split_input_ids(self, input_ids):
+        return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithMC2(is_fused_mc2=True)
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def _ensure_zercmoe_loaded(self):
+        if self._zercmoe is None:
+            self._zercmoe = moe_utils.load_zercmoe_ops()
+
+    def _init_zerc_symm_buffer(self):
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        ascend_config = get_ascend_config()
+        # Use compile-time capacity, never the current per-rank token count:
+        # all EP ranks must agree on every SHMEM allocation dimension.
+        num_max_tokens_per_rank = max(1, int(self.token_dispatcher.max_num_tokens_per_rank))
+        ep_world_size = int(self.token_dispatcher.ep_world_size)
+        ipport = ascend_config.zercmoe_ipport or _ZERCMOE_DEFAULT_IPPORT
+        mem_size_mb = ascend_config.zercmoe_shmem_mb or 0
+        logger.info(
+            "ZercMoE sym-buffer alloc (must match across all EP ranks): "
+            "ep_world=%s num_max_tokens_per_rank=%s num_experts=%s topk=%s hidden=%s "
+            "intermediate=%s ipport=%s mem_size_mb=%s",
+            ep_world_size,
+            num_max_tokens_per_rank,
+            self.moe_config.num_experts,
+            self.moe_config.experts_per_token,
+            self.moe_config.hidden_dim,
+            self.moe_config.intermediate_size_per_partition,
+            ipport,
+            mem_size_mb,
+        )
+        # The wheel reads standard distributed launcher variables. vLLM
+        # workers receive ranks as constructor arguments instead; DP=PP=1
+        # in the ZercMoE gate makes the EP rank equal to the global rank.
+        # Override inherited launcher values: all spawned workers may have
+        # inherited the parent's RANK/WORLD_SIZE rather than their own.
+        os.environ["RANK"] = str(self.token_dispatcher.ep_rank_id)
+        os.environ["WORLD_SIZE"] = str(ep_world_size)
+        return self._zercmoe.get_symm_buffer(
+            moe_expert_num=self.moe_config.num_experts,
+            ep_world_size=ep_world_size,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_topk=self.moe_config.experts_per_token,
+            hidden=self.moe_config.hidden_dim,
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
+            ipport=ipport,
+            device_id=torch.npu.current_device(),
+            mem_size_mb=mem_size_mb,
+        )
+
+    def fused_experts(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+        quant_method=None,
+    ):
+        activation = getattr(fused_experts_input.activation, "value", fused_experts_input.activation)
+        if (
+            fused_experts_input.quant.quant_type != QuantType.NONE
+            or activation != "silu"
+            or fused_experts_input.hidden_states.dtype != torch.bfloat16
+            or fused_experts_input.routing.apply_router_weight_on_input
+        ):
+            raise ValueError(
+                "ZercMoE requires unquantized BF16 standard silu with output router weighting. "
+                "Disable additional_config.enable_zerc_moe for this layer."
+            )
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        num_tokens = fused_experts_input.hidden_states.shape[0]
+        num_max_tokens = self.token_dispatcher.max_num_tokens_per_rank
+        if num_tokens > num_max_tokens:
+            raise ValueError(
+                f"ZercMoE received {num_tokens} tokens per rank, but its symmetric buffer "
+                f"was allocated for at most {num_max_tokens}. Reduce max-num-batched-tokens "
+                "or disable ZERC_MOE."
+            )
+        weights = (
+            quant_method.get_zercmoe_weights(fused_experts_input.layer)
+            if quant_method is not None
+            else fused_experts_input.weights
+        )
+        w1, w2 = weights.w1, weights.w2
+        assert isinstance(w1, torch.Tensor) and w1.dim() == 1 and isinstance(w2, torch.Tensor) and w2.dim() == 1, (
+            "ZERC_MOE requires pre-packed zN weights (layer.w13_weight_zr / layer.w2_weight_zr). "
+            "Check that the zercmoe gate was active during weight processing."
+        )
+
+        topk_ids = fused_experts_input.topk_ids
+        if fused_experts_input.routing.log2phy is not None:
+            topk_ids = fused_experts_input.routing.log2phy[topk_ids]
+        before_dispatch_evt = torch.npu.current_stream().record_event()
+
+        self._ensure_zercmoe_loaded()
+        if self.zerc_symm_buffer is None:
+            self.zerc_symm_buffer = self._init_zerc_symm_buffer()
+
+        # The config gate and one-time packing establish the BF16 operator
+        # contract. Bypass the Python wrapper's per-call validation and weight
+        # layout detection. Dynamic EPLB is excluded, so mode 0 skips expert
+        # count readback and its CPU/NPU synchronization on every MoE layer.
+        out, expert_tokens = torch.ops.npu.zerc_moe(
+            fused_experts_input.hidden_states,
+            topk_ids.to(torch.int32),
+            fused_experts_input.topk_weights.to(torch.float32),
+            [w1],
+            [w2],
+            self.zerc_symm_buffer.moe_expert_num,
+            self.zerc_symm_buffer.ep_world_size,
+            self.zerc_symm_buffer.ccl_buffer_size,
+            0,  # topk_weights_type: fp32
+            0,  # return_expert_tokens: no synchronous count readback
+        )
+        return FusedExpertsResult(
+            routed_out=out,
+            before_dispatch_evt=before_dispatch_evt,
             expert_tokens=expert_tokens,
         )

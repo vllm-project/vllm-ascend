@@ -38,6 +38,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "multimodal",
     },
     "feature": {
+        "zercmoe",
         "kvpp",
         "lora",
         "multi_lora",

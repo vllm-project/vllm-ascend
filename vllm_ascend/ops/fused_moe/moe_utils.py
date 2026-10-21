@@ -164,6 +164,71 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
+@lru_cache(maxsize=1)
+def zercmoe_lib_available() -> bool:
+    """Check the optional wheel once, only after the ZercMoE config gate.
+
+    Importing the wheel loads SHMEM shared libraries, so unrelated workers
+    must not probe it during initialization.
+    """
+    try:
+        load_zercmoe_ops()
+    except Exception as exc:
+        logger.warning_once("zercmoe wheel is not available, ZERC_MOE branch disabled: %s", exc)
+        return False
+    return True
+
+
+def load_zercmoe_ops():
+    """Load the wheel exposing ``pack_weights`` and ``get_symm_buffer``.
+
+    The import also registers ``torch.ops.npu.zerc_moe``, which is called
+    directly after weights and runtime arguments have been validated.
+    """
+    return import_module("zercmoe")
+
+
+def validate_zercmoe_layer(layer, moe_config) -> None:
+    """Reject layer features the fixed BF16 SwiGLU operator would ignore."""
+
+    def reject(reason):
+        raise ValueError(
+            f"ZercMoE does not support this routed layer: {reason}. Disable additional_config.enable_zerc_moe."
+        )
+
+    for owner in (layer, moe_config):
+        activation = getattr(owner, "activation", "silu")
+        if getattr(activation, "value", activation) != "silu":
+            reject(f"activation={activation!r}; only standard silu is supported")
+        if getattr(owner, "swigluoai_uninterleave", False):
+            reject("swigluoai_uninterleave=True")
+        for name, supported in (
+            ("swiglu_limit", (None, 0.0)),
+            ("swiglu_alpha", (None, 1.0)),
+            ("swiglu_beta", (None, 0.0)),
+        ):
+            value = getattr(owner, name, None)
+            if value not in supported:
+                reject(f"{name}={value!r}")
+        if getattr(owner, "has_bias", False):
+            reject("expert bias is enabled")
+        if getattr(owner, "apply_router_weight_on_input", False):
+            reject("apply_router_weight_on_input=True")
+    if getattr(layer, "w13_bias", None) is not None or getattr(layer, "w2_bias", None) is not None:
+        reject("expert bias tensors are present")
+
+    expected_shapes = (
+        (moe_config.num_local_experts, moe_config.hidden_dim, 2 * moe_config.intermediate_size_per_partition),
+        (moe_config.num_local_experts, moe_config.intermediate_size_per_partition, moe_config.hidden_dim),
+    )
+    for name, expected_shape in zip(("w13_weight", "w2_weight"), expected_shapes):
+        weight = getattr(layer, name)
+        if weight.dtype != torch.bfloat16:
+            reject(f"{name}.dtype={weight.dtype}; only torch.bfloat16 is supported")
+        if tuple(weight.shape) != expected_shape:
+            reject(f"{name}.shape={tuple(weight.shape)}; expected ND shape {expected_shape}")
+
+
 def select_mega_moe_activation_kwargs(
     mega_moe_op: Callable[..., Any],
     *,
