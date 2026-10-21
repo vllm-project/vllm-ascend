@@ -62,6 +62,12 @@ bash format.sh ci
 
 #### Submit the commit
 
+Build dependencies are declared in `pyproject.toml` under `[build-system].requires`;
+runtime dependencies are declared under `[project].dependencies`. After changing
+runtime declarations, run `python -m tools.export_requirements` to refresh the
+generated `requirements.txt` used by existing dependency preinstall commands.
+Use `python -m tools.export_requirements --check` to check for a stale export.
+
 ```bash
 # Commit changed files using `-s`
 git commit -sm "your commit info"

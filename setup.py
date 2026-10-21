@@ -424,43 +424,6 @@ if envs.COMPILE_CUSTOM_KERNELS:
     ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 
-def get_path(*filepath) -> str:
-    return os.path.join(ROOT_DIR, *filepath)
-
-
-def read_readme() -> str:
-    """Read the README file if present."""
-    p = get_path("README.md")
-    if os.path.isfile(p):
-        with open(get_path("README.md"), encoding="utf-8") as f:
-            return f.read()
-    else:
-        return ""
-
-
-def get_requirements() -> list[str]:
-    """Get Python package dependencies from requirements.txt."""
-
-    def _read_requirements(filename: str) -> list[str]:
-        with open(get_path(filename)) as f:
-            requirements = f.read().strip().split("\n")
-        resolved_requirements = []
-        for line in requirements:
-            if line.startswith("-r "):
-                resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
-                continue
-            else:
-                resolved_requirements.append(line)
-        return resolved_requirements
-
-    try:
-        requirements = _read_requirements("requirements.txt")
-    except ValueError:
-        print("Failed to read requirements.txt in vllm_ascend.")
-    return requirements
-
-
 cmdclass = {
     "develop": custom_develop,
     "build_py": custom_build_info,
@@ -470,49 +433,15 @@ cmdclass = {
 }
 
 setup(
-    name="vllm_ascend",
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
     version=VERSION,
-    author="vLLM-Ascend team",
-    license="Apache 2.0",
-    description="vLLM Ascend backend plugin",
-    long_description=read_readme(),
-    long_description_content_type="text/markdown",
+    python_requires=">=3.10",
     url="https://github.com/vllm-project/vllm-ascend",
-    project_urls={
-        "Homepage": "https://github.com/vllm-project/vllm-ascend",
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "License :: OSI Approved :: Apache Software License",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Information Technology",
-        "Intended Audience :: Science/Research",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-    ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability": ["config/*.yaml"],
     },
-    python_requires=">=3.10",
-    install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    extras_require={},
-    entry_points={
-        "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
-        "vllm.general_plugins": [
-            "ascend_kv_connector = vllm_ascend:register_connector",
-            "ascend_model_loader = vllm_ascend:register_model_loader",
-            "ascend_service_profiling = vllm_ascend:register_service_profiling",
-            "ascend_model = vllm_ascend:register_model",
-        ],
-        "ms_service_metric.providers": [
-            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
-        ],
-    },
 )

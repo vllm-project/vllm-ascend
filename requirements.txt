@@ -1,4 +1,5 @@
-# Should be mirrored in pyproject.toml
+# Generated from pyproject.toml [project].dependencies; do not edit.
+# Regenerate: python -m tools.export_requirements
 cmake>=3.26
 decorator
 einops
@@ -22,18 +23,11 @@ wheel
 xgrammar>=0.1.30
 pandas-stubs
 compressed_tensors>=0.11.0
-
-# Required for disaggregated prefill
 msgpack
 quart
-
-# Required for N-gram speculative decoding
 numba
-
-# Required for kvpool supports memcache backend
 memfabric_hybrid==1.2.0
 memcache_hybrid==1.2.0
-
 arctic-inference==0.1.1
 transformers==5.19.0
 fastapi<0.124.0
