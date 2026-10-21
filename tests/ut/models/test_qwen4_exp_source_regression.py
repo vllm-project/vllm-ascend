@@ -40,7 +40,7 @@ def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
 
 
 def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
-    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    runner = _source("vllm_ascend/worker/v1/model_runner.py")
     # The concrete class is part of the static drafter union so mypy can see
     # the inherited proposer methods. Runtime dispatch still uses capabilities.
     assert "AscendQwen4ExpMTPProposer" in runner
@@ -59,7 +59,7 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
 
 
 def test_runner_customizes_compressed_attention_cache_specs() -> None:
-    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    runner = _source("vllm_ascend/worker/v1/model_runner.py")
     branch_start = runner.index("elif self.use_compress:")
     branch_end = runner.index(
         "elif isinstance(attn_module, Attention):",
@@ -86,7 +86,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
-    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    runner = _source("vllm_ascend/worker/v1/model_runner.py")
     branch_start = runner.index("isinstance(builder, QSAMetadataBuilder)")
     branch_end = runner.index("if is_gdn_noop:", branch_start)
     branch = runner[branch_start:branch_end]
