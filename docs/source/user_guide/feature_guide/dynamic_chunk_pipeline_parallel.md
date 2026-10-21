@@ -286,7 +286,7 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length 256k    | TTFT: 53.5s | TTFT: 61.4s |
+    | Input length 256k    | TTFT: 51.41s | TTFT: 55.61s |
 
 **Variable-length requests, concurrency=4**:
 
