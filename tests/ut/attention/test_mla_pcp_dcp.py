@@ -109,6 +109,7 @@ def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabl
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.flashmla_state = None
     builder.dcp_enabled = dcp_enabled
     builder.reorder_batch_threshold = 3
     expected = object()

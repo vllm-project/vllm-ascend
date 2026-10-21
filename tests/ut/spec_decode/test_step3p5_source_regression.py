@@ -103,7 +103,7 @@ def test_pad_query_start_loc_for_fia_first_arg_is_query_start_loc() -> None:
     num_reqs (int) and eventually triggering:
         TypeError: unsupported operand type(s) for *: 'CUDAGraphMode' and 'int'
 
-    See model_runner_v1.py:_pad_query_start_loc_for_fia and the correct call
+    See worker/v1/model_runner.py:_pad_query_start_loc_for_fia and the correct call
     pattern at llm_base_proposer.py:730–736.
     """
     propose = _method(STEP3P5, "AscendStep3p5MTPProposer", "_propose")

@@ -21,10 +21,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-
-# FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
-# through the OOT registration in `vllm_ascend.utils` rather than by import.
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -249,6 +245,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
+        # FLA imports can initialize an NPU context through capability queries.
+        # Resolve and register the Ascend subclass after worker device selection.
+        # TODO: Restore eager import/registration once supported vLLM FLA or
+        # Triton Ascend versions make these queries safe before device selection.
+        from vllm_ascend.utils import register_ascend_fla_customop
+
+        register_ascend_fla_customop()
+        from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,

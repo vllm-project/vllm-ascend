@@ -66,6 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
@@ -154,6 +155,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
+        self._uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -454,6 +456,11 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
+            self._uses_flashmla = any(
+                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                for groups in self.attn_groups
+                for group in groups
+            )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -751,15 +758,10 @@ class NPUModelRunner(GPUModelRunner):
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        # The initial dummy profile bypasses PCP batch partitioning. Profile
-        # rank-local tokens; the existing MoE preparation still handles TP.
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        global_max_num_tokens: int = self.max_num_tokens
-        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and profile_max_num_tokens > mc2_tokens_capacity
+                and self.max_num_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -772,11 +774,14 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            self.max_num_tokens: int = profile_max_num_tokens
-            try:
-                super().profile_run(**profile_kwargs)
-            finally:
-                self.max_num_tokens = global_max_num_tokens
+            super().profile_run(**profile_kwargs)
+
+    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
+        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if self._uses_flashmla and batch_state is not None:
+            # The backend order must precede derived inputs and graph dispatch.
+            batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.

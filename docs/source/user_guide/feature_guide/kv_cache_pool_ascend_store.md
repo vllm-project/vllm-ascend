@@ -52,6 +52,16 @@ KV Cache supports the following three external storage backends, choose the stor
     | Software Dependencies | Requires `openyuanrong-datasystem` |
     | Feature Mutex | • Worker cannot configure both Coordinator and etcd discovery backends simultaneously.<br>• Under `P2P_TRANSFER` or FabricMem mode, client-side device memory pre-registration is always skipped regardless of `enable_dev_mem_pregister` value. |
 
+### Upgrading Pools with Strided MLA Caches
+
+Bulk and layerwise pooling transfer MLA components in separate physical-block segments when a scheduler block contains multiple kernel blocks with gaps between their payloads. The components must be contiguous inside each physical block. Partial layerwise transfers copy only the token interval covered by each segment. Dense cache layouts retain their existing packed representation.
+
+Pool objects written by the older contiguous-range implementation are incompatible with the corrected representation for affected layouts, even though their total byte size is unchanged. Upgrade all writers and readers together, and invalidate the affected pool entries or use a fresh cache namespace. For request-level isolation, use a new `cache_salt` consistently for requests that should share cached prefixes. Restarting vLLM workers alone does not invalidate persisted pool objects.
+
+For non-layerwise complete-block transfers, adjacent MLA components sharing one backing storage are coalesced into one descriptor per physical page, or one descriptor per logical block when the pages have no gaps. Padding is never copied. Layerwise transfers, partial-chunk configurations, align-state groups, decode-cache saving, TP mismatch, DCP and KVPP retain the component-segment fallback. Registration logs report each coalesced layer and its descriptor count.
+
+This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
@@ -483,6 +493,10 @@ mooncake_master \
 ```
 
 `offload_on_evict` defaults to `false`. When enabled, eviction queues objects without a `LOCAL_DISK` replica for offload and pins one memory replica while offload is pending. Keep `offload_force_evict=false` to defer eviction when offload cannot be queued. On Mooncake builds that expose `offloading_queue_limit`, increase the pending-object limit per local disk segment as needed (for example, `--offloading_queue_limit=200000`), and leave DRAM headroom for pending writes.
+
+Only worker clients own local SSD storage. Each worker uses `ssd_offload_path/rank_<global_rank>/`, where the global rank includes the DP offset and TP/PP/CP ranks. Scheduler clients do not enable local SSD offload. In a single-node DP=2 deployment, both replicas can use the same `mooncake.json`: their workers use distinct rank subdirectories and their schedulers do not claim the shared root directory. Separate vLLM services whose global ranks overlap must use different `ssd_offload_path` roots.
+
+If startup reports `storage_path already held by another live client`, another client holds the local directory lock. This message comes from Mooncake's client-side bucket backend. Check the Mooncake package and native libraries loaded by vLLM and the live clients using the reported directory; the `mooncake_master` version alone does not identify the client's locking implementation. The `Mooncake SSD offload enabled` log reports the actual worker subdirectory. See the [Mooncake SSD ownership contract](https://kvcache-ai.github.io/Mooncake/design/store/ssd-offload.html#bucketstoragebackend-default).
 
 SSD disk usage control environment variables:
 

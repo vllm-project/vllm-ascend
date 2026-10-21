@@ -24,7 +24,7 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -217,7 +217,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 
@@ -274,7 +274,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "vllm_ascend.worker.model_runner_v1.get_pp_group",
+        "vllm_ascend.worker.v1.model_runner.get_pp_group",
         lambda: SimpleNamespace(is_last_rank=False),
     )
 

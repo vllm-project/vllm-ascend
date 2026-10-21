@@ -298,7 +298,7 @@ class MooncakeBackend(Backend):
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
-                self.config.ssd_offload_path,
+                ssd_kwargs["ssd_offload_path"],
             )
         logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
