@@ -1,9 +1,10 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from vllm_ascend import spec_decode
+from vllm_ascend.spec_decode.qwen4_exp import is_qwen4_exp_mtp
 
 
 def _speculative_config(
@@ -31,7 +32,7 @@ def test_qwen4_exp_mtp_detects_model_level_architecture():
         text_architectures=None,
     )
 
-    assert spec_decode._use_qwen4_exp_mtp(config)
+    assert is_qwen4_exp_mtp(config)
 
 
 @pytest.mark.parametrize(
@@ -44,7 +45,7 @@ def test_qwen4_exp_mtp_preserves_text_config_fallbacks(text_architectures, text_
         text_model_type=text_model_type,
     )
 
-    assert spec_decode._use_qwen4_exp_mtp(config)
+    assert is_qwen4_exp_mtp(config)
 
 
 def test_non_qwen_mtp_is_not_misclassified():
@@ -54,7 +55,18 @@ def test_non_qwen_mtp_is_not_misclassified():
         text_model_type="other",
     )
 
-    assert not spec_decode._use_qwen4_exp_mtp(config)
+    assert not is_qwen4_exp_mtp(config)
+
+
+def test_implicit_mock_checker_does_not_misclassify_other_mtp_models():
+    config = _speculative_config(
+        model_architectures=["Glm5NextMTPModel"],
+        text_architectures=None,
+        text_model_type="glm5_next_mtp",
+    )
+    config.use_qwen4_exp_mtp = MagicMock()
+
+    assert not is_qwen4_exp_mtp(config)
 
 
 def test_model_level_architecture_dispatches_qwen_proposer():

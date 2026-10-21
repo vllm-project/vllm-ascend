@@ -61,6 +61,7 @@ from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.v1.model_runner import (
     NPUModelRunner,
     _resolve_draft_kernel_block_sizes,
+    _uses_per_group_kernel_block_sizes,
 )
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -142,6 +143,18 @@ class SparseAttentionBackend(AscendAttentionBackend):
 
 
 class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
+    def test_capability_result_is_evaluated(self):
+        class PerGroupProposer:
+            def __init__(self, enabled: bool):
+                self.enabled = enabled
+
+            def uses_per_group_kernel_block_sizes(self) -> bool:
+                return self.enabled
+
+        self.assertTrue(_uses_per_group_kernel_block_sizes(PerGroupProposer(True)))
+        self.assertFalse(_uses_per_group_kernel_block_sizes(PerGroupProposer(False)))
+        self.assertFalse(_uses_per_group_kernel_block_sizes(object()))
+
     def test_single_group_contract_preserves_supported_sizes(self):
         self.assertEqual(
             _resolve_draft_kernel_block_sizes([[128, 64], [32]], per_group=False),

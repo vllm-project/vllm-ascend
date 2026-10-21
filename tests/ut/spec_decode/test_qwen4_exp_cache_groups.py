@@ -12,8 +12,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.spec_decode.eagle_proposer import AscendQwen4ExpMTPProposer
-from vllm_ascend.spec_decode.qwen4_exp import Qwen4ExpMTPProposer
+from vllm_ascend.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
 
 
 def _attention_spec() -> FullAttentionSpec:
@@ -35,7 +34,7 @@ def test_map_draft_layer_accepts_direct_group_spec() -> None:
     )
     proposer = SimpleNamespace(_draft_attn_layer_names={layer_name})
 
-    layer_to_gid, layer_to_spec = Qwen4ExpMTPProposer._map_draft_layers_to_groups(proposer, config)
+    layer_to_gid, layer_to_spec = AscendQwen4ExpMTPProposer._map_draft_layers_to_groups(proposer, config)
 
     assert layer_to_gid == {layer_name: 0}
     assert layer_to_spec == {layer_name: spec}
@@ -53,7 +52,7 @@ def test_map_draft_layer_accepts_uniform_group_spec() -> None:
     )
     proposer = SimpleNamespace(_draft_attn_layer_names={layer_name})
 
-    layer_to_gid, layer_to_spec = Qwen4ExpMTPProposer._map_draft_layers_to_groups(proposer, config)
+    layer_to_gid, layer_to_spec = AscendQwen4ExpMTPProposer._map_draft_layers_to_groups(proposer, config)
 
     assert layer_to_gid == {layer_name: 0}
     assert layer_to_spec == {layer_name: spec}
@@ -114,9 +113,7 @@ def test_ascend_later_step_uses_qwen_cache_only_group_block_table() -> None:
     proposer._per_group_block_tables = {1: raw_table}
     proposer._per_group_kernel_block_sizes = {0: 16, 1: 128}
     proposer._per_group_next_step_slot_mappings = {}
-    proposer.slot_mapping_group = [
-        torch.full((8,), -1, dtype=torch.int32) for _ in range(3)
-    ]
+    proposer.slot_mapping_group = [torch.full((8,), -1, dtype=torch.int32) for _ in range(3)]
     primary_metadata = object()
     raw_metadata = object()
     primary_group, _ = _draft_group(0, "draft.main", primary_metadata)
