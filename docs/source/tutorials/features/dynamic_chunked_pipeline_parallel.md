@@ -432,13 +432,13 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in PD disaggr
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length 128k | TTFT: 22.5s | TTFT: 27.0s |
+    | Input length 128k | TTFT: 24.04s | TTFT: 28.33s |
 
 - Qwen3-235B:
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
     | ----------------------------- | ------------------------- | ------------------------- |
-    | Input length 256k | TTFT: 53.5s | TTFT: 61.4s |
+    | Input length 256k | TTFT: 51.41s | TTFT: 55.61s |
 
 **Variable-length requests, concurrency=4**:
 
