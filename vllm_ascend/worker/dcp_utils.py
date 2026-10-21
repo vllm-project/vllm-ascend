@@ -26,7 +26,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.v1.spec_decode.utils import correct_optimistic_seq_lens_cpu
+from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

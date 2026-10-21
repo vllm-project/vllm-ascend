@@ -16,7 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
-from vllm_ascend.worker.v1.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 _RPC_BLOCKS = 128
 _LEASE_TTL_MS = 5 * 60 * 1000

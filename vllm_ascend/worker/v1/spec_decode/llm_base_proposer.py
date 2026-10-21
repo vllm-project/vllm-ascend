@@ -62,6 +62,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
+from vllm_ascend.worker.spec_decode_utils import PREPARE_INPUTS_BLOCK_SIZE
 from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
@@ -73,9 +74,6 @@ from vllm_ascend.worker.v1.spec_decode.utils import (
 class _HiddenStateDrafter(Protocol):
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor: ...
 
-
-# Currently we will fix block size to a small one since `num_reqs` can't be too large
-_PREPARE_INPUTS_BLOCK_SIZE = 4
 
 _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     Eagle3LlamaForCausalLM,
@@ -2400,7 +2398,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             token_indices_to_sample = torch.empty((num_reqs,), dtype=torch.int32, device=device)
             num_rejected_tokens_gpu = torch.empty((num_reqs,), dtype=torch.int32, device=device)
-            num_blocks_needed = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
+            num_blocks_needed = triton.cdiv(num_reqs, PREPARE_INPUTS_BLOCK_SIZE)
             num_vector_core = get_vectorcore_num()
             grid_size = min(num_blocks_needed, num_vector_core)
             grid = (grid_size,)
@@ -2412,7 +2410,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 token_indices_to_sample,
                 num_rejected_tokens_gpu,
                 num_reqs,
-                BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
+                BLOCK_SIZE=PREPARE_INPUTS_BLOCK_SIZE,
             )
         else:
             num_draft_tokens_gpu = torch.cat(

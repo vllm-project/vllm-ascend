@@ -224,6 +224,10 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.spec_decode_utils import (
+    correct_optimistic_seq_lens_cpu,
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm_ascend.worker.utils import (
     copy_kv_cache_blocks_inplace,
     disable_compilation,
@@ -247,10 +251,6 @@ from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.worker.v1.spec_decode.utils import (
-    correct_optimistic_seq_lens_cpu,
-    update_num_computed_tokens_for_batch_change,
-)
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip

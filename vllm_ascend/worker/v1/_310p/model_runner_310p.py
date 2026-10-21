@@ -55,13 +55,13 @@ from vllm_ascend.utils import (
     is_rc_device,
     lmhead_tp_enable,
 )
+from vllm_ascend.worker.spec_decode_utils import (
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm_ascend.worker.v1._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend.worker.v1._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend.worker.v1._310p.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-from vllm_ascend.worker.v1.spec_decode.utils import (
-    update_num_computed_tokens_for_batch_change,
-)
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
