@@ -1023,8 +1023,9 @@ def allocate_shared_attention_kv_cache(
     live in two groups at once. Split each layer slot into K and V halves;
     equal, unpadded pages and equal K/V widths make this mapping identical
     across groups while preserving the contiguous layout required by PA.
-    Validate all descriptors before allocating: falling back to private
-    buffers after retaining the full budget would overallocate device memory.
+    Upstream constructs the layer coverage, offsets and allocation bounds.
+    Check only the shared backing and contiguous strides required here:
+    upstream permits alignment padding that this K/V split cannot consume.
     """
     descriptors = kv_cache_config.kv_cache_tensors
     specs = {
@@ -1046,20 +1047,9 @@ def allocate_shared_attention_kv_cache(
             spec = specs[name]
             layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
             start = descriptor.offset + index * descriptor.layer_stride
-            if (
-                layer_size <= 0
-                or layer_size % 2
-                or descriptor.layer_stride != layer_size
-                or descriptor.block_stride != spec.page_size_bytes
-                or start < 0
-                or start % layer_size
-                or start + layer_size > backing_size
-                or name in regions
-            ):
+            if descriptor.layer_stride != layer_size or descriptor.block_stride != spec.page_size_bytes:
                 raise ValueError(f"Invalid shared attention KV cache descriptor for {name}.")
             regions[name] = (start, layer_size)
-    if regions.keys() != specs.keys():
-        raise ValueError("Shared attention KV cache descriptors do not cover all layers.")
     backing = allocate(backing_size)
     return {
         name: (

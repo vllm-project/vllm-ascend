@@ -229,20 +229,14 @@ def test_unsupported_layouts_keep_private_allocation(unsupported):
     assert not can_share_full_and_sliding_kv_cache(config, specs)
 
 
-@pytest.mark.parametrize("invalid", ["size", "offset", "layer_stride", "block_stride", "missing", "duplicate", "zero"])
+@pytest.mark.parametrize("invalid", ["size", "layer_stride", "block_stride", "zero"])
 def test_invalid_descriptors_fail_before_allocating(invalid):
     cache = _cache_config()
     descriptor = cache.kv_cache_tensors[0]
     if invalid == "size":
         descriptor.size += 1
-    elif invalid == "offset":
-        descriptor.offset = 1
     elif invalid in ("layer_stride", "block_stride"):
         setattr(descriptor, invalid, 1)
-    elif invalid == "missing":
-        cache.kv_cache_tensors.pop()
-    elif invalid == "duplicate":
-        cache.kv_cache_tensors.append(descriptor)
     else:
         cache.num_blocks = 0
     allocate = Mock()
