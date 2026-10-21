@@ -431,6 +431,7 @@ class TestNPUWorker(TestBase):
             ),
         ]
         worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
         worker.vllm_config = SimpleNamespace(
             cache_config=SimpleNamespace(
                 get_resolved_kv_cache_layout=lambda: SimpleNamespace(
