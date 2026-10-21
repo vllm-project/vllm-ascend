@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -715,6 +716,60 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler7.max_num_scheduled_tokens = 4
         scheduler7.add_request(create_requests(num_requests=1, num_tokens=20)[0])
         scheduler7.schedule()
+
+    def _encoder_stalled_request(self, request):
+        """Give the request a placeholder that cannot fit the encoder cache
+        when the encoder budget is 0 (the upstream vllm#59030 scenario)."""
+        request.mm_features = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier=f"stalled-mm-{request.request_id}",
+                mm_position=PlaceholderRange(offset=0, length=50),
+            )
+        ]
+        return request
+
+    def test_waiting_encoder_stall_does_not_starve_later_requests(self):
+        """Upstream vllm#59030: an encoder-stalled waiting request must be
+        requeued instead of ending the pass and starving requests behind it."""
+        scheduler = self.create_scheduler()
+        scheduler.max_num_encoder_input_tokens = 0
+        stalled, ready = create_requests(num_requests=2, num_tokens=100)
+        self._encoder_stalled_request(stalled)
+        scheduler.add_request(stalled)
+        scheduler.add_request(ready)
+
+        output = scheduler.schedule()
+
+        self.assertNotIn(stalled.request_id, output.num_scheduled_tokens)
+        self.assertIn(ready.request_id, output.num_scheduled_tokens)
+        # The stall must requeue via skip_request: the request is accounted
+        # as deferred waiting and restored at the head of the waiting queue.
+        self.assertIn(stalled, scheduler.deferred_waiting)
+        self.assertEqual(list(scheduler.waiting), [stalled])
+
+    def test_waiting_encoder_stall_is_counted_as_deferred(self):
+        scheduler = self.create_scheduler()
+        scheduler.max_num_encoder_input_tokens = 0
+        stalled = self._encoder_stalled_request(create_requests(num_requests=1, num_tokens=100)[0])
+        scheduler.add_request(stalled)
+
+        scheduler.schedule()
+
+        self.assertIn(stalled, scheduler.deferred_waiting)
+
+    def test_waiting_encoder_stall_kv_holder_keeps_drain_priority(self):
+        """A stalled request holding KV blocks must stay on the drain-first queue."""
+        scheduler = self.create_scheduler()
+        scheduler.max_num_encoder_input_tokens = 0
+        stalled = self._encoder_stalled_request(create_requests(num_requests=1, num_tokens=100)[0])
+        stalled.num_computed_tokens = 10
+        scheduler.add_request(stalled)
+
+        scheduler.schedule()
+
+        self.assertIn(stalled, scheduler.kv_holding_waiting)
 
 
 # ===================================================================
