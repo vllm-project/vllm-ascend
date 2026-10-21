@@ -66,6 +66,7 @@ def make_model():
     model._engram_max_tokens = 8
     model.engram_rotation = torch.eye(32)
     model.config = SimpleNamespace(engram_layer_ids=(1, 2), image_token_id=999)
+    model.engram_layer_ids = model.config.engram_layer_ids
     model.layers = [
         SimpleNamespace(engram=SimpleNamespace(embed_tokens=SimpleNamespace(n_hash_cols=4, dim=2))) for _ in range(3)
     ]
@@ -294,6 +295,8 @@ def test_sp_row_copy_waits_for_its_table(runtime, monkeypatch):
             return hidden[:, 0]
 
     model.layers = [Layer(1), Layer(2)]
+    model.start_layer, model.end_layer = 0, 2
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
     monkeypatch.setattr(model_mod, "sp_shard", shard)
     monkeypatch.setattr(model_mod, "sp_all_gather", lambda values: torch.cat((values, values)))
     monkeypatch.setattr(model_mod.envs, "VLLM_MOE_SKIP_PADDING", False)

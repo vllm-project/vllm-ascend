@@ -299,6 +299,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
             return hidden + 1, pre_mix
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
+    model.start_layer, model.end_layer = 0, 3
     ids = torch.tensor([0, 1])
     with patch(
         "vllm_ascend.models.deepseek_v41.model.get_pp_group",
@@ -316,6 +317,64 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     assert len(aux) == 2
     torch.testing.assert_close(aux[0], embedded)
     torch.testing.assert_close(aux[1], embedded + 2)
+
+
+@pytest.mark.parametrize("engram_layer", [None, 1])
+def test_v41_pp_preserves_delayed_hc_mix_and_aux_states(engram_layer):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.utils import PPMissingLayer
+    from vllm.sequence import IntermediateTensors
+
+    from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
+
+    class Engram(torch.nn.Module):
+        def forward(self, hidden, lookup, mask, rotation):
+            return hidden * 2 + 3
+
+    class Layer(torch.nn.Module):
+        hc_collapse = staticmethod(DeepseekV41DecoderLayer.hc_collapse)
+
+        def __init__(self, idx):
+            super().__init__()
+            self.layer_idx = idx
+            self.engram = Engram() if idx == engram_layer else None
+
+        def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
+            return hidden + pre_mix.unsqueeze(-1), pre_mix.roll(1, -1)
+
+    def stage(start, end):
+        model = DeepseekV41Model.__new__(DeepseekV41Model)
+        torch.nn.Module.__init__(model)
+        model.config = SimpleNamespace(hidden_size=3)
+        model.start_layer, model.end_layer = start, end
+        model.hc_mult = 2
+        model.decoder_replay_layers = None
+        model._mtp_hidden_buffer = None
+        model.engram_rotated = False
+        model.norm = torch.nn.Identity() if end == 3 else PPMissingLayer()
+        model.shared_attention_state = MagicMock()
+        model.aux_hidden_state_layers = (1, 2, 3)
+        model.layers = torch.nn.ModuleList([Layer(i) if start <= i < end else PPMissingLayer() for i in range(3)])
+        return model
+
+    embedded = torch.arange(6, dtype=torch.float32).view(2, 3)
+    positions = torch.arange(2)
+    inputs = dict(engram_lookups={1: torch.zeros(2, 3)}, engram_mask=torch.ones(2, dtype=torch.bool))
+    patch_target = "vllm_ascend.models.deepseek_v41.model.get_pp_group"
+    with patch(patch_target, return_value=SimpleNamespace(is_first_rank=True, is_last_rank=True)):
+        expected, expected_aux = stage(0, 3).forward(None, positions, None, inputs_embeds=embedded, **inputs)
+    with patch(patch_target, return_value=SimpleNamespace(is_first_rank=True, is_last_rank=False)):
+        payload = stage(0, 1).forward(None, positions, None, inputs_embeds=embedded, **inputs)
+    assert isinstance(payload, IntermediateTensors)
+    assert payload["pre_mix"].dtype == torch.float32
+    torch.testing.assert_close(payload["pre_mix"], torch.tensor([[0.0, 1.0]]).expand(2, -1))
+    with patch(patch_target, return_value=SimpleNamespace(is_first_rank=False, is_last_rank=True)):
+        actual, actual_aux = stage(1, 3).forward(None, positions, payload, **inputs)
+    torch.testing.assert_close(actual, expected)
+    assert len(actual_aux) == len(expected_aux) == 3
+    for actual_state, expected_state in zip(actual_aux, expected_aux):
+        torch.testing.assert_close(actual_state, expected_state)
 
 
 def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():

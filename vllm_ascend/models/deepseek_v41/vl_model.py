@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
 # Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
 # to deepseek_v41.
@@ -211,7 +211,9 @@ class AscendDeepseekV41ForCausalLM(
     def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
         # MRV2 model state sees this multimodal wrapper. Forward its batch
         # length to the vocabulary embedding that performs PCP token exchange.
-        self.language_model.model.embed_tokens.set_embedding_num_tokens_padded(num_tokens_padded)
+        embedding = self.language_model.model.embed_tokens
+        if not isinstance(embedding, PPMissingLayer):
+            embedding.set_embedding_num_tokens_padded(num_tokens_padded)
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.language_model.prepare_engram_graph_inputs(padded_tokens)

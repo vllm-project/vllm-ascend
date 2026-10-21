@@ -3,6 +3,7 @@
 """Framework-side V4.1 layer-outermost cache placement and allocation."""
 
 from dataclasses import replace
+from itertools import zip_longest
 
 import torch
 from vllm.config import VllmConfig
@@ -187,6 +188,9 @@ def get_layer_tuples(specs):
         )
         layer_tuples.append((kv_name, index_name, *((folded_name,) if folded_spec is not None else ()), *aliases))
         page_sizes.append(capacity)
+    for name in draft_swa[len(full) :]:
+        layer_tuples.append((name,))
+        page_sizes.append(specs[name].unpadded_page_size_bytes)
     return page_sizes, layer_tuples
 
 
@@ -197,6 +201,10 @@ def group_cache_specs(specs):
     page_sizes, layer_tuples = get_layer_tuples(specs)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
+        if len(layer_tuple) == 1:
+            name = layer_tuple[0]
+            padded[name] = replace(specs[name], page_size_padded=page_size)
+            continue
         kv_name, index_name, *rest = layer_tuple
         folded_name = index_name + "_folded"
         has_folded = folded_name in rest
@@ -214,8 +222,9 @@ def group_cache_specs(specs):
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]
     state_names = [name for name, spec in padded.items() if isinstance(spec, CircularBufferSpec)]
     groups = [
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in mla_names}),
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in state_names}),
+        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names})
+        for names in (mla_names, state_names)
+        if names
     ]
 
     # Transpose the physical tuples. Each scheduler SWA group takes one layer
@@ -228,8 +237,8 @@ def group_cache_specs(specs):
         ]
         for layer_tuple in layer_tuples
     ]
-    for names in zip(*swa_columns):
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names}))
+    for names in zip_longest(*swa_columns):
+        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names if name is not None}))
 
     draft_names = [
         name
@@ -258,8 +267,52 @@ def _specs_from_groups(groups):
 
 
 def get_deepseek_v41_pool_bytes_per_block(groups):
-    page_sizes, _ = get_layer_tuples(_specs_from_groups(groups))
+    page_sizes, _ = _get_group_layer_tuples(groups)
     return sum(page_sizes)
+
+
+def _get_group_layer_tuples(groups):
+    """Keep layers in each projected scheduler group in distinct physical slots."""
+    specs = _specs_from_groups(groups)
+    if not any(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and set(group.layer_names) != set(group.kv_cache_spec.kv_cache_specs)
+        for group in groups
+    ):
+        return get_layer_tuples(specs)
+    full = sorted((name for name in specs if name.endswith(".long_kv_cache")), key=_layer_number)
+    if not full:
+        return get_layer_tuples(specs)
+
+    slots = []
+    for name in full:
+        index = name.removesuffix(".long_kv_cache") + ".indexer.k_cache"
+        folded = index + "_folded"
+        slots.append([name, index, *((folded,) if folded in specs else ())])
+    packed_mla = {name for slot in slots for name in slot}
+    for group in groups:
+        aliases = [name for name in group.layer_names if name not in packed_mla]
+        for slot_index, name in enumerate(aliases):
+            if slot_index == len(slots):
+                slots.append([])
+            slots[slot_index].append(name)
+
+    page_sizes = []
+    for slot in slots:
+        mla_bytes = sum(
+            specs[name].unpadded_page_size_bytes for name in slot if isinstance(specs[name], AscendMLAAttentionSpec)
+        )
+        page_sizes.append(
+            max(
+                [mla_bytes]
+                + [
+                    specs[name].unpadded_page_size_bytes
+                    for name in slot
+                    if not isinstance(specs[name], AscendMLAAttentionSpec)
+                ]
+            )
+        )
+    return page_sizes, [tuple(slot) for slot in slots]
 
 
 def get_deepseek_v41_kv_cache_config(
@@ -268,7 +321,7 @@ def get_deepseek_v41_kv_cache_config(
     available_memory: int,
 ) -> KVCacheConfig:
     """Allocate independent layer slots backed by one global block-ID pool."""
-    page_sizes, layer_tuples = get_layer_tuples(_specs_from_groups(groups))
+    page_sizes, layer_tuples = _get_group_layer_tuples(groups)
     capacity = max(available_memory // sum(page_sizes), 0)
     num_blocks = may_override_num_blocks(vllm_config, capacity)
     tensors: list[KVCacheTensor] = []
