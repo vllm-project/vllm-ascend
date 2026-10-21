@@ -252,10 +252,7 @@ from vllm_ascend.worker.v1.spec_decode import get_spec_decode_method
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.worker.v1.spec_decode.eagle_proposer import (
-    AscendEagleProposer,
-    AscendQwen4ExpMTPProposer,
-)
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -263,11 +260,13 @@ from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Propos
 from vllm_ascend.worker.v1.spec_decode.interfaces import (
     SupportsAttentionBackendInitialization,
     SupportsCUDAGraphInitialization,
+    SupportsPerGroupAttentionMetadata,
     SupportsPerGroupBlockTables,
     SupportsPerGroupKernelBlockSizes,
 )
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.worker.v1.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -405,6 +404,13 @@ def _resolve_draft_kernel_block_sizes(
     if not isinstance(first, int):
         return [int(size) for size in first]
     return [int(size) for size in cast(Sequence[int], kernel_block_sizes)]
+
+
+def _uses_per_group_kernel_block_sizes(drafter: object) -> bool:
+    """Evaluate the proposer's kernel block-size contract when it has one."""
+    return isinstance(drafter, SupportsPerGroupKernelBlockSizes) and (
+        drafter.uses_per_group_kernel_block_sizes()
+    )
 
 
 def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
@@ -4276,11 +4282,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.speculative_config and isinstance(
                 self.drafter,
-                (
-                    AscendStep3p5MTPProposer,
-                    AscendDSparkProposer,
-                    AscendQwen4ExpMTPProposer,
-                ),
+                SupportsPerGroupAttentionMetadata,
             ):
                 # Multi-group draft layers need each group's block table and
                 # slot mapping as one addressing pair. Flattened slot ids are
@@ -5123,10 +5125,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             draft_kernel_block_sizes = _resolve_draft_kernel_block_sizes(
                 self.kernel_block_sizes,
-                per_group=isinstance(
-                    self.drafter,
-                    SupportsPerGroupKernelBlockSizes,
-                ),
+                per_group=_uses_per_group_kernel_block_sizes(self.drafter),
             )
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
