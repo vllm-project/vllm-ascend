@@ -64,8 +64,8 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-ARG FLA_VERSION="26.9.1+dev812ccc8"
-ARG FLA_RELEASE_TAG="v26.9.1-20261015-121515"
+ARG FLA_VERSION="26.9.1+dev5cc6990"
+ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -149,10 +149,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="52718f982f39e7e83bb3e9eb6d81f17d7062bb8350ce2fb85f4b9f155114cec2" ;; \
+            FLA_SHA256="0aa5c9191d536136a6c40a609d25901d7f632cab10d784f10de0c517d07c9c51" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a5-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="d0b7ae671b0cad699a9767c12d9ec622397acd5e607f5eb31753dd8b0c43e112" ;; \
+            FLA_SHA256="8b59e7630c50394a34c411360fbe893a463d7ea869b8711be5dd26890882cf97" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"; \
