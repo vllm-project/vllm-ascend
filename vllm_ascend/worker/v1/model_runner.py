@@ -193,10 +193,6 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
-from vllm_ascend.models.input_adapter import (
-    ModelInputContext,
-    build_model_input_adapter,
-)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -697,11 +693,19 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
-        self.model_input_adapter = build_model_input_adapter(
-            self.model_config,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
-        )
+        self.qwen4_exp_input_adapter = None
+        text_config = getattr(self.model_config, "hf_text_config", None)
+        if text_config is not None and getattr(text_config, "ple_layer_ids", None):
+            # Keep the Qwen4Exp package out of unrelated model startup paths.
+            from vllm_ascend.models.qwen4_exp.input_adapter import (
+                build_qwen4_exp_input_adapter,
+            )
+
+            self.qwen4_exp_input_adapter = build_qwen4_exp_input_adapter(
+                self.model_config,
+                max_num_reqs=self.max_num_reqs,
+                device=self.device,
+            )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2691,7 +2695,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
-            self._maybe_add_model_inputs(
+            self._maybe_add_qwen4_exp_inputs(
                 model_kwargs,
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -3642,7 +3646,7 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("Full-graph device metadata requires external events")
         return executor
 
-    def _maybe_add_model_inputs(
+    def _maybe_add_qwen4_exp_inputs(
         self,
         model_kwargs: dict[str, Any],
         *,
@@ -3650,13 +3654,17 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded: int,
         is_dummy: bool = False,
     ) -> None:
-        """Let the active model family add graph-stable auxiliary inputs."""
-        adapter = getattr(self, "model_input_adapter", None)
+        """Add graph-stable Qwen4Exp PLE inputs when configured."""
+        adapter = getattr(self, "qwen4_exp_input_adapter", None)
         if adapter is None:
             return
+        from vllm_ascend.models.qwen4_exp.input_adapter import (
+            Qwen4ExpInputContext,
+        )
+
         adapter.prepare(
             model_kwargs,
-            ModelInputContext(
+            Qwen4ExpInputContext(
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 is_dummy=is_dummy,
@@ -4692,7 +4700,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 model_kwargs: dict[str, Any] = {}
-                self._maybe_add_model_inputs(
+                self._maybe_add_qwen4_exp_inputs(
                     model_kwargs,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,

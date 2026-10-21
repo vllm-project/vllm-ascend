@@ -5,12 +5,10 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from vllm_ascend.models.input_adapter import (
-    ModelInputContext,
-    build_model_input_adapter,
-)
-from vllm_ascend.models.qwen4_exp.ple_inputs import (
+from vllm_ascend.models.qwen4_exp.input_adapter import (
+    Qwen4ExpInputContext,
     Qwen4ExpPLEInputAdapter,
+    build_qwen4_exp_input_adapter,
     pad_ple_graph_inputs,
 )
 
@@ -23,8 +21,8 @@ def _make_adapter() -> Qwen4ExpPLEInputAdapter:
     )
 
 
-def _make_context(*, is_dummy: bool = False) -> ModelInputContext:
-    return ModelInputContext(
+def _make_context(*, is_dummy: bool = False) -> Qwen4ExpInputContext:
+    return Qwen4ExpInputContext(
         num_reqs=1,
         num_reqs_padded=1,
         is_dummy=is_dummy,
@@ -51,7 +49,7 @@ def test_graph_padding_uses_fixed_buffers() -> None:
 
 def test_factory_ignores_models_without_ple() -> None:
     assert (
-        build_model_input_adapter(
+        build_qwen4_exp_input_adapter(
             SimpleNamespace(),
             max_num_reqs=2,
             device=torch.device("cpu"),
