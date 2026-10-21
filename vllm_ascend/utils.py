@@ -96,6 +96,21 @@ def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
     )
 
 
+def is_dcp_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether decode context parallelism is on.
+
+    DCP shards attention caches across ranks, so they cannot be exposed as
+    contiguous slices of the standardized backing. Partially built configs
+    (e.g. test SimpleNamespaces) are treated as disabled.
+    """
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    dcp_size = getattr(parallel_config, "decode_context_parallel_size", 1)
+    try:
+        return int(dcp_size) > 1
+    except (TypeError, ValueError):
+        return False
+
+
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
     """Extract DSV4 index for config per-layer arrays.
 
@@ -215,6 +230,18 @@ def model_uses_sfa_sparse(model_config: Any | None) -> bool:
         and not hasattr(hf_text_config, "compress_ratios")
         and not hasattr(hf_config, "compress_ratios")
     )
+
+
+def model_uses_compress_kv(vllm_config: VllmConfig) -> bool:
+    """Whether the model stores compressed KV instead of dense per-token KV.
+
+    DeepSeek-V4/V4.1 keep compress_ratios on the HF config and lay their cache
+    out through the model-specific packed planner, so the standardized shared
+    backing cannot describe them.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None) if model_config is not None else None
+    return hf_config is not None and hasattr(hf_config, "compress_ratios")
 
 
 def should_reuse_topk(config: Any, layer_id: int) -> bool:
@@ -1399,7 +1426,7 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
     # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
     cache_config = getattr(vllm_config, "cache_config", None)
-    return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+    return getattr(cache_config, "cache_dtype", None) == C8_MXFP_KV_CACHE_DTYPE
 
 
 def is_minimax_m3_fp8_kv_cache(vllm_config: VllmConfig | None) -> bool:

@@ -1,7 +1,9 @@
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
 import torch
+from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -10,16 +12,106 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import (
     AttentionGroup,
     prepare_kernel_block_sizes,
     select_common_block_size,
 )
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    get_layerwise_reuse_config,
+)
+from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.utils import (
+    enable_sfa,
+    is_c8_mxfp_kv_quant,
+    is_dcp_enabled,
+    is_hidden_state_cache_spec,
+    model_uses_compress_kv,
+    vllm_version_is,
+)
+
+
+def get_shared_kv_backing_layers(
+    kv_cache_spec: Mapping[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    *,
+    num_kv_cache_groups: int,
+    layout: KVCacheLayout | None,
+) -> set[str]:
+    """Layers materialized from vLLM's one standardized KV cache backing.
+
+    vLLM #51718 gives every cache group a view into a single allocation. Ascend
+    backends consume one contiguous ``num_blocks * page_size_bytes`` buffer per
+    layer. That buffer is exactly a slice of the backing when the resolved
+    layout keeps the layer and block dimensions outermost: layers are then
+    packed back to back and every page is dense. Groups still alias each other,
+    which is safe because a block ID belongs to one group at a time.
+
+    The runners and the worker's memory budget both call this helper, so the
+    bytes allocated at startup always match the advertised budget. An empty
+    result keeps the existing per-layer path, and is returned when a slice
+    cannot express the plan:
+
+    * a single cache group, where per-layer buffers cost the same as the
+      backing;
+    * a layout that is not layer/block compact, i.e. block-outer packing (an
+      unresolved layout only happens with stub configs and is left to the
+      descriptor geometry check);
+    * padded shared-slot pools (GLM-Next), whose planner already pools
+      physical slots, and DSV4, whose planner owns the packed tuple layout;
+    * sparse (SFA) or compressed KV, layerwise alias descriptors, mxfp8 KV
+      scales and decode context parallelism, which all address the cache with
+      their own strides;
+    * MLA, indexer and vendor-specific specs, which carry their own layout, and
+      plans whose pages do not share one size.
+
+    Hybrid attention/Mamba plans keep overlaying every group except
+    hidden-state dumps, as before #51718: their per-descriptor fallback would
+    duplicate the whole pool.
+    """
+    specs = kv_cache_spec
+    if num_kv_cache_groups < 2:
+        return set()
+    if layout is not None and not (layout.is_layer_compact and layout.is_block_compact):
+        return set()
+    if any(is_glm5_next_cache_spec(spec) for spec in specs.values()):
+        # GLM-Next emits one descriptor per physical slot and binds an
+        # attention page to a recurrent-state page; only its planner knows the
+        # slot geometry.
+        return set()
+
+    has_attention = any(isinstance(spec, AttentionSpec) for spec in specs.values())
+    has_mamba = any(isinstance(spec, MambaSpec) for spec in specs.values())
+    if has_attention and has_mamba:
+        shareable = {layer_name for layer_name, spec in specs.items() if not is_hidden_state_cache_spec(spec)}
+    else:
+        if enable_sfa(vllm_config) or model_uses_compress_kv(vllm_config):
+            return set()
+        if get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None)) is not None:
+            return set()
+        if is_dcp_enabled(vllm_config) or is_c8_mxfp_kv_quant(vllm_config):
+            return set()
+        shareable = {
+            layer_name
+            for layer_name, spec in specs.items()
+            # Exact types: MLA, compressed and vendor-specific specs carry
+            # their own layout, and a padded page would break the geometry.
+            if type(spec) in (FullAttentionSpec, SlidingWindowSpec) and spec.page_size_padded is None
+        }
+        if len({specs[layer_name].page_size_bytes for layer_name in shareable}) > 1:
+            # One backing has one page geometry.
+            return set()
+
+    logger.debug("Shared KV backing covers %d/%d layers.", len(shareable), len(specs))
+    return shareable
 
 
 def copy_kv_cache_blocks_inplace(

@@ -224,6 +224,7 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_packed_sfa_main_cache,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    model_uses_compress_kv,
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
@@ -246,6 +247,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
     copy_kv_cache_blocks_inplace,
     disable_compilation,
+    get_shared_kv_backing_layers,
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
     prepare_ascend_kernel_block_sizes,
@@ -384,11 +386,7 @@ class NPUModelRunner(GPUModelRunner):
         self._decoder_replay_common_metadata: AscendCommonAttentionMetadata | None = None
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None) if model_config else None
-        self.use_compress = (
-            hf_config is not None and hasattr(hf_config, "compress_ratios")
-        )
+        self.use_compress = model_uses_compress_kv(vllm_config)
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -5350,10 +5348,6 @@ class NPUModelRunner(GPUModelRunner):
         self.hybrid_with_attn_and_mamba = any(
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
-        # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
-        # are, remove this is_step_model exemption: this line and the
-        # `or is_step_model` overlay gate below.
-        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         strided_attention_cache_layers: set[str] = set()
         if (
             not self.use_dcp
@@ -5462,45 +5456,72 @@ class NPUModelRunner(GPUModelRunner):
                     start : start + layer_size
                 ]
 
-        # The standardized main descriptors all refer to the same backing
-        # allocation. Ascend attention and Mamba backends still require
-        # contiguous per-layer tensors, which the default layer/block-compact
-        # layout provides. Materialize slices of one backing tensor so cache
-        # groups retain #51718's overlay semantics without reducing capacity.
+        # vLLM #51718 gives every cache group a view into one standardized
+        # allocation. Ascend attention backends need contiguous per-layer
+        # buffers, so expose one ``num_blocks * page_size_bytes`` slice per
+        # layer -- the same physical cost as vLLM, not one buffer per layer.
+        # ``get_shared_kv_backing_layers`` owns the decision (single group,
+        # block-outer layouts, padded slot pools, DCP/mxfp8, MLA and
+        # sparse/compressed planners keep the per-layer path below) and the
+        # worker's budget uses the same helper.
+        layerwise_reuse = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
+        cache_config = getattr(self.vllm_config, "cache_config", None)
+        layout_resolver = getattr(cache_config, "get_resolved_kv_cache_layout", None)
+        layout = layout_resolver() if callable(layout_resolver) else None
+        shared_backing_layers = get_shared_kv_backing_layers(
+            layer_kv_cache_spec,
+            self.vllm_config,
+            num_kv_cache_groups=len(kv_cache_config.kv_cache_groups),
+            layout=layout,
+        )
         if (
-            not is_dsv4_main
+            shared_backing_layers
+            and not is_dsv4_main
             and not uses_padded_page_layout
-            and (self.hybrid_with_attn_and_mamba
-                 or is_step_model)
-            and not self.use_sparse
-            and not self.use_compress
             and kv_cache_config.kv_cache_tensors
         ):
-            layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+            # Resolve every slice before allocating. Falling back halfway would
+            # leave a partially materialized backing behind and then allocate
+            # private buffers for the same layers.
             tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+            if len(tensor_sizes) != 1:
+                raise ValueError(
+                    "Ascend shared KV backing requires one standardized allocation, "
+                    f"got sizes {sorted(tensor_sizes)}."
+                )
+            backing_size = next(iter(tensor_sizes))
             regions: list[tuple[str, int, int]] = []
-            if len(tensor_sizes) == 1 and layout.is_layer_compact and layout.is_block_compact:
-                backing_size = next(iter(tensor_sizes))
-                for descriptor in kv_cache_config.kv_cache_tensors:
-                    for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
-                        spec = layer_kv_cache_spec[layer_name]
-                        layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
-                        start = descriptor.offset + layer_idx * descriptor.layer_stride
-                        if descriptor.block_stride != spec.page_size_bytes or start + layer_size > backing_size:
-                            regions = []
-                            break
-                        regions.append((layer_name, start, layer_size))
-                    if not regions:
-                        break
-                if regions:
-                    backing = self._allocate_int8_cache_tensor(
-                        backing_size,
-                        alignment,
-                    )
-                    for layer_name, start, layer_size in regions:
-                        kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+                    if layer_name not in shared_backing_layers:
+                        continue
+                    spec = layer_kv_cache_spec[layer_name]
+                    layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+                    start = descriptor.offset + layer_idx * descriptor.layer_stride
+                    if (
+                        descriptor.layer_stride != layer_size
+                        or descriptor.block_stride != spec.page_size_bytes
+                        or start < 0
+                        or start + layer_size > backing_size
+                    ):
+                        raise ValueError(
+                            "Ascend shared KV backing requires contiguous per-layer slices, "
+                            f"but {layer_name} has layer_stride={descriptor.layer_stride}, "
+                            f"block_stride={descriptor.block_stride}, page_size={spec.page_size_bytes}."
+                        )
+                    # Groups alias from byte 0, so layers of different
+                    # groups may share this range. That is intended: a block
+                    # ID belongs to exactly one group at a time.
+                    regions.append((layer_name, start, layer_size))
+            if not regions:
+                raise ValueError("KV cache config has no layer materializable from the shared backing.")
+            backing = self._allocate_int8_cache_tensor(
+                backing_size,
+                alignment,
+            )
+            for layer_name, start, layer_size in regions:
+                kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 
-        layerwise_reuse = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
             # Only the layerwise planner emits zero-stride alias descriptors

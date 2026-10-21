@@ -104,11 +104,14 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_c8_mxfp_kv_quant,
+    is_dcp_enabled,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    model_uses_compress_kv,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
+    get_shared_kv_backing_layers,
     get_single_raw_mla_backing,
     make_page_strided_cache_view,
 )
@@ -666,9 +669,8 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
 
 
 def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None) if model_config else None
-    return hf_config is not None and hasattr(hf_config, "compress_ratios")
+    """DSV4 keeps compressed KV, which the standardized backing cannot express."""
+    return model_uses_compress_kv(vllm_config)
 
 
 def _get_attention_kv_cache_dims(
@@ -1019,7 +1021,6 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
-    is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
@@ -1064,28 +1065,68 @@ def _allocate_kv_cache(
             kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
 
     # vLLM #51718 changed every KVCacheTensor to describe a view into one
-    # common backing allocation. Hybrid groups overlay that backing from byte
-    # zero because a block ID belongs to only one group at a time. Allocate it
-    # once here; allocating tensor.size for every descriptor duplicates the
-    # full cache pool and can OOM before the second tensor is initialized.
-    hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model and not is_glm5_next:
+    # common backing allocation. Ascend attention backends need contiguous
+    # per-layer buffers, so expose one ``num_blocks * page_size_bytes`` slice
+    # per layer instead of allocating one buffer per layer.
+    # ``get_shared_kv_backing_layers`` decides which layouts can do this;
+    # everything else keeps its own allocation path below.
+    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
+    cache_config = getattr(vllm_config, "cache_config", None)
+    layout_resolver = getattr(cache_config, "get_resolved_kv_cache_layout", None)
+    layout = layout_resolver() if callable(layout_resolver) else None
+    shared_backing_layers = get_shared_kv_backing_layers(
+        layer_kv_cache_spec,
+        vllm_config,
+        num_kv_cache_groups=len(kv_cache_config.kv_cache_groups),
+        layout=layout,
+    )
+    shared_backing_tensor: torch.Tensor | None = None
+    # DSV4 keeps its packed tuple planner above, so it never reaches this path
+    # even when the helper could describe it.
+    if shared_backing_layers and not is_dsv4_model and kv_cache_config.kv_cache_tensors:
+        # Resolve every slice before allocating. A partial materialization
+        # would be followed by private buffers for the same layers.
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
-            raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
-        tensor_size = tensor_sizes.pop()
-        if vllm_config.kv_transfer_config is None:
-            hybrid_backing = torch.zeros(tensor_size, dtype=torch.int8, device=device)
-        else:
-            hybrid_backing = torch.zeros(
-                tensor_size + alignment,
-                dtype=torch.int8,
-                device=device,
+            raise ValueError(
+                f"Ascend shared KV backing requires one standardized allocation, got sizes {sorted(tensor_sizes)}."
             )
-            hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
+        backing_size = next(iter(tensor_sizes))
+        regions: list[tuple[str, int, int]] = []
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(kv_cache_tensor)):
+                if layer_name not in shared_backing_layers:
+                    continue
+                layer_spec = layer_kv_cache_spec[layer_name]
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                if (
+                    kv_cache_tensor.layer_stride != layer_size
+                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
+                    or start < 0
+                    or start + layer_size > backing_size
+                ):
+                    raise ValueError(
+                        "Ascend shared KV backing requires contiguous per-layer slices, "
+                        f"but {layer_name} has layer_stride={kv_cache_tensor.layer_stride}, "
+                        f"block_stride={kv_cache_tensor.block_stride}, page_size={layer_spec.page_size_bytes}."
+                    )
+                # Groups alias from byte 0, so layers of different groups
+                # may share this range. A block ID belongs to one group at a
+                # time, so the aliasing is intended.
+                regions.append((layer_name, start, layer_size))
+        if not regions:
+            raise ValueError("KV cache config has no layer materializable from the shared backing.")
+        shared_backing_tensor = _allocate_int8_cache_tensor(
+            backing_size,
+            alignment,
+            device,
+        )
+        for layer_name, start, layer_size in regions:
+            kv_cache_raw_tensors[layer_name] = shared_backing_tensor[start : start + layer_size]
 
-    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
     layerwise_aliases: dict[str, str] = {}
+    use_dcp = is_dcp_enabled(vllm_config)
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
@@ -1117,6 +1158,11 @@ def _allocate_kv_cache(
         if dsv4_backing is not None:
             continue
 
+        # Layers already materialized from the shared backing need no private
+        # allocation; the shared geometry is validated before allocating.
+        if shared_backing_tensor is not None and all(layer_name in kv_cache_raw_tensors for layer_name in shared_names):
+            continue
+
         if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
@@ -1145,46 +1191,18 @@ def _allocate_kv_cache(
 
         # extract_hidden_states dumps are live at the same time as the target
         # model's Attention/Mamba caches. Keep HiddenStateCacheSpec off the
-        # #51718 hybrid backing so float32 SSM writes cannot overlay bfloat16
+        # #51718 shared backing so float32 SSM writes cannot overlay bfloat16
         # hidden states, and size each dump from its own page.
         if any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
-            for layer_idx, layer_name in enumerate(shared_names):
-                layer_spec = layer_kv_cache_spec[layer_name]
-                if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
-                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
-                        kv_cache_config.num_blocks * layer_spec.page_size_bytes,
-                        alignment,
-                        device,
-                    )
+            for layer_name in shared_names:
+                if layer_name in kv_cache_raw_tensors:
                     continue
-                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
-                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
-                end = start + layer_size
-                if end > hybrid_backing.numel():
-                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
-                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
-            continue
-
-        if hybrid_backing is not None:
-            for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
-                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
-                if (
-                    kv_cache_tensor.layer_stride != layer_size
-                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
-                ):
-                    raise ValueError(
-                        "Ascend hybrid KV cache requires contiguous per-layer "
-                        f"views, but {layer_name} has layer_stride="
-                        f"{kv_cache_tensor.layer_stride}, block_stride="
-                        f"{kv_cache_tensor.block_stride}, page_size="
-                        f"{layer_spec.page_size_bytes}."
-                    )
-                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
-                end = start + layer_size
-                if end > hybrid_backing.numel():
-                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
-                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+                kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                    kv_cache_config.num_blocks * layer_spec.page_size_bytes,
+                    alignment,
+                    device,
+                )
             continue
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
@@ -1300,7 +1318,6 @@ def _allocate_kv_cache(
                 backend = layer.get_attn_backend() if layer is not None else None
                 # TODO: Remove this DCP guard once DCP KV loading supports
                 # the generic packed K/V cache layout.
-                use_dcp = getattr(getattr(vllm_config, "parallel_config", None), "decode_context_parallel_size", 1) > 1
                 if (
                     (backend is None or not backend.is_sparse())
                     and not use_dcp

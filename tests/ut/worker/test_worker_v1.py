@@ -353,7 +353,7 @@ class TestNPUWorker(TestBase):
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
-    def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
+    def test_pure_attention_multi_group_budget_keeps_full_budget_for_shared_backing(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         spec = FullAttentionSpec(
@@ -400,9 +400,11 @@ class TestNPUWorker(TestBase):
             "vllm_ascend.worker.worker.get_kv_cache_groups",
             return_value=groups,
         ):
+            # Both pure-attention groups are unpadded FullAttentionSpec, so
+            # they share the standardized backing and keep the 1x budget.
             self.assertEqual(
                 worker._scale_kv_cache_memory_for_multi_group(12345),
-                6172,
+                12345,
             )
 
     @patch("vllm_ascend.utils.adapt_patch")
