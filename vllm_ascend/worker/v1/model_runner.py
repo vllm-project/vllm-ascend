@@ -3884,8 +3884,10 @@ class NPUModelRunner(GPUModelRunner):
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return {}, None
-        num_tokens_padded = num_tokens_padded or num_tokens
-        num_reqs_padded = num_reqs_padded or num_reqs
+        if num_tokens_padded is None:
+            num_tokens_padded = num_tokens
+        if num_reqs_padded is None:
+            num_reqs_padded = num_reqs
         if self.sparse_kv_offload_enabled:
             update_sparse_kv_offload_metadata(
                 num_tokens,
