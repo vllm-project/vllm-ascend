@@ -341,6 +341,30 @@ jobs:
         fi
         echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
 
+    - name: Compute temp tag
+      id: temp-tag
+      run: |
+        SUFFIX=""
+        if [ -n "${{ inputs.suffix }}" ]; then
+          SUFFIX="-${{ inputs.suffix }}"
+        fi
+        if [ "${{ inputs.temp_only }}" = "true" ]; then
+          case "${{ inputs.vllm_commit }}" in
+            v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
+            *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
+          esac
+          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+        else
+          TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+          if [ "${{ inputs.build_type }}" = "daily" ]; then
+            DATE=$(date +'%Y%m%d')
+            TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
+          fi
+        fi
+        echo "Creating temp tag: ${{ inputs.swr_temp_repo }}:$TAG"
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
@@ -348,9 +372,12 @@ jobs:
         # use the current repo path as the build context, ensure .git is contained
         context: .
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
-        # only trigger when tag, branch/main push
-        push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }},oci-mediatypes=false
+        # push is controlled by the outputs "push" attribute below; do NOT set
+        # the "push" input here, otherwise buildx gets both --push (type=registry)
+        # and --output type=image,push=true, which can cause the build client to
+        # return before the image is actually exported/pushed. See issue where
+        # steps.build.outputs.digest is empty for the "Tag digest to prevent GC" step.
+        outputs: type=image,name=${{ inputs.swr_temp_repo }}:${{ steps.temp-tag.outputs.tag }},push=${{ inputs.should_push }},oci-mediatypes=false
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
@@ -376,46 +403,35 @@ jobs:
         cache-from: type=registry,ref=${{ inputs.swr_temp_repo }}:${{ steps.cache-tag.outputs.value }}
         cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', inputs.swr_temp_repo, steps.cache-tag.outputs.value) || '' }}
 
-    # Quay.io/swr automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
-    # Add temporary tags to digests to prevent them from being removed.
-    - name: Tag digest to prevent GC
+    # The image is now pushed under an explicit temp tag (see "Compute temp tag" +
+    # "Build and push" above), so it won't be garbage-collected as an untagged
+    # digest. Resolve its digest from the registry instead of relying on
+    # docker/build-push-action's "digest" output, which can be empty when the build
+    # client returns before the image is fully exported/pushed.
+    - name: Export digest
       if: ${{ inputs.should_push }}
       run: |
-        SUFFIX=""
-        if [ -n "${{ inputs.suffix }}" ]; then
-          SUFFIX="-${{ inputs.suffix }}"
-        fi
-        if [ "${{ inputs.temp_only }}" = "true" ]; then
-          case "${{ inputs.vllm_commit }}" in
-            v*) VLLM_SHORT="${{ inputs.vllm_commit }}" ;;
-            *) VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7) ;;
-          esac
-          ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-        else
-          TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
-          if [ "${{ inputs.build_type }}" = "daily" ]; then
-            DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
-          fi
-        fi
-        echo "Creating temp tag: ${{ inputs.swr_temp_repo }}:$TAG"
-
-        # Copy the digest to a temp tag to prevent GC. The build uses
-        # oci-mediatypes=false so the image is Docker v2s2, and this produces
-        # a Docker manifest list which SWR accepts (no skopeo/sudo needed).
-        docker buildx imagetools create \
-          -t "${{ inputs.swr_temp_repo }}:$TAG" \
-          "${{ inputs.swr_temp_repo }}@${{ steps.build.outputs.digest }}"
-
-    - name: Export digest
-      run: |
         mkdir -p /tmp/digests
-        digest="${{ steps.build.outputs.digest }}"
+        REF="${{ inputs.swr_temp_repo }}:${{ steps.temp-tag.outputs.tag }}"
+        digest=""
+        for i in $(seq 1 30); do
+          digest=$(docker buildx imagetools inspect "${REF}" 2>/dev/null | awk '/^Digest:/ {print $2}')
+          if [ -n "$digest" ]; then
+            break
+          fi
+          echo "Waiting for image ${REF} to become available (attempt ${i}/30)..."
+          sleep 10
+        done
+        if [ -z "$digest" ]; then
+          echo "::error::Failed to resolve digest for ${REF}"
+          exit 1
+        fi
+        echo "Resolved digest: ${digest}"
         touch "/tmp/digests/${digest#sha256:}"
         ls -al /tmp/digests
 
     - name: Upload digest
+      if: ${{ inputs.should_push }}
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
