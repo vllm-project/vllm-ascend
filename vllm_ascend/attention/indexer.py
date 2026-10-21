@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
-from vllm_ascend.attention.utils import split_decodes_and_prefills
+from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_context
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -1022,6 +1022,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
         pcp_context = kwargs.get("pcp_context")
+        uses_pcp_layout = uses_pcp_context(common_attn_metadata, self.use_pcp)
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
@@ -1029,7 +1030,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 kwargs.get("pcp_cache_group_idx"),
                 buffer_key,
             )
-        elif pcp_context is not None:
+        elif uses_pcp_layout:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
@@ -1074,7 +1075,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if pcp_context is not None:
+        if uses_pcp_layout:
             # Preserve the decode boundary for PCP's cache-write gather.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,

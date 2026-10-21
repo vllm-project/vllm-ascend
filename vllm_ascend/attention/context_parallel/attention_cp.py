@@ -40,6 +40,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     is_dcp_enabled,
     split_decodes_and_prefills,
+    uses_pcp_context,
 )
 from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.device.device_op import DeviceOperator
@@ -291,7 +292,7 @@ class AscendAttentionDCPMetadataBuilder(
     ) -> dict[str, object]:
         prefill_metadata = None
         if num_prefills > 0:
-            if self._pcp_context is not None:
+            if uses_pcp_context(common_attn_metadata, self.use_pcp):
                 prefill_metadata = self._build_pcp_prefill_metadata(
                     common_attn_metadata, block_table, query_lens, seq_lens, num_decodes, num_prefills
                 )
@@ -518,11 +519,12 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         )
 
     def _prefill_query_all_gather(self, attn_metadata, prefill_query):
-        prefill = attn_metadata.prefill
-        assert prefill is not None and prefill.chunked_context is not None
-        chunked_context = prefill.chunked_context
         # Only PCP-context metadata splits the query sequence across ranks.
-        if chunked_context.pcp_query_restore_idx is not None:
+        if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
+            prefill = attn_metadata.prefill
+            assert prefill is not None
+            chunked_context = prefill.chunked_context
+            assert chunked_context is not None and chunked_context.pcp_query_restore_idx is not None
             # PCP splits the query sequence, not the history KV cache. Restore
             # all current queries before computing each DCP history shard.
             prefill_query = self.pcp_group.all_gather(prefill_query.contiguous(), dim=0)
@@ -589,8 +591,8 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         query_lens = prefill.actual_seq_lengths_q
         local_query = query[attn_metadata.num_decode_tokens : attn_metadata.num_actual_tokens].contiguous()
         causal = attn_metadata.causal
-        if prefill.pcp_current_kv_indices is not None:
-            assert prefill.pcp_actual_seq_lengths_kv is not None
+        if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
+            assert prefill.pcp_current_kv_indices is not None and prefill.pcp_actual_seq_lengths_kv is not None
             key = torch.index_select(key, 0, prefill.pcp_current_kv_indices)
             value = torch.index_select(value, 0, prefill.pcp_current_kv_indices)
             kv_lens = prefill.pcp_actual_seq_lengths_kv
@@ -669,7 +671,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         if chunked_context is not None:
             # PCP query gather includes padding; current attention uses actual local tokens.
             query_end = attn_metadata.num_actual_tokens
-            if attn_metadata.pcp_local_num_input_tokens is not None:
+            if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
                 query_end = attn_metadata.pcp_local_num_input_tokens
             history_query = query[num_decode_tokens:query_end].contiguous()
             comm_stream = cp_chunkedprefill_comm_stream()
@@ -685,7 +687,8 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             with torch_npu.npu.stream(comm_stream):
                 history_recv = self._merge_dcp_attention_output(history_output, history_lse, defer_combine=True)
             main_stream.wait_stream(comm_stream)
-            if chunked_context.pcp_local_query_indices is not None:
+            if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
+                assert chunked_context.pcp_local_query_indices is not None
                 history_recv = torch.index_select(history_recv, 2, chunked_context.pcp_local_query_indices)
             current_output = fused_dcp_lse_combine(
                 history_recv,

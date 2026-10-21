@@ -55,6 +55,7 @@ from vllm_ascend.attention.utils import (
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    uses_pcp_context,
     using_paged_attention,
 )
 from vllm_ascend.compilation.updatable_graph import (
@@ -330,7 +331,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         fast_build: bool = False,
     ) -> AscendMetadata:
         expanded_slot_mapping = (
-            common_attn_metadata.slot_mapping if common_attn_metadata.pcp_context is not None else None
+            common_attn_metadata.slot_mapping if uses_pcp_context(common_attn_metadata, self.use_pcp) else None
         )
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -1350,13 +1351,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            # Only PCP-context metadata is finalized with the rank-local
-            # layout; a replicated draft decode writes its local slots.
-            if self.use_pcp and attn_metadata.pcp_local_num_input_tokens is not None:
+            # Only PCP-context metadata expands the slot mapping to every
+            # rank's tokens; a replicated draft decode writes its local slots.
+            uses_pcp_slot_layout = self.use_pcp and attn_metadata.slot_mapping.shape[0] > query.shape[0]
+            if uses_pcp_slot_layout:
+                assert attn_metadata.pcp_local_num_input_tokens is not None, "PCP metadata must be finalized."
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output
                 )
             else:
+                # The DCP impl keys its PCP query paths on this field.
+                assert not self.use_pcp or attn_metadata.pcp_local_num_input_tokens is None
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
                 )

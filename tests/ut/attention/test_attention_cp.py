@@ -124,8 +124,9 @@ def test_gqa_pcp_dcp_metadata_separates_current_prefix_and_dcp_history(
         gathered_query = torch.tensor([0, 1, 6, 7, 2, 3, 4, 5]).view(8, 1, 1)
         impl.pcp_group = SimpleNamespace(all_gather=Mock(return_value=gathered_query))
         impl._dcp_all_gather_fragments = Mock(side_effect=lambda query, dim: (query,))
+        impl.use_pcp = True
         restored_query = impl._prefill_query_all_gather(
-            SimpleNamespace(prefill=prefill), gathered_query[rank * 4 : (rank + 1) * 4]
+            SimpleNamespace(prefill=prefill, pcp_local_num_input_tokens=4), gathered_query[rank * 4 : (rank + 1) * 4]
         )
         torch.testing.assert_close(restored_query, torch.arange(8).view(8, 1, 1))
         local_query = gathered_query[rank * 4 : (rank + 1) * 4]
@@ -185,7 +186,9 @@ def test_gqa_current_attention_routes_local_q_and_ordered_kv(use_pcp, causal) ->
         causal=causal,
         attn_mask=torch.ones(4, 4, dtype=torch.bool),
         prefill=prefill,
+        pcp_local_num_input_tokens=7 if use_pcp else None,
     )
+    impl.use_pcp = use_pcp
     query = torch.arange(7 * 4 * 2).float().view(7, 4, 2)
     key = torch.arange(9 * 2).float().view(9, 1, 2)
     value = key + 1000
@@ -219,6 +222,7 @@ def test_gqa_pcp_dcp_merges_history_only_for_local_query_fragments(has_history, 
 
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
     impl.head_size = 2
+    impl.use_pcp = True
     impl._forward_decode_dcp = Mock(return_value=torch.full((decode_tokens, 1, 2), 9.0))
     current_output = torch.ones(4, 1, 2)
     current_lse = torch.zeros(4, 1, 1)
@@ -353,7 +357,7 @@ def test_dcp_chunked_prefill_keeps_host_parameters_and_device_history_separate(
 ):
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.chunked_prefill_enabled = True
-    builder._pcp_context = None
+    builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = size, rank
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))

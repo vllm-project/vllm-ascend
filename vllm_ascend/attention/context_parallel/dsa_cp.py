@@ -33,9 +33,11 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_or_register_attention_buffer,
+    is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
+    uses_pcp_context,
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
@@ -2478,7 +2480,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert common_ratio_to_sas_metadata is not None
-        if pcp_context is None:
+        if not uses_pcp_context(common_attn_metadata, is_pcp_enabled()):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
             # ordinary DSA metadata that the impl executes without PCP.

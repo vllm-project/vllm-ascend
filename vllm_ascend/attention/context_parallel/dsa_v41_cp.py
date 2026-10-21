@@ -22,7 +22,7 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41MetadataBuilder,
     _config_value,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_context
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.utils import enable_dsa_cp
@@ -379,7 +379,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     ) -> AscendDSAV41Metadata:
         pcp_context = common_attn_metadata.pcp_context
         pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
-        if pcp_context is None:
+        if not uses_pcp_context(common_attn_metadata, is_pcp_enabled()):
             # Without a PCP context the batch runs replicated on every rank,
             # like a PCP=1 model (e.g. a replicated draft decode), so build the
             # ordinary V4.1 metadata that the impl executes without PCP.

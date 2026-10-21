@@ -396,8 +396,8 @@ def test_pcp_replicated_draft_decode_writes_cache_locally() -> None:
     impl.use_pcp = True
     impl.key_cache = object()
     # A draft decode built without a PCP context has no PCP-local layout.
-    metadata = AscendMetadata(model_runner_type="generate")
     query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    metadata = AscendMetadata(model_runner_type="generate", slot_mapping=torch.tensor([3, 4]))
     layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
     written = (query, key, value, output)
     with (
