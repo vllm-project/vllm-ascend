@@ -20,12 +20,15 @@ def _prepare_nonempty_keypool_inputs_kernel(
     padded_lengths,
     padded_tails,
     padded_table,
+    q_descale,
+    padded_q_descale,
     tokens,
     requests,
     table_rows,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     TABLE_COLS: tl.constexpr,
+    QUANTIZED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     block = tl.program_id(0)
@@ -37,6 +40,10 @@ def _prepare_nonempty_keypool_inputs_kernel(
         offsets = block * BLOCK + tl.arange(0, BLOCK)
         value = tl.load(weights + offsets, offsets < tokens * HEADS, other=0)
         tl.store(padded_weights + offsets, value, offsets < (tokens + 1) * HEADS)
+        if QUANTIZED:
+            scale = tl.load(q_descale + offsets, offsets < tokens * HEADS, other=1.0)
+            # Zero heads and the sentinel must have a nonzero CANN descale.
+            tl.store(padded_q_descale + offsets, tl.where(scale == 0, 1.0, scale), offsets < (tokens + 1) * HEADS)
     # Int64 vector arithmetic is scalarized on A3. Keep these small metadata
     # tiles separate from the wide BF16/int32 copies. Tile boundaries also
     # keep different cores from writing the same 32-byte output cache line.
@@ -55,7 +62,9 @@ def _prepare_nonempty_keypool_inputs_kernel(
         tl.store(padded_table + offsets, value, offsets < (table_rows + 1) * TABLE_COLS)
 
 
-def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table):
+def prepare_nonempty_keypool_inputs(
+    query, weights, ends, lengths, tails, table, *, q_descale=None, padded_q_descale=None
+):
     """Append safe CANN sentinel inputs in one launch, without temporary fills.
 
     Allocate outputs per invocation so independently captured graphs and layers
@@ -95,12 +104,15 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
         padded_lengths,
         padded_tails,
         padded_table,
+        q_descale.contiguous() if q_descale is not None else None,
+        padded_q_descale,
         tokens,
         requests,
         table_rows,
         heads,
         dim,
         table_cols,
+        q_descale is not None,
         block,
     )
     return padded_query, padded_weights, padded_ends, padded_lengths, padded_tails, padded_table

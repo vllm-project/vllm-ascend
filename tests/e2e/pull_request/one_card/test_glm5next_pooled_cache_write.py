@@ -253,7 +253,7 @@ def test_fp8_pool_writes_preserve_shared_key_scale_pages_under_replay():
     pooled = torch.arange(4 * dim, dtype=torch.float32, device="npu").view(4, dim).to(torch.bfloat16)
     pooled[0].zero_()
     query, descales = quantize_keypool_query(pooled[:, None])
-    assert query.dtype == torch.float8_e4m3fn and (descales > 0).all()
+    assert query.dtype == torch.float8_e4m3fn
     torch.testing.assert_close(query.float() * descales[..., None], pooled[:, None].float(), rtol=0.065, atol=1e-5)
     metadata = SimpleNamespace(pooled_slot_mapping=torch.tensor([0, 33, -1, 64], device="npu"))
     inputs = SimpleNamespace(
@@ -359,3 +359,43 @@ def test_cann_selection_replays_empty_short_and_live_requests(dtype):
         for row, position in enumerate(positions):
             valid = actual[row, 0][actual[row, 0] >= 0].sort().values.tolist()
             assert valid == (list(range(position + 1)) if row < ends[-1] else [])
+
+
+@pytest.mark.parametrize("tokens", [0, 257])
+@torch.inference_mode()
+def test_nonempty_fp8_query_scales_preserve_inputs_under_replay(tokens):
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+    from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
+
+    if not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_FP8):
+        pytest.skip("Requires A5 FP8 query inputs")
+    heads, dim = 32, 128
+    query_bytes = torch.arange(tokens * heads * dim, device="npu").to(torch.uint8).view(tokens, heads, dim)
+    query = query_bytes.view(torch.float8_e4m3fn)
+    weights = torch.ones(tokens, heads, dtype=torch.bfloat16, device="npu")
+    scales = torch.arange(tokens * heads * 2, dtype=torch.float32, device="npu").view(tokens, heads * 2)[:, ::2]
+    padded_scales = torch.empty(tokens + 1, heads, device="npu")
+    ends = torch.tensor([tokens], device="npu")
+    lengths, tails = torch.zeros_like(ends), torch.zeros_like(ends)
+    table = torch.zeros(1, 1, dtype=torch.int32, device="npu")
+
+    def run():
+        return prepare_nonempty_keypool_inputs(
+            query, weights, ends, lengths, tails, table, q_descale=scales, padded_q_descale=padded_scales
+        )
+
+    for _ in range(3):
+        run()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = run()
+    for fill in (0.0, 2.5):
+        scales.fill_(fill)
+        graph.replay()
+        torch.testing.assert_close(result[0][:-1].view(torch.uint8), query_bytes, rtol=0, atol=0)
+        torch.testing.assert_close(
+            result[0][-1].view(torch.uint8), torch.zeros(heads, dim, dtype=torch.uint8, device="npu")
+        )
+        torch.testing.assert_close(padded_scales[:-1], torch.full_like(scales, fill or 1.0), rtol=0, atol=0)
+        torch.testing.assert_close(padded_scales[-1], torch.ones(heads, device="npu"), rtol=0, atol=0)
+        torch.testing.assert_close(scales, torch.full_like(scales, fill), rtol=0, atol=0)
