@@ -211,7 +211,7 @@ class TokenRepeatDetector(ConfigBackedDetector):
 
         io_mgr = RequestIoSnapshotManager.get()
         if sampled_token_ids is not None:
-            io_mgr.append_batch(req_ids, sampled_token_ids)
+            io_mgr.append_batch(req_ids, sampled_token_ids, runner=runner)
 
         alerts: list[Incident] = []
         for batch_idx, req_id in enumerate(req_ids):

@@ -195,11 +195,11 @@ class DetectorManager:
         resolved_ids, need_io, io_owner, skip = self._after_sample_setup(req_ids)
         if self._gated("after_sample"):
             if need_io and io_owner:
-                RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
+                RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids, runner=self._runner)
             return [], None
 
         if need_io and io_owner:
-            RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids)
+            RequestIoSnapshotManager.get().append_batch(resolved_ids, sampled_token_ids, runner=self._runner)
 
         alerts: list[Incident] = []
         alerts.extend(self._logits_finite_det.check_deferred(skip_req_ids=skip))

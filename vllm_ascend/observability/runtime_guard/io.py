@@ -223,18 +223,49 @@ class RequestIoSnapshotManager:
         """
         return RequestGuardStore.get().new_output_ids_since(req_id, consumed)
 
-    def append_output(self, req_id: str, token_ids: Any) -> None:
+    def _backfill_output_prefix(self, runner: Any, req_id: str, new_ids: list[int]) -> None:
+        """Seed Store from the runner when cumulative output is still empty.
+
+        MRV2 keeps the committed sequence on ``all_token_ids.gpu``. The first
+        append after ``needs_cumulative_io`` turns on would otherwise drop every
+        token sampled while IO was off, and later snapshots prefer that partial
+        Store list. If the device row already ends with this step, the following
+        append is deduped so the step is not counted twice.
+        """
+        store = RequestGuardStore.get()
+        state = store.get_state(req_id)
+        if state is not None and state.output_token_ids:
+            return
+        read = _output_from_req_states(runner, req_id, None)
+        if read is None:
+            return
+        ids = read[1]
+        if not ids:
+            return
+        already_includes_step = len(ids) >= len(new_ids) and ids[-len(new_ids) :] == new_ids
+        store.seed_output_ids_if_empty(
+            req_id,
+            ids,
+            dedupe_chunk=tuple(new_ids) if already_includes_step else None,
+        )
+
+    def append_output(self, req_id: str, token_ids: Any, *, runner: Any | None = None) -> None:
         """Normalize accepted ids and append into :class:`RequestGuardStore`.
 
         Drops ``-1`` placeholders. Within one engine wave, duplicate chunks
         for the same req are skipped (Store ``last_append_chunk``). Across
         waves, identical chunks are kept after :meth:`clear_wave_cache`.
+
+        ``runner`` enables a one-time prefix backfill when Store output is
+        still empty. Fully-off never calls this.
         """
         if not req_id:
             return
         new_ids = filter_valid_token_ids(token_ids)
         if not new_ids:
             return
+        if runner is not None:
+            self._backfill_output_prefix(runner, req_id, new_ids)
         RequestGuardStore.get().append_output_ids(req_id, new_ids)
         # Same-wave ``include_token_ids`` snapshots must not keep pre-append ids.
         self.clear_req_cache(req_id)
@@ -243,6 +274,8 @@ class RequestIoSnapshotManager:
         self,
         req_ids: list[str] | None,
         sampled_rows: Any,
+        *,
+        runner: Any | None = None,
     ) -> None:
         """Append one step of per-req sampled / accepted token rows."""
         if not req_ids or sampled_rows is None:
@@ -254,7 +287,7 @@ class RequestIoSnapshotManager:
                 row = sampled_rows[i]
             except (IndexError, TypeError, KeyError):
                 continue
-            self.append_output(req_id, row)
+            self.append_output(req_id, row, runner=runner)
 
     def snapshot(
         self,
