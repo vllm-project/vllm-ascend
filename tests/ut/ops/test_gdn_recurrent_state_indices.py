@@ -42,6 +42,13 @@ def test_2d_query_lens_clamped_to_slot_count():
     torch.testing.assert_close(flattened, torch.tensor([1, 2, 3], dtype=torch.int32))
 
 
+def test_2d_nonzero_query_start_offset():
+    indices = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    query_start_loc = torch.tensor([4, 6, 7], dtype=torch.int32)
+    flattened = _flatten_recurrent_state_indices(indices, 3, query_start_loc)
+    torch.testing.assert_close(flattened, torch.tensor([1, 2, 3], dtype=torch.int32))
+
+
 def test_2d_missing_query_start_loc_raises():
     indices = torch.arange(6, dtype=torch.int32).reshape(3, 2)
     with pytest.raises(ValueError, match="query_start_loc is required"):

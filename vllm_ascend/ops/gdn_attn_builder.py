@@ -135,16 +135,20 @@ def _flatten_recurrent_state_indices(
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
 
-    # Variable-length speculative sequences: compact on CPU (matching the
-    # 310P path). Doing this in the builder avoids repeating host work and the
-    # host-to-device copy in every GDN layer.
-    qsl_cpu = query_start_loc[: num_seqs + 1].cpu()
-    lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).clamp(min=0, max=num_slots)
-    valid = torch.arange(num_slots).unsqueeze(0) < lens_cpu.unsqueeze(1)
-    flat_cpu = state_indices[:num_seqs].cpu().masked_select(valid)[:total_tokens]
-    flat = torch.empty(flat_cpu.numel(), dtype=state_indices.dtype, device=state_indices.device)
-    flat.copy_(flat_cpu)
-    return flat
+    # Keep variable-length compaction on device. Supplying output_size avoids
+    # a device-to-host synchronization in repeat_interleave when determining
+    # the output shape.
+    query_lens = (query_start_loc[1 : num_seqs + 1] - query_start_loc[:num_seqs]).clamp(
+        min=0, max=num_slots
+    )
+    sequence_ids = torch.repeat_interleave(
+        torch.arange(num_seqs, device=state_indices.device),
+        query_lens,
+        output_size=total_tokens,
+    )
+    sequence_starts = torch.cumsum(query_lens, dim=0) - query_lens
+    slot_ids = torch.arange(total_tokens, device=state_indices.device) - sequence_starts[sequence_ids]
+    return state_indices[sequence_ids, slot_ids].contiguous()
 
 
 @dataclass
@@ -520,6 +524,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     def _attach_spec_decode_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
+        recurrent_state_index_count: int | None = None,
     ) -> GDNAttentionMetadata:
         attn_metadata.spec_decode_metadata = None
         if attn_metadata.spec_sequence_masks is None:
@@ -531,6 +536,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected spec_state_indices_tensor for Ascend GDN speculative conv1d path.")
         if attn_metadata.num_accepted_tokens is None:
             raise RuntimeError("Expected num_accepted_tokens for Ascend GDN speculative conv1d path.")
+
+        if recurrent_state_index_count is None:
+            recurrent_state_index_count = getattr(attn_metadata, "num_spec_decode_tokens", None)
+            if recurrent_state_index_count is None:
+                recurrent_state_index_count = attn_metadata.spec_token_indx.numel()
 
         num_sequences = attn_metadata.num_spec_decodes
         actual_seq_lengths_buffer = None
@@ -556,7 +566,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             ),
             recurrent_state_indices=_flatten_recurrent_state_indices(
                 attn_metadata.spec_state_indices_tensor,
-                attn_metadata.num_spec_decode_tokens,
+                recurrent_state_index_count,
                 attn_metadata.spec_query_start_loc,
             ),
         )
@@ -757,6 +767,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
+        num_spec_recurrent_state_indices = 0
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -810,6 +821,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             assert non_spec_sequence_indices is not None
 
             non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+            spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
             num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
             num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
             num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
@@ -909,6 +921,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
+
+            # This count comes from scheduler-owned CPU metadata, so it does
+            # not synchronize the NPU. The index expansion itself stays on
+            # device and uses the count as repeat_interleave's output_size.
+            assert spec_state_indices_tensor is not None
+            num_spec_recurrent_state_indices = (
+                spec_query_lens_cpu.clamp(
+                    min=0,
+                    max=spec_state_indices_tensor.size(1),
+                )
+                .sum()
+                .item()
+            )
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = torch.index_select(
@@ -1013,7 +1038,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
         )
-        self._attach_spec_decode_metadata(attn_metadata)
+        self._attach_spec_decode_metadata(
+            attn_metadata,
+            num_spec_recurrent_state_indices,
+        )
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return attn_metadata
 
