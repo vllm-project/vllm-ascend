@@ -748,16 +748,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
-        layer_name, metadata = next(iter(draft_attn_metadata.items()))
-        block_table = metadata.block_tables
+        block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
                 {
                     "layer_name": layer_name,
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": block_table,
+                    "block_table": metadata.block_tables,
                 }
+                for layer_name, metadata in draft_attn_metadata.items()
             ]
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
