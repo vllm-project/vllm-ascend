@@ -115,6 +115,38 @@ def _treat_single_token_prefills_with_state_as_decodes(
     return common_attn_metadata.replace(is_prefilling=is_prefilling)
 
 
+def _flatten_recurrent_state_indices(
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build the token-granularity recurrent indices once per scheduler step.
+
+    The recurrent GDN kernel requires one state index per q/k/v row. Decode
+    metadata, however, is request-granular and may contain graph padding rows
+    or unused speculative slots. Keep this normalization in the metadata
+    builder so every GDN layer reuses the same result.
+    """
+    if state_indices.ndim == 1:
+        return state_indices[:total_tokens].contiguous()
+    num_seqs, num_slots = state_indices.shape
+    if total_tokens == num_seqs * num_slots:
+        return state_indices.reshape(-1).contiguous()
+    if query_start_loc is None:
+        raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+
+    # Variable-length speculative sequences: compact on CPU (matching the
+    # 310P path). Doing this in the builder avoids repeating host work and the
+    # host-to-device copy in every GDN layer.
+    qsl_cpu = query_start_loc[: num_seqs + 1].cpu()
+    lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).clamp(min=0, max=num_slots)
+    valid = torch.arange(num_slots).unsqueeze(0) < lens_cpu.unsqueeze(1)
+    flat_cpu = state_indices[:num_seqs].cpu().masked_select(valid)[:total_tokens]
+    flat = torch.empty(flat_cpu.numel(), dtype=state_indices.dtype, device=state_indices.device)
+    flat.copy_(flat_cpu)
+    return flat
+
+
 @dataclass
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
@@ -154,6 +186,7 @@ class GDNPrefillMetadata:
 class GDNDecodeMetadata:
     causal_conv1d: GDNCausalConv1dMetadata
     actual_seq_lengths: torch.Tensor
+    recurrent_state_indices: torch.Tensor
 
 
 @dataclass
@@ -161,6 +194,7 @@ class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
     # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
     actual_seq_lengths: torch.Tensor | None
+    recurrent_state_indices: torch.Tensor
 
 
 def _build_actual_seq_lengths(
@@ -520,6 +554,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 if self._USE_COMMON_KERNEL_METADATA
                 else None
             ),
+            recurrent_state_indices=_flatten_recurrent_state_indices(
+                attn_metadata.spec_state_indices_tensor,
+                attn_metadata.num_spec_decode_tokens,
+                attn_metadata.spec_query_start_loc,
+            ),
         )
         return attn_metadata
 
@@ -556,6 +595,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 attn_metadata.non_spec_query_start_loc,
                 num_sequences,
                 actual_seq_lengths_buffer,
+            ),
+            recurrent_state_indices=_flatten_recurrent_state_indices(
+                attn_metadata.non_spec_state_indices_tensor,
+                attn_metadata.num_decode_tokens,
             ),
         )
         return attn_metadata
