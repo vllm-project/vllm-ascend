@@ -134,7 +134,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
-    | GLM-5.3-Flash | 🔵 | W8A8 MXFP8; model runner V1 | ✅ | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 133120 |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
+    | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 133120 |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     |Qwen3.5-397B-A17B|✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |Kimi-K3          |✅        |W4A8; DSpark; FULL_DECODE_ONLY; KV Cache Pool||950DT Products|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
@@ -145,7 +145,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     |                Model                | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     | ----------------------------------- | ------- | ---- | ---- | ------------------ | ---- | --------------- | ---------------------- | ---- | -------------------- | ---------------- | --------------- | ----------------- | --------------- | ------------- | ----------------------------- | ------------------ | ------------------ | ------------- | --- |
-    | GLM-5.3-Flash | ✅ | W8A8; model runner V1 | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
+    | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Qwen3-VL                            | ✅      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
     | Qwen3-VL-30B-A3B | ✅      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-30B-A3B](../../tutorials/models/Qwen3-VL-30B-A3B-Instruct.md) |
     | Qwen3-VL-235B-A22B | 🔴      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Qwen3-VL-235B-A22B](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md) |
