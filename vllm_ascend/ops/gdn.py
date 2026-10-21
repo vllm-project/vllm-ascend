@@ -674,7 +674,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_spec.squeeze(0),
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
+                ssm_state_indices=attn_metadata.spec_decode_metadata.recurrent_state_indices,
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
         else:
@@ -703,7 +703,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
                 scale=key_decode.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_decodes],
+                ssm_state_indices=attn_metadata.non_spec_decode_metadata.recurrent_state_indices,
             ).unsqueeze(0)
         else:
             core_attn_out_decode = None
@@ -825,7 +825,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
                 scale=key_non_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor,
+                ssm_state_indices=attn_metadata.non_spec_decode_metadata.recurrent_state_indices,
             ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None

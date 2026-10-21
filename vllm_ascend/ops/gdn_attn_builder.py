@@ -115,6 +115,42 @@ def _treat_single_token_prefills_with_state_as_decodes(
     return common_attn_metadata.replace(is_prefilling=is_prefilling)
 
 
+def _flatten_recurrent_state_indices(
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build the token-granularity recurrent indices once per scheduler step.
+
+    The recurrent GDN kernel requires one state index per q/k/v row. Decode
+    metadata, however, is request-granular and may contain graph padding rows
+    or unused speculative slots. Keep this normalization in the metadata
+    builder so every GDN layer reuses the same result.
+    """
+    if state_indices.ndim == 1:
+        return state_indices[:total_tokens].contiguous()
+    num_seqs, num_slots = state_indices.shape
+    if total_tokens == num_seqs * num_slots:
+        return state_indices.reshape(-1).contiguous()
+    if query_start_loc is None:
+        raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+
+    # Keep variable-length compaction on device. Supplying output_size avoids
+    # a device-to-host synchronization in repeat_interleave when determining
+    # the output shape.
+    query_lens = (query_start_loc[1 : num_seqs + 1] - query_start_loc[:num_seqs]).clamp(
+        min=0, max=num_slots
+    )
+    sequence_ids = torch.repeat_interleave(
+        torch.arange(num_seqs, device=state_indices.device),
+        query_lens,
+        output_size=total_tokens,
+    )
+    sequence_starts = torch.cumsum(query_lens, dim=0) - query_lens
+    slot_ids = torch.arange(total_tokens, device=state_indices.device) - sequence_starts[sequence_ids]
+    return state_indices[sequence_ids, slot_ids].contiguous()
+
+
 @dataclass
 class GDNChunkedPrefillMetadata:
     cu_seqlens_host: tuple[int, ...]
@@ -154,6 +190,7 @@ class GDNPrefillMetadata:
 class GDNDecodeMetadata:
     causal_conv1d: GDNCausalConv1dMetadata
     actual_seq_lengths: torch.Tensor
+    recurrent_state_indices: torch.Tensor
 
 
 @dataclass
@@ -161,6 +198,7 @@ class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
     # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
     actual_seq_lengths: torch.Tensor | None
+    recurrent_state_indices: torch.Tensor
 
 
 def _build_actual_seq_lengths(
@@ -486,6 +524,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     def _attach_spec_decode_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
+        recurrent_state_index_count: int | None = None,
     ) -> GDNAttentionMetadata:
         attn_metadata.spec_decode_metadata = None
         if attn_metadata.spec_sequence_masks is None:
@@ -497,6 +536,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected spec_state_indices_tensor for Ascend GDN speculative conv1d path.")
         if attn_metadata.num_accepted_tokens is None:
             raise RuntimeError("Expected num_accepted_tokens for Ascend GDN speculative conv1d path.")
+
+        if recurrent_state_index_count is None:
+            recurrent_state_index_count = getattr(attn_metadata, "num_spec_decode_tokens", None)
+            if recurrent_state_index_count is None:
+                recurrent_state_index_count = attn_metadata.spec_token_indx.numel()
 
         num_sequences = attn_metadata.num_spec_decodes
         actual_seq_lengths_buffer = None
@@ -519,6 +563,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
                 if self._USE_COMMON_KERNEL_METADATA
                 else None
+            ),
+            recurrent_state_indices=_flatten_recurrent_state_indices(
+                attn_metadata.spec_state_indices_tensor,
+                recurrent_state_index_count,
+                attn_metadata.spec_query_start_loc,
             ),
         )
         return attn_metadata
@@ -556,6 +605,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 attn_metadata.non_spec_query_start_loc,
                 num_sequences,
                 actual_seq_lengths_buffer,
+            ),
+            recurrent_state_indices=_flatten_recurrent_state_indices(
+                attn_metadata.non_spec_state_indices_tensor,
+                attn_metadata.num_decode_tokens,
             ),
         )
         return attn_metadata
@@ -714,6 +767,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
+        num_spec_recurrent_state_indices = 0
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks = None
             num_spec_decodes = 0
@@ -767,6 +821,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             assert non_spec_sequence_indices is not None
 
             non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+            spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
             num_decodes = (non_spec_query_lens_cpu == 1).sum().item()
             num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
             num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
@@ -866,6 +921,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
+
+            # This count comes from scheduler-owned CPU metadata, so it does
+            # not synchronize the NPU. The index expansion itself stays on
+            # device and uses the count as repeat_interleave's output_size.
+            assert spec_state_indices_tensor is not None
+            num_spec_recurrent_state_indices = (
+                spec_query_lens_cpu.clamp(
+                    min=0,
+                    max=spec_state_indices_tensor.size(1),
+                )
+                .sum()
+                .item()
+            )
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = torch.index_select(
@@ -970,7 +1038,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
         )
-        self._attach_spec_decode_metadata(attn_metadata)
+        self._attach_spec_decode_metadata(
+            attn_metadata,
+            num_spec_recurrent_state_indices,
+        )
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return attn_metadata
 

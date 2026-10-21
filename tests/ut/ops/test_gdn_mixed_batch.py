@@ -66,6 +66,7 @@ def _make_mixed_metadata() -> GDNAttentionMetadata:
             initial_state_mode=None,
         ),
         actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
+        recurrent_state_indices=torch.tensor([0], dtype=torch.int32),
     )
     return metadata
 
@@ -302,6 +303,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
+        recurrent_state_indices=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
     )
     output = torch.empty(4, 1, 2)
     context = ForwardContext(
