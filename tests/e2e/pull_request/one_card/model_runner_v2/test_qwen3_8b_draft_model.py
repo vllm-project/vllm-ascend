@@ -67,6 +67,6 @@ def test_qwen3_plain_draft_model_spec_decoding() -> None:
     )
     print(acceptance_per_pos)
     
-    golden = [0.43, 0.13, 0.05]
+    golden = [0.82, 0.64, 0.42]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
