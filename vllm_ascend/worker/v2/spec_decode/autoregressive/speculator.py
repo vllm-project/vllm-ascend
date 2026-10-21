@@ -27,6 +27,7 @@ import torch
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -448,16 +449,37 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             # Use the first executable draft attention layer as the architecture
             # discriminator and cache it for ACL graph parameter updates.
             self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
             self.attn_architecture = "MLA"
         elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
+        elif issubclass(self.attn_backend, AscendQSABackend):
+            self.attn_architecture = "QSA"
+            self._bind_draft_context_flag()
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
+
+    def _bind_draft_context_flag(self) -> None:
+        """Tag each draft forward's context as draft-model.
+
+        The QSA draft RoPE bypass reads ``get_forward_context().is_draft_model``,
+        which upstream ``set_forward_context`` never sets on the V2 runner.
+        """
+        assert self.model is not None
+        original_forward = self.model.forward
+
+        def forward_with_draft_flag(*args: Any, **kwargs: Any) -> torch.Tensor:
+            forward_context = get_forward_context()
+            forward_context.is_draft_model = True
+            return original_forward(*args, **kwargs)
+
+        self.model.forward = forward_with_draft_flag  # type: ignore[method-assign]
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
@@ -790,7 +812,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         if attn_metadata is None:
             return
 
-        if self.attn_architecture in ("DSA", "SFA"):
+        # DSA/SFA manage draft state in their metadata builders; QSA has no
+        # host-side FIA fields to patch here.
+        if self.attn_architecture in ("DSA", "SFA", "QSA"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))
