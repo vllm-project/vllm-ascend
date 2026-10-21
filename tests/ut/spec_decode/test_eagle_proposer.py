@@ -1587,9 +1587,9 @@ class TestEagleProposerPropose:
         assert not missing, f"Missing dataclass fields: {missing}"
 
 
-        import vllm_ascend.worker.model_runner_v1
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        import vllm_ascend.worker.v1.model_runner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",
@@ -2511,10 +2511,10 @@ class TestRunMergedDraft(TestBase):
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
-        import vllm_ascend.worker.model_runner_v1
+        import vllm_ascend.worker.v1.model_runner
 
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",

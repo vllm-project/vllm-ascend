@@ -17,6 +17,8 @@ DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
+DeepSeek-V4-Flash support is largely feature-complete starting from **vLLM-Ascend v0.26.0**. This document is validated and written based on **vLLM-Ascend v0.30.0**. To use the latest features, it is recommended to use the latest release candidate or official version.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -29,8 +31,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
-| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
-| `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
+| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
+| `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -151,7 +153,7 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800 A3 (128GB × 8) or 1 Atlas 800 A2 (64GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800I A3 (128GB × 8) or 1 Atlas 800I A2 (64GB × 8).
 
 === "A2 series"
 
@@ -373,11 +375,11 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800 A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments.
+The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A3 (128GB × 8) multi-node environment with 1P1D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800I A3 (128GB × 8) multi-node environment with 1P1D for better performance.
 
 Before you start, please:
 
@@ -403,6 +405,12 @@ Before you start, please:
             type=int,
             default=1,
             help="Tensor parallel size."
+        )
+        parser.add_argument(
+            "--pcp-size",
+            type=int,
+            default=1,
+            help="Prefill context parallel size."
         )
         parser.add_argument(
             "--dp-size-local",
@@ -439,6 +447,7 @@ Before you start, please:
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
+    pcp_size = args.pcp_size
     dp_size_local = args.dp_size_local
     if dp_size_local == -1:
         dp_size_local = dp_size
@@ -458,6 +467,7 @@ Before you start, please:
             dp_address,
             dp_rpc_port,
             str(tp_size),
+            str(pcp_size),
         ]
         subprocess.run(command, check=True)
 
@@ -468,11 +478,11 @@ Before you start, please:
             sys.exit(1)
 
         processes = []
-        num_cards = dp_size_local * tp_size
+        devices_per_rank = tp_size * pcp_size
         for i in range(dp_size_local):
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
-            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+            visible_devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
             process = multiprocessing.Process(target=run_command,
                                             args=(visible_devices, dp_rank,
                                                     vllm_engine_port))
@@ -489,6 +499,7 @@ Before you start, please:
     |---------|----|--------|-------|-----------|
     |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
     |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+    |`--pcp-size`|int|No|1|Prefill context parallel size within each DP rank. Each rank uses `--tp-size` × `--pcp-size` devices.|
     |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
     |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
     |`--dp-address`|str|Yes|-|IP address of the data parallel master node.|
@@ -555,7 +566,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -624,7 +634,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
@@ -670,7 +679,7 @@ Before you start, please:
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         # Ensure the model path matches the directory recorded during download
@@ -682,11 +691,12 @@ Before you start, please:
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --prefill-context-parallel-size $8 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 8192 \
+            --max-num-batched-tokens 16384 \
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
@@ -698,19 +708,19 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.9 \
+            --gpu-memory-utilization 0.94 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 4
+                                "dp_size": 2,
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -741,6 +751,7 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_USE_V2_MODEL_RUNNER=1
         
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -770,17 +781,17 @@ Before you start, please:
             --reasoning-parser deepseek_v4 \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}' \
+            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 4
+                                "dp_size": 2,
+                                "tp_size": 1,
+                                "pcp_size": 8
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -803,9 +814,18 @@ Before you start, please:
 
     1. Prefill node
 
+        For MTP (`A3 series`), keep DP4 and TP4:
+
         ```shell
         # change ip to your own
         python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        ```
+
+        For DSpark (`A3 series with dspark`), use PCP8, DP2, and TP1:
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 2 --tp-size 1 --pcp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
     2. Decode node
@@ -821,7 +841,7 @@ Before you start, please:
 
 #### 5.2.2 A2 Series PD Separation Deployment
 
-This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800 A2 (64GB × 8) multi-node environment with 4\*1P 1\*4D for better performance.
+This section shows the deployment guide of DeepSeek-V4-Flash on Atlas 800I A2 (64GB × 8) multi-node environment with 4\*1P 1\*4D for better performance.
 
 Before you start, please:
 
@@ -894,7 +914,7 @@ Before you start, please:
 
     1. Prefill node (4 P nodes share the same script)
 
-        For each P instance, only these two configuration values need to be modified: `kv_port` and `engine_id`. The `engine_id` should start from 0 and increment sequentially, while the `kv_port` (e.g., `30100`) must be unique for each P instance, such as 30000, 30100, etc.
+        For each P instance, set a unique `kv_port` (e.g., 30000, 30100, etc.).
 
         ```shell
         unset ftp_proxy
@@ -957,7 +977,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                         "prefill": {
                             "dp_size": 8,
@@ -1033,7 +1052,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30400",
-            "engine_id": "4",
             "kv_connector_extra_config": {
                         "prefill": {
                             "dp_size": 8,
@@ -1085,6 +1103,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--kv-cache-dtype turboquant_4bit_nc` is not currently supported in P/D disaggregated deployments.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
+- `VLLM_USE_V2_MODEL_RUNNER=1`: Enables Model Runner V2. Set it with `export VLLM_USE_V2_MODEL_RUNNER=1` on both DSpark nodes in the A3 example. PCP requires Model Runner V2; DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
@@ -1142,10 +1161,10 @@ Here is the accuracy evaluation method using AISBench.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800 A3 (128GB × 8) |
-| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800 A3 (128GB × 8) |
-| GPQA | v0.25.1rc | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
-| SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
+| GPQA | - | accuracy | gen | 88.17 | 1 Atlas 800I A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 96.30 | 1 Atlas 800I A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
+| SWE Multilingual | - | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
 | GPQA | - | accuracy | gen | 90.40 | 950PR&950DT Products, w4a4c8 |
 
 > **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.

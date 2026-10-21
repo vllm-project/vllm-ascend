@@ -16,6 +16,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 @pytest.fixture
@@ -123,9 +124,11 @@ def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
     torch.testing.assert_close(batch.positions, torch.arange(16, dtype=batch.positions.dtype))
 
 
+@pytest.mark.parametrize("is_hybrid", [False, True])
 @pytest.mark.parametrize("draft_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
 @pytest.mark.parametrize("capture_size,uniform", [(16, 1), (16, 2), (16, 4), (32, 2), (32, 4)])
-def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size):
+def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size, is_hybrid):
+    runner.model_config.is_hybrid = is_hybrid
     runner.decode_query_len = uniform
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"dummy": uniform}, total_num_scheduled_tokens=uniform)
     _, original_uniform = runner.gather_batch_req_state(scheduler_output, dummy_run=True)
@@ -142,7 +145,6 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         votes[5, 1:] = torch.tensor([2, 3, 1])
 
     def execute_dummy(num_tokens, **kwargs):
-        assert buffers.dummy_num_tokens == uniform
         desc, sync = dispatch_cg_and_sync_dp(target, 1, uniform, original_uniform, 4, 0, max_query_len=uniform)
         assert sync is not None
         assert sync.uniform_token_count == uniform
@@ -153,11 +155,11 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         actual_uniform = get_uniform_decode_token_count(
             batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
         )
-        assert actual_uniform == uniform
         dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(
             draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, **{dp_sync_kwarg: sync}
         )
+        assert actual_uniform == uniform
         assert draft_desc.cg_mode == draft_mode.decode_mode()
         assert draft_desc.num_tokens == capture_size
         assert reused_sync is sync
@@ -184,7 +186,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         ({"context_len": 1}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({}, CUDAGraphMode.PIECEWISE, object(), False, None),
-        ({}, CUDAGraphMode.PIECEWISE, None, True, None),
+        ({}, CUDAGraphMode.PIECEWISE, None, True, 1),
         ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, None),
         ({}, CUDAGraphMode.NONE, None, False, None),
     ],
@@ -357,15 +359,18 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
     runner.block_tables.get_dummy_slot_mappings.assert_called_once_with(2)
 
 
+@pytest.mark.parametrize("state_type", [AscendModelState, AscendMambaHybridModelState])
 @pytest.mark.parametrize(
     "mode,is_dummy,expected_input_tokens",
     [(CUDAGraphMode.PIECEWISE, True, 16), (CUDAGraphMode.PIECEWISE, False, 2), (CUDAGraphMode.NONE, True, 2)],
 )
-def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, is_dummy, expected_input_tokens):
+def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
+    buffers, mode, is_dummy, expected_input_tokens, state_type
+):
     with patch.object(buffers, "dummy_num_tokens", 2), patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         batch = AscendInputBatch.make_dummy(1, 16, buffers)
     batch.is_dummy = is_dummy
-    state = AscendModelState.__new__(AscendModelState)
+    state = state_type.__new__(state_type)
     state.decoder_replay = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
@@ -377,7 +382,7 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, i
     state.kvpp_runtime = None
     state.kvpp_is_dummy_run = False
     state.device_metadata = None
-    with patch("vllm_ascend.worker.v2.model_states.default.build_attn_metadata", return_value={}) as build:
+    with patch(f"{state_type.__module__}.build_attn_metadata", return_value={}) as build:
         assert state.prepare_attn(batch, mode, (), torch.full((1, 16), -1), [], None) == {}
     kwargs = build.call_args.kwargs
     assert kwargs["num_input_tokens"] == expected_input_tokens

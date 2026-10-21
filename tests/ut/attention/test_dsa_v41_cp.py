@@ -696,6 +696,7 @@ def runtime(builders, monkeypatch):
         )
         projector.cv_wq_a, projector.cv_wq_b, projector.cv_wkv = map(CVLinearWrapper, (attn.wq_a, attn.wq_b, attn.wkv))
         monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))
+        monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
             SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
@@ -765,9 +766,11 @@ class TestPCPBatchLifecycle:
     ):
         state = runtime(sharding=sharding, overlap=overlap, decode_sharded=decode_sharded)
         profile_output = torch.empty(4, 4)
+        state.projector.reference_input = torch.zeros_like(profile_output)
+        state.projector.peer_inputs = list(state.projector.reference_input.chunk(2))
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
-        assert not state.events
+        assert state.events == (["project", "reduce"] if sharding else [])
         switches = state.projector._pcp_o_proj_weight_switches or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())

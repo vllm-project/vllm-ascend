@@ -244,7 +244,6 @@ from vllm_ascend.worker.device_metadata import (
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
-    AscendKVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     disable_compilation,
     get_single_raw_mla_backing,
@@ -252,6 +251,7 @@ from vllm_ascend.worker.utils import (
     prepare_ascend_kernel_block_sizes,
     row_major_strides,
 )
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -301,9 +301,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 
 v41_metadata_builder_type: type[AscendDSAV41MetadataBuilder] = AscendDSAV41MetadataBuilder
 v41_cache_layer_type: type[DeepseekV41CacheLayer] = DeepseekV41CacheLayer
-
-# if true, allow tensor initialization and casting with internal format (e.g., NZ)
-torch.npu.config.allow_internal_format = True
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
