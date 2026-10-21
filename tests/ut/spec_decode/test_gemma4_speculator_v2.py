@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (

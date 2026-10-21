@@ -856,9 +856,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         base_seq_lens = self._get_seq_lens_cpu(num_reqs_padded)[:num_reqs].tolist()
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in base_seq_lens
-            ]
+            seq_lens = [min(int(seq_len) + step, self.max_model_len) for seq_len in base_seq_lens]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name in self.draft_attn_layer_names:
                 fia_params.append(
