@@ -26,16 +26,14 @@ vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
 guide provides a single-node colocated A3 configuration and a two-node A3
 Prefill-Decode (PD) disaggregated configuration.
 
-DeepSeek-V4.1-Flash was first supported in **vLLM Ascend v0.30.0**.
-This guide uses **vLLM Ascend v0.30.0** as its documentation and model-validation
-baseline. Use **vLLM Ascend v0.30.0 or later** to deploy this model. To use the
-latest features, use the latest vLLM Ascend release or the latest `main` branch.
+DeepSeek-V4.1-Flash is supported only in **vLLM Ascend versions later than
+v0.30.0rc1**, starting with **v0.30.0rc2**. This guide uses **vLLM Ascend
+v0.30.0rc2** as its documentation and model-validation baseline. To use the
+latest features, use the latest supported vLLM Ascend version.
 
 Use the matching upstream vLLM revision for the selected vLLM Ascend version.
-On `main`, development builds use the verified revision recorded in
-`.github/vllm-main-verified.commit`, while release builds use the tag recorded
-in `.github/vllm-release-tag.commit` (currently v0.31.0). These are separate
-supported upstream revisions.
+For source builds, use the upstream vLLM tag recorded in
+`.github/vllm-release-tag.commit` at the vLLM Ascend **v0.30.0rc2** tag.
 
 ## 2 Supported Features
 
@@ -102,7 +100,7 @@ images.
     server.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -147,7 +145,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -186,8 +184,8 @@ absolute path inside and outside every container.
 
 To build from source, follow the
 [software environment installation guide](../../getting_started/installation.md#installation-software-environment)
-and use the `main` branch with the matching vLLM revision recorded in
-`.github/vllm-main-verified.commit`.
+and check out the **v0.30.0rc2** tag of vLLM Ascend. Use the matching upstream
+vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
 
 ## 5 Online Service Deployment
 
