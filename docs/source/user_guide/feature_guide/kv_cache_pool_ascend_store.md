@@ -494,6 +494,10 @@ mooncake_master \
 
 `offload_on_evict` defaults to `false`. When enabled, eviction queues objects without a `LOCAL_DISK` replica for offload and pins one memory replica while offload is pending. Keep `offload_force_evict=false` to defer eviction when offload cannot be queued. On Mooncake builds that expose `offloading_queue_limit`, increase the pending-object limit per local disk segment as needed (for example, `--offloading_queue_limit=200000`), and leave DRAM headroom for pending writes.
 
+Only worker clients own local SSD storage. Each worker uses `ssd_offload_path/rank_<global_rank>/`, where the global rank includes the DP offset and TP/PP/CP ranks. Scheduler clients do not enable local SSD offload. In a single-node DP=2 deployment, both replicas can use the same `mooncake.json`: their workers use distinct rank subdirectories and their schedulers do not claim the shared root directory. Separate vLLM services whose global ranks overlap must use different `ssd_offload_path` roots.
+
+If startup reports `storage_path already held by another live client`, another client holds the local directory lock. This message comes from Mooncake's client-side bucket backend. Check the Mooncake package and native libraries loaded by vLLM and the live clients using the reported directory; the `mooncake_master` version alone does not identify the client's locking implementation. The `Mooncake SSD offload enabled` log reports the actual worker subdirectory. See the [Mooncake SSD ownership contract](https://kvcache-ai.github.io/Mooncake/design/store/ssd-offload.html#bucketstoragebackend-default).
+
 SSD disk usage control environment variables:
 
 ```shell
