@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -34,6 +34,9 @@ from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
@@ -406,6 +409,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # cacheable groups -- and only the shared prefix is there. ``None`` means
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
+
+    # Global PCP view of the current target step and this cache group's index
+    # into its per-group tensors. ``None`` when the step is not PCP-partitioned.
+    pcp_context: "AscendPCPAttentionContext | None" = None
+    pcp_cache_group_idx: int | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
