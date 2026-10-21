@@ -586,6 +586,8 @@ The templates use named environment variables instead of positional shell argume
 | `DP_RANK` | Engine's global DP rank | The launcher sets `DP_RANK_START + local_rank`. |
 | `VISIBLE_DEVICES` | NPU IDs for one engine | The launcher assigns `TP_SIZE × PP_SIZE` consecutive IDs per local rank. |
 
+An explicit `--data-parallel-rank` enables external DP load balancing, which vLLM requires to have `DP_SIZE > 1`. The templates below build `DP_RANK_ARGS` from the actual `DP_SIZE`: omit the rank argument for DP1, and pass the launcher-assigned rank for DP greater than 1. Keep `DP_RANK` available for per-rank connector ports, including in DP1.
+
 Save the Prefill template as `run_dp_template.sh` on the P node and the Decode template under that name on each D node. Run the launcher from the directory containing the matching template. If using a shared filesystem, keep P and D templates in separate directories. Changing TP/DP/PP also requires updating the matching `prefill` and `decode` layouts in both roles' `--kv-transfer-config`.
 
 The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D node counts refer to machines; `DP_SIZE` is the global number of ranks for that role.
@@ -645,13 +647,19 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
+
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -678,7 +686,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_producer",
             "kv_port":"36000",
-            "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
@@ -721,11 +728,17 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
+
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -753,7 +766,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
             "kv_buffer_device":"npu",
             "kv_role":"kv_consumer",
             "kv_port":"36100",
-            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
@@ -904,11 +916,17 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
+
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -936,7 +954,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_producer",
             "kv_port":"30000",
-            "engine_id":"0",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
@@ -982,12 +999,18 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export GLOO_SOCKET_IFNAME=$NIC_NAME
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
+
     vllm serve "$MODEL_PATH" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -1013,7 +1036,6 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
             "kv_connector":"MooncakeConnectorV1",
             "kv_role":"kv_consumer",
             "kv_port":"26900",
-            "engine_id":"1",
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
@@ -1142,7 +1164,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --vllm-start-port "$SERVICE_PORT"
     ```
 
-    The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) and `engine_id` (`"1"`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four DP ranks:
+    The first Decode node serves API ports `31060`/`31061` and the second `31062`/`31063`. Wait until all four DP ranks print `Application startup complete`. The template base `kv_port` (`26900`) can remain the same on both Decode nodes. Keep the global DP ranks distinct (0–1 and 2–3); Mooncake derives handshake ports using the global DP-rank offset. Start the proxy only after all six engines are up (the example proxy waits only a few seconds per backend), registering two Prefill ranks and four DP ranks:
 
     ```bash
     export PREFILL_IP="<PREFILL_NODE_IP>"
@@ -1230,7 +1252,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
 | Mooncake Master | Not required | Start `mooncake_master --enable_offload=true` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; A3 P and both D nodes use `15GB`; 950DT P and D use `64GB`; enable SSD offload on all nodes |
-| `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
+| `lookup_rpc_port` | Not used | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid IPC endpoint collisions |
 | Extra env | Section 5.3.1 `HCCL_*` only | Keep 5.3.1 env, then add pool fabric/UB exports from [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf` and the local SSD offload directory; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
@@ -1347,9 +1369,19 @@ export MOONCAKE_CONFIG_PATH=./mooncake.json
 export PYTHONHASHSEED=0
 # SSD I/O buffer per worker: 1GB, aligned for A3 fabric memory.
 export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+# SSD disk budget per NPU worker rank: 10 GiB.
+export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
+export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
 ```
 
-The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB` value above is an aligned starting point; size it for the KV read/write batches and include it in the per-rank memory budget. Set per-rank SSD capacity limits according to the actual disk capacity and number of contributing workers, as described in [Mooncake SSD Offload Parameter Tuning](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#mooncake-ssd-offload-parameter-tuning).
+The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB` value above is an aligned starting point; size it for the KV read/write batches and include it in the per-rank memory budget.
+
+For this three-tier (NPU, host memory, and SSD) example, the recommended starting SSD budget is **10 GiB per NPU worker rank** on every Prefill and Decode node. The two capacity limits describe the same SSD budget; they do not add up to 20 GiB:
+
+- `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` sets the per-worker SSD capacity reported to Mooncake Master. Its default is `2199023255552` bytes (2 TiB) per worker; this is advertised capacity, not an immediate disk allocation.
+- `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` sets the local bucket size limit. Its default is `0`, meaning 90% of the physical disk capacity. Set it explicitly alongside the reported capacity.
+
+Adjust both values to the workload and usable SSD space, allowing for all workers sharing that disk and leaving room for other data. Count TP and PP worker ranks, not just DP ranks or physical cards: an A3 node with 16 logical NPU workers has a combined budget of 160 GiB at 10 GiB per worker. These limits control SSD usage; they do not change the host-memory pool or SSD I/O buffer size. For details, see [Mooncake SSD Offload Parameter Tuning](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#mooncake-ssd-offload-parameter-tuning).
 
 | Hardware | Dependencies | Required pooling exports | Notes |
 | -------- | ------------- | ------------------------ | ----- |
@@ -1359,7 +1391,7 @@ The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB`
 
 ##### 5.3.2.3 Prefill / Decode Scripts
 
-Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3.1 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `DP_RANK` — do not hardcode the same values across ranks.
+Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3.1 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Derive `lookup_rpc_port` from `DP_RANK` so each rank uses a distinct IPC endpoint.
 
 === "A3 series (W8A8)"
 
@@ -1406,6 +1438,15 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
     export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    # SSD disk budget per NPU worker rank: 10 GiB.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
 
     # For better prefill performance, keep max_num_batched_tokens at 8192 for input
     # lengths >= 8192 tokens; for shorter inputs, set it to the input token length.
@@ -1413,7 +1454,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -1439,7 +1480,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_producer",
-            "engine_id":"minimax-m3-prefill-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1505,12 +1545,21 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
     export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    # SSD disk budget per NPU worker rank: 10 GiB.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -1536,7 +1585,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -1605,15 +1653,24 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
     export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    # SSD disk budget per NPU worker rank: 10 GiB.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
+
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
 
     vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$SERVICE_PORT" \
       --data-parallel-size "$DP_SIZE" \
-      --data-parallel-rank "$DP_RANK" \
+      "${DP_RANK_ARGS[@]}" \
       --data-parallel-address "$DP_ADDRESS" \
       --data-parallel-rpc-port "$DP_RPC_PORT" \
       --tensor-parallel-size "$TP_SIZE" \
@@ -1640,7 +1697,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
       '{
           "kv_connector":"MultiConnector",
           "kv_role":"kv_producer",
-          "engine_id":"minimax-m3-prefill-dp'"$DP_RANK"'",
           "kv_connector_extra_config":{
               "connectors":[
                   {
@@ -1704,16 +1760,25 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
     export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    # SSD disk budget per NPU worker rank: 10 GiB.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
+
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
 
     vllm serve "$MODEL_PATH" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
@@ -1738,7 +1803,6 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
         '{
             "kv_connector":"MultiConnector",
             "kv_role":"kv_consumer",
-            "engine_id":"minimax-m3-decode-dp'"$DP_RANK"'",
             "kv_connector_extra_config":{
                 "connectors":[
                     {
@@ -2181,7 +2245,6 @@ The four Decode engines share one global DP group. Each process serves one DP ra
         "kv_buffer_device": "npu",
         "kv_role": "kv_producer",
         "kv_port": "36000",
-        "engine_id": "minimax-m3-1m-prefill",
         "kv_connector_extra_config": {
             "use_ascend_direct": true,
             "prefill": {
@@ -2240,8 +2303,14 @@ The four Decode engines share one global DP group. Each process serves one DP ra
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Explicit DP ranks enable external load balancing, which requires DP > 1.
+    DP_RANK_ARGS=()
+    if [ "$DP_SIZE" -gt 1 ]; then
+        DP_RANK_ARGS=(--data-parallel-rank "$DP_RANK")
+    fi
+
     vllm serve "$MODEL_PATH" \
-        --data-parallel-rank "$DP_RANK" \
+        "${DP_RANK_ARGS[@]}" \
         --data-parallel-size-local 1 \
         --data-parallel-address "$DP_ADDRESS" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
@@ -2276,7 +2345,6 @@ The four Decode engines share one global DP group. Each process serves one DP ra
         "kv_buffer_device": "npu",
         "kv_role": "kv_consumer",
         "kv_port": "36100",
-        "engine_id": "minimax-m3-1m-decode-dp'"$DP_RANK"'",
         "kv_connector_extra_config": {
             "use_ascend_direct": true,
             "prefill": {
@@ -2422,7 +2490,7 @@ Send client requests to `http://<PROXY_HOST_IP>:18919/v1/chat/completions`. The 
 3. Prepare a prompt containing exactly 1,048,576 tokens using the deployed model's tokenizer. Keep input plus requested output within `1049600`; the configuration reserves up to 1024 output tokens for a full 1M-token input.
 4. Verify the API's input-token count and the requested retrieval answers. Check the Prefill prompt-token counter and the receiving Decode rank's external-prefix-cache hit counter to confirm the long prefix was transferred. Decode should not recompute the complete 1M prefill.
 
-The recorded A3 run used vLLM `0.30.0+empty` and vLLM-Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with generic engine identifiers and environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
+The recorded A3 run used vLLM `0.30.0+empty` and vLLM-Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 

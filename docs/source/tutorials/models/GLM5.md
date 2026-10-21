@@ -719,7 +719,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 1,
@@ -784,7 +783,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 1,
@@ -852,7 +850,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30300",
-            "engine_id": "3",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 1,
@@ -920,7 +917,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30300",
-            "engine_id": "3",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 1,
@@ -1100,7 +1096,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1162,7 +1157,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1179,10 +1173,6 @@ if __name__ == "__main__":
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # Each DP rank uses an independent engine ID to avoid KV route confusion.
-        # $4 = data-parallel-rank. The rank offset within a node is 0 to 3, and the corresponding engine ID is 100 to 103.
-        ENGINE_ID=$((100 + $4))
-
         #Mooncake
 
         export HCCL_BUFFSIZE=256
@@ -1225,7 +1215,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1242,10 +1231,6 @@ if __name__ == "__main__":
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # Each DP rank uses an independent engine ID to avoid KV route confusion.
-        # $4 = data-parallel-rank. The rank offset within a node is 0 to 3, and the corresponding engine ID is 100 to 103.
-        ENGINE_ID=$((100 + $4))
-
         #Mooncake
 
         export HCCL_BUFFSIZE=256
@@ -1288,7 +1273,6 @@ if __name__ == "__main__":
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},

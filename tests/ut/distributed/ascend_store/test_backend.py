@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -383,7 +384,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         backend._contribute_memory = contribute_memory
         return backend
 
-    def _setup_store(self, backend: MooncakeBackend, store: MagicMock):
+    def _setup_store(self, backend: MooncakeBackend, store: MagicMock, global_rank: int = 3):
         transfer_engine = MagicMock()
         transfer_engine.get_rpc_port.return_value = 50052
         fake_store_module = sys.modules["mooncake.store"]
@@ -396,7 +397,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
             ),
             patch(f"{self._MODULE_PATH}.get_ip", return_value="10.0.0.7"),
             patch(f"{self._MODULE_PATH}.global_te") as mock_global_te,
-            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=3),
+            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=global_rank),
             patch(
                 f"{self._MODULE_PATH}._mooncake_setup_supports_ssd_offload",
                 return_value=True,
@@ -404,6 +405,70 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         ):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
+
+    def test_dp_clients_use_distinct_ssd_paths_and_log_actual_directories(self):
+        for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+            with (
+                self.subTest(use_fabric_mem=use_fabric_mem, use_store_independent_te=use_store_independent_te),
+                tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path,
+                patch(f"{self._MODULE_PATH}.logger") as mock_logger,
+            ):
+                config = _make_mooncake_store_config(
+                    tenant_id="tenant-a",
+                    enable_ssd_offload=True,
+                    ssd_offload_path=ssd_path,
+                )
+                setup_calls: list[dict[str, Any]] = []
+                owned_paths: set[str] = set()
+
+                def setup(setup_calls=setup_calls, owned_paths=owned_paths, **kwargs):
+                    setup_calls.append(kwargs)
+                    if kwargs.get("enable_ssd_offload", False):
+                        path = kwargs["ssd_offload_path"]
+                        if path in owned_paths:
+                            return -1  # Mooncake rejects a second live owner.
+                        owned_paths.add(path)
+                    return 0
+
+                for dp_rank in range(2):
+                    for contribute_memory in (False, True):
+                        backend = self._make_backend(
+                            config=config,
+                            use_fabric_mem=use_fabric_mem,
+                            contribute_memory=contribute_memory,
+                        )
+                        backend._use_store_independent_te = use_store_independent_te
+                        store = MagicMock()
+                        store.setup.side_effect = setup
+                        self.assertIs(self._setup_store(backend, store, global_rank=dp_rank), store)
+
+                self.assertEqual(len(setup_calls), 4)
+                for scheduler_setup in setup_calls[::2]:
+                    self.assertEqual(scheduler_setup["global_segment_size"], 0)
+                    self.assertEqual(scheduler_setup["local_buffer_size"], 0)
+                    self.assertNotIn("enable_ssd_offload", scheduler_setup)
+                    self.assertNotIn("ssd_offload_path", scheduler_setup)
+                for rank, worker_setup in enumerate(setup_calls[1::2]):
+                    rank_path = os.path.join(ssd_path, f"rank_{rank}")
+                    self.assertTrue(worker_setup["enable_ssd_offload"])
+                    self.assertEqual(worker_setup["ssd_offload_path"], rank_path)
+                    self.assertGreater(worker_setup["global_segment_size"], 0)
+                    self.assertTrue(os.path.isdir(rank_path))
+                self.assertTrue(all(kwargs["tenant_id"] == "tenant-a" for kwargs in setup_calls))
+                self.assertEqual(owned_paths, {os.path.join(ssd_path, f"rank_{rank}") for rank in range(2)})
+                self.assertEqual(config.ssd_offload_path, ssd_path)
+                ssd_logs = [
+                    _format_log_call(log_call)
+                    for log_call in mock_logger.info.call_args_list
+                    if log_call.args[0] == "Mooncake SSD offload enabled (Mode A): path=%s"
+                ]
+                self.assertEqual(
+                    ssd_logs,
+                    [
+                        f"Mooncake SSD offload enabled (Mode A): path={os.path.join(ssd_path, f'rank_{rank}')}"
+                        for rank in range(2)
+                    ],
+                )
 
     def test_setup_omits_default_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):

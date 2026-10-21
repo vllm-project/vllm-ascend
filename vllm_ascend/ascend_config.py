@@ -828,7 +828,7 @@ class AscendConfig:
                 )
 
         finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:

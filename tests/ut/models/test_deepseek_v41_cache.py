@@ -374,7 +374,7 @@ def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):
 
 
 def test_view_with_nonzero_backing_storage_offset():
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
     spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
     backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
@@ -405,7 +405,7 @@ def test_v2_view_with_nonzero_initial_offset():
 
 
 def test_view_accepts_latest_vllm_int8_backing_storage():
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
     spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
     raw = torch.zeros(2 * 256, dtype=torch.int8)

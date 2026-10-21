@@ -57,7 +57,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 )
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
@@ -107,7 +107,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         runner = self._build_dispatch_runner(speculative=True)
 
         with patch(
-            "vllm_ascend.worker.model_runner_v1.enable_sp",
+            "vllm_ascend.worker.v1.model_runner.enable_sp",
             return_value=False,
         ):
             runner._determine_batch_execution_and_padding(
@@ -140,7 +140,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
                 # Extra stale rows must not affect the real batch decision.
                 runner.input_batch.num_computed_tokens_cpu = np.array(computed + [0])
                 runner.input_batch.num_prompt_tokens = np.array(prompts + [999])
-                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                with patch("vllm_ascend.worker.v1.model_runner.enable_sp", return_value=False):
                     runner._determine_batch_execution_and_padding(
                         num_tokens=4 * len(computed),
                         num_reqs=len(computed),
@@ -159,7 +159,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
                 runner.uniform_decode_query_len = 1
                 runner.input_batch.num_computed_tokens_cpu = np.array([computed])
                 runner.input_batch.num_prompt_tokens = np.array([2049])
-                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                with patch("vllm_ascend.worker.v1.model_runner.enable_sp", return_value=False):
                     runner._determine_batch_execution_and_padding(
                         num_tokens=1,
                         num_reqs=1,
@@ -192,7 +192,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
         is_draft=False,
         mega_moe=False,
     ):
-        module = "vllm_ascend.worker.model_runner_v1"
+        module = "vllm_ascend.worker.v1.model_runner"
 
         def all_reduce(packed_tensor, group):
             remote_rank = 1 - runner.dp_rank
@@ -214,7 +214,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
 
     def test_skip_dp_sync_keeps_local_token_count(self):
         runner = self._make_runner()
-        module = "vllm_ascend.worker.model_runner_v1"
+        module = "vllm_ascend.worker.v1.model_runner"
         with (
             patch(f"{module}.should_skip_allreduce_across_dp_group", return_value=True),
             patch(f"{module}.dist.all_reduce") as all_reduce,
@@ -231,7 +231,7 @@ class TestDPPaddingPolicy(unittest.TestCase):
     def test_single_dp_does_not_synchronize(self):
         runner = self._make_runner()
         runner.dp_size = 1
-        with patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce") as all_reduce:
+        with patch("vllm_ascend.worker.v1.model_runner.dist.all_reduce") as all_reduce:
             self.assertEqual(runner._sync_metadata_across_dp(8), (8, None, CUDAGraphMode.NONE))
         all_reduce.assert_not_called()
 
@@ -457,7 +457,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
                 runner._get_cumsum_and_arange = check_padded_schedule
                 runner._pad_query_start_loc_for_fia = check_offsets
                 with (
-                    patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+                    patch("vllm_ascend.worker.v1.model_runner.using_paged_attention", return_value=False),
                     self.assertRaisesRegex(RuntimeError, "logical query lengths checked"),
                 ):
                     runner._dummy_run(num_tokens, uniform_decode=True, cudagraph_runtime_mode=CUDAGraphMode.FULL)
@@ -598,7 +598,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner._build_attention_metadata = check_slots_before_build
 
         with (
-            patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+            patch("vllm_ascend.worker.v1.model_runner.using_paged_attention", return_value=False),
             self.assertRaisesRegex(RuntimeError, "metadata checked"),
         ):
             runner._dummy_run(2, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
@@ -727,10 +727,10 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
             events.append("context_exit")
 
         with (
-            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
-            patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable", return_value=False),
-            patch("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context", forward_context),
-            patch("vllm_ascend.worker.model_runner_v1.update_cos_sin"),
+            patch("vllm_ascend.worker.v1.model_runner.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
+            patch("vllm_ascend.worker.v1.model_runner.lmhead_tp_enable", return_value=False),
+            patch("vllm_ascend.worker.v1.model_runner.set_ascend_forward_context", forward_context),
+            patch("vllm_ascend.worker.v1.model_runner.update_cos_sin"),
         ):
             runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
 
@@ -945,7 +945,7 @@ class TestDrafterMaxModelLen(unittest.TestCase):
                     num_spec_tokens_to_schedule=draft_width,
                 )
                 self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
-                with patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp:
+                with patch("vllm_ascend.worker.v1.model_runner.get_pp_group") as pp:
                     pp.return_value.world_size = 1
                     runner._skip_drafting(scheduler_output)
                 runner.draft_token_ids_event.record.assert_not_called()
@@ -986,7 +986,7 @@ class TestDrafterMaxModelLen(unittest.TestCase):
                 runner.input_batch.sampling_metadata.output_token_ids = [[1]] if mode == "penalties" else []
                 scheduler_output = SimpleNamespace(has_structured_output_requests=mode == "structured")
                 with (
-                    patch("vllm_ascend.worker.model_runner_v1.get_pp_group") as pp,
+                    patch("vllm_ascend.worker.v1.model_runner.get_pp_group") as pp,
                     patch("torch.npu.current_stream"),
                     patch("torch.npu.stream", return_value=nullcontext()),
                 ):
@@ -1058,7 +1058,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
 
         with patch(
-            "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
+            "vllm_ascend.worker.v1.model_runner.mamba_utils.postprocess_mamba_align_gpu",
             side_effect=postprocess,
         ):
             runner._update_states_after_model_execute(
@@ -1126,7 +1126,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.mamba_state_idx = {}
                 runner.num_spec_tokens = 3
                 with patch(
-                    "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all", create=True
+                    "vllm_ascend.worker.v1.model_runner.mamba_utils.postprocess_mamba_all", create=True
                 ) as postprocess_all:
                     runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
                 np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
@@ -1277,7 +1277,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         with (
             patch.multiple(
-                "vllm_ascend.worker.model_runner_v1",
+                "vllm_ascend.worker.v1.model_runner",
                 DeviceMemoryProfiler=memory_profiler,
                 get_model=load_target,
                 get_pp_group=lambda: SimpleNamespace(world_size=1),
@@ -1303,7 +1303,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 join_early_kernel_warmup=MagicMock(),
             ),
             patch(
-                "vllm_ascend.worker.model_runner_v1.breakable_cudagraph.is_breakable_cudagraph_enabled",
+                "vllm_ascend.worker.v1.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
                 return_value=False,
             ),
         ):
@@ -1360,14 +1360,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
         with patch(
-            "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+            "vllm_ascend.worker.v1.model_runner.get_flashmla_ops",
             return_value=(MagicMock(), MagicMock()),
         ):
             for q_heads in (8, 12, 64, 96):
                 with self.subTest(q_heads=q_heads):
                     spec = replace(spec, num_heads=q_heads)
                     with patch(
-                        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                        "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
                         return_value=flash_profile,
                     ):
                         fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
@@ -1380,7 +1380,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         # models on the FIA-compatible component-major layout.
         spec = replace(spec, num_heads=48)
         with patch(
-            "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+            "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
             return_value=flash_profile,
         ):
             a5_fallback = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
@@ -1392,10 +1392,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         spec = replace(spec, num_heads=64)
         with (
             patch(
-                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
                 return_value=flash_profile,
             ),
-            patch("vllm_ascend.worker.model_runner_v1.get_flashmla_ops", return_value=None),
+            patch("vllm_ascend.worker.v1.model_runner.get_flashmla_ops", return_value=None),
         ):
             missing_flashmla_ops = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
@@ -1415,11 +1415,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         with (
             patch(
-                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
                 return_value=flash_profile,
             ),
             patch(
-                "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+                "vllm_ascend.worker.v1.model_runner.get_flashmla_ops",
                 return_value=(MagicMock(), MagicMock()),
             ),
         ):
@@ -1434,11 +1434,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.kv_transfer_config.kv_connector_extra_config["decode"]["tp_size"] = 2
         with (
             patch(
-                "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
                 return_value=flash_profile,
             ),
             patch(
-                "vllm_ascend.worker.model_runner_v1.get_flashmla_ops",
+                "vllm_ascend.worker.v1.model_runner.get_flashmla_ops",
                 return_value=(MagicMock(), MagicMock()),
             ),
         ):
@@ -1448,7 +1448,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.kv_transfer_config = None
 
         with patch(
-            "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+            "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda capability: False),
         ):
             nope, rope = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
@@ -1483,21 +1483,21 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
 
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
         attn_module.impl.enable_kv_nz = False
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
 
         attn_module.impl.pcp_enabled = True
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
@@ -1505,7 +1505,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         attn_module.impl.is_pcp_decode_sharded = True
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
@@ -1516,7 +1516,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.scheduler_config.max_num_batched_tokens = 16384
         attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertFalse(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
@@ -1528,7 +1528,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
@@ -1536,7 +1536,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl.dcp_enabled = False
         attn_module.impl.supports_strided_mla_writer = lambda: True
         with patch(
-            "vllm_ascend.worker.model_runner_v1.supports_component_major_mla_pd",
+            "vllm_ascend.worker.v1.model_runner.supports_component_major_mla_pd",
             return_value=True,
         ):
             self.assertTrue(runner._uses_single_raw_mla_cache(layer_name, spec, attn_module))
@@ -1546,7 +1546,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
         from vllm_ascend.core import kv_cache_placement
-        from vllm_ascend.worker import kvpp_cache, model_runner_v1
+        from vllm_ascend.worker import kvpp_cache
+        from vllm_ascend.worker.v1 import model_runner as model_runner_v1
 
         for packed in (False, True):
             with self.subTest(packed=packed):
@@ -1714,7 +1715,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
 
-        with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
+        with patch("vllm_ascend.worker.v1.model_runner.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
             raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
         uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
@@ -1876,7 +1877,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             )
         return SimpleNamespace(kv_cache_groups=groups)
 
-    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    @patch("vllm_ascend.worker.v1.model_runner.NPUInputBatch")
     def test_matching_single_group_keeps_existing_input_batch(self, input_batch_cls):
         runner = self._build_reinitialize_runner()
         original_input_batch = runner.input_batch
@@ -1887,7 +1888,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         input_batch_cls.assert_not_called()
         assert runner.input_batch is original_input_batch
 
-    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    @patch("vllm_ascend.worker.v1.model_runner.NPUInputBatch")
     def test_kernel_size_change_reinitializes_with_flat_values(self, input_batch_cls):
         runner = self._build_reinitialize_runner()
         config = self._cache_config_with_block_sizes(384)
@@ -1915,7 +1916,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             reasoning_config=None,
         )
 
-    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    @patch("vllm_ascend.worker.v1.model_runner.NPUInputBatch")
     def test_multiple_groups_reinitialize_even_when_sizes_match(self, input_batch_cls):
         runner = self._build_reinitialize_runner()
         config = self._cache_config_with_block_sizes(128, 128)
@@ -1926,7 +1927,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert input_batch_cls.call_args.kwargs["kernel_block_sizes"] == [128, 128]
         assert input_batch_cls.call_args.kwargs["max_num_blocks_per_req"] == [10, 11]
 
-    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    @patch("vllm_ascend.worker.v1.model_runner.NPUInputBatch")
     def test_reinitialize_rejects_cpu_offload(self, input_batch_cls):
         runner = self._build_reinitialize_runner()
         runner.offload_config.uva.cpu_offload_gb = 1
@@ -2054,7 +2055,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             2 * kv_cache_spec.page_size_bytes,
         )
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_mla_spec_preserves_block_stride_layout_contract(
         self,
         mock_get_layers,
@@ -2085,8 +2086,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertTrue(spec.indexes_kv_by_block_stride)
         self.assertEqual(spec.num_heads, 64)
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_mamba_alignment_excludes_auxiliary_glm_caches(
         self,
         mock_get_layers,
@@ -2147,7 +2148,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             "model.layers.0.linear_attn": FakeMamba(mamba_spec),
         }
 
-        with patch("vllm_ascend.worker.model_runner_v1.MambaBase", FakeMamba):
+        with patch("vllm_ascend.worker.v1.model_runner.MambaBase", FakeMamba):
             specs = runner.get_kv_cache_spec()
 
         self.assertEqual(
@@ -2157,7 +2158,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
         self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
         class FakeBuilder:
             def __init__(self, _spec, layer_names, _config, _device):
@@ -2279,9 +2280,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.drafter = None
                 runner.use_aclgraph = False
                 with (
-                    patch("vllm_ascend.worker.model_runner_v1.enable_dsa_cp", return_value=cp_enabled),
-                    patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=enable_sp),
-                    patch("vllm_ascend.worker.model_runner_v1.update_pass_config", return_value=nullcontext()),
+                    patch("vllm_ascend.worker.v1.model_runner.enable_dsa_cp", return_value=cp_enabled),
+                    patch("vllm_ascend.worker.v1.model_runner.enable_sp", return_value=enable_sp),
+                    patch("vllm_ascend.worker.v1.model_runner.update_pass_config", return_value=nullcontext()),
                 ):
                     runner._check_and_update_cudagraph_mode([], [])
                     dispatcher = runner.cudagraph_dispatcher
@@ -2337,7 +2338,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
         assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
-    @patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=True)
+    @patch("vllm_ascend.worker.v1.model_runner.requires_contiguous_pa_kv_cache", return_value=True)
     def test_hybrid_backing_is_unchanged_when_pa_is_configured(self, _mock_requires_contiguous):
         self.test_hybrid_descriptors_share_standardized_backing_allocation()
 
@@ -2557,7 +2558,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(
         self,
         mock_get_layers,
@@ -2737,8 +2738,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertEqual(k_cache.shape, (2, 4, 2, 3))
             self.assertEqual(v_cache.shape, (2, 4, 2, 3))
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(
         self,
         mock_get_layers,
@@ -2801,7 +2802,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
         self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_sparse_layer_packs_the_turboquant_main_cache(
         self,
         mock_get_layers,
@@ -2840,8 +2841,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(spec.head_size, get_tq_fused_slot_bytes(512, 64))
         self.assertEqual(spec.dtype, torch.int8)
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_sparse_layer_allocates_one_packed_turboquant_tensor(
         self,
         mock_get_layers,
@@ -2899,8 +2900,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         (raw_cache,) = raw_caches[layer_name]
         self.assertEqual(raw_cache.numel(), 2 * 16 * spec.head_size)
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_sparse_indexer_allocates_separate_replicated_cache_tensor(
         self,
         mock_get_layers,
@@ -3013,8 +3014,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(v_cache.shape, (2, 16, 1, 64))
         self.assertEqual(indexer_cache.shape, (4, 16, 1, 128))
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_sparse_indexer_skips_allocation_for_runtime_shared_s_layer(
         self,
         mock_get_layers,
@@ -3203,11 +3204,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     self.assertEqual(indexer_cache[1].dtype, torch.float16)
 
     @patch(
-        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+        "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_a5_sparse_c8_specs_keep_main_and_indexer_layouts_separate(
         self,
         mock_get_layers,
@@ -3296,11 +3297,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 self.assertEqual(indexer_spec.cache_sparse_li_c8, enable_li_c8)
 
     @patch(
-        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+        "vllm_ascend.worker.v1.model_runner.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_layers_from_vllm_config")
     def test_a5_sparse_li_c4_specs_keep_main_and_indexer_layouts_separate(
         self,
         mock_get_layers,
@@ -3797,8 +3798,8 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner.use_compress = False
         return runner
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
-    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    @patch("vllm_ascend.worker.v1.model_runner.get_ascend_config")
+    @patch("vllm_ascend.worker.v1.model_runner.lmhead_tp_enable")
     def test_sample_updates_output_token_ids_before_sampler(self, mock_lmhead_tp_enable, mock_get_ascend_config):
         """Verify output_token_ids are updated before sampler is called"""
         mock_lmhead_tp_enable.return_value = False
@@ -3997,10 +3998,10 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         debugger.start.assert_called_once_with(runner.model, scheduled_tokens={"req-0": 42})
         self.assertTrue(runner._debugger_started)
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
-    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    @patch("vllm_ascend.worker.v1.model_runner.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_pp_group")
+    @patch("vllm_ascend.worker.v1.model_runner.record_function_or_nullcontext")
     def test_execute_model_skips_dump_start_for_dp_dummy_run(
         self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
     ):
@@ -4037,10 +4038,10 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         )
         runner._start_dump_data.assert_not_called()
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
-    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
+    @patch("vllm_ascend.worker.v1.model_runner.has_kv_transfer_group", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.v1.model_runner.get_pp_group")
+    @patch("vllm_ascend.worker.v1.model_runner.record_function_or_nullcontext")
     def test_execute_model_starts_dump_for_real_batch(
         self, mock_record_function, mock_get_pp_group, _mock_has_ec_transfer, _mock_has_kv_transfer_group
     ):
@@ -4138,7 +4139,7 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
 
 class TestKVPPExecute(unittest.TestCase):
     def test_history_gate_uses_only_actual_requests(self):
-        from vllm_ascend.worker import model_runner_v1 as module
+        from vllm_ascend.worker.v1 import model_runner as module
 
         events: list[object] = []
         result = SimpleNamespace()

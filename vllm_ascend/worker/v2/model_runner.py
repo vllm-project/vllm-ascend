@@ -1148,15 +1148,14 @@ class NPUModelRunner(GPUModelRunner):
 
     @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        # TODO: Remove this workaround once upstream dummy-batch preparation
+        # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
             # FULL modes can also pad requests; only change token-only PIECEWISE padding.
             self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
             and self.pcp_manager is None
-            # Hybrid models also need recurrent-state metadata to stay aligned.
-            # TODO: Verify whether this hybrid-model guard can be removed.
-            and not self.model_config.is_hybrid
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
