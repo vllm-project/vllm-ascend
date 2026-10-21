@@ -104,7 +104,7 @@ class QuantizedAllReduce:
         self.max_q = 127 // self.world_size
         # Messages smaller than this stay on the bf16 path: they are
         # latency-bound, and the extra scale sync would cost more than the
-        # halved transfer saves. Default 8 MiB of bf16 elements.
+        # halved transfer saves. Default 4 MiB of bf16 elements.
         self.min_numel = _env_int(
             "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 4 * 1024 * 1024 // 2
         )
