@@ -94,6 +94,10 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    # Saving and layerwise metadata need local prefix blocks even when another
+    # MultiConnector child supplies the external tokens.
+    requires_full_blocks_on_update_after_alloc = True
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """

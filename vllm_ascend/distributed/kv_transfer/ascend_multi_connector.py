@@ -186,7 +186,9 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             connector.update_state_after_alloc(
                 request,
                 blocks if needs_full_blocks else empty_blocks,
-                num_external_tokens if needs_full_blocks else 0,
+                # Observing the allocation does not make this child the source
+                # of another connector's external tokens.
+                num_external_tokens if i == chosen_connector else 0,
             )
 
     def get_num_new_matched_tokens(

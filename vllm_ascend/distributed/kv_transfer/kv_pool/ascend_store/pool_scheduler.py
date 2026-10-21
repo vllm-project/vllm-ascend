@@ -786,9 +786,10 @@ class KVPoolScheduler:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
-        local_block_ids: list[list[int]] = [[] for _ in self.kv_cache_group_ids]
-        if num_external_tokens > 0:
-            local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
+        # This is the full allocation, including locally cached prefix blocks.
+        # A zero external-token count does not imply an empty allocation: retain
+        # the block table used by the asynchronous metadata path and later saves.
+        local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         if request.request_id not in self.load_specs:
@@ -1020,9 +1021,14 @@ class KVPoolScheduler:
         request: Request,
         block_ids: list[list[int]],
     ) -> ReqMeta | None:
-        load_spec = self.load_specs.pop(request_id, None)
+        load_spec = self.load_specs.get(request_id)
         if not load_spec:
             return None
+        if load_spec.kvpool_cached_tokens > 0 and not any(block_ids):
+            # Do not replace an existing tracker with an empty allocation, or
+            # fall back to old IDs that may have been freed and reallocated.
+            raise ValueError(f"Missing allocated block IDs for asynchronous KV load: {request_id}")
+        self.load_specs.pop(request_id)
         num_tokens_to_compute = load_spec.kvpool_cached_tokens
         if (num_tokens_to_compute % self._block_size != 0) and (
             num_tokens_to_compute == len(request.prompt_token_ids) - 1

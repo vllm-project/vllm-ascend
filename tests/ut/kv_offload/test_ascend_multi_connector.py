@@ -238,7 +238,7 @@ def test_update_state_after_alloc_forwards_full_blocks_to_observer():
     full_blocks_observer.update_state_after_alloc.assert_called_once_with(
         request,
         blocks,
-        16,
+        0,
     )
     unrelated.update_state_after_alloc.assert_called_once_with(request, blocks.empty, 0)
 

@@ -64,6 +64,74 @@ def _patch_pool_scheduler_importlib():
         yield
 
 
+def _make_prefix_state_scheduler():
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_cache_group_ids = [0, 1, 2]
+    scheduler._unfinished_requests = {}
+    scheduler._request_trackers = {}
+    scheduler._loading_req_ids = set()
+    scheduler.load_specs = {"prefix": LoadSpec(0, 32, can_load=True)}
+    scheduler.use_layerwise = True
+    scheduler.load_async = False
+    scheduler._block_size = 16
+    scheduler.grouped_block_size = [16, 16, 16]
+    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.cache_transfer_granularity = 16
+    scheduler._discard_partial_chunks = False
+    scheduler.original_block_size = [16, 16, 16]
+    scheduler.kv_cache_group_families = None
+    scheduler.hash_block_size = 16
+    return scheduler
+
+
+@pytest.mark.parametrize("external_tokens", [0, 32])
+def test_allocation_snapshot_survives_async_metadata_and_cached_delta(external_tokens):
+    scheduler = _make_prefix_state_scheduler()
+    request = SimpleNamespace(request_id="prefix", prompt_token_ids=list(range(64)), block_hashes=[])
+    full_ids = ([10, 11], [], [20, 21])
+    blocks = SimpleNamespace(get_block_ids=lambda: full_ids)
+
+    scheduler.update_state_after_alloc(request, blocks, external_tokens)
+    allocated_ids = scheduler._unfinished_requests["prefix"][1]
+    assert allocated_ids == [[10, 11], [], [20, 21]]
+    # The callback owns a snapshot, not the mutable cache manager lists.
+    full_ids[0].append(99)
+    assert allocated_ids[0] == [10, 11]
+    with patch.object(ReqMeta, "from_request_tracker", side_effect=lambda tracker, *args, **kwargs: tracker):
+        tracker = scheduler._process_async_load_request("prefix", request, allocated_ids)
+    assert tracker is scheduler._request_trackers["prefix"]
+    assert "prefix" not in scheduler.load_specs
+    tracker.update(([12], [], [22]))
+    assert tracker.allocated_block_ids_by_group == [[10, 11, 12], [], [20, 21, 22]]
+
+
+def test_zero_external_allocation_keeps_blocks_without_load_spec():
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_cache_group_ids = [0]
+    scheduler._unfinished_requests = {}
+    scheduler.load_specs = {}
+    request = SimpleNamespace(request_id="local-prefix")
+    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([10, 11],)), 0)
+    assert scheduler._unfinished_requests["local-prefix"][1] == [[10, 11]]
+
+
+@pytest.mark.parametrize("block_ids", [[], [[], [], []]])
+def test_async_empty_allocation_does_not_replace_tracker(block_ids):
+    scheduler = _make_prefix_state_scheduler()
+    previous_tracker = RequestTracker(req_id="prefix", token_len=32, allocated_block_ids_by_group=[[10, 11]])
+    load_spec = LoadSpec(0, 32, can_load=True)
+    scheduler._request_trackers = {"prefix": previous_tracker}
+    scheduler.load_specs = {"prefix": load_spec}
+    request = SimpleNamespace(prompt_token_ids=list(range(64)), block_hashes=[])
+    with (
+        patch.object(ReqMeta, "from_request_tracker"),
+        pytest.raises(ValueError, match="Missing allocated block IDs.*prefix"),
+    ):
+        scheduler._process_async_load_request("prefix", request, block_ids)
+    assert scheduler._request_trackers["prefix"] is previous_tracker
+    assert scheduler.load_specs["prefix"] is load_spec
+
+
 @pytest.mark.parametrize("dspark", [False, True])
 def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_replica(dspark):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
@@ -485,7 +553,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(load_spec.kvpool_cached_tokens, 48)
         self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
         self.assertTrue(load_spec.can_load)
-        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        scheduler.update_state_after_alloc(request, MagicMock(get_block_ids=MagicMock(return_value=([0, 1],))), 0)
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
@@ -534,6 +602,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = ([0, 1],)
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertIn("r1", scheduler._unfinished_requests)
 
@@ -565,6 +634,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = ([0, 1],)
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
@@ -1476,12 +1546,16 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
 
     def test_zero_external_tokens(self):
         scheduler = self._make_scheduler()
-        scheduler.update_state_after_alloc(MagicMock(request_id="missing"), MagicMock(), 0)
+        scheduler.update_state_after_alloc(
+            MagicMock(request_id="missing"), MagicMock(get_block_ids=MagicMock(return_value=([0, 1],))), 0
+        )
         self.assertNotIn("missing", scheduler.load_specs)
 
         scheduler.use_layerwise = True
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
-        scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
+        scheduler.update_state_after_alloc(
+            MagicMock(request_id="r1"), MagicMock(get_block_ids=MagicMock(return_value=([0, 1],))), 0
+        )
         self.assertTrue(scheduler.load_specs["r1"].can_load)
 
 

@@ -39,6 +39,10 @@ def _mock_events(num_workers=1):
     return events
 
 
+def test_store_receives_full_allocations_as_multi_connector_observer():
+    assert AscendStoreConnector.requires_full_blocks_on_update_after_alloc is True
+
+
 class TestAscendStoreKVEvents(unittest.TestCase):
     def test_event_lifecycle(self):
         ev = _mock_events()
