@@ -50,6 +50,15 @@ class MemoryRangeStore:
     def register_buffer(self, ptrs, lengths):
         assert all(length > 0 for length in lengths)
 
+    def put(self, keys, buffers, sizes):
+        for key, addrs, lengths in zip(keys, buffers, sizes, strict=True):
+            assert "@snapshot:" in key
+            self.objects[key] = b"".join(
+                ctypes.string_at(addr, length) for addr, length in zip(addrs, lengths, strict=True)
+            )
+        self.complete.update(keys)
+        return True
+
     def validate_layerwise_support(self):
         pass
 
@@ -552,6 +561,61 @@ class TestMooncakeHybrid(unittest.TestCase):
         self.assertEqual({key: bytes(value) for key, value in store.objects.items()}, committed)
         self.assertEqual(store.complete, set(committed))
         self.assertFalse(errors)
+
+    def test_private_partial_snapshots_preserve_then_extend_full_hybrid_checkpoints(self):
+        for role in ("kv_producer", "kv_both"):
+            with self.subTest(role=role):
+                worker, store, arrays, jobs, errors = self.make_hybrid(private_tail=True)
+                worker.kv_role = role
+                worker._partial_snapshot_namespace = "snapshot-writer"
+                request = self.save_prefix(worker, last_chunk=False)
+                committed = {key: bytes(value) for key, value in store.objects.items()}
+                for array in arrays.values():
+                    array.fill(99)
+                request.save_start_token = 64
+                request.save_end_token = request.target_token_len = request.token_len_chunk = 77
+                request.num_prompt_tokens = 96
+                request.is_last_chunk = False
+                request.block_ids_by_group = [[1, 2, 3, 4, 5], [1, 2, 3], [1, 2, 3, 4, 5]]
+
+                def save_step(worker=worker, request=request):
+                    meta = AscendConnectorMetadata(set())
+                    meta.add_request(request)
+                    worker.prepare_layerwise_step(meta)
+                    worker.start_load_kv(meta)
+                    for _ in range(4):
+                        worker.wait_for_layer_load()
+                        with attention_transfer_window():
+                            pass
+                        worker.save_kv_layer(meta)
+                    worker._drain_deferred_last_save()
+
+                save_step()
+                snapshots = {key: value for key, value in store.objects.items() if "@snapshot:" in key}
+                self.assertEqual(len(snapshots), 3)
+                self.assertEqual({key: bytes(store.objects[key]) for key in committed}, committed)
+                state_snapshot = next(value for key, value in snapshots.items() if "@group:2@" in key)
+                self.assertEqual(len(state_snapshot), sum(worker.group_block_len[2]))
+                self.assertEqual(state_snapshot, bytes([99]) * len(state_snapshot))
+
+                for array in arrays.values():
+                    array.fill(123)
+                request.save_start_token = 77
+                request.save_end_token = request.target_token_len = request.token_len_chunk = 96
+                request.block_hashes = [b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"]
+                request.block_ids_by_group = [[1, 2, 3, 4, 5, 6], [1, 2, 3], [1, 2, 3, 4, 5, 6]]
+                request.is_last_chunk = True
+                worker.token_database.store_mask.return_value = ([True] * 6, [True] * 3, [False] * 5 + [True], [])
+                state_key = worker._make_layerwise_full_key(2, b"h5".hex())
+                self.assertEqual(store.batch_is_readable([state_key]), [False])
+                save_step()
+                self.assertEqual(store.batch_is_readable([state_key]), [True])
+                self.assertEqual(bytes(store.objects[state_key]), bytes([123]) * len(state_snapshot))
+                self.assertEqual({key: value for key, value in store.objects.items() if "@snapshot:" in key}, snapshots)
+                for job in jobs:
+                    job.join(timeout=2)
+                    self.assertFalse(job.is_alive())
+                self.assertFalse(errors)
 
     def test_continuation_restores_group_keys_into_new_local_blocks(self):
         worker, store, arrays, jobs, errors = self.make_hybrid()

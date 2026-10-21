@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from itertools import compress
 from typing import Any, cast
 
@@ -654,6 +655,45 @@ class ChunkedTokenDatabase:
                     cache_family=cache_family,
                 ),
             )
+
+    def prepare_partial_snapshots(
+        self,
+        request: ReqMeta,
+        align_state_groups: Sequence[bool],
+        namespace: str,
+    ) -> Iterable[tuple[str, list[int], list[int]]]:
+        """Describe request-private tails, never reachable through prefix hashes.
+
+        State is a whole snapshot at the actual forward end, not token-sliceable
+        KV. No snapshot is promoted: a later full save uses the local buffers.
+        """
+        end = request.target_token_len
+        if end <= 0:
+            return
+        request_key = sha256(request.req_id.encode()).hexdigest()
+        for group_id in request.kv_cache_group_ids or range(len(request.block_ids_by_group)):
+            if self.cache_coordinator is not None and group_id not in self.cache_coordinator.cacheable_group_ids:
+                continue
+            block_size = self.get_block_size(group_id)
+            is_state = group_id < len(align_state_groups) and align_state_groups[group_id]
+            if not is_state and end % block_size == 0:
+                continue
+            block_index = (end - 1) // block_size
+            block_ids = request.block_ids_by_group[group_id]
+            # Like bulk iteration, support tables containing only the suffix.
+            offset = max(cdiv(end, block_size) - len(block_ids), 0)
+            table_index = block_index - offset
+            if not 0 <= table_index < len(block_ids) or block_ids[table_index] <= 0:
+                continue
+            start = block_index * block_size
+            copy_end = start + block_size if is_state else end
+            addrs, sizes, _ = self.prepare_value(
+                start, copy_end, block_ids, kv_cache_group_id=group_id, block_id=block_ids[table_index]
+            )
+            if not sizes or not any(sizes):
+                continue
+            key = f"{self._get_key_prefix(group_id)}snapshot:{namespace}:{request_key}:{start}:{end}"
+            yield key, addrs, sizes
 
     def process_token_key_strings(
         self,

@@ -2,8 +2,12 @@ fixes:
   - |
     Restrict AscendStore non-layerwise bulk cache publication and lookup to
     complete logical blocks, including when ``discard_partial_chunks=false``.
-    Partial tails stay local and are not reused across requests. Recurrent
-    snapshots are published only at their actual, block-aligned forward end.
+    With ``discard_partial_chunks=false``, partial attention tails and whole
+    recurrent states at their exact forward end are saved under isolated
+    request/worker/extent snapshot keys. These keys never participate in
+    prefix lookup or reusable-block events. Later complete blocks are saved
+    afresh from local buffers; partial objects cannot occupy full-block keys.
+    Only actual block-aligned recurrent checkpoints are published for reuse.
     Bulk lookup excludes the final prompt token so a complete recurrent
     snapshot is not rewound to regenerate logits from an earlier position.
     Bulk key format is unchanged. When switching to this implementation,
@@ -15,7 +19,7 @@ fixes:
     final prompt token, so a prompt-end state is not loaded after reporting
     a one-token-shorter computed prefix. Attention-only layerwise full-hit
     handling is unchanged.
-    Hybrid block-key layerwise saves skip unaligned steps, retaining earlier
+    Hybrid block-key layerwise full-key saves skip unaligned steps, retaining earlier
     committed checkpoints instead of rejecting a final partial prefill chunk
     or associating its later recurrent state with an earlier full block.
     For Qwen hybrid models, configure the prefill token budget to a multiple
@@ -25,3 +29,11 @@ fixes:
     on the mixed instance and both separate P/D instances. The final partial
     chunk is recomputed locally. This single-request configuration is not
     a throughput recommendation for concurrent workloads.
+    The private snapshot save uses the existing whole-object PUT on both
+    bulk and layerwise paths. Layerwise snapshots wait for the final local
+    layer's post-compute fence; reusable full blocks retain their existing
+    GVA/session completion protocol. Backend eviction reclaims snapshots.
+    Neither mixed deployment nor separate P/D uses these private objects
+    for loading. D restores a complete checkpoint and recomputes the tail.
+    Disabling partial discard therefore adds storage traffic without
+    extending prefix hits or reducing P/D tail recomputation.

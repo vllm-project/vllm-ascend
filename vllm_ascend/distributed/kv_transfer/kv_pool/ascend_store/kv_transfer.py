@@ -1063,6 +1063,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             req_id = req_meta.req_id
             try:
                 self.worker._store_kv_tp_mismatch(req_meta)
+                self.worker._save_partial_snapshots([req_meta])
             except Exception:
                 logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
             finally:
@@ -1265,6 +1266,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
+
+        if self.worker is not None:
+            self.worker._save_partial_snapshots([req_meta])
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):

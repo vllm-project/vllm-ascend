@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -220,6 +221,8 @@ class KVPoolWorker:
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
+        # Distinct from every reusable block key and every other worker lifetime.
+        self._partial_snapshot_namespace = uuid4().hex if not extra_config.get("discard_partial_chunks", True) else None
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
@@ -882,7 +885,7 @@ class KVPoolWorker:
                     ready_event_sending,
                     self.group_uses_align_state,
                     self.enable_kv_events,
-                    worker=self if self.tp_mismatch else None,
+                    worker=self if self.tp_mismatch or self._partial_snapshot_namespace is not None else None,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -3188,6 +3191,32 @@ class KVPoolWorker:
             self._invalid_block_ids.clear()
         return invalid_blocks
 
+    def _save_partial_snapshots(self, requests: list[ReqMeta], event: Any = None) -> None:
+        """Persist private snapshots without publishing prefix hits or KV events.
+
+        A single ordinary PUT includes every local layer of each snapshot. The
+        layerwise caller fences the completed forward before invoking it, so
+        partial saves need no new multi-forward GVA/session protocol. Backend
+        eviction reclaims these objects; no reader or PD handoff selects them.
+        """
+        namespace = getattr(self, "_partial_snapshot_namespace", None)
+        if namespace is None or not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+            return
+        if self._save_disabled.is_set():
+            return
+        for request in requests:
+            if request.can_save is False or request.target_token_len % self.cache_transfer_granularity == 0:
+                continue
+            rows = list(self.token_database.prepare_partial_snapshots(request, self.group_uses_align_state, namespace))
+            if not rows:
+                continue
+            boundary_event = event if event is not None else request.current_event
+            if boundary_event is not None:
+                boundary_event.synchronize()
+            keys, addrs, sizes = zip(*rows, strict=True)
+            if self.m_store.put(list(keys), list(addrs), list(sizes)) is False:
+                logger.warning("Failed to save private partial snapshot for request %s", request.req_id)
+
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Match process_layer_data(), including stage-local draft layers.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
@@ -3214,6 +3243,12 @@ class KVPoolWorker:
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
+            if getattr(self, "_partial_snapshot_namespace", None) is not None:
+                # The normal layer save event can precede recurrent updates on
+                # the attention-overlap path. Fence the actual forward end.
+                snapshot_event = torch.npu.Event()
+                snapshot_event.record()
+                self._save_partial_snapshots(connector_metadata.requests, snapshot_event)
             if _LW_DEFER_LAST_SAVE:
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
