@@ -109,7 +109,6 @@ class AscendMlaDCPMetadataBuilder(
     """Build MLA metadata for decode context parallelism."""
 
     decode_metadata_cls = AscendMLADCPDecodeMetadata
-    consumes_pcp_context = True
     # Non-causal block drafters (e.g. DSpark) attend to all DCP-local KV.
     # Causal multi-token queries still need history/current split attention.
     supports_non_causal_multi_token_dcp = True
