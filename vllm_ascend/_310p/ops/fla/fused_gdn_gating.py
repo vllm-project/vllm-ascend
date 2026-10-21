@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import torch
 
 
@@ -60,3 +62,27 @@ def fused_gdn_gating_pytorch(
     beta_output = beta_output.unsqueeze(0)
 
     return g, beta_output
+
+
+def fused_gdn_gating(
+    A_log: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    dt_bias: torch.Tensor,
+    beta: float = 1.0,
+    threshold: float = 20.0,
+    *,
+    gating_op: Callable | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use the GDN op bound during initialization, otherwise use PyTorch."""
+    if gating_op is not None and a.device.type == "npu":
+        return gating_op(
+            A_log.to(torch.float16).contiguous(),
+            a.to(torch.float16).contiguous(),
+            b.to(torch.float16).contiguous(),
+            dt_bias.to(torch.float16).contiguous(),
+            beta,
+            threshold,
+        )
+
+    return fused_gdn_gating_pytorch(A_log, a, b, dt_bias, beta, threshold)
