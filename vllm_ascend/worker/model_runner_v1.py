@@ -1010,6 +1010,8 @@ class NPUModelRunner(GPUModelRunner):
         finalized.difference_update(request.req_id for request in scheduler_output.scheduled_new_reqs)
         finalized.difference_update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
         pending = self.requests.keys() - finalized
+        plan = plan_final_prefill(self.requests, scheduler_output.num_scheduled_tokens, pending)
+        self._tq_has_prefill = plan.has_prefill
         prepared = getattr(self, "_tq_prepared_req_ids", set())
         prepared.intersection_update(self.requests)
         prepared.difference_update(request.req_id for request in scheduler_output.scheduled_new_reqs)
@@ -1018,10 +1020,6 @@ class NPUModelRunner(GPUModelRunner):
         if not hasattr(self, "_tq_prefill_pipeline"):
             self._tq_prefill_pipeline = PrefillQuantizationPipeline(self.device)
         for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            plan = plan_final_prefill(
-                self.requests, scheduler_output.num_scheduled_tokens, group_id, self.block_size, pending
-            )
-            self._tq_has_prefill |= plan.has_prefill
             slots = plan_incremental_slots(
                 self.requests, scheduler_output.num_scheduled_tokens, group_id, self.block_size, pending, initial
             )

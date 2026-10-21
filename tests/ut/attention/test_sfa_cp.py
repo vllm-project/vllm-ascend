@@ -927,6 +927,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     # lookup. Only projections/kernels are mocked; static layers have no cache
     # or metadata, while MTP must call the indexer even when top-k is skipped.
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.final_prefill = None
     impl.has_indexer = has_indexer
     impl.layerwise_kv_cache_hook = None
     impl._is_mtp_layer = is_mtp

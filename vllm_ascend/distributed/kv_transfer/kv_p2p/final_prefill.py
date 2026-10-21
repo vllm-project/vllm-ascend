@@ -12,7 +12,7 @@ import math
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
-from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent, pack_bf16_kv
 
 BF16_TO_TQ4 = "bf16_to_tq4"
 BF16_TO_BF16 = "bf16_to_bf16"
@@ -45,14 +45,6 @@ def final_prefill_mode(config):
         if transfer.is_kv_producer or config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise ValueError("Final-prefill export requires eager P; D supports eager or FULL_DECODE_ONLY")
     return value
-
-
-def pack_bf16_kv(nope, rope, quantizer):
-    """Input is already RMS-normalized / RoPE-transformed, in original coordinates."""
-    rows = quantizer.compress(nope.reshape(-1, LATENT_DIM)).reshape(-1, PACKED_DIM + 2)
-    scale = rows[:, PACKED_DIM:].contiguous().view(torch.float16).reshape(-1, 1)
-    rope = (rope.reshape(-1, ROPE_DIM).float() / (scale.float() + 1e-20)).to(torch.bfloat16)
-    return torch.cat((rows[:, :PACKED_DIM], rope.contiguous().view(torch.uint8), rows[:, PACKED_DIM:]), -1)
 
 
 def describe_layout(meta, tensors, spec, mode, is_producer):

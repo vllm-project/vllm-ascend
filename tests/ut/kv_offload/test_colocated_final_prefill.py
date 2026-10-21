@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import (
@@ -17,6 +18,7 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import (
     plan_incremental_slots,
     validate_colocated_final_prefill,
 )
+from vllm_ascend.worker import model_runner_v1
 
 
 def request(computed, prompt=30000, generated=0, blocks=None):
@@ -69,36 +71,67 @@ def test_unsupported_configs_fail_before_cache_allocation(field, value):
         validate_colocated_final_prefill(cfg)
 
 
-def test_only_final_chunk_exports_complete_history():
+def test_intermediate_and_final_chunks_are_prefill():
     reqs = {"a": request(0)}
-    plan = plan_final_prefill(reqs, {"a": 4096}, 0, 128)
-    assert plan.has_prefill and not plan.block_ids
+    plan = plan_final_prefill(reqs, {"a": 4096})
+    assert plan.has_prefill
     reqs["a"] = request(28672)
-    assert plan_final_prefill(reqs, {"a": 1328}, 0, 128).block_ids == tuple(range(235))
+    assert plan_final_prefill(reqs, {"a": 1328}).has_prefill
 
 
 def test_full_prefix_hit_is_still_prefill():
-    plan = plan_final_prefill({"a": request(29999)}, {"a": 1}, 0, 128)
-    assert plan.has_prefill and len(plan.block_ids) == 235
+    plan = plan_final_prefill({"a": request(29999)}, {"a": 1})
+    assert plan.has_prefill
 
 
 def test_decode_and_resumed_recompute():
-    plan = plan_final_prefill({"a": request(30000, generated=1)}, {"a": 1}, 0, 128)
+    plan = plan_final_prefill({"a": request(30000, generated=1)}, {"a": 1})
     assert plan == FinalPrefillPlan()
     resumed = request(0, prompt=128, generated=10, blocks=[4, 2])
-    plan = plan_final_prefill({"a": resumed}, {"a": 138}, 0, 128)
-    assert plan == FinalPrefillPlan(True, (4, 2))
-
-
-def test_shared_prefix_pages_are_deduplicated():
-    reqs = {"a": request(127, 128, blocks=[4]), "b": request(127, 128, blocks=[4])}
-    assert plan_final_prefill(reqs, {"a": 1, "b": 1}, 0, 128).block_ids == (4, )
+    plan = plan_final_prefill({"a": resumed}, {"a": 138})
+    assert plan == FinalPrefillPlan(True)
 
 
 def test_resumed_last_chunk_after_prompt_is_not_mistaken_for_decode():
     reqs = {"a": request(137, prompt=128, generated=10, blocks=[7, 3])}
-    assert plan_final_prefill(reqs, {"a": 1}, 0, 128, {"a"}) == FinalPrefillPlan(True, (7, 3))
-    assert plan_final_prefill(reqs, {"a": 1}, 0, 128, set()) == FinalPrefillPlan()
+    assert plan_final_prefill(reqs, {"a": 1}, {"a"}) == FinalPrefillPlan(True)
+    assert plan_final_prefill(reqs, {"a": 1}, set()) == FinalPrefillPlan()
+
+
+@pytest.mark.parametrize("computed", [0, 3, 4])
+def test_new_request_refreshes_mirror_before_decode(monkeypatch, computed):
+    monkeypatch.setattr(model_runner_v1, "get_ascend_config", lambda: SimpleNamespace(
+        enable_turboquant_final_prefill=True))
+    state = SimpleNamespace()
+    runner = SimpleNamespace(
+        requests={"a": request(computed, prompt=5, blocks=[7, 2])},
+        _tq_finalized_req_ids={"a"},
+        _tq_prepared_req_ids={"a"},
+        _tq_prefill_pipeline=MagicMock(),
+        device=torch.device("cpu"),
+        block_size=4,
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["layer"])]),
+        compilation_config=SimpleNamespace(static_forward_context={
+            "layer": SimpleNamespace(impl=SimpleNamespace(final_prefill=state))}),
+    )
+    new = NewRequestData(
+        req_id="a", prompt_token_ids=[1] * 5, mm_features=[], sampling_params=None,
+        pooling_params=None, block_ids=([7, 2],), num_computed_tokens=computed, lora_request=None)
+    scheduled = SimpleNamespace(
+        scheduled_new_reqs=[new],
+        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids=[]),
+        num_scheduled_tokens={"a": 5 - computed},
+    )
+    model_runner_v1.NPUModelRunner._prepare_tq_final_prefill(runner, scheduled)
+    assert runner._tq_has_prefill and state.plan.has_prefill
+    assert state.prefill_slots.tolist() == [28, 29, 30, 31, 8]
+
+    runner.requests["a"] = request(5, prompt=5, generated=1, blocks=[7, 2])
+    scheduled.scheduled_new_reqs = []
+    scheduled.num_scheduled_tokens = {"a": 1}
+    model_runner_v1.NPUModelRunner._prepare_tq_final_prefill(runner, scheduled)
+    assert not runner._tq_has_prefill and not state.plan.has_prefill
+    assert state.prefill_slots is None
 
 
 def test_both_cache_pools_are_charged_and_nonoverlapping():

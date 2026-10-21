@@ -44,14 +44,12 @@ def validate_colocated_final_prefill(config):
 @dataclass(frozen=True)
 class FinalPrefillPlan:
     has_prefill: bool = False
-    block_ids: tuple[int, ...] = ()
 
 
-def plan_final_prefill(requests, scheduled, group_id, block_size, pending_req_ids=None):
+def plan_final_prefill(requests, scheduled, pending_req_ids=None):
     """Use scheduler state, including prefix hits/resume, never query length."""
     has_prefill = False
-    blocks = []
-    for req_id, count in scheduled.items():
+    for req_id in scheduled:
         request = requests[req_id]
         computed = request.num_computed_tokens
         # Recompute may include previously generated tokens after preemption.
@@ -60,10 +58,7 @@ def plan_final_prefill(requests, scheduled, group_id, block_size, pending_req_id
                    if pending_req_ids is not None else computed < request.num_prompt_tokens or target - computed > 1)
         if computed < target and pending:
             has_prefill = True
-            if computed + count >= target:
-                pages = (target + block_size - 1) // block_size
-                blocks.extend(request.block_ids[group_id][:pages])
-    return FinalPrefillPlan(has_prefill, tuple(dict.fromkeys(blocks)))
+    return FinalPrefillPlan(has_prefill)
 
 
 def colocated_cache_views(raw, num_blocks, block_size):

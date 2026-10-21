@@ -473,6 +473,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention_vllm(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.final_prefill = None
         impl.enable_sparse_sfa_c8 = True
         impl.enable_sparse_sfa_turboquant = False
         impl.scale = 0.125
@@ -1868,6 +1869,7 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         """The TQ4 quantization type runs on the packed cache and the result is
         rotated back out of Hadamard space."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.final_prefill = None
         impl.enable_sparse_sfa_turboquant = True
         impl.scale = 0.125
         impl.qk_rope_head_dim = self.ROPE_HEAD_DIM
@@ -1891,7 +1893,8 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
             lengths,
         )
 
-        impl.turboquant.inverse.assert_called_once_with(attn_out)
+        impl.turboquant.inverse.assert_called_once()
+        torch.testing.assert_close(impl.turboquant.inverse.call_args.args[0], attn_out, rtol=0, atol=0)
         self.assertIs(result, impl.turboquant.inverse.return_value)
         # query, key, value and the sparse indices are positional.
         self.assertIs(mock_op.call_args.args[1], kv_cache[0])
@@ -1904,9 +1907,41 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
         self.assertEqual(kwargs["layout_query"], "TND")
         self.assertEqual(kwargs["layout_kv"], "PA_BSND")
 
+    @patch("vllm_ascend.attention.sfa_v1.DeviceOperator.execute_sparse_flash_attention_process")
+    def test_final_prefill_reads_bf16_even_for_one_token_prefix_hit(self, mock_bf16):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.final_prefill = MagicMock()
+        impl.final_prefill.plan.has_prefill = True
+        impl.enable_sparse_sfa_turboquant = False
+        impl.qk_rope_head_dim = self.ROPE_HEAD_DIM
+        impl._turboquant_sfa = MagicMock()
+        impl._tq_rotate_query = MagicMock()
+        impl._tq_inverse_output = MagicMock()
+        impl._get_sfa_kv_slot_mapping = MagicMock(return_value=torch.tensor([0]))
+        cache = (torch.randn(2, 128, 1, 512, dtype=torch.bfloat16),
+                 torch.randn(2, 128, 1, 64, dtype=torch.bfloat16))
+        for tokens, decode_tokens in ((8, 0), (1, 1)):
+            with self.subTest(tokens=tokens, decode_tokens=decode_tokens):
+                query = torch.randn(tokens, 2, 512, dtype=torch.bfloat16)
+                rope = torch.randn(tokens, 2, 64, dtype=torch.bfloat16)
+                lengths = torch.tensor([tokens], dtype=torch.int32)
+                metadata = SimpleNamespace(num_decode_tokens=decode_tokens)
+                mock_bf16.reset_mock()
+                result = impl._execute_sparse_flash_attention_process(
+                    query, rope, cache, torch.zeros(tokens, 1, dtype=torch.int32),
+                    metadata, lengths, lengths)
+                self.assertIs(result, mock_bf16.return_value)
+                self.assertIs(mock_bf16.call_args.args[1], query)
+                self.assertIs(mock_bf16.call_args.args[2], rope)
+                self.assertIs(mock_bf16.call_args.args[3], cache)
+                impl._turboquant_sfa.assert_not_called()
+                impl._tq_rotate_query.assert_not_called()
+                impl._tq_inverse_output.assert_not_called()
+
     def test_forward_initializes_transform_outside_graph_capture(self):
         """The transform tensors are built before any graph-captured dispatch."""
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.final_prefill = None
         impl.enable_sparse_sfa_turboquant = True
         impl.turboquant = MagicMock()
         hidden_states = torch.randn(2, 4)

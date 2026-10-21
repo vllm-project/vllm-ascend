@@ -161,9 +161,11 @@ def test_incremental_side_stream_matches_serial_cache_across_steps():
     expected_steps = [[] for _ in states]
     for start, end in ((0, 129), (129, 257), (257, 511)):
         slots = torch.arange(start, end, device=device)
+        bf16_before = []
         for state in states:
             state.cache[0].view(-1, 512)[start:end].normal_()
             state.cache[1].view(-1, 64)[start:end].normal_()
+            bf16_before.append(tuple(t.clone() for t in state.cache[:2]))
             state.prefill_slots = slots
             pipe.submit(state)
             # Exercise unrelated main-stream vector/cube work while converting.
@@ -174,6 +176,8 @@ def test_incremental_side_stream_matches_serial_cache_across_steps():
         # The next step's main stream can immediately consume completed slots.
         for index, state in enumerate(states):
             nope, rope, target = state.cache
+            for before, after in zip(bf16_before[index], (nope, rope)):
+                torch.testing.assert_close(before, after, rtol=0, atol=0)
             # Keep the serial reference's GEMM row count identical. Changing
             # the batch size can change FP32 reduction rounding at a bin edge.
             expected_steps[index].append(

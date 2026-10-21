@@ -133,13 +133,18 @@ class TurboQuantLatent:
         """Pack the established GLM ABI and scatter directly into target slots."""
         from vllm_ascend.device.device_op import DeviceOperator
 
-        rows = self.compress(nope.reshape(-1, HEAD_DIM)).reshape(-1, HEAD_DIM // 2 + 2)
-        scale = rows[:, HEAD_DIM // 2:].contiguous().view(torch.float16).reshape(-1, 1)
-        rope = (rope.reshape(-1, 64).float() / (scale.float() + 1e-20)).bfloat16()
-        packed = torch.cat((rows[:, :HEAD_DIM // 2], rope.view(torch.uint8), rows[:, HEAD_DIM // 2:]), -1)
+        packed = pack_bf16_kv(nope, rope, self)
         # P/D staging is uint8, whereas the cache is int8. Scatter supports
         # signed bytes only; reinterpret both views without changing the ABI.
         DeviceOperator.scatter_cache(output.view(torch.int8), slots.view(-1, 1), packed.view(torch.int8))
+
+
+def pack_bf16_kv(nope, rope, quantizer):
+    """Pack GLM BF16 KV identically for the colocated mirror and P/D export."""
+    rows = quantizer.compress(nope.reshape(-1, HEAD_DIM)).reshape(-1, HEAD_DIM // 2 + 2)
+    scale = rows[:, HEAD_DIM // 2:].contiguous().view(torch.float16).reshape(-1, 1)
+    rope = (rope.reshape(-1, 64).float() / (scale.float() + 1e-20)).bfloat16()
+    return torch.cat((rows[:, :HEAD_DIM // 2], rope.view(torch.uint8), rows[:, HEAD_DIM // 2:]), -1)
 
 
 @cache
