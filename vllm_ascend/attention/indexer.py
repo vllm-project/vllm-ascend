@@ -945,6 +945,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             # Speculative decoding prepares multiple step metadata objects
             # up front, so each step still needs independent RoPE storage.
             copy_rope=self.speculative_config is not None,
+            pcp_context=common_attn_metadata.pcp_context,
+            pcp_cache_group_idx=common_attn_metadata.pcp_cache_group_idx,
             **kwargs,
         )
 

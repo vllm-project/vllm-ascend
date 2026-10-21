@@ -142,12 +142,9 @@ class AscendAttentionDCPMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        *,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
     ) -> AscendAttentionDCPMetadata:
-        self._pcp_context = pcp_context
-        self._pcp_cache_group_idx = pcp_cache_group_idx
+        self._pcp_context = common_attn_metadata.pcp_context
+        self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         assert isinstance(metadata, AscendAttentionDCPMetadata)
         return metadata

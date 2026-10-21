@@ -591,11 +591,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=common_attn_metadata.pcp_context),
         )
         if (
             self.use_pcp
-            and kwargs.get("pcp_context") is not None
+            and common_attn_metadata.pcp_context is not None
             and needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded)
         ):
             assert metadata.pcp_slot_mapping is not None

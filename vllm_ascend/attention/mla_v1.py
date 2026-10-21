@@ -478,12 +478,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        *,
-        pcp_context=None,
-        pcp_cache_group_idx: int | None = None,
     ) -> AscendMLAMetadata:
-        self._pcp_context = pcp_context
-        self._pcp_cache_group_idx = pcp_cache_group_idx
+        self._pcp_context = common_attn_metadata.pcp_context
+        self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
