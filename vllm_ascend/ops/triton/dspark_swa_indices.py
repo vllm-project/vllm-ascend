@@ -189,7 +189,7 @@ def build_dspark_swa_slot_indices_triton(
     num_reqs = query_start_loc.shape[0] - 1
     if index_width is None:
         # Same alignment rule as dsa_v1._aligned_dspark_index_width.
-        min_width = int(window_size) + int(num_speculative_tokens)
+        min_width = int(window_size) + int(num_speculative_tokens) + 1
         index_width = ((min_width + 127) // 128) * 128
     W = int(index_width)
 

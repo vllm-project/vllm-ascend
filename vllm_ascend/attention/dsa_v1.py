@@ -492,7 +492,9 @@ def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
 
 
 def _aligned_dspark_index_width(window_size: int, block_size: int, alignment: int = 128) -> int:
-    min_width = int(window_size) + int(block_size)
+    # Non-anchor drafting has K+1 queries; reserve its last query even when
+    # native_window + K is already an alignment multiple.
+    min_width = int(window_size) + int(block_size) + 1
     return ((min_width + alignment - 1) // alignment) * alignment
 
 
@@ -731,20 +733,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
                 for _ in range(spec_token_num)
             ]
-            # Shared static buffer for dspark_swa_indices, so its address
-            # stays stable across async ACL-graph replays.
-            _dspark_index_width = _aligned_dspark_index_width(
-                self.model_config.hf_config.sliding_window, spec_token_num
-            )
-            max_dspark_rows = max(
-                scheduler_config.max_num_batched_tokens,
-                scheduler_config.max_num_seqs * (self.speculative_config.num_speculative_tokens + 1),
-            )
-            self.dspark_swa_indices_buffer = torch.zeros(
-                (max_dspark_rows, 1, _dspark_index_width),
-                dtype=torch.int32,
-                device=self.device,
-            )
+            # The large noncausal sparse-index buffer is allocated on its
+            # first actual use. Causal Eagle builders never need it.
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -1157,8 +1147,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.model_config.hf_config.sliding_window,
             self.speculative_config.num_speculative_tokens,
         )
-        # The buffer keeps the __init__ allocation (sized for the token-count
-        # cap) unless the caller's query-token quota needs more rows; either
+        # Reuse an existing eager allocation unless the caller's query-token
+        # quota needs more rows; otherwise allocate before deferred work. Either
         # way the row count must cover the triton capacity grid, which is
         # derived from the builder's padded request capacity below.
         min_rows = self.max_num_reqs_for_dspark() * self.dspark_num_query_per_req()
@@ -1225,6 +1215,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_decode_reqs <= self.max_num_reqs_for_dspark()
         )
 
+    def _get_dspark_swa_indices_buffer(self) -> torch.Tensor:
+        """Lazily allocate the same stable-address noncausal scratch capacity."""
+        if self.dspark_swa_indices_buffer is None:
+            assert self.speculative_config is not None and self._dspark_index_width is not None
+            scheduler = self.vllm_config.scheduler_config
+            max_rows = max(
+                scheduler.max_num_batched_tokens,
+                scheduler.max_num_seqs * (self.speculative_config.num_speculative_tokens + 1),
+            )
+            self.dspark_swa_indices_buffer = torch.zeros(
+                (max_rows, 1, self._dspark_index_width), dtype=torch.int32, device=self.device
+            )
+        return self.dspark_swa_indices_buffer
+
     def _build_dspark_swa_indices_eager(
         self, dspark_swa_args: tuple, buffer: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1236,6 +1240,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         unavailable or the shape is unsupported. ``buffer`` keeps the
         stable-address contract of the previous eager call sites.
         """
+        if buffer is None:
+            buffer = self._get_dspark_swa_indices_buffer()
         block_table, num_speculative_tokens, window_size, block_size, query_start_loc, seq_lens, num_decode_tokens = (
             dspark_swa_args
         )

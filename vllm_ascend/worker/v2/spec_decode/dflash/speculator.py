@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -17,7 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory, build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
@@ -246,6 +248,56 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 block_tables,
             )
 
+        if hasattr(self, "draft_window_policy"):
+            from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime
+
+            self._draft_window_runtime = DraftWindowRuntime(self, self.draft_window_policy)
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+        slot_mappings: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        runtime = getattr(self, "_draft_window_runtime", None)
+        # Older vLLM releases do not accept this optional upstream argument.
+        slot_kwargs = {} if slot_mappings is None else {"slot_mappings": slot_mappings}
+        if runtime is None:
+            return super()._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+                **slot_kwargs,
+            )
+        with build_attn_metadata_factory(
+            self.input_buffers.positions,
+            batch_desc.num_tokens,
+            self.draft_is_prefilling,
+            common_metadata_callback=runtime.metadata_callback(step, num_reqs),
+            metadata_builder_callback=runtime.metadata_builder_callback(step),
+        ):
+            metadata = super()._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+                **slot_kwargs,
+            )
+        runtime.retain_metadata(metadata)
+        return metadata
+
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
     # vLLM #60335 added `num_speculative_tokens`. Define the per-version public
     # signature and body.
@@ -279,7 +331,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 # TODO: Remove this guard once main2main includes upstream vLLM
                 # #54856 (facd9a74a1), which resets the profiling DP counts.
                 sync_state = None
-            with build_attn_metadata_wrapper():
+            runtime = getattr(self, "_draft_window_runtime", None)
+            with (
+                runtime.proposal_context(self, input_batch, dummy_run, is_profile)
+                if runtime is not None
+                else nullcontext(),
+                build_attn_metadata_wrapper(),
+            ):
                 return super().propose(
                     input_batch,
                     attn_metadata,
@@ -330,7 +388,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 # TODO: Remove this guard once main2main includes upstream vLLM
                 # #54856 (facd9a74a1), which resets the profiling DP counts.
                 sync_state = None
-            with build_attn_metadata_wrapper():
+            runtime = getattr(self, "_draft_window_runtime", None)
+            with (
+                runtime.proposal_context(self, input_batch, dummy_run, is_profile)
+                if runtime is not None
+                else nullcontext(),
+                build_attn_metadata_wrapper(),
+            ):
                 return super().propose(
                     input_batch,
                     attn_metadata,

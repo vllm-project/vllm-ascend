@@ -29,7 +29,7 @@ def test_forced_off_precedes_invalid_number_and_capability(requested, method, co
     result = resolve_draft_window_policy(
         requested_window_size=requested,
         method=method,
-        cotrained_v4_dspark=cotrained,
+        builtin_v4_dspark=cotrained,
         dynamic_k=True,
         is_dflash2=True,
     )
@@ -39,13 +39,13 @@ def test_forced_off_precedes_invalid_number_and_capability(requested, method, co
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41", "deepseek_v4_external_draft"])
 def test_v4_name_does_not_prove_cotraining(model_type):
-    with pytest.raises(ValueError, match="co-training identity"):
+    with pytest.raises(ValueError, match="model-route identity"):
         resolve_draft_window_policy(requested_window_size=1024, method="dspark", target_model_type=model_type)
     independent = resolve_draft_window_policy(
         requested_window_size=1024,
         method="dspark",
         target_model_type=model_type,
-        cotrained_v4_dspark=False,
+        builtin_v4_dspark=False,
     )
     assert independent.enabled
 
