@@ -2873,8 +2873,13 @@ class KVPoolWorker:
         is not aligned.
         """
         if getattr(self, "block_key_hybrid", False) and request.can_save and request.save_end_token > 0:
-            if self.cache_coordinator is None or request.save_end_token % self.cache_transfer_granularity:
+            if self.cache_coordinator is None:
                 raise ValueError("Block-key hybrid saves require a coordinator-aligned full-block boundary")
+            if request.save_end_token % self.cache_transfer_granularity:
+                # The current recurrent state is past the last full boundary.
+                # Keep this step local instead of publishing it under an
+                # earlier checkpoint key. Previously committed blocks remain.
+                return tuple([False] * (request.save_end_token // size) for size in self.grouped_block_size)
             return self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
         masks = None
         if (

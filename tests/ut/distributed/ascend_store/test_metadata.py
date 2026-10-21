@@ -252,20 +252,29 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][2].chunk_hash, "b")
 
-    def test_key_strings_match_pool_keys(self):
+    def test_bulk_keys_match_full_pool_blocks(self):
         hashes = ["aaa", "bbb", "ccc"]
         pool_keys = list(self.db.process_tokens(40, hashes))
         self.assertEqual(
-            list(self.db.process_token_key_strings(40, hashes)),
+            [
+                (start, end, key, hash_val)
+                for start, end, key, hash_val in self.db.process_token_key_strings(40, hashes)
+            ],
             [
                 (start, end, key.to_string(), hash_val)
                 for (start, end, key), hash_val in zip(pool_keys, hashes, strict=True)
+                if end - start == 16
             ],
         )
 
         block_ids = [5, 6]
         self.assertEqual(
-            list(self.db.process_token_key_strings_with_block_ids(32, hashes, block_ids)),
+            [
+                (start, end, key, hash_val, block_id)
+                for start, end, key, hash_val, block_id in self.db.process_token_key_strings_with_block_ids(
+                    32, hashes, block_ids
+                )
+            ],
             [
                 (start, end, key.to_string(), hash_val, block_id)
                 for (start, end, key), hash_val, block_id in zip(pool_keys[:2], hashes[:2], block_ids, strict=True)
@@ -291,7 +300,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
         self.assertEqual(len(pool_key_result), 1)
         self.assertEqual(
-            direct_key_result[0][:3],
+            (direct_key_result[0][0], direct_key_result[0][1], direct_key_result[0][2]),
             (pool_key_result[0][0], pool_key_result[0][1], pool_key_result[0][2].to_string()),
         )
         layer_key = pool_key_result[0][2].split_layers(2)[1]

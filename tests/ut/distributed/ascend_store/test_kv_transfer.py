@@ -539,7 +539,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
         self.assertEqual(
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
-            [["h1"], ["h0", "h2"]],
+            [["h1"], ["h2"]],
         )
 
     def test_write_shards_cover_filtered_blocks_once(self):
@@ -572,11 +572,13 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                                 for i in range(2, 8)
                                 if (i - 2) % (pcp_size * tp_replicas) == pcp_rank * tp_replicas + tp_rank
                             ]
+                            if aligned:
+                                expected = [hashes[-1]] if pcp_rank == 0 and tp_rank == 0 else []
                             self.assertEqual([key.rsplit("@", 1)[1] for key in keys], expected)
                             self.assertIn("r1", thread.finished_requests)
                             saved.extend(keys)
-                    self.assertEqual(len(saved), 6)
-                    self.assertEqual(len(set(saved)), 6)
+                    self.assertEqual(len(saved), 1 if aligned else 6)
+                    self.assertEqual(len(set(saved)), 1 if aligned else 6)
 
     def test_handle_request_save_decisions(self):
         cases = [

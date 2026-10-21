@@ -664,7 +664,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
-        """Yield cache key strings directly without materializing PoolKey objects."""
+        """Yield reusable full-block bulk keys, excluding partial tails."""
         prefix = self._get_key_prefix(kv_cache_group_id)
         for start, end, hash_val, _ in self._iter_token_chunks(
             token_len,
@@ -674,7 +674,8 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             chunk_mask=chunk_mask,
         ):
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val
+            if end - start == self.get_block_size(kv_cache_group_id):
+                yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
     def process_token_key_strings_with_block_ids(
         self,
@@ -689,7 +690,7 @@ class ChunkedTokenDatabase:
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
-        """Yield cache key strings and resolved block ids without PoolKey allocation."""
+        """Yield full-block bulk keys and physical ids; partial tails stay local."""
         prefix = self._get_key_prefix(kv_cache_group_id)
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
@@ -703,8 +704,9 @@ class ChunkedTokenDatabase:
             shard_size=shard_size,
             chunk_mask=chunk_mask,
         ):
-            assert block_id is not None
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
+            if end - start == self.get_block_size(kv_cache_group_id):
+                assert block_id is not None
+                yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:

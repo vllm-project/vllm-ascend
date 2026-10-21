@@ -281,8 +281,9 @@ class TestMooncakeHybrid(unittest.TestCase):
             self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (32, False))
             load = scheduler.load_specs[request.request_id]
             self.assertEqual(load.kvpool_cached_tokens, 32)
-            self.assertEqual(load.kvpool_store_skip_tokens, 64)
-        # The full hit is a write-skip extent, not the recurrent resume point.
+            self.assertEqual(load.kvpool_store_skip_tokens, 32)
+        # The private-state worker also enforces the replay boundary when
+        # given a longer write-skip extent by an existing caller.
         worker.use_eagle = False
         request = ReqMeta(
             "load",
@@ -519,6 +520,38 @@ class TestMooncakeHybrid(unittest.TestCase):
             np.testing.assert_array_equal(array[slots], saved[name][slots])
         self.assertFalse(errors)
         self.assertFalse(store.open_reads)
+
+    def test_partial_continuation_preserves_committed_hybrid_checkpoints(self):
+        worker, store, arrays, jobs, errors = self.make_hybrid(private_tail=True)
+        request = self.save_prefix(worker, last_chunk=False)
+        committed = {key: bytes(value) for key, value in store.objects.items()}
+        store.batch_put_start = MagicMock(wraps=store.batch_put_start)
+        # The new forward state is S65, not the already committed S64.
+        for array in arrays.values():
+            array.fill(99)
+        request.save_start_token = 64
+        request.save_end_token = request.target_token_len = 65
+        request.token_len_chunk = 65
+        request.num_prompt_tokens = 65
+        request.is_last_chunk = True
+        request.block_ids_by_group = [[1, 2, 3, 4, 5], [1, 2, 3], [1, 2, 3, 4, 5]]
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(request)
+        worker.prepare_layerwise_step(meta)
+        worker.start_load_kv(meta)
+        for _ in range(4):
+            worker.wait_for_layer_load()
+            with attention_transfer_window():
+                pass
+            worker.save_kv_layer(meta)
+        worker._drain_deferred_last_save()
+        for job in jobs:
+            job.join(timeout=2)
+            self.assertFalse(job.is_alive())
+        store.batch_put_start.assert_not_called()
+        self.assertEqual({key: bytes(value) for key, value in store.objects.items()}, committed)
+        self.assertEqual(store.complete, set(committed))
+        self.assertFalse(errors)
 
     def test_continuation_restores_group_keys_into_new_local_blocks(self):
         worker, store, arrays, jobs, errors = self.make_hybrid()

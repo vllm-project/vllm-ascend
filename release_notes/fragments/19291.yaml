@@ -1,0 +1,27 @@
+fixes:
+  - |
+    Restrict AscendStore non-layerwise bulk cache publication and lookup to
+    complete logical blocks, including when ``discard_partial_chunks=false``.
+    Partial tails stay local and are not reused across requests. Recurrent
+    snapshots are published only at their actual, block-aligned forward end.
+    Bulk lookup excludes the final prompt token so a complete recurrent
+    snapshot is not rewound to regenerate logits from an earlier position.
+    Bulk key format is unchanged. When switching to this implementation,
+    stop all old bulk writers and clear all existing bulk cache objects
+    before starting the updated readers and writers. Old partial or
+    incorrectly positioned state objects must not be reused. Layerwise keys
+    are unchanged. No remote extent index is added.
+    Hybrid layerwise lookup also selects recurrent checkpoints before the
+    final prompt token, so a prompt-end state is not loaded after reporting
+    a one-token-shorter computed prefix. Attention-only layerwise full-hit
+    handling is unchanged.
+    Hybrid block-key layerwise saves skip unaligned steps, retaining earlier
+    committed checkpoints instead of rejecting a final partial prefill chunk
+    or associating its later recurrent state with an earlier full block.
+    For Qwen hybrid models, configure the prefill token budget to a multiple
+    of the logical cache block size so intermediate recurrent snapshots
+    remain reusable without changing prefill scheduling. For the validated
+    896-token layout, use ``--max-num-batched-tokens 896 --max-num-seqs 1``
+    on the mixed instance and both separate P/D instances. The final partial
+    chunk is recomputed locally. This single-request configuration is not
+    a throughput recommendation for concurrent workloads.

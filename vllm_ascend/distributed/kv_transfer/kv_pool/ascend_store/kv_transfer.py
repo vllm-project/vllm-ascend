@@ -1144,7 +1144,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             def chunk_filter(
                 start: int,
                 group_block_size=group_block_size,
+                align_state_group=align_state_group,
             ) -> bool:
+                # A recurrent snapshot belongs to the actual forward end,
+                # never to an earlier boundary rounded down for KV export.
+                if align_state_group and start + group_block_size != req_meta.target_token_len:
+                    return False
                 # Request progress is not a durable save watermark on this branch.
                 return not should_skip(start, start + group_block_size)
 

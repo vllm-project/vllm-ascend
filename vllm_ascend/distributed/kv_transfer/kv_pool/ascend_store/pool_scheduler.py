@@ -666,6 +666,11 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
+        if self.use_layerwise and getattr(self, "num_speculative_blocks_by_group", {}):
+            # Select a recurrent checkpoint before the final prompt token.
+            # Loading the prompt-end state and then subtracting one cannot
+            # rewind that state to the engine's recomputation position.
+            prompt_token_len = max(0, prompt_token_len - 1)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:
@@ -679,6 +684,11 @@ class KVPoolScheduler:
                 token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             else:
                 token_len = prompt_token_len
+
+            if not self.use_layerwise:
+                # Leave the final prompt token to compute locally. A full
+                # recurrent checkpoint cannot be rewound by subtracting one.
+                token_len = self._floor_to_cache_transfer_granularity(prompt_token_len - 1)
 
             if token_len < self.cache_transfer_granularity:
                 return 0, False

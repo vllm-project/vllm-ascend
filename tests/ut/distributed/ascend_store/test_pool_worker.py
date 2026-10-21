@@ -3088,6 +3088,33 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
                 )
                 self.assertEqual(worker._compute_reachable_store_masks(request), (expected,))
 
+    def test_block_key_hybrid_skips_unaligned_save_steps(self):
+        worker = self._make_worker()
+        worker.block_key_hybrid = True
+        worker.cache_coordinator = object()
+        worker.cache_transfer_granularity = 32
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 32]
+        worker.token_database.store_mask = MagicMock()
+        for end in (1, 31, 33, 60):
+            with self.subTest(end=end):
+                request = self._make_request(save_end_token=end, target_token_len=end)
+                self.assertEqual(
+                    worker._compute_reachable_store_masks(request),
+                    ([False] * (end // 16), [False] * (end // 32)),
+                )
+                self.assertTrue(request.can_save)
+        worker.token_database.store_mask.assert_not_called()
+        expected = ([True] * 4, [False, True])
+        worker.token_database.store_mask.return_value = expected
+        self.assertEqual(worker._compute_reachable_store_masks(self._make_request()), expected)
+
+    def test_block_key_hybrid_still_requires_coordinator_for_partial_steps(self):
+        worker = self._make_worker()
+        worker.block_key_hybrid = True
+        with self.assertRaises(ValueError):
+            worker._compute_reachable_store_masks(self._make_request(save_end_token=60))
+
     def test_alloc_gvas_for_save_respects_store_mask(self):
         worker = self._make_worker()
         worker.m_store.batch_alloc.return_value = [101, 103]
