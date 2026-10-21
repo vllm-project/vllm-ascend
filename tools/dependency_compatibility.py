@@ -14,7 +14,13 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-SOURCES = ("requirements.txt", "requirements-dev.txt", "requirements-lint.txt", "pyproject.toml")
+SOURCES = (
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements-lint.txt",
+    "pyproject.toml",
+    "pyproject.toml:project.dependencies",
+)
 
 
 def read_requirements(path, root, active=()):
@@ -58,9 +64,16 @@ def prepare_probe(root, source, packages_json, candidates_json, output):
         raise ValueError("Use a fresh output directory to avoid reusing profile results")
     if source not in SOURCES:
         raise ValueError(f"Unsupported dependency source: {source}")
-    if source == "pyproject.toml":
-        with (root / source).open("rb") as file:
-            requirements = [Requirement(line) for line in tomllib.load(file)["build-system"]["requires"]]
+    if source.startswith("pyproject.toml"):
+        with (root / "pyproject.toml").open("rb") as file:
+            data = tomllib.load(file)
+        if source == "pyproject.toml:project.dependencies":
+            declarations = data.get("project", {}).get("dependencies")
+            if declarations is None:
+                raise ValueError("The runtime source requires static project.dependencies")
+        else:
+            declarations = data["build-system"]["requires"]
+        requirements = [Requirement(line) for line in declarations]
     else:
         requirements = read_requirements(root / source, root)
     selected = []

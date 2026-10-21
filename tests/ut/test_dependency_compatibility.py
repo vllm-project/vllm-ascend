@@ -42,6 +42,16 @@ class DependencyCompatibilityTest(unittest.TestCase):
             plan = prepare_probe(root, "pyproject.toml", '["packaging"]', "[]", root / "results")
             self.assertEqual(plan["baseline"], ["packaging"])
 
+    def test_static_runtime_requirements_from_pyproject(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["example>=1"]\n[build-system]\nrequires = ["build-only>=2"]\n',
+                encoding="utf-8",
+            )
+            plan = prepare_probe(root, "pyproject.toml:project.dependencies", "[]", "[]", root / "results")
+            self.assertEqual(plan["baseline"], ["example>=1"])
+
     def test_invalid_inputs_are_rejected(self):
         for packages, candidates in (
             ('"packaging"', "[]"),

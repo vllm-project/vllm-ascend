@@ -9,7 +9,9 @@ are available for manual runs.
 ## Sources and candidate semantics
 
 Supported sources are `requirements.txt`, `requirements-dev.txt`,
-`requirements-lint.txt`, and `pyproject.toml`'s `[build-system].requires`.
+`requirements-lint.txt`, `pyproject.toml`'s `[build-system].requires`, and
+`pyproject.toml:project.dependencies` for static runtime declarations. The
+runtime TOML source requires the static metadata migration from #18832.
 Requirements includes are resolved relative to their containing file; cycles
 and paths outside the repository fail. Unsupported pip options also fail
 explicitly, so the probe does not silently drop constraints or index settings.
@@ -44,6 +46,7 @@ and candidates. For example:
 | Resource library candidate | requirements.txt | `["psutil"]` | `["psutil==6.0.0"]` |
 | Complete lint environment | requirements-lint.txt | `[]` | `["mypy==1.11.1"]` |
 | Build dependency subset | pyproject.toml | `["packaging"]` | `["packaging>=24.2,<27"]` |
+| Static runtime subset | pyproject.toml:project.dependencies | `["packaging"]` | `["packaging==24.2"]` |
 | Triton transitive conflict | requirements.txt | `["triton-ascend"]` | `["numpy==2.0.2"]` |
 
 The generic probe runs binary-only resolution and installation, then

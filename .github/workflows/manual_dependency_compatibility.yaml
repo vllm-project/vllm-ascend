@@ -10,13 +10,14 @@ on:
   workflow_dispatch:
     inputs:
       source:
-        description: 'Authoritative dependency source (pyproject selects build-system.requires)'
+        description: 'Dependency source; plain pyproject selects build requirements'
         type: choice
         options:
           - requirements.txt
           - requirements-dev.txt
           - requirements-lint.txt
           - pyproject.toml
+          - pyproject.toml:project.dependencies
         default: requirements.txt
       packages_json:
         description: 'JSON array of direct package names; [] selects the entire source'
