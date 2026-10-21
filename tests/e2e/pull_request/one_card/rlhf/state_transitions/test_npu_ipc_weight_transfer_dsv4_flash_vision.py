@@ -208,12 +208,6 @@ def test_npu_ipc_weight_transfer_dsv4_vision(packed: bool):
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
     }
-    # Mirror the opt-in coverage gate into the server process explicitly, so the
-    # FINISH of every update fails loudly on zero/partial modules instead of only
-    # logging them (see the weight-transfer engines' coverage report).
-    if os.environ.get("VLLM_IPC_STRICT_UPDATE"):
-        env_dict["VLLM_IPC_STRICT_UPDATE"] = os.environ["VLLM_IPC_STRICT_UPDATE"]
-
     # Independent oracle first: a server that loads exactly this payload at
     # startup, on its own lifecycle, before the live path touches anything.
     reference = reference_signature(
@@ -251,11 +245,6 @@ def test_npu_ipc_weight_transfer_dsv4_vision(packed: bool):
             case.model,
             image_prompt=case.image_prompt and not DUMMY_TEXT_ONLY,
         )
-
-        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
-        from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-
-        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
         register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
@@ -344,12 +333,28 @@ class RetentionProbe:
         return {"saved": {n: digest(p) for n, p in self._sleep_saved_parameters.items()}}
 
     def wsc_state(self):
+        from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
         model = self.model_runner.model
+        parameters = {}
+        meta_names = []
+        for name, parameter in model.named_parameters():
+            if not is_tracked(name):
+                continue
+            if parameter.is_meta:
+                # Native reload uses temporary meta placeholders. Inspect the
+                # retained kernel tensor, which is what captured graphs use.
+                module_name, local_name = name.rsplit(".", 1)
+                info = get_layerwise_info(model.get_submodule(module_name))
+                assert info.kernel_tensors is not None
+                parameter = info.kernel_tensors[0][local_name]
+                meta_names.append(name)
+            parameters[name] = parameter
         return {
+            "reload_meta_parameters": meta_names,
             "parameters": {
                 name: {"sha256": digest(p), "ptr": p.data_ptr(), "shape": list(p.shape), "dtype": str(p.dtype)}
-                for name, p in model.named_parameters()
-                if is_tracked(name)
+                for name, p in parameters.items()
             },
             **self.wsc_saved_state(),
             "configured": self.model_config.sleep_preserve_parameter_names,

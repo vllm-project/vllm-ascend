@@ -40,6 +40,7 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
@@ -182,6 +183,7 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 def test_start_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
+    engine.model_config = types.SimpleNamespace(sleep_preserve_parameter_names=[])
     mock_init = MagicMock()
 
     with _patch_reload_module(initialize=mock_init):
@@ -236,3 +238,46 @@ def test_receive_packed_weights_loads_model():
         device_index=0,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
+
+
+@pytest.mark.parametrize("patterns", [["gate.tid2eid"], ["gate.attn_sink"], ["gate.tid2eid", "gate.attn_sink"]])
+def test_native_reload_retains_selected_current_parameters(patterns):
+    """A partial reload preserves current values and shared kernel addresses."""
+    from fnmatch import fnmatchcase
+
+    from vllm.model_executor.model_loader import reload
+    from vllm.model_executor.model_loader.reload import meta
+
+    model = torch.nn.Module()
+    model.gate = torch.nn.Module()
+    model.gate.weight = torch.nn.Parameter(torch.full((2, 2), 0.25), requires_grad=False)
+    model.gate.tid2eid = torch.nn.Parameter(torch.tensor([[0, 1], [1, 0]], dtype=torch.int32), requires_grad=False)
+    model.gate.attn_sink = torch.nn.Parameter(torch.tensor([0.5, 0.75]), requires_grad=False)
+    model.attention = torch.nn.Module()
+    model.attention.attn_sink = model.gate.attn_sink
+    reload.record_metadata_for_reloading(model)
+    original_ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
+    skip_sets = (meta.SKIP_LOAD_TENSORS.copy(), meta.SKIP_TENSORS.copy())
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = model
+    engine.model_config = types.SimpleNamespace(dtype=torch.float32, sleep_preserve_parameter_names=patterns)
+
+    for cycle in range(2):
+        before = {n: p.detach().clone() for n, p in model.named_parameters()}
+        selected = {id(p) for n, p in model.named_parameters() if any(fnmatchcase(n, pat) for pat in patterns)}
+        updates = {n: torch.full_like(p, cycle + 2) for n, p in model.named_parameters() if id(p) not in selected}
+        engine.start_weight_update()
+        for name, value in updates.items():
+            parameter = model.get_parameter(name)
+            parameter.weight_loader(parameter, value)
+        engine.finish_weight_update()
+        for name, parameter in model.named_parameters():
+            assert torch.equal(parameter, updates.get(name, before[name])), name
+            assert parameter.data_ptr() == original_ptrs[name]
+        assert model.gate.attn_sink is model.attention.attn_sink
+        assert skip_sets == (meta.SKIP_LOAD_TENSORS, meta.SKIP_TENSORS)
+        # The next update must preserve this new current value, not the first load.
+        with torch.no_grad():
+            for name, parameter in model.named_parameters():
+                if any(fnmatchcase(name, pattern) for pattern in patterns):
+                    parameter.add_(1)

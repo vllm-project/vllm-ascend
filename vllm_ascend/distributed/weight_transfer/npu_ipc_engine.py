@@ -6,6 +6,7 @@ import os
 import socket
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from fnmatch import fnmatchcase
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -160,7 +161,30 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
             initialize_layerwise_reload,
         )
 
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
+        retained = []
+        if patterns:
+            selected = {
+                id(parameter)
+                for name, parameter in self.model.named_parameters()
+                if any(fnmatchcase(name, pattern) for pattern in patterns)
+            }
+            # Include all registrations of selected shared parameters, even when
+            # the caller selected only their canonical served-model name.
+            retained = [
+                (name, parameter)
+                for name, parameter in self.model.named_parameters(remove_duplicate=False)
+                if id(parameter) in selected
+            ]
+
         initialize_layerwise_reload(self.model)
+        # Worker has restored these current values after wake. Submit them to
+        # the native loaders so partial layers materialize and count them like
+        # received weights. Do not change process-global reload skip sets.
+        for name, value in retained:
+            parameter = self.model.get_parameter(name)
+            if parameter is not value:
+                parameter.weight_loader(parameter, value)
 
     def finish_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import (
