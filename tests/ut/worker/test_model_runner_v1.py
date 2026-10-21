@@ -1233,6 +1233,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             impl.v_head_dim = 1
             impl.enable_mlapo = False
             impl.fa_quant_layer = False
+            impl.use_flashmla = False
             impl.pcp_enabled = pcp_enabled
             impl.dcp_enabled = False
             impl.supports_prolog_v3_writer = lambda: True

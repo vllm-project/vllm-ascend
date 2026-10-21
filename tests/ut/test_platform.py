@@ -2213,7 +2213,7 @@ class TestNPUPlatform(TestBase):
 
         platform._validate_parallel_config(vllm_config)
 
-    def test_validate_deepseek_v4_tp_config_rejects_tp_above_device_limit(self):
+    def test_validate_deepseek_v4_tp_config_limits_are_hardware_independent(self):
         cases = (
             ("deepseek_v4", 256, "V4 Flash", 8),
             ("deepseek_v4", 384, "V4 Pro", 16),
@@ -2221,48 +2221,34 @@ class TestNPUPlatform(TestBase):
             ("deepseek_v41", 384, "V4.1", 8),
         )
         for model_type, num_experts, variant, max_tp_size in cases:
-            for device_type in (AscendDeviceType.A2, AscendDeviceType.A3):
-                with self.subTest(model_type=model_type, device_type=device_type):
-                    vllm_config = self.mock_vllm_config()
-                    vllm_config.use_v2_model_runner = True
-                    vllm_config.model_config.hf_config = SimpleNamespace(
+            for device_type in AscendDeviceType:
+                for use_v2_model_runner in (False, True):
+                    with self.subTest(
                         model_type=model_type,
-                        n_routed_experts=num_experts,
-                    )
-                    vllm_config.model_config.hf_text_config = None
-                    vllm_config.parallel_config.tensor_parallel_size = max_tp_size + 1
+                        device_type=device_type,
+                        use_v2_model_runner=use_v2_model_runner,
+                    ):
+                        vllm_config = self.mock_vllm_config()
+                        vllm_config.use_v2_model_runner = use_v2_model_runner
+                        vllm_config.model_config.hf_config = SimpleNamespace(
+                            model_type=model_type,
+                            n_routed_experts=num_experts,
+                        )
+                        vllm_config.model_config.hf_text_config = None
 
-                    with (
-                        patch(
+                        with patch(
                             "vllm_ascend.platform.get_current_hardware_profile",
                             return_value=get_hardware_profile(device_type),
-                        ),
-                        pytest.raises(ValueError, match=rf"{variant} supports at most TP{max_tp_size}"),
-                    ):
-                        _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+                        ) as mock_get_hardware_profile:
+                            for tp_size in (1, 2, max_tp_size):
+                                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                                _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
 
-    def test_validate_deepseek_v4_tp_config_accepts_tp_at_device_limit(self):
-        cases = (
-            ("deepseek_v4", 256, 8),
-            ("deepseek_v4", 384, 16),
-            ("deepseek_v4.1", 384, 8),
-        )
-        for model_type, num_experts, tp_size in cases:
-            with self.subTest(model_type=model_type, tp_size=tp_size):
-                vllm_config = self.mock_vllm_config()
-                vllm_config.use_v2_model_runner = True
-                vllm_config.model_config.hf_config = SimpleNamespace(
-                    model_type=model_type,
-                    n_routed_experts=num_experts,
-                )
-                vllm_config.model_config.hf_text_config = None
-                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                            vllm_config.parallel_config.tensor_parallel_size = max_tp_size + 1
+                            with pytest.raises(ValueError, match=rf"{variant} supports at most TP{max_tp_size}"):
+                                _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
 
-                with patch(
-                    "vllm_ascend.platform.get_current_hardware_profile",
-                    return_value=get_hardware_profile(AscendDeviceType.A2),
-                ):
-                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
+                        mock_get_hardware_profile.assert_not_called()
 
     def test_validate_deepseek_v41_tp_config_reads_text_config(self):
         cases = (
@@ -2286,24 +2272,6 @@ class TestNPUPlatform(TestBase):
                         return_value=get_hardware_profile(AscendDeviceType.A3),
                     ),
                     pytest.raises(ValueError, match=r"V4\.1 supports at most TP8"),
-                ):
-                    _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
-
-    def test_validate_deepseek_v4_tp_config_rejects_tp_on_a5(self):
-        for use_v2_model_runner in (False, True):
-            with self.subTest(use_v2_model_runner=use_v2_model_runner):
-                vllm_config = self.mock_vllm_config()
-                vllm_config.use_v2_model_runner = use_v2_model_runner
-                vllm_config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", n_routed_experts=256)
-                vllm_config.model_config.hf_text_config = None
-                vllm_config.parallel_config.tensor_parallel_size = 2
-
-                with (
-                    patch(
-                        "vllm_ascend.platform.get_current_hardware_profile",
-                        return_value=get_hardware_profile(AscendDeviceType.A5),
-                    ),
-                    pytest.raises(ValueError, match="does not support tensor parallelism on A5"),
                 ):
                     _validate_deepseek_v4_tp_config(vllm_config, SimpleNamespace(enable_dsa_cp=False))
 
