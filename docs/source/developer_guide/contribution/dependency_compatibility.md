@@ -53,8 +53,8 @@ selects `packaging` and tests `packaging>=24.2,<27`, keeping unrelated CI and
 production dependencies unchanged. These are experiment inputs, not new
 production constraints.
 
-Artifacts include the temporary declarations, `plan.json`, resolution and
-installation reports/logs, installed metadata, Python/platform/revision context,
+Artifacts include the temporary declarations, `plan.json`, installation
+reports/logs, installed metadata, Python/platform/revision context,
 and `comparison.json`. The comparison uses the installed graph, including
 bootstrap packages that may not appear in pip's installation report. It reports
 added, removed and version-changed distributions only when both profiles
@@ -62,7 +62,8 @@ finish successfully. Otherwise its status is `incomplete`; partial installed
 metadata is diagnostic evidence, not a passing candidate environment. The
 comparison command returns a nonzero exit code for incomplete results.
 
-A failed resolver may not produce a JSON resolution report; inspect its log.
+A normal install resolves dependencies and records the result in its installation
+report. A failed resolver may not produce a JSON report; inspect its installation log.
 The probe does not fall back to source builds when a binary Wheel is unavailable.
 This documents binary availability, not a claim that every source build fails.
 

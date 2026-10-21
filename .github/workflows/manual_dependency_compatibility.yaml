@@ -76,9 +76,6 @@ jobs:
             local python=".compatibility-$profile/bin/python"
             mkdir -p "$directory" || return 1
             python -m venv ".compatibility-$profile" || return 1
-            "$python" -m pip install --dry-run --only-binary=:all: \
-              --report "$directory/resolution.json" -r "compatibility-results/$profile.txt" \
-              2>&1 | tee "$directory/resolution.log" || return 1
             "$python" -m pip install --only-binary=:all: \
               --report "$directory/installation.json" -r "compatibility-results/$profile.txt" \
               2>&1 | tee "$directory/installation.log" || return 1
