@@ -19,6 +19,18 @@ class SupportsPerGroupBlockTables(Protocol):
 
 
 @runtime_checkable
+class SupportsPerGroupAttentionMetadata(Protocol):
+    """A proposer that consumes each cache group's full addressing pair."""
+
+    def set_per_group_attn_metadata(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None: ...
+
+
+@runtime_checkable
 class SupportsAttentionBackendInitialization(Protocol):
     """A proposer that initializes metadata builders from the target cache."""
 
@@ -31,7 +43,7 @@ class SupportsAttentionBackendInitialization(Protocol):
 
 @runtime_checkable
 class SupportsPerGroupKernelBlockSizes(Protocol):
-    """A proposer that consumes one resolved kernel size per cache group."""
+    """A proposer that declares whether it consumes sizes per cache group."""
 
     def uses_per_group_kernel_block_sizes(self) -> bool: ...
 
