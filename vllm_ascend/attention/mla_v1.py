@@ -1457,7 +1457,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
-            and not is_dcp_enabled()
+            and not self.use_dcp
             # Sharded PCP uses the unfused projections to gather current KV.
             and not self.is_pcp_decode_sharded
             and self.vllm_config.kv_transfer_config is not None
