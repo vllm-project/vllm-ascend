@@ -22,7 +22,7 @@ from vllm_ascend.core.kv_cache_layout import (
     can_share_full_and_sliding_kv_cache,
 )
 from vllm_ascend.worker import worker as worker_module
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
 
 
