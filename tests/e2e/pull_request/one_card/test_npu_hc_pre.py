@@ -61,6 +61,13 @@ HC_BASE_SWEEP_CASES = (
     (129, 4, DSV4_FLASH_HIDDEN_SIZE),
 )
 CPU_REFERENCE_NUM_TOKENS = 33
+# hidden <= 2048 makes the premix tiling pick rowFactor >= 2 on 910_93, where the
+# issue-#19357 eps-coverage bug can manifest; 4096/5120 always pick rowFactor == 1
+# and the bug is unobservable there.
+SMALL_HIDDEN_SIZE_SWEEP = (512, 1024, 2048)
+# Multi-row-per-core batches (rowOfFormerBlock >= 2). 129 is excluded: at
+# (129, 2048) both kernels emit NaN rows (independent artifact).
+SMALL_HIDDEN_TOKEN_SWEEP = (65, 128)
 HF32_MANTISSA_BITS = 10
 FP32_MANTISSA_BITS = 23
 Y_DIFF_THRESHOLD = 4e-3
@@ -106,6 +113,28 @@ def _make_identical_row_inputs(
     x_row = torch.randn(HC_MULT, hidden_size, dtype=torch.float32).to(torch.bfloat16)
     x = x_row.unsqueeze(0).expand(num_tokens, HC_MULT, hidden_size).contiguous()
     hc_fn = torch.zeros(MIX_HC, HC_MULT * hidden_size, dtype=torch.float32)
+    hc_scale = torch.zeros(3, dtype=torch.float32)
+    pre_mix_row = torch.rand(HC_MULT, dtype=torch.float32)
+    pre_mix = pre_mix_row.unsqueeze(0).expand(num_tokens, HC_MULT).contiguous()
+    return x, hc_fn, hc_scale, pre_mix
+
+
+def _make_identical_row_inputs_random_hc_fn(
+    num_tokens: int,
+    hidden_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Identical token rows with a random (non-zero) ``hc_fn``.
+
+    A zero ``hc_fn`` makes small-hidden shapes emit NaN rows (``rsqrt(0) * 0``),
+    so this variant uses a normal random ``hc_fn`` instead. Every token row of
+    ``x`` is still a broadcast of the same row, so the per-row GEMM contribution
+    is row-identical and ``comb`` has no legitimate reason to vary by row
+    position on a fixed kernel.
+    """
+    torch.manual_seed(1024)
+    x_row = torch.randn(HC_MULT, hidden_size, dtype=torch.float32).to(torch.bfloat16)
+    x = x_row.unsqueeze(0).expand(num_tokens, HC_MULT, hidden_size).contiguous()
+    hc_fn = torch.randn(MIX_HC, HC_MULT * hidden_size, dtype=torch.float32)
     hc_scale = torch.zeros(3, dtype=torch.float32)
     pre_mix_row = torch.rand(HC_MULT, dtype=torch.float32)
     pre_mix = pre_mix_row.unsqueeze(0).expand(num_tokens, HC_MULT).contiguous()
@@ -195,6 +224,38 @@ def test_npu_hc_pre_v3_row_position_invariance(num_tokens: int, hc_sinkhorn_iter
         hc_sinkhorn_iters,
         _make_hc_base("normal"),
     )
+    gc.collect()
+    torch.npu.empty_cache()
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("hidden_size", SMALL_HIDDEN_SIZE_SWEEP)
+@pytest.mark.parametrize("num_tokens", SMALL_HIDDEN_TOKEN_SWEEP)
+def test_npu_hc_pre_v3_row_position_invariance_small_hidden(num_tokens: int, hidden_size: int) -> None:
+    """Small-hidden shapes where premix rowFactor >= 2: comb must stay row-invariant.
+
+    This is the discriminating case for the eps-coverage fix: on the unfixed
+    kernel the column-eps Adds only covers curRowFactor * hcMult elements of the
+    hcMultAlign-strided reduce buffer, so comb picks up row-position-dependent
+    eps differences (~1e-6, fp32-visible). Only comb is asserted: ``pre`` has a
+    separate multi-row-batch defect (both kernels, see ProcessPrePostBatch from
+    #18293) and ``post`` can hit NaN rows at (129, 2048); neither is this fix.
+    """
+    _enable_hc_pre_custom_op()
+    x, hc_fn, hc_scale, pre_mix = _make_identical_row_inputs_random_hc_fn(num_tokens, hidden_size)
+    hc_base = _make_hc_base("normal")
+    _, _, comb, _ = torch.ops._C_ascend.npu_hc_pre_v3(
+        x.npu(),
+        hc_fn.npu(),
+        hc_scale.npu(),
+        hc_base.npu(),
+        pre_mix.npu(),
+        hc_mult=HC_MULT,
+        hc_sinkhorn_iters=HC_SINKHORN_ITERS,
+        norm_eps=NORM_EPS,
+        hc_eps=HC_EPS,
+    )
+    _assert_rows_bitwise_identical("comb", comb)
     gc.collect()
     torch.npu.empty_cache()
 
