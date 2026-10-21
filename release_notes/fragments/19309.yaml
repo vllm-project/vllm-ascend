@@ -1,0 +1,9 @@
+pr: 19309
+entries:
+  - category: bugfix
+    text: >-
+      Fixed sampled-token and Mamba state bookkeeping for asynchronous hybrid MTP
+      decoding with pipeline parallelism on Model Runner V1. GLM-5.3-Flash
+      validation currently requires prefix caching to be disabled.
+    model: glm-5.3-flash
+    hardware: [A3]
