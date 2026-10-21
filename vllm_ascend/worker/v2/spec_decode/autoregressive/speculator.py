@@ -762,12 +762,11 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        advance_draft_positions = getattr(self, "advance_draft_positions", True)
+        base_seq_lens = self._get_seq_lens_cpu(num_reqs_padded)[:num_reqs].tolist()
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
             seq_lens = [
-                min(int(seq_len) + (step if advance_draft_positions else 0), self.max_model_len)
-                for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                min(int(seq_len) + step, self.max_model_len) for seq_len in base_seq_lens
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name in self.draft_attn_layer_names:
@@ -805,12 +804,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         parallel_config = self.draft_vllm_config.parallel_config
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        advance_draft_positions = getattr(self, "advance_draft_positions", True)
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
             seq_lens = [
-                min(int(seq_len) + (step if advance_draft_positions else 0), self.max_model_len)
-                for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             kv_lens_cpu = torch.tensor(seq_lens, dtype=torch.int32)
@@ -837,8 +834,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
 
         # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
-        if not getattr(self, "advance_draft_positions", True):
-            step = 0
         next_seqs_cpu = torch.clamp(seq_lens_cpu[:num_reqs_padded] + step, max=self.max_model_len)
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
