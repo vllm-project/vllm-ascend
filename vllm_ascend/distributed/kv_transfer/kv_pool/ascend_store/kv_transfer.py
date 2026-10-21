@@ -1229,9 +1229,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if logical_success is None:
             return compress_ratio, [selected_ranges[index] for index in missing_indices]
         return compress_ratio, [
-            selected_ranges[missing_indices[index]]
-            for index, succeeded in enumerate(logical_success)
-            if succeeded
+            selected_ranges[missing_indices[index]] for index, succeeded in enumerate(logical_success) if succeeded
         ]
 
     def _build_cpu_stored_events(
