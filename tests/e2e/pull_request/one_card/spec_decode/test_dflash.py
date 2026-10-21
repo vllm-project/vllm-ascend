@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import pytest
-from transformers import AutoTokenizer
-from vllm import SamplingParams
 from vllm.config import CompilationConfig
-from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import VllmRunner
-from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, DFLASH, calculate_acceptance_per_pos
+from tests.e2e.pull_request.one_card.spec_decode.utils import DFLASH
+from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
-MAX_NUM_SEQS = 256
+EXPECTED_ACCEPTANCE_LENGTH_STATIC = 2.80
 
 
 @pytest.mark.parametrize("method", DFLASH.keys())
@@ -20,66 +17,32 @@ def test_dflash_acceptance(
 ):
     main_model_name = DFLASH[method]["main"]
     spec_model_name = DFLASH[method]["spec"]
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
-        temperature=0,
-        ignore_eos=False,
-        max_tokens=256,
-    )
-
-    prompts = [{"role": "user", "content": "Hello, your name is"}]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [prompt],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        for prompt in prompts
-    ]
-
     speculative_config = {
         "method": "dflash",
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
     }
-    capture_sizes = [9, 18]
+    num_prompts = len(SPEC_DECODE_PROMPTS)
+    capture_sizes = [num_prompts * (num_speculative_tokens + 1)]
     cudagraph_mode = "FULL_DECODE_ONLY"
 
-    compilation_config = CompilationConfig(
-        cudagraph_mode=cudagraph_mode,
-        cudagraph_capture_sizes=capture_sizes,
-    )
-
-    with VllmRunner(
-        main_model_name,
-        max_model_len=4096,
-        disable_log_stats=False,
-        tensor_parallel_size=1,
-        max_num_seqs=MAX_NUM_SEQS,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
+    _run_speculative_decoding(
+        model_name=main_model_name,
         speculative_config=speculative_config,
-        compilation_config=compilation_config,
-        enable_prefix_caching=False,
-    ) as llm:
-        outputs = llm.model.generate(prompts, sampling_params)
-        metrics = llm.model.get_metrics()
-
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        output_tokens = output.outputs[0].token_ids
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        print(f"Output tokens: {output_tokens}")
-
-    acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
-    golden = BASELINES[method][:num_speculative_tokens]
-
-    assert len(acceptance_per_pos) == num_speculative_tokens
-    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden, strict=True))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+        expected_acceptance_length=EXPECTED_ACCEPTANCE_LENGTH_STATIC,
+        runner_kwargs={
+            "max_model_len": 4096,
+            "tensor_parallel_size": 1,
+            "distributed_executor_backend": "mp",
+            "gpu_memory_utilization": 0.8,
+            "compilation_config": CompilationConfig(
+                cudagraph_mode=cudagraph_mode,
+                cudagraph_capture_sizes=capture_sizes,
+            ),
+            "enable_prefix_caching": False,
+        },
+        example_prompts=SPEC_DECODE_PROMPTS,
+        max_tokens=256,
+        is_moe=False,
+        enable_thinking=False,
+    )

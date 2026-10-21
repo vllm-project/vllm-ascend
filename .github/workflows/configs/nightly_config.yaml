@@ -358,3 +358,11 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
+      - name: Gemma4_26B_A4B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_26B_A4B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma
+      - name: Gemma4_31B_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Gemma4_31B_W4A4_A5.yaml
+        config_base_path: tests/e2e/cases/models/configs/Gemma

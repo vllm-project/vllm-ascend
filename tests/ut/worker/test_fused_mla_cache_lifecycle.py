@@ -8,7 +8,8 @@ import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 MANAGER_BLOCK_SIZE = 384
 KERNEL_BLOCK_SIZE = 128

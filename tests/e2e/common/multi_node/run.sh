@@ -144,6 +144,63 @@ check_and_config() {
     pip config set global.timeout 120
 }
 
+install_extra_components() {
+    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
+
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
+    fi
+    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+
+    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
+    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    echo "====> Extra components installation completed"
+}
+
+checkout_and_install_vllm() {
+    echo "====> Checkout and install vllm from ref: ${VLLM_REF}"
+    # The nightly image ships an editable vllm checkout at /vllm-workspace/vllm.
+    # Fetch the requested ref into it and refresh the editable install.
+    # Mirrors tools/bisect/version_compat.py (_switch_vllm).
+    cd "$WORKSPACE/vllm" || {
+        echo "ERROR: $WORKSPACE/vllm not found in image, cannot override vllm ref"
+        return 1
+    }
+    git remote add origin https://github.com/vllm-project/vllm.git 2>/dev/null || \
+        git remote set-url origin https://github.com/vllm-project/vllm.git
+    # Fetch the tag ref itself when the ref names a tag: a plain
+    # "git fetch origin <tag>" only fetches the commit object and leaves
+    # no local tag ref, so vllm's setuptools_scm falls back to a wrong
+    # 0.1.dev1+g<sha> version instead of the release version.
+    if ! git fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
+        if ! git fetch --depth 1 origin "$VLLM_REF"; then
+            git fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
+                { echo "ERROR: cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; return 1; }
+        fi
+    fi
+    git checkout -f FETCH_HEAD
+    VLLM_TARGET_DEVICE=empty pip install -e . --no-input --disable-pip-version-check
+    # setuptools_scm falls back to 0.1.dev1+g<sha> when the ref carries no tag
+    # information (bare SHA / branch); surface it instead of silently
+    # misrouting every vllm_version_is() check in vllm-ascend.
+    local installed_vllm_version
+    installed_vllm_version=$(pip show vllm 2>/dev/null | sed -n 's/^Version: //p')
+    if [[ "$installed_vllm_version" == 0.1.dev* ]]; then
+        echo "WARNING: vllm version fell back to '$installed_vllm_version': ref '$VLLM_REF' carries no tag info. Version-gated code paths in vllm-ascend may misbehave; prefer a release tag for reliable results."
+    fi
+}
 checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
@@ -221,6 +278,16 @@ run_tests_with_log() {
     pytest -sv --show-capture=no "$MULTI_NODE_TEST_PATH" 2>&1 | tee "$log_file"
     ret=$?
     echo "pytest exit code: ret=${ret}"
+    # Save every AISBench experiment before AOP can rerun tests or pods are deleted.
+    # Each test pod has its own checkout; the destination belongs to this run.
+    local outputs_ret=0
+    if [ -d outputs ]; then
+        local outputs_dest="${LOG_PREFIX}/aisbench_outputs/node-${LWS_WORKER_INDEX:-0}"
+        if ! mkdir -p "$outputs_dest" || ! cp -a outputs/. "$outputs_dest/"; then
+            echo "::error::Failed to preserve AISBench outputs at $outputs_dest"
+            outputs_ret=1
+        fi
+    fi
     set -e
     if [ "${LWS_WORKER_INDEX:-}" = "0" ]; then
         if [ $ret -eq 0 ]; then
@@ -301,6 +368,9 @@ run_tests_with_log() {
         else
             echo "Worker: leader finished successfully, exiting"
         fi
+    fi
+    if [ "$outputs_ret" -ne 0 ]; then
+        print_failure "Failed to preserve AISBench outputs"
     fi
 }
 
@@ -553,6 +623,9 @@ main() {
     check_npu_info
     clear_logs
     check_and_config
+    if [ -n "${VLLM_REF:-}" ]; then
+        checkout_and_install_vllm
+    fi
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
         install_vllm_ascend

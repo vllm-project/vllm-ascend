@@ -1,0 +1,7 @@
+pr: 19164
+entries:
+  - category: bugfix
+    text: >-
+      Fixed packed weight-transfer storage ownership, mixed-dtype alignment,
+      HCCL ordering, and asynchronous cleanup on Ascend. Invalid tensor layouts
+      and transfer metadata now fail explicitly instead of silently corrupting weights.

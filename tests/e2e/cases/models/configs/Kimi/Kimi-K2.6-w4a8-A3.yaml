@@ -68,3 +68,12 @@ test_cases:
         request_rate: 0
         baseline: 1279.0642
         threshold: 0.97
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 1500
+        batch_size: 32
+        baseline: [0.79, 0.61, 0.47, 0.36, 0.29, 0.23, 0.18]
+        threshold: 0.05

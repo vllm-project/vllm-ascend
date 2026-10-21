@@ -2876,7 +2876,8 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         fake_cache.shape = [100, 16, 4, 64]
         fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
         fake_cache.element_size.return_value = 2
-        fake_cache.stride.return_value = 16 * 4 * 64
+        strides = (16 * 4 * 64, 4 * 64, 64, 1)
+        fake_cache.stride.side_effect = lambda dim=None: strides if dim is None else strides[dim]
         fake_cache.data_ptr.return_value = 10000
         fake_cache.untyped_storage.return_value.data_ptr.return_value = 10000
         worker._transfer_threads_started = True

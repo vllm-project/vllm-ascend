@@ -478,6 +478,21 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_force_eplb_logs_production_warning(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_force_eplb": True}
+        with patch("vllm_ascend.ascend_config.logger") as mock_logger:
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_force_eplb)
+        warnings = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("must not be used in production" in message for message in warnings),
+            f"expected a production warning, got {warnings}",
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
         # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
         # out-of-range values are invalid on main.
@@ -1597,6 +1612,33 @@ class TestTopLevelSwitchTypeValidation(TestBase):
                 clear_enable_sp()
 
         return wrapper
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"})
+    def test_kv_pool_range_debug_defaults_off_without_env_fallback(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {}
+        self.assertIs(init_ascend_config(vc).kv_pool_range_debug, False)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kv_pool_range_debug_additional_config_is_typed(self, mock_fix):
+        for value, expected in ((True, True), (False, False), ("false", False), ("0", False), (1, True)):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"kv_pool_range_debug": value}
+                self.assertIs(init_ascend_config(vc).kv_pool_range_debug, expected)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kv_pool_range_debug_rejects_invalid_values(self, mock_fix):
+        for value in (2, "invalid", None):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"kv_pool_range_debug": value}
+                with self.assertRaises(ValueError):
+                    init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

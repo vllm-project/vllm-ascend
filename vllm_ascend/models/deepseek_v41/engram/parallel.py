@@ -14,11 +14,24 @@ from vllm.forward_context import get_forward_context
 
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import DEAD_ID
-from vllm.models.deepseek_v41.nvidia.engram import (
-    engram_head_shard_rank as engram_head_shard_rank,
+
+from vllm_ascend.utils import (
+    get_potential_max_tokens,
+    is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
-from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_scheduler_enabled
+# Upstream #59327 moved `engram_head_shard_rank` from `nvidia.engram` into
+# `common.engram` on main; the release lane (v0.31.0) still ships it under
+# `nvidia.engram`.
+if vllm_version_is("0.31.0"):
+    from vllm.models.deepseek_v41.nvidia.engram import (  # type: ignore[import-not-found]
+        engram_head_shard_rank as engram_head_shard_rank,
+    )
+else:
+    from vllm.models.deepseek_v41.common.engram import (
+        engram_head_shard_rank as engram_head_shard_rank,
+    )
 
 
 def resolve_dp_shared_memory(requested: bool) -> bool:

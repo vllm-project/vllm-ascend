@@ -28,7 +28,6 @@ from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -412,12 +411,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
