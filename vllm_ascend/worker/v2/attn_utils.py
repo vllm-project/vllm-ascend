@@ -69,9 +69,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
-    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -408,6 +406,7 @@ def build_attn_metadata(
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
+    common_metadata_callback=None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -539,6 +538,8 @@ def build_attn_metadata(
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             **common_attn_metadata_extra_kwargs,
         )
+        if common_metadata_callback is not None:
+            common_metadata_callback(i, common_attn_metadata)
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
@@ -957,6 +958,19 @@ def _uses_single_raw_mla_cache(
     attn_module = attn_layers.get(layer_name)
     if attn_module is None:
         return False
+    if not isinstance(attn_module, MLAAttention):
+        return False
+    if getattr(attn_module, "indexer", None) is not None:
+        return False
+    impl = getattr(attn_module, "impl", None)
+    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+        # PCP gathers and sharded-decode writes still use the legacy
+        # preprocessing contract. Keep their allocation compatible with it.
+        return False
+    if getattr(impl, "use_flashmla", False):
+        # The external reader retains its fused-cache contract, including
+        # DCP. Native FIA continues to follow the dependency's exclusions.
+        return True
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 
@@ -1678,15 +1692,9 @@ def _reshape_kv_cache_v2(
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
 
-                if (
-                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                    and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                    and get_flashmla_ops() is not None
-                    # The outer eligibility check admits only supported PD,
-                    # which requires component-major pages at both endpoints.
-                    and vllm_config.kv_transfer_config is None
-                ):
-                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if attn_impl.use_flashmla:
+                    # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(
                         single_raw_mla_cache,
@@ -1697,7 +1705,7 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each component internally contiguous and puts
+                # FIA keeps each component internally contiguous and puts
                 # the hybrid-page padding only in the leading block stride.
                 kv_caches[layer_name] = _reshape_combined_mla_kv_cache(
                     single_raw_mla_cache,

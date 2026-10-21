@@ -45,6 +45,9 @@ msgstr ""
 msgid "### Quick Reference"
 msgstr "### 快速参考"
 
+msgid "| `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` | `kv_pool_range_debug` | `\"1\"` → `true`, `\"0\"` → `false` |"
+msgstr "| `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` | `kv_pool_range_debug` | `\"1\"` → `true`, `\"0\"` → `false` |"
+
 msgid "## How to use"
 msgstr "## 使用方法"
 
@@ -61,6 +64,13 @@ msgstr "**离线模式**："
 
 msgid "### Configuration options"
 msgstr "### 配置选项"
+
+msgid ""
+"| `kv_pool_range_debug`               | bool | `false` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. "
+"Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |"
+msgstr ""
+"| `kv_pool_range_debug`               | bool | `false` | 输出 KV pool whole-key 操作、逐层 range 和 commit 的 JSON 审计日志。"
+"使用此配置替代旧的 `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` 环境变量；正常运行时请保持禁用，以避免逐层日志开销。 |"
 
 msgid ""
 "The following table lists additional configuration options available in vLLM"

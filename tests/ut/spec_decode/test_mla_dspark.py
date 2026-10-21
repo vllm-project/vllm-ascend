@@ -19,6 +19,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
@@ -73,7 +74,9 @@ def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
         )
     monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
-    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+    assert spec.propose(batch, *[None for _ in range(10)], **{dp_sync_kwarg: target_sync}) == "draft"
 
 
 def make_target():

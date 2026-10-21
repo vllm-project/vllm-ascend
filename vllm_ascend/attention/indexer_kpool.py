@@ -3,6 +3,7 @@
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
 from dataclasses import dataclass
+from functools import partial
 from importlib import import_module
 from typing import Any
 
@@ -28,7 +29,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
-from vllm_ascend.utils import _round_up, enable_dsa_cp
+from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -312,6 +313,12 @@ class AscendIndexerKPoolBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
@@ -455,6 +462,12 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -621,7 +634,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             self._prepare_keypool_state = adapters.prepare_keypool_state
             self._write_keypool_caches = fused.write_keypool_caches
             self._key_pool = torch.ops.cann_ops_transformer.key_pool
-            self._pool_key_indexer = torch.ops.cann_ops_transformer.pool_key_indexer
+            self._pool_key_indexer = partial(
+                adapters.pool_key_indexer_nonempty,
+                torch.ops.cann_ops_transformer.pool_key_indexer,
+            )
         except (ImportError, AttributeError) as exc:
             raise RuntimeError(
                 "GLM-5.3-Flash KPool requires cann_ops_transformer with key_pool and pool_key_indexer, "

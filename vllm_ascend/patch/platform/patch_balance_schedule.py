@@ -789,7 +789,7 @@ class BalanceScheduler(Scheduler):
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
-        # connector before building its metadata. (vLLM main/v0.30.0)
+        # connector before building its metadata. (vLLM main/v0.31.0)
         kv_connector_block_state = None
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
         if self.connector is not None:

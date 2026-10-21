@@ -353,6 +353,25 @@ vllm serve Qwen/Qwen3-235B-A22B \
   }'
 ```
 
+## Performance Ceiling Analysis (`enable_force_eplb`)
+
+`enable_force_eplb` is an analysis-only switch that forces a deterministic
+round-robin expert routing instead of the real MoE router output. It gives every
+expert-parallel rank a synthetic, perfectly balanced token distribution, so you can
+measure the performance upper bound (ceiling) of the expert-parallel / EPLB path
+under ideal load balance.
+
+!!!WARNING
+
+    `enable_force_eplb` replaces the real routing result, so model results and
+    **accuracy are invalid**. It is **not for production** and must not be used for
+    correctness or accuracy validation.
+
+- Enable it through `additional_config`: `--additional-config '{"enable_force_eplb": true}'`.
+- It requires expert parallelism and a MoE model; `num_logical_experts` must be divisible by the expert-parallel size.
+- It cannot be combined with `eplb_config.dynamic_eplb`.
+- See [`enable_force_eplb`](../configuration/additional_config.md) for the full parameter reference.
+
 ## Critical Considerations
 
 1. Parameter Tuning:
