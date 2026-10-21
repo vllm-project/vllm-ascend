@@ -78,7 +78,7 @@ def test_flashmla_selection_requires_operator_and_supported_mla_config(monkeypat
         fa_quant_layer=False,
         dtype=torch.bfloat16,
         enable_kv_nz=False,
-        pcp_enabled=False,
+        use_pcp=False,
     )
     monkeypatch.setattr(
         mla_v1,

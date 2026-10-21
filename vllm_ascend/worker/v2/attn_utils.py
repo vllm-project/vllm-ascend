@@ -967,7 +967,7 @@ def _uses_single_raw_mla_cache(
     if getattr(attn_module, "indexer", None) is not None:
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         # PCP gathers and sharded-decode writes still use the legacy
         # preprocessing contract. Keep their allocation compatible with it.
         return False

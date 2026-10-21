@@ -1055,7 +1055,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # History sees all Q heads in the DCP group; current uses local heads.
-        if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
             return False
@@ -1907,8 +1907,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and input_size not in PROLOG_V3_SUPPORTED_INPUT_SIZES
             and self.support_fp8_attention
             and self.is_draft_model
-            and not self.pcp_enabled
-            and not self.dcp_enabled
+            and not self.use_pcp
+            and not self.use_dcp
             and self.num_kv_heads == 1
             and self._supports_strided_mla_projection()
         )
