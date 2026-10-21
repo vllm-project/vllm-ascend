@@ -30,7 +30,7 @@ class TestBulkFullBlocks(unittest.TestCase):
             {0: [ctypes.addressof(self.attention)], 1: [ctypes.addressof(self.state)]},
             {0: [896], 1: [73]},
         )
-        self.objects = {}
+        self.objects: dict[str, bytes] = {}
         self.store = MagicMock()
         self.store.requires_exists_before_put = True
         self.store.exists.side_effect = lambda keys: [int(key in self.objects) for key in keys]

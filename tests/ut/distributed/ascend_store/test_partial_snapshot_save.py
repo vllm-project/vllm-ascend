@@ -176,7 +176,7 @@ class TestPartialSnapshotSave(unittest.TestCase):
                     meta = AscendConnectorMetadata(set())
                     meta.add_request(self.fixture.request(1921))
                     event = MagicMock()
-                    order = []
+                    order: list[str] = []
                     event.record.side_effect = lambda order=order: order.append("record")
                     event.synchronize.side_effect = lambda order=order: order.append("synchronize")
 
