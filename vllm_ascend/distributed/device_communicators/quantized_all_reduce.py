@@ -37,8 +37,33 @@ Measured on 4x Atlas 910B3 (TP=4, hidden=2048, 16k-token prefill batches):
   - e2e TTFT: -25%, throughput: +4.5%
   - accuracy: GPQA-diamond 70.7% vs 69.7% baseline (within noise)
 
-Enable with VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1, tune the activation
-threshold with VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL.
+Enable with VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1.
+
+VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL (optional, unit: elements):
+  An all-reduce takes the quantized path only when its tensor holds at
+  least this many elements. The tensor is the hidden state of the whole
+  batch, so numel == num_tokens * hidden_size, and the default
+  (4 * 1024 * 1024 // 2 = 2,097,152 elements == 4 MiB of bf16 payload)
+  maps to the following token count:
+
+      min_tokens = min_numel / hidden_size = 2,097,152 / hidden_size
+
+      hidden_size   tokens to trigger the int8 path
+      1024          2048
+      2048          1024   (e.g. Qwen3.6-35B-A3B: 1k-token prefill)
+      4096           512
+      8192           256
+
+  Notes:
+  - For a single-sequence prefill, num_tokens == sequence length; for
+    batched requests it is the summed token count of the batch, so
+    several short prompts together can still exceed the threshold.
+  - Decode steps usually have num_tokens == batch size (a few to a few
+    hundred, far below the threshold) and keep the plain bf16 path by
+    design: small messages are latency-bound and cannot amortize the
+    extra per-channel scale sync.
+  - Lower the value to quantize smaller messages, or raise it to leave
+    only the very large prefill collectives on the int8 path.
 """
 
 import os
@@ -104,7 +129,11 @@ class QuantizedAllReduce:
         self.max_q = 127 // self.world_size
         # Messages smaller than this stay on the bf16 path: they are
         # latency-bound, and the extra scale sync would cost more than the
-        # halved transfer saves. Default 4 MiB of bf16 elements.
+        # halved transfer saves. Default 4 MiB of bf16 payload, i.e.
+        # 2,097,152 elements. The all-reduce tensor is the batch hidden
+        # state (numel == num_tokens * hidden_size), so this maps to
+        # min_tokens = 2,097,152 / hidden_size (2048 -> 1024, 4096 -> 512,
+        # 8192 -> 256); see the module docstring for the full table.
         self.min_numel = _env_int(
             "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 4 * 1024 * 1024 // 2
         )
