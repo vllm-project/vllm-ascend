@@ -861,8 +861,10 @@ class ProfilingChunkScheduler(Scheduler):
                     num_new_tokens = self._reserve_prefill_lookahead(request, num_computed_tokens, num_new_tokens)
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
+                        skip_request(request_queue)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid

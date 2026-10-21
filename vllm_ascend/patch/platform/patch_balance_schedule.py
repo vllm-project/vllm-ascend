@@ -589,8 +589,10 @@ class BalanceScheduler(Scheduler):
                             shift_computed_tokens=1 if self.use_eagle else 0,
                         )
                         if num_new_tokens == 0:
-                            # The request cannot be scheduled.
-                            break
+                            # The request cannot be scheduled. Requeue it so
+                            # it does not stall the requests behind it.
+                            _skip_request(request_queue)
+                            continue
 
                 # Skip block alignment when setting up async receive (no local work).
                 if self.need_mamba_block_aligned_split and not load_kv_async:

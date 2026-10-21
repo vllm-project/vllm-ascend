@@ -26,11 +26,11 @@ What is guarded here (everything reachable from CPU UT):
   still exist;
 * the Mamba-aligned waiting path can schedule a request through the real
   upstream helper without an argument mismatch;
-* the 3 balance deltas remain present in ``schedule()`` (intent lock);
+* the 4 balance deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
   at vllm-ascend's pinned vLLM release tag (read from
   ``.github/vllm-release-tag.commit`` -- the same file CI uses), modulo exactly
-  those 3 deltas. Reading the tag from the pin file means a pin advance
+  those 4 deltas. Reading the tag from the pin file means a pin advance
   auto-flips this guard to the new tag until the copy is re-synced.
 
 What is NOT guarded here (structurally unreachable without a real engine):
@@ -60,6 +60,7 @@ import torch
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
 from vllm.model_executor.models import ModelRegistry
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
@@ -345,14 +346,27 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
 # ---------------------------------------------------------------------------
 
 
+def _is_zero_token_branch(stmt: ast.stmt) -> bool:
+    """The ``if num_new_tokens == 0:`` branch inside ``has_encoder_inputs``:
+    a plain ``break`` in upstream, ``_skip_request`` + ``continue`` in our
+    copy (delta 4)."""
+    if not isinstance(stmt, ast.If):
+        return False
+    test = ast.dump(stmt.test)
+    if "num_new_tokens" not in test or "Eq" not in test:
+        return False
+    body = ast.dump(ast.Module(body=stmt.body, type_ignores=[]))
+    return "Break" in body or ("skip_request" in body and "Continue" in body)
+
+
 def _schedule_body_ast(source: str) -> str:
-    """Canonical AST dump of a ``schedule`` method body with the 3 balance
+    """Canonical AST dump of a ``schedule`` method body with the 4 balance
     deltas stripped, so the remainder can be compared verbatim against the
     pinned release tag's ``schedule()``. AST-based on purpose: it is blind to
     comments and whitespace, so the only differences that surface are real code
     drift (not the escape-quoting of a comment or reformatting).
 
-    The 3 deltas removed:
+    The 4 deltas removed:
       * delta 1 -- the disabled-path early return (``if not
         self._balance_enabled: ... super().schedule(...)``);
       * delta 2 -- the ``balance_flag`` gate (``max(t.item() for t in
@@ -361,6 +375,11 @@ def _schedule_body_ast(source: str) -> str:
         copy as ``if request_queue is None: break`` and in upstream as
         ``assert request_queue is not None``. Both are stripped so the two
         bodies align.
+      * delta 4 -- the encoder-stall requeue (upstream vllm#59030): the
+        ``if num_new_tokens == 0:`` branch inside
+        ``if request.has_encoder_inputs:`` ends the pass with ``break``
+        upstream, while our copy requeues via ``_skip_request`` +
+        ``continue``. Both are stripped so the two bodies align.
     """
     tree = ast.parse(textwrap.dedent(source))
     func = next(
@@ -381,6 +400,9 @@ def _schedule_body_ast(source: str) -> str:
             # delta 3 (ours): if request_queue is None: break.
             if "request_queue" in test and "None" in test and "Is" in test:
                 return None
+            # delta 4: the encoder-stall branch inside has_encoder_inputs.
+            if "has_encoder_inputs" in test:
+                node.body = [stmt for stmt in node.body if not _is_zero_token_branch(stmt)]
             return self.generic_visit(node)
 
         def visit_Assert(self, node: ast.Assert):  # noqa: N802
@@ -457,13 +479,13 @@ def test_schedule_signature_matches_installed_vllm():
 
 
 # ---------------------------------------------------------------------------
-# 1b. the 3 balance deltas remain present in schedule() (intent lock)
+# 1b. the 4 balance deltas remain present in schedule() (intent lock)
 # ---------------------------------------------------------------------------
 
 
 def test_balance_deltas_present_in_schedule():
     """The whole point of copying schedule() is to inject the balance logic.
-    If a future re-sync against the pinned tag drops any of the 3 deltas,
+    If a future re-sync against the pinned tag drops any of the 4 deltas,
     balance silently stops working -- this locks their presence in the source."""
     src = inspect.getsource(BalanceScheduler.schedule)
 
@@ -478,6 +500,22 @@ def test_balance_deltas_present_in_schedule():
     # The shared queue path must stop before peeking an empty request queue.
     assert "if not request_queue:" in src
 
+    # delta 4 (upstream vllm#59030): the encoder-stall branch requeues the
+    # request via _skip_request + continue instead of ending the pass with
+    # break. Locked via AST: an If inside has_encoder_inputs whose body is
+    # a _skip_request call followed by a continue.
+    func = ast.parse(textwrap.dedent(src)).body[0]
+    requeue = any(
+        isinstance(stmt, ast.If)
+        and "num_new_tokens" in ast.dump(stmt.test)
+        and "skip_request" in ast.dump(ast.Module(body=stmt.body, type_ignores=[]))
+        and "Continue" in ast.dump(ast.Module(body=stmt.body, type_ignores=[]))
+        for node in ast.walk(func)
+        if isinstance(node, ast.If) and "has_encoder_inputs" in ast.dump(node.test)
+        for stmt in node.body
+    )
+    assert requeue
+
 
 # ---------------------------------------------------------------------------
 # 1c. copied schedule() body stays verbatim with the pinned release tag
@@ -487,7 +525,7 @@ def test_balance_deltas_present_in_schedule():
 def test_schedule_body_matches_pinned_release_tag():
     """The copied ``schedule()`` body must stay a verbatim copy of the
     ``schedule()`` at vllm-ascend's pinned vLLM release tag, modulo exactly the
-    3 balance deltas.
+    4 balance deltas.
 
     The tag is read dynamically from ``.github/vllm-release-tag.commit`` -- the
     same file CI uses to pick the tag, NOT a hardcoded string or a design doc
@@ -498,7 +536,7 @@ def test_schedule_body_matches_pinned_release_tag():
     repo, git not on PATH, or the test run outside the vllm-ascend tree.
     Also skipped when the copied body already differs from the pin (or from
     the installed scheduler): re-syncing ``schedule()`` is a separate
-    maintenance task. The 3 balance deltas are locked by
+    maintenance task. The 4 balance deltas are locked by
     ``test_balance_deltas_present_in_schedule``."""
     ref = _pinned_release_schedule_source()
     if ref is None:
@@ -516,8 +554,8 @@ def test_schedule_body_matches_pinned_release_tag():
     if ours != theirs or installed != theirs:
         pytest.skip(
             f"BalanceScheduler.schedule is not a verbatim {tag} copy modulo "
-            "the 3 balance deltas (or installed vLLM already differs from "
-            "the pin). Re-sync is a separate maintenance task; the 3 deltas "
+            "the 4 balance deltas (or installed vLLM already differs from "
+            "the pin). Re-sync is a separate maintenance task; the 4 deltas "
             "are locked by test_balance_deltas_present_in_schedule."
         )
 
@@ -843,6 +881,64 @@ def test_balance_schedule_drained_waiting_queues(holds_kv_blocks):
     assert list(scheduler.kv_holding_waiting) == ([request] if holds_kv_blocks else [])
     assert list(scheduler.waiting) == ([] if holds_kv_blocks else [request])
     assert request in scheduler.deferred_waiting
+
+
+def _encoder_stalled_request(request, offset: int = 0, length: int = 50):
+    """Give the request a placeholder that cannot fit the encoder cache when
+    the encoder budget is 0 (the upstream vllm#59030 scenario)."""
+    request.mm_features = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier=f"stalled-mm-{request.request_id}",
+            mm_position=PlaceholderRange(offset=offset, length=length),
+        )
+    ]
+    return request
+
+
+def test_balance_waiting_encoder_stall_does_not_starve_later_requests():
+    """Upstream vllm#59030: an encoder-stalled waiting request must be
+    requeued instead of ending the pass and starving requests behind it."""
+    scheduler = _make_balance_scheduler()
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled, ready = _create_requests(2, num_tokens=100, max_tokens=8)
+    _encoder_stalled_request(stalled)
+    scheduler.add_request(stalled)
+    scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert ready.request_id in output.num_scheduled_tokens
+    # The stall must requeue via _skip_request: the request is accounted as
+    # deferred waiting and restored at the head of the waiting queue.
+    assert stalled in scheduler.deferred_waiting
+    assert list(scheduler.waiting) == [stalled]
+
+
+def test_balance_waiting_encoder_stall_is_counted_as_deferred():
+    scheduler = _make_balance_scheduler()
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled = _encoder_stalled_request(_create_requests(1, num_tokens=100, max_tokens=8)[0])
+    scheduler.add_request(stalled)
+
+    scheduler.schedule()
+
+    assert stalled in scheduler.deferred_waiting
+
+
+def test_balance_waiting_encoder_stall_kv_holder_keeps_drain_priority():
+    """A stalled request holding KV blocks must stay on the drain-first queue."""
+    scheduler = _make_balance_scheduler()
+    scheduler.max_num_encoder_input_tokens = 0
+    stalled = _encoder_stalled_request(_create_requests(1, num_tokens=100, max_tokens=8)[0])
+    stalled.num_computed_tokens = 10
+    scheduler.add_request(stalled)
+
+    scheduler.schedule()
+
+    assert stalled in scheduler.kv_holding_waiting
 
 
 def test_balance_schedule_pause_freeze_and_v2():
