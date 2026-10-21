@@ -784,7 +784,6 @@ Before you start, please:
         '{"kv_connector": "MooncakeHybridConnector",
         "kv_role": "kv_producer",
         "kv_port": "30200",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -863,7 +862,6 @@ Before you start, please:
         '{"kv_connector": "MooncakeHybridConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30800",
-        "engine_id": "8",
         "kv_connector_extra_config": {
                     "prefill": {
                             "dp_size": 2,
@@ -955,7 +953,6 @@ Before you start, please:
         '{"kv_connector":"MooncakeHybridConnector",
           "kv_role":"kv_producer",
           "kv_port":"30100",
-          "engine_id":"1",
           "kv_connector_extra_config":{
               "prefill":{"dp_size":4,"tp_size":8},
               "decode":{"dp_size":16,"tp_size":2}
@@ -1028,7 +1025,6 @@ Before you start, please:
         '{"kv_connector":"MooncakeHybridConnector",
           "kv_role":"kv_consumer",
           "kv_port":"30800",
-          "engine_id":"8",
           "kv_connector_extra_config":{
               "prefill":{"dp_size":4,"tp_size":8},
               "decode":{"dp_size":16,"tp_size":2}
@@ -1228,7 +1224,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                     "prefill": {
                         "dp_size": 4,
@@ -1305,7 +1300,6 @@ Before you start, please:
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
-            "engine_id": "1",
             "kv_connector_extra_config": {
                     "prefill": {
                         "dp_size": 4,
@@ -1477,7 +1471,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 | Long Context (~1M Input, Reference) | Prefill Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 4096 | 1048576 | 5 | Off | On | On / Off |
 | Long Context (~1M Input, Reference) | Decode Pool | 32 (2 A3 nodes) | 16 | 2 | 2 | 16 | 1048576 | 5 | Off | On | Off / Off |
 
-> `FC / DSA-CP Switch` reports the FlashComm1 and DSA context-parallel switches respectively. For the long-context Prefill configuration, set `"enable_flashcomm1": true` and `"enable_dsa_cp": false` in `--additional-config`. On Decode, configure recomputation as `"scheduler_config": {"recompute_scheduler_enable": true}`. Keep the role-specific `--kv-transfer-config` as the final argument, using `"kv_port": "30100"` and `"engine_id": "1"` for Prefill, and `"kv_port": "30800"` and `"engine_id": "8"` for Decode.
+> `FC / DSA-CP Switch` reports the FlashComm1 and DSA context-parallel switches respectively. For the long-context Prefill configuration, set `"enable_flashcomm1": true` and `"enable_dsa_cp": false` in `--additional-config`. On Decode, configure recomputation as `"scheduler_config": {"recompute_scheduler_enable": true}`. Keep the role-specific `--kv-transfer-config` as the final argument, using `"kv_port": "30100"` for Prefill, and `"kv_port": "30800"` for Decode.
 >
 > FUSED_MC2 is disabled in the long-context reference configuration because it increases memory usage. If sufficient memory is available and higher performance is the priority, enabling FUSED_MC2 on Prefill is recommended.
 >
