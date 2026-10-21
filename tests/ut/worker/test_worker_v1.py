@@ -35,9 +35,9 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
         pp_group.return_value.is_first_rank = False
         pp_group.return_value.is_last_rank = False
         pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
-        for sp_enabled in (False, True):
+        for sp_enabled, use_v2 in ((False, False), (True, False), (False, True), (True, True)):
             for forward_pass in (False, True):
-                with self.subTest(sp=sp_enabled, forward=forward_pass):
+                with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
                     pp_group.return_value.reset_mock()
                     worker = NPUWorker.__new__(NPUWorker)
                     worker.vllm_config = SimpleNamespace(
@@ -49,7 +49,7 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     worker.log_memory_stats = MagicMock()
                     worker._pp_send_work = []
                     worker.profiler = None
-                    worker.use_v2_model_runner = False
+                    worker.use_v2_model_runner = use_v2
                     output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
                     output.kv_connector_output = None
                     worker.model_runner = MagicMock()
@@ -58,7 +58,7 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
 
                     self.assertIsNone(worker.execute_model(scheduler_output))
 
-                    group = None if sp_enabled else tp_group.return_value
+                    group = None if use_v2 and sp_enabled else tp_group.return_value
                     if forward_pass:
                         pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
                     else:

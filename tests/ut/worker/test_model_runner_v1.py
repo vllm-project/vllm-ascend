@@ -63,20 +63,44 @@ from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
 class TestPPSequenceParallelLayout(unittest.TestCase):
+    def test_profile_allocates_full_pp_buffers(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=16, pipeline_parallel_size=2, use_sequence_parallel_moe=True
+            )
+        )
+        runner.max_num_tokens = 16384
+        runner.dtype = torch.float32
+        runner.device = torch.device("cpu")
+        runner.intermediate_tensors = None
+        factory = MagicMock(
+            side_effect=lambda batch_size, dtype, device: IntermediateTensors(
+                {"hidden_states": torch.zeros(batch_size, 4, dtype=dtype, device=device)}
+            )
+        )
+        runner.model = SimpleNamespace(make_empty_intermediate_tensors=factory)
+        for num_tokens in (17, runner.max_num_tokens):
+            dummy = runner._get_pp_intermediate_tensors(num_tokens)
+            self.assertEqual(dummy["hidden_states"].shape, (num_tokens, 4))
+            self.assertEqual(runner.intermediate_tensors["hidden_states"].shape, (runner.max_num_tokens, 4))
+        factory.assert_called_once_with(batch_size=runner.max_num_tokens, dtype=runner.dtype, device=runner.device)
+
     @patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("No current config"))
-    def test_sync_and_slice_without_current_config(self, _current_config):
+    def test_full_pp_buffers_with_global_sp_enabled(self, _current_config):
         max_tokens = 16384
         tp_size = 16
         for sp_enabled in (False, True):
-            capacity = max_tokens // tp_size if sp_enabled else max_tokens
+            capacity = max_tokens
             for num_tokens in (1, 17, max_tokens):
-                rows = (num_tokens + tp_size - 1) // tp_size if sp_enabled else num_tokens
+                rows = num_tokens
                 for sync_self in (False, True):
                     with self.subTest(sp=sp_enabled, tokens=num_tokens, sync=sync_self):
                         runner = NPUModelRunner.__new__(NPUModelRunner)
                         runner.vllm_config = SimpleNamespace(
                             parallel_config=SimpleNamespace(
                                 tensor_parallel_size=tp_size,
+                                pipeline_parallel_size=2,
                                 use_sequence_parallel_moe=sp_enabled,
                             )
                         )

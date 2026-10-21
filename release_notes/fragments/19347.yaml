@@ -1,4 +1,4 @@
 pr: 19347
 entries:
   - category: bugfix
-    text: Fixed a Model Runner V1 pipeline-parallel intermediate-tensor shape mismatch when sequence parallelism is enabled and no current vLLM configuration context is active.
+    text: Fixed Model Runner V1 pipeline-parallel buffer sizing and token truncation when internal MoE sequence parallelism is enabled but PP intermediates use the full token layout.
