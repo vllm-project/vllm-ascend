@@ -517,11 +517,27 @@ options.
 - **`draft_window_size`** (int, optional): the number of most recent tokens
   the draft attention can read. Omit the key (or remove it) to disable the
   window. Typical values are 512-4096; the window is block-aligned internally,
-  so any positive value works.
-- Works on the default model runner (MRV1). Not yet supported under
-  `VLLM_USE_V2_MODEL_RUNNER=1`.
+  so the readable extent can include up to one additional partial block.
+  MRV2 Eagle3 additionally requires `draft_window_size >= 2 * K + 1`, where
+  `K` is the static number of speculative tokens, to cover first-pass queries
+  and the frozen proposal horizon through rejection.
+- MRV2 requires an eager draft (`speculative_config.enforce_eager=true`).
+  The target retains its configured graph mode. Draft Window graph execution
+  is not implemented. Actual draft backend and KV-group compatibility are
+  checked after attention setup; unsupported read layouts fail explicitly.
 - For `mtp` the window is ignored (force-disabled): MTP reuses the target
   model's own layers, so windowing it would change the target's computation.
+- MRV2 also force-disables the window for the dedicated built-in DeepSeek V4
+  DSpark model category. DSpark itself remains enabled. Other recognized draft
+  categories follow their own window setting and consumer capability checks.
+- MRV2 supports static Eagle3, DFlash, and eligible DSpark methods. Plain
+  Eagle, dynamic speculative length, and DFlash2 window providers are not
+  implemented. Continuing prefill chunks retain full reads. Eagle3 also keeps
+  full reads for its first prefill pass before applying its frozen window to
+  subsequent autoregressive steps.
+
+See the [MRV2 design](../../developer_guide/Design_Documents/speculative_kv_sliding_window.md#mrv2-implementation)
+for read ownership, backend boundaries, and current synchronization costs.
 
 ### When to enable it
 

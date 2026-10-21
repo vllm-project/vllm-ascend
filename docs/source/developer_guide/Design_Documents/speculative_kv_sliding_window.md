@@ -86,33 +86,122 @@ There are two apply points because of how the drafts construct metadata:
   and before `builder.build_for_drafting`, so FIA reads the windowed clone of
   the per-group table instead of the full one.
 
-## MRV2 status
+## MRV2 implementation
 
-Model Runner V2 is not yet covered by this feature. The MRV2 speculator
-system bakes `seq_lens` / block tables into the final per-layer metadata
-inside `build_attn_metadata` - there is no shared `common_attn_metadata` to
-mutate after the build, so porting the window requires applying it to the
-**builder inputs** (windowed `input_buffers.seq_lens`, gathered per-group
-block-table clones, capped `seq_lens_cpu_upper_bound`) around the
-`_build_draft_attn_metadata` call in
-`vllm_ascend/worker/v2/spec_decode/dspark/speculator.py`. The window math
-and the two invariants above carry over unchanged.
+MRV2 applies the window to fresh, per-group common metadata through the
+existing `build_attn_metadata` callback, immediately before the actual backend
+builder. It never temporarily replaces `input_buffers.seq_lens` or the
+canonical Full tables. The factory resolves CONFIG_OFF and forced-OFF before
+allocating any window runtime. The dedicated built-in DeepSeek V4 DSpark
+category is identified from normalized model configuration, including Ascend's
+V4.1 architecture normalization. This disables only the window; the original
+speculative method is still constructed.
 
-## Expected behavior
+### Canonical reads and method phases
 
-- Drafts trained on short contexts that collapse on long inputs (acceptance
-  dropping with context length): the window restores acceptance up to the
-  draft's short-context level. The gain grows with input length.
-- Drafts already stable at long context (recently trained drafts, or drafts
-  with their own SWA structure): the window provides no benefit and can hurt
-  if set **below** the draft's training window - the draft expects to see
-  more context than the window allows. Rule of thumb: keep
-  `draft_window_size` at or above the draft's training/native window, or
-  leave it off when acceptance is already flat across context lengths.
-- End-to-end effect combines the acceptance change with the draft's reduced
-  KV-read cost; with no acceptance gain the two roughly cancel.
+`DirectPrefixSource` borrows `AscendBlockTables.block_tables[gid].gpu` and
+snapshots the current request-to-state-row mapping. Each build gathers a new
+read table from that owner. It never clips a previous window result. The
+canonical table is kernel-column addressed: physical allocator blocks may
+have been expanded into several columns. `kernel_block_sizes[gid]`, not a
+similarly named scheduler or physical block field, supplies the column span.
+
+The first active group's span defines the historical alignment of `S`.
+Other groups must represent that same logical start exactly. A larger LCM
+alignment would change the feature's semantics and is not substituted. Each
+group receives its own read table and backend-derived state. Initialized
+column counts alone do not prove residency for recycled or offloaded caches.
+
+DFlash and DSpark use their actual prepared query width and exact end; DSpark
+may use `K` or `K+1` queries. Eagle3 freezes its proposal horizon and block
+start at the first pass, then refreshes exact lengths at each AR step. The
+startup window bound covers the configured rejection range. A continuing
+prefill row keeps its full read view; an Eagle3 first prefill pass also keeps
+full reads so long prompt queries are preserved. Per-row phase decisions use
+computed prompt tokens, prompt length, and scheduled tokens excluding draft
+placeholders.
+
+`DraftReadView` changes only the table, device exact length, both exact CPU
+mirrors, scheduling upper bound, and maximum length. Positions, query layout,
+Full KV write slots, and target metadata keep their original ownership.
+Backend builders run after this projection. The Eagle3 metadata update that
+would otherwise restore Full CPU lengths is bypassed only while an enabled
+window proposal owns the metadata.
+
+### Actual consumers and parallel execution
+
+Backend selection uses the actual backend, builder, spec, and layer names,
+not the target model's architecture. For example, a DSA target can use a dense
+MLA or GQA draft. Ordinary TP/EP and sequence-parallel hidden-state collectives
+retain their original query/write coordinates. DSA-CP needs a distinct
+provider for its local query ranges and global KV read coordinates.
+
+Providers distinguish direct GQA, ordinary MLA, standard SFA with its indexer,
+and uncompressed DSA/DSA-CP. MLA and SFA preserve full absolute rotary inputs
+while taking ownership of scratch that would otherwise be overwritten.
+DSA native-window reads must remain a subset of the baseline native read set;
+the provider does not infer residency from stale prefix table entries.
+Compressed, packed, offloaded, or unsupported context-parallel layouts require
+specific providers and are rejected when the selected consumer lacks one.
+An unsupported conditional layout is not evidence that a required model has
+been validated through another backend.
+
+### Asynchronous ownership
+
+Every proposal owns independently allocated read views and all derived
+metadata through a completion token. All Eagle3 steps belong to that proposal.
+Mutable DSA builders are owned by lane and step. The owner enters its native
+region before preparation can enqueue a copy or kernel. Successful completion
+recording retains the owner until the event completes; capacity pressure may
+wait for the oldest submitted proposal. Normal acquisition of a free lane
+performs no global synchronization.
+
+If host execution, event creation/recording, bookkeeping, or completion
+query/wait fails after possible native submission, the pool retains the
+backing and quarantines the execution context. Host return, process progress,
+or a failed event cannot authorize reuse. A new pool is not a safe recovery
+mechanism unless the executor separately establishes device completion. The
+final event must cover all readers, including any secondary communication
+stream; retaining a Python reference alone does not establish that boundary.
+
+The current implementation obtains an exact CPU length snapshot once per
+metadata build and shares it across groups. This adds a device-to-host
+synchronization where the baseline could use an upper bound. Its effect on
+actual scheduler overlap and performance requires device measurement. CPU
+ownership tests are not proof of NPU completion or a throughput improvement.
+
+### Validation boundaries
+
+Host tests exercise the paired source interfaces, current mapping, exact vs
+upper arithmetic, phase transitions, final writers, and partial-submit owner
+failures. Device validation must compare fixed queries and logical KV against an
+independent reference for the same window and preserve Full/query operands.
+The included device tests require an NPU run; Host results do not establish
+that this validation has completed.
+Separate real-model tests must establish actual backend/gid identity, prefix
+hits, multiple chunks, mixed arrival, row reuse, parallel layouts, and the
+last-reader completion boundary. OFF and ON may produce different draft
+proposals; naturally decoded token positions are not a same-state numerical
+oracle. Performance is measured only after correctness, using the same source
+candidate for both OFF and ON.
+
+## Performance considerations
+
+A shorter Draft context can improve acceptance for drafts trained on short
+contexts, but the result depends on the checkpoint and workload. A window
+below a draft's training or native window can reduce acceptance. Both effects
+must be measured for the selected model rather than inferred from input length.
+
+End-to-end performance combines acceptance, Draft KV-read cost, metadata
+preparation, and scheduling overlap. A smaller read view alone does not prove
+a speedup. Compare OFF and ON on the same candidate and runtime, retain short
+context regressions, and separately compare candidate OFF to the clean base.
 
 ## Related Files
 
 - Shared window adapter: `vllm_ascend/spec_decode/utils.py`
 - MRV1 proposer (apply points, config validation): `vllm_ascend/spec_decode/llm_base_proposer.py`
+
+- MRV2 policy and integration: `vllm_ascend/worker/v2/spec_decode/`
+- MRV2 source/math/ownership: `draft_window_read.py`, `draft_window_plan.py`, `draft_window_lifetime.py`
+- MRV2 builder seam: `vllm_ascend/worker/v2/attn_utils.py`
