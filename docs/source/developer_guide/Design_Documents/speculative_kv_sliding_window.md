@@ -33,7 +33,7 @@ windowing degrades acceptance.
 
 Let `W` be the window size, `b` the kernel block size, `K = future_offset`
 the number of draft query positions lying beyond the `seq_lens` value the
-adapter sees. The adapter computes, entirely on device:
+adapter sees. The MRV1 adapter computes, entirely on device:
 
 ```text
 start        = floor(clamp(seq_lens + K - W, min=0) / b) * b   # block-aligned window start
@@ -115,7 +115,10 @@ column counts alone do not prove residency for recycled or offloaded caches.
 DFlash and DSpark use their actual prepared query width and exact end; DSpark
 may use `K` or `K+1` queries. Eagle3 freezes its proposal horizon and block
 start at the first pass, then refreshes exact lengths at each AR step. The
-startup window bound covers the configured rejection range. A continuing
+startup bound `W >= 2*K+1` is sufficient for the configured rejection
+range and first-pass query width of at most `K+1`; it is not the smallest
+possible window for every favorable block alignment. For example, K=3 accepts
+W=7 and rejects W=6 even when one particular block alignment would fit. A continuing
 prefill row keeps its full read view; an Eagle3 first prefill pass also keeps
 full reads so long prompt queries are preserved. Per-row phase decisions use
 computed prompt tokens, prompt length, and scheduled tokens excluding draft
@@ -137,7 +140,11 @@ retain their original query/write coordinates. DSA-CP needs a distinct
 provider for its local query ranges and global KV read coordinates.
 
 Providers distinguish direct GQA, ordinary MLA, standard SFA with its indexer,
-and uncompressed DSA/DSA-CP. MLA and SFA preserve full absolute rotary inputs
+and uncompressed DSA. Legacy DSA-CP is rejected by the fixed MRV2 startup
+contract before a Window provider can run. PCP is a separate mechanism and
+does not satisfy this missing capability. The inventory also rejects the
+legacy builder if reached directly; its ordinary metadata construction keeps
+the baseline behavior. MLA and SFA preserve full absolute rotary inputs
 while taking ownership of scratch that would otherwise be overwritten.
 DSA native-window reads must remain a subset of the baseline native read set;
 the provider does not infer residency from stale prefix table entries.
@@ -164,11 +171,104 @@ mechanism unless the executor separately establishes device completion. The
 final event must cover all readers, including any secondary communication
 stream; retaining a Python reference alone does not establish that boundary.
 
-The current implementation obtains an exact CPU length snapshot once per
-metadata build and shares it across groups. This adds a device-to-host
-synchronization where the baseline could use an upper bound. Its effect on
-actual scheduler overlap and performance requires device measurement. CPU
-ownership tests are not proof of NPU completion or a throughput improvement.
+### Unresolved async-first architecture constraint
+
+The current implementation generally obtains an exact CPU length snapshot
+once per metadata build and shares it across groups: one added copy per
+normal parallel proposal and K copies per K-step Eagle3 proposal. DSpark
+with ordinary MLA and no DCP is an explicit exception: its existing preparation
+already completes a fresh CPU copy of the current Draft lengths. The caller
+binds that snapshot to the current device prefix and request mapping; the
+proposal owner retains it, avoiding a second Window copy. This does not reuse
+an optimistic common CPU field or remove the baseline copy. Other paths
+retain the added synchronization. This is an unresolved
+architecture constraint, not an approved performance tradeoff. It does not
+meet the MRV2 async-first requirement. Hardware measurement can quantify its
+cost but cannot by itself approve this design.
+
+The existing runner copies completed request counts to the CPU for the next
+Target input. Draft preparation subsequently consumes rejection results on
+the device; that earlier CPU snapshot is not generally the current Draft
+exact length. It is distinct from the post-preparation DSpark MLA snapshot
+explicitly reused above. An upper bound also cannot replace exact: for W=1024, B=128,
+E=1151 and upper=1152, exact planning starts at zero but upper-based planning
+starts at 128, changing the read set.
+
+Removing only the copy is insufficient. CPU planning chooses the table width
+and validates the exact query interval. GQA eager builders materialize length
+lists; MLA builders derive chunk loops and decode lists from CPU lengths.
+Generic parallel GQA drafting already selects device lengths and calls
+`tolist()`, adding a separate baseline synchronization. Default CPU-to-device
+copies for projection indices also require an asynchronous staging contract.
+SFA also has existing device-length consumers that can be reused; this does
+not make the GQA and MLA CPU consumers disappear. A device projector for the
+remaining paths therefore needs an explicit consumer contract separating
+device exact lengths from host capacity bounds, together with verified native
+tensor-length inputs and bounded chunk planning. That migration is not yet
+implemented. No previous-step exact value or estimated acceptance is used as
+a substitute, and Async is not disabled to hide this limitation.
+
+Each group/build currently allocates a fresh read table sized to its active
+column maximum, length tensors and owned starts. These survive until proposal
+completion; Full KV is borrowed, not copied. Allocation and synchronization
+costs require separate device evidence. CPU ownership tests are not proof of
+NPU completion, overlap or a throughput improvement.
+
+### Integration responsibilities
+
+The baseline and Window flows share input preparation and canonical writes:
+
+```mermaid
+flowchart TD
+    A[Selector and speculator factory] --> B{Window enabled?}
+    B -->|Yes| C[Acquire proposal owner]
+    B -->|No| D[Baseline preparation]
+    C --> E[Prepare rejection-corrected per-step inputs]
+    D --> F[Canonical Full table, slots and absolute positions]
+    E --> F
+    F --> G{Window enabled?}
+    G -->|No| H[Baseline metadata and builder]
+    G -->|Yes| I[Fresh Draft read view and selected builder]
+    H --> J[Draft forward]
+    I --> J
+    J --> K[Last reader completion]
+    K --> L[Release enabled proposal owner]
+```
+
+Persistent request state remains separate from per-step input ordering. Target
+execution keeps its own baseline metadata.
+
+| Change | Condition and responsibility |
+| --- | --- |
+| Selector blacklist removal | An explicit runner choice is preserved. Auto selection may now choose MRV2 when Window is requested; other existing exclusions still apply. Unsupported Window configurations are rejected by the factory/provider rather than silently ignored. |
+| Fresh first Eagle3 metadata | Window reads cannot reuse Target metadata. Keep Full preparation, then build Draft metadata with the prepared query extent and chunked-prefill state. Replicated PCP preparation may already do this build; do not build step zero twice. |
+| Skip baseline AR CPU update | Enabled Window metadata already carries the step's projected lengths. Restoring Full CPU lengths would corrupt the view. OFF retains the original update. |
+| Callback and builder selection | Apply once to fresh common metadata per group before the last builder writes. Preserve query, positions, Full slots and baseline shared DSA kwargs. |
+| Factory module interception | This is an existing Ascend mechanism extended with explicit callbacks. It assumes serial worker execution and LIFO nesting, restores the previous function on exceptions, and rejects callback conflicts. It is not a thread-local API. An instance-level upstream hook would remove the need for interception. |
+| Completion | Retain all steps and mutable derived buffers until the last reader completes. Unknown completion quarantines the pool; capacity pressure may wait for a known submitted owner. |
+
+CONFIG_OFF and forced-OFF allocate no Window runtime, owner or view. This does
+not exempt shared backend changes from OFF regression testing. The selector
+change is user-visible even for forced-OFF: it can permit auto-selected MRV2
+while leaving the original speculative method enabled.
+
+### Shared DSA changes and regression obligations
+
+Noncausal DSpark uses K or K+1 query positions. An index buffer must cover the
+native prefix plus the actual query width, including an alignment boundary
+where W+K is exactly a multiple of 128 and the additional position needs
+another column. Default capacity allows K+1; an explicitly known anchor width
+may use K. Insufficient explicit capacity is rejected using host configuration,
+without reading device query values to make that decision.
+
+Noncausal index storage is allocated when its consumer is first enabled and
+then reused by that builder. Causal builders do not need that storage. This
+avoids multiplying unused buffers across proposal lanes and AR steps.
+Device-metadata setup allocates before deferred work/capture. This changes the
+shared OFF/MRV1 allocation time and requires eager reuse, warmup, profiling,
+and existing capture/replay regressions. It is not a measured optimization.
+The unrelated legacy DSA-CP ordinary-build extension is excluded; the baseline
+CP drafting implementation and MRV2 startup guard remain intact.
 
 ### Validation boundaries
 
