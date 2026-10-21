@@ -17,13 +17,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_layout import (
+from vllm_ascend.worker import worker as worker_module
+from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.attn_utils import (
     allocate_shared_attention_kv_cache,
     can_share_full_and_sliding_kv_cache,
 )
-from vllm_ascend.worker import worker as worker_module
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-from vllm_ascend.worker.v2 import attn_utils
 
 
 def _config():
@@ -78,15 +77,17 @@ def test_partial_model_configs_keep_existing_path(config):
     assert not can_share_full_and_sliding_kv_cache(config, _specs(_cache_config()).values())
 
 
+@pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("sliding_groups", [4, 5])
 @pytest.mark.parametrize("supports_shared", [False, True])
 @pytest.mark.parametrize("model_type", ["gemma4_text", "other_full_sliding_model", "step3p5", "step3p7"])
-def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared, model_type):
+def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, supports_shared, model_type, use_v2):
     config = _config()
     config.model_config.hf_text_config.model_type = model_type
     cache = _cache_config(sliding_groups)
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
     worker.vllm_config = config
+    worker.use_v2_model_runner = use_v2
     worker.model_config = config.model_config
     worker.get_kv_cache_spec = lambda: _specs(cache)
     worker.model_runner = SimpleNamespace(
@@ -95,15 +96,14 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     monkeypatch.setattr(worker_module, "get_kv_cache_groups", lambda *_: cache.kv_cache_groups)
     # Divisible by both five and six; the unsupported runner must retain scaling.
     available = 60 * cache.kv_cache_tensors[0].size
-    shares_pool = supports_shared and model_type in ("gemma4_text", "step3p5", "step3p7")
+    shares_pool = supports_shared and (model_type in ("step3p5", "step3p7") or (use_v2 and model_type == "gemma4_text"))
     expected = available if shares_pool else available // (sliding_groups + 1)
     assert worker._scale_kv_cache_memory_for_multi_group(available) == expected
 
 
-@pytest.mark.parametrize("runner_kind", ["v1", "v2"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("kernel_block_size", [1, 2])
-def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, runner_kind, dtype, kernel_block_size):
+def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype, kernel_block_size):
     config = _config()
     cache = _cache_config(dtype=dtype)
     backend = SimpleNamespace(
@@ -120,32 +120,16 @@ def test_runners_share_storage_and_keep_distinct_blocks_isolated(monkeypatch, ru
     ]
     kernel_sizes = [kernel_block_size] * len(groups)
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
-    if runner_kind == "v1":
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.vllm_config = config
-        runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
-        runner.use_sparse = runner.use_compress = False
-        runner._get_layer_kv_cache_specs = lambda _: _specs(cache)
-        runner._allocate_int8_cache_tensor = lambda size, _: allocate(size)
-        raw = runner._allocate_kv_cache_tensors(cache)
-        assert runner.hybrid_with_attn_and_mamba is False
-        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
-        runner.runner_only_attn_layers = set()
-        runner._is_c8_mxfp_kv_cache = lambda _: False
-        runner.sparse_kv_offload_enabled = False
-        runner.use_hybrid_blocks = True
-        reshaped = runner._reshape_kv_cache_tensors(cache, raw, kernel_sizes)
-    else:
-        monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
-        monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
-        monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-        monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
-        monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
-        raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))
-        reshaped = attn_utils._reshape_kv_cache_v2(
-            groups, raw, "auto", kernel_sizes, {"shared_layer": groups[0].layer_names[0]}, cache
-        )
-        assert reshaped["shared_layer"] is reshaped[groups[0].layer_names[0]]
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", lambda size, *_: allocate(size))
+    raw = attn_utils._allocate_kv_cache(cache, {}, torch.device("cpu"))
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        groups, raw, "auto", kernel_sizes, {"shared_layer": groups[0].layer_names[0]}, cache
+    )
+    assert reshaped["shared_layer"] is reshaped[groups[0].layer_names[0]]
     allocate.assert_called_once_with(cache.kv_cache_tensors[0].size)
     assert len({tensor.untyped_storage().data_ptr() for pair in raw.values() for tensor in pair}) == 1
     specs = _specs(cache)

@@ -78,7 +78,6 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
-from vllm_ascend.core.kv_cache_layout import can_share_full_and_sliding_kv_cache
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
@@ -789,7 +788,13 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
-        shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
+        shares_attention_pool = False
+        if getattr(self, "use_v2_model_runner", False):
+            # Load V2 helpers only for V2 workers; V1 retains private allocation
+            # and must keep its original multi-group budget scaling.
+            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+
+            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
