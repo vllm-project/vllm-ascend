@@ -20,7 +20,6 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendPlainDraftModelSpeculator(PlainDraftModelSpeculator):
-
     def _build_attn_metadata(
         self,
         num_reqs: int,
@@ -41,11 +40,7 @@ class AscendPlainDraftModelSpeculator(PlainDraftModelSpeculator):
 
         num_tokens = int(query_start_loc_np[-1])
         positions = self.expanded_positions if step == 0 else self.input_buffers.positions
-        attn_state = (
-            AscendAttentionState.ChunkedPrefill
-            if step == 0
-            else AscendAttentionState.DecodeOnly
-        )
+        attn_state = AscendAttentionState.DecodeOnly
 
         with (
             build_attn_metadata_wrapper(),
