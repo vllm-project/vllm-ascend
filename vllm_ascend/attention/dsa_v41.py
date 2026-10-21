@@ -774,6 +774,20 @@ class AscendDSAV41Impl:
 
 
 class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]):
+    _specialized_metadata: bool = False
+    _state_only: bool = False
+    _folded_only: bool = False
+    _needs_smla: bool = False
+    _needs_qli: bool = False
+
+    def _use_specialized_metadata(self) -> bool:
+        return (
+            self._specialized_metadata
+            and self.vllm_config.use_v2_model_runner
+            and not self._device_metadata_enabled
+            and not getattr(self.vllm_config.model_config.hf_text_config, "vision_n_layers", 0)
+        )
+
     def __init__(
         self,
         kv_cache_spec,
@@ -982,6 +996,41 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             num_prefill_tokens=num_prefill_tokens,
         )
 
+    def _build_resource_metadata(
+        self,
+        common,
+        coordinates,
+        num_actual_reqs: int,
+    ) -> AscendDSAV41Metadata:
+        """Keep the existing metadata interface without preparing unused work"""
+        num_reqs = common.num_reqs
+        num_tokens = common.num_input_tokens
+        is_state = self._cache_kind == "compressor_state"
+
+        values = dict(coordinates)
+        values["cache_seq_lens"] = values["seq_lens"]
+
+        return AscendDSAV41Metadata(
+            block_table=common.block_table_tensor[:num_reqs],
+            slot_mapping=(self._slot_mapping[:num_tokens] if is_state else self._slot_mapping_2d[:0]),
+            flat_slot_mapping=None,
+            compress_ratio=get_kv_cache_compression_ratio(self.kv_cache_spec),
+            storage_block_size=get_storage_block_size(self.kv_cache_spec),
+            logical_block_size=self.kv_cache_spec.block_size,
+            is_compressor_state=is_state,
+            cache_kind=self._cache_kind,
+            num_actual_tokens=common.num_actual_tokens,
+            num_input_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_actual_reqs=num_actual_reqs,
+            max_query_len=common.max_query_len,
+            max_seq_len=common.max_seq_len,
+            attn_state=common.attn_state,
+            is_prefilling=common.is_prefilling,
+            causal=common.causal,
+            **values,
+        )
+
     def build(
         self,
         common_prefix_len,
@@ -995,6 +1044,20 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         cache_kind = self._cache_kind
         is_compressor_state = cache_kind == "compressor_state"
         ratio = get_kv_cache_compression_ratio(spec)
+
+        # Only the shared PCP path opts in; replay/vision/deferred fallbacks
+        # retain the complete metadata contract of the original builder.
+        specialized = self._use_specialized_metadata() and kwargs.get("specialize_metadata", False)
+        build_query = self._build_query_metadata
+        update_cache = True
+
+        if specialized:
+            build_query = build_query and bool(kwargs.get("build_query", True))
+            update_cache = bool(kwargs.get("update_cache", True))
+
+        build_query_fields = build_query if specialized else True
+        needs_smla = build_query and (not specialized or self._needs_smla)
+        needs_qli = build_query and (not specialized or self._needs_qli)
 
         storage_block_size = get_storage_block_size(spec)
 
@@ -1025,12 +1088,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         seq_lens = coordinates["seq_lens"]
         positions = coordinates["positions"]
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
+
+        if specialized and (self._folded_only or (self._state_only and not update_cache)):
+            return self._build_resource_metadata(common, coordinates, num_actual_reqs)
+
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = cache_kind in {"long_kv", "index_k"}
         if is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
             slots = self._slot_mapping[:num_input_tokens]
+            flat_slots = None
+        elif not update_cache:
+            slots = self._slot_mapping_2d[:0]
             flat_slots = None
         else:
             # Scope ``shared`` to one framework KV cache group in the model
@@ -1105,7 +1175,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             coordinates["max_cache_seq_len"] = max(plane_ratio, coordinates["max_cache_seq_len"])
         coordinates["max_cache_seq_len"] //= plane_ratio
         cos = sin = None
-        if cache_kind == "swa" and positions is not None:
+        if cache_kind == "swa" and positions is not None and (build_query or update_cache):
             rope = kwargs.get("rope_views")
             if rope is None:
                 rope = batch_shared.get("rope")
@@ -1140,7 +1210,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         replay_start = kwargs.get("replay_start")
         replay_seq_lens = replay_block_table = replay_cache_blocks = replay_cache_offsets = None
         max_ori_seq_len = int(getattr(common, "max_seq_len", 0))
-        if replay_start is not None:
+        if build_query_fields and replay_start is not None:
             replay_seq_lens = (seq_lens - replay_start).clamp_min(0)
             max_ori_seq_len = kwargs["replay_max_seq_len"]
             if cache_kind == "swa":
@@ -1158,7 +1228,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     num_reqs * blocks_per_req, dtype=torch.int32, device=seq_lens.device
                 ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
-        if noncausal and ori_sparse_indices is None:
+        if build_query_fields and noncausal and ori_sparse_indices is None:
             ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[:num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,
@@ -1184,7 +1254,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             lengths_view.copy_(ori_topk_length)
             ori_sparse_indices, ori_topk_length = indices_view, lengths_view
         if (
-            not noncausal
+            build_query_fields
+            and not noncausal
             and ori_sparse_indices is None
             and self._a5_causal_swa_indices is not None
             and positions is not None
@@ -1201,7 +1272,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 )
                 batch_shared[cache_key] = cached_window
             ori_sparse_indices, ori_topk_length = cached_window
-        if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
+        if build_query_fields and ori_topk_length is None and ori_sparse_indices is not None and noncausal:
             ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
 
         # SWA bounded replay (vLLM #56227): a prefill admission that hit the
@@ -1220,7 +1291,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # ranges come from the same band -- so they stay a superset of the window.
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
-        if replay_start is not None and cache_kind == "swa":
+        if build_query_fields and replay_start is not None and cache_kind == "swa":
             replay_visible_lens = build_replay_swa_visible_lens(
                 window_size,
                 common.query_start_loc[: num_reqs + 1],
@@ -1241,7 +1312,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         qli_metadata = None
 
         if (
-            self._build_query_metadata
+            needs_smla
             and self._uses_a5_packed_cache
             and cache_kind == "swa"
             and self._a5_smla_metadata is not None
@@ -1278,7 +1349,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             )
 
         if (
-            self._build_query_metadata
+            needs_smla
             and self._supports_device_ops
             and not self._uses_a5_packed_cache
             and cache_kind in {"swa", "long_kv"}
@@ -1327,7 +1398,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 build_smla_metadata,
             )
 
-        if self._build_query_metadata and self._supports_device_ops and cache_kind == "index_k":
+        if needs_qli and self._supports_device_ops and cache_kind == "index_k":
             residual = cmp_residual_buffer
 
             if self._uses_a5_packed_cache:
@@ -1405,6 +1476,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         c2_metadata_group_id = None
         if (
             self._build_compressor_metadata
+            and update_cache
             and kwargs.get("build_compressor_metadata", True)
             and cache_kind == "compressor_state"
             and positions is not None
@@ -1547,6 +1619,65 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
 
 
+class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
+    """C2 controls belong only to the cache-update consumer."""
+
+    _specialized_metadata = True
+    _state_only = True
+    _needs_smla = False
+    _needs_qli = False
+
+
+class AscendDSAV41SWAMetadataBuilder(AscendDSAV41MetadataBuilder):
+    """SWA queries consume window/SMLA metadata."""
+
+    _specialized_metadata = True
+    _needs_smla = True
+    _needs_qli = False
+
+
+class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
+    """Long-context attention consumes SMLA, never QLI."""
+
+    _specialized_metadata = True
+    _needs_smla = True
+    _needs_qli = False
+
+
+class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41MetadataBuilder):
+    """Indexer queries consume QLI, independently of attention SMLA."""
+
+    _specialized_metadata = True
+    _needs_qli = True
+    _needs_smla = False
+
+
+class AscendDSAV41FoldedIndexMetadataBuilder(AscendDSAV41MetadataBuilder):
+    """The packed indexer accesses the folded cache directly."""
+
+    _specialized_metadata = True
+    _folded_only = True
+    _needs_smla = False
+    _needs_qli = False
+
+
+def _get_v41_role_builder(role: str):
+    from vllm_ascend.attention.context_parallel import dsa_v41_cp
+
+    builder_cls, _ = dsa_v41_cp.get_v41_cp_classes()
+
+    if builder_cls is not dsa_v41_cp.AscendDSAV41PCPMetadataBuilder:
+        return builder_cls
+
+    return {
+        "State": dsa_v41_cp.AscendDSAV41PCPStateMetadataBuilder,
+        "SWA": dsa_v41_cp.AscendDSAV41PCPSWAMetadataBuilder,
+        "Attention": dsa_v41_cp.AscendDSAV41PCPAttentionMetadataBuilder,
+        "Indexer": dsa_v41_cp.AscendDSAV41PCPIndexerMetadataBuilder,
+        "FoldedIndex": dsa_v41_cp.AscendDSAV41PCPFoldedIndexMetadataBuilder,
+    }[role]
+
+
 class DeepseekV41CacheBackend(AttentionBackend):
     """Cache-only backend: supplies layout and metadata, not an AttentionImpl."""
 
@@ -1581,6 +1712,38 @@ class DeepseekV41CacheBackend(AttentionBackend):
         return num_blocks, block_size, num_kv_heads, head_size
 
 
+class _DeepseekV41RoleBackend(DeepseekV41CacheBackend):
+    metadata_role = ""
+
+    @classmethod
+    def get_name(cls):
+        return f"ASCEND_DSA_V41_{cls.metadata_role.upper()}"
+
+    @classmethod
+    def get_builder_cls(cls):
+        return _get_v41_role_builder(cls.metadata_role)
+
+
+class DeepseekV41StateBackend(_DeepseekV41RoleBackend):
+    metadata_role = "State"
+
+
+class DeepseekV41SWABackend(_DeepseekV41RoleBackend):
+    metadata_role = "SWA"
+
+
+class DeepseekV41AttentionBackend(_DeepseekV41RoleBackend):
+    metadata_role = "Attention"
+
+
+class DeepseekV41IndexerBackend(_DeepseekV41RoleBackend):
+    metadata_role = "Indexer"
+
+
+class DeepseekV41FoldedIndexBackend(_DeepseekV41RoleBackend):
+    metadata_role = "FoldedIndex"
+
+
 class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     supports_dcp = False
 
@@ -1600,4 +1763,18 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         return self.spec
 
     def get_attn_backend(self):
-        return DeepseekV41CacheBackend
+        spec = self.spec
+
+        if isinstance(spec, CircularBufferSpec):
+            return DeepseekV41StateBackend
+
+        if isinstance(spec, AscendSlidingWindowMLASpec):
+            return DeepseekV41SWABackend
+
+        if isinstance(spec, AscendMLAAttentionSpec):
+            if spec.tokens_per_state == 8 and spec.head_size == 544:
+                return DeepseekV41FoldedIndexBackend
+            if spec.scale_dim:
+                return DeepseekV41IndexerBackend
+            return DeepseekV41AttentionBackend
+        raise TypeError(f"Unsupported V4.1 cache spec: {type(spec).__name__}")

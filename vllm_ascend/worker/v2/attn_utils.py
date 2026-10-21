@@ -586,6 +586,9 @@ def build_attn_metadata(
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
                     common_v41_batch_metadata=common_v41_batch_metadata,
+                    allow_v41_pcp_shared_metadata=(
+                        model_specific_attn_metadata is None and group_causal is True and pcp_context is not None
+                    ),
                     # Upstream capture prepares metadata with runtime mode
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
