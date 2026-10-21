@@ -106,6 +106,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: ${{ inputs.target }}
+      os: ${{ inputs.os }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
       should_push: ${{ inputs.should_push }}
@@ -113,3 +114,4 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}

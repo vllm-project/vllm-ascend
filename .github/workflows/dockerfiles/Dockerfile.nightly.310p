@@ -17,7 +17,8 @@
 
 ARG VLLM_ASCEND_BRANCH=""
 ARG BASE_IMAGE="quay.io/ascend/vllm-ascend"
-FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-310p
+ARG BASE_IMAGE_TAG_SUFFIX=""
+FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-310p${BASE_IMAGE_TAG_SUFFIX}
 
 # Build-time configuration. Defaults are the public community mirrors so this
 # Dockerfile can be built standalone.

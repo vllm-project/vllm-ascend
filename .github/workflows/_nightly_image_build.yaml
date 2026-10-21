@@ -18,6 +18,11 @@
 # Build the nightly test image on top of the runtime image produced from the
 # root Dockerfiles. All dependency versions come from those Dockerfiles; this
 # workflow does not select versions.
+#
+# Ubuntu nightly images are arm64-only test images pushed to
+# base_image/ascend-ci/vllm-ascend. openEuler nightly images keep the previous
+# multi-arch (amd64+arm64) contract and are pushed to atlas_inference/vllm-ascend
+# on swr.cn-north-12, then mirrored to swr.cn-north-4 by the sync-tools workflow.
 name: 'Nightly image build'
 
 on:
@@ -27,6 +32,11 @@ on:
         required: true
         type: string
         description: "Build target: 'a2', 'a3', '310p' or 'a5'"
+      os:
+        required: false
+        type: string
+        default: 'ubuntu'
+        description: "Operating system variant to build: 'ubuntu' or 'openeuler'"
       vllm_ascend_branch:
         required: false
         type: string
@@ -67,17 +77,39 @@ on:
         required: false
       SWR_PASSWORD:
         required: false
+      SYNC_TOOLS_TOKEN:
+        required: false
 
 jobs:
+  setup-matrix:
+    name: Prepare build matrix
+    runs-on: linux-amd64-cpu-2-hk
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Select architectures
+        id: matrix
+        run: |
+          if [ "${{ inputs.os }}" = "openeuler" ]; then
+            # openEuler nightly images are published for both architectures so
+            # the cn-north-4 mirror can be used from amd64 and arm64 runners.
+            MATRIX='{"include":[{"arch":"amd64","runner":"linux-amd64-cpu-4","platform":"linux/amd64"},{"arch":"arm64","runner":"linux-aarch64-cpu-4","platform":"linux/arm64"}]}'
+          else
+            MATRIX='{"include":[{"arch":"arm64","runner":"linux-aarch64-cpu-4","platform":"linux/arm64"}]}'
+          fi
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
   build:
-    name: Build nightly-${{ inputs.target }}
-    runs-on: linux-aarch64-cpu-4
+    name: Build nightly-${{ inputs.target }} (${{ inputs.os }}, ${{ matrix.arch }})
+    needs: setup-matrix
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
     container:
       image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
         SOC: ${{ inputs.soc }}
-    outputs:
-      image: ${{ steps.build.outputs.image }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -106,27 +138,38 @@ jobs:
           BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
 
           # Runtime images are published by the runtime build workflow as
-          # nightly-<branch>[-<target>][-<os>] from the root Dockerfiles.
-          SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend"
+          # nightly-<branch>[-<target>][-openeuler] from the root Dockerfiles.
           BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
-          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
-          IMAGE="${SWR_REGISTRY}:${FULL_TAG}"
+          OS_MARK=""
+          if [ "${{ inputs.os }}" = "openeuler" ]; then
+            OS_MARK="-openeuler"
+          fi
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+
+          if [ -n "$OS_MARK" ]; then
+            FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+            PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${FULL_TAG}-${{ matrix.arch }}"
+          else
+            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+            PUSH_IMAGE="${FINAL_IMAGE}"
+          fi
 
           BUILD_ARGS=(
-            --platform linux/arm64
+            --platform ${{ matrix.platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
             --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
             --build-arg BASE_IMAGE="${BASE_IMAGE}"
+            --build-arg BASE_IMAGE_TAG_SUFFIX="${OS_MARK}"
           )
 
           if [ "${{ inputs.should_push }}" = "true" ]; then
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false,push=true" .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false,push=true" .
           else
-            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false" .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${PUSH_IMAGE},oci-mediatypes=false" .
           fi
 
           {
-            echo "image=${IMAGE}"
+            echo "image=${FINAL_IMAGE}"
             echo "full_tag=${FULL_TAG}"
           } >> "$GITHUB_OUTPUT"
 
@@ -134,3 +177,47 @@ jobs:
         if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           echo "nightly test image pushed: ${{ steps.build.outputs.image }}"
+
+  merge-image:
+    name: Merge nightly-${{ inputs.target }} (openeuler, multi-arch)
+    runs-on: linux-amd64-cpu-4
+    needs: build
+    if: ${{ inputs.os == 'openeuler' && inputs.should_push }}
+    steps:
+      - name: Login to SWR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: Merge and push multi-arch image
+        env:
+          SWR_REGISTRY: ${{ inputs.swr_registry }}
+          TARGET: ${{ inputs.target }}
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
+        run: |
+          set -euo pipefail
+          BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${TARGET}-openeuler"
+          TEMP_IMAGE="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${FULL_TAG}"
+
+          # The arch builds use oci-mediatypes=false, so this produces a Docker
+          # manifest list which SWR accepts.
+          docker buildx imagetools create \
+            -t "${SWR_REGISTRY}/atlas_inference/vllm-ascend:${FULL_TAG}" \
+            "${TEMP_IMAGE}-amd64" \
+            "${TEMP_IMAGE}-arm64"
+
+      - name: Dispatch cn-north-4 sync
+        if: ${{ github.repository == 'vllm-project/vllm-ascend' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
