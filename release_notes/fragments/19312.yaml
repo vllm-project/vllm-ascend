@@ -1,0 +1,5 @@
+pr: 19312
+entries:
+  - category: performance
+    text: Removed two output initialization calls from GLM-5.3 Flash KDA attention and causal convolution.
+    model: glm-5.3-flash
