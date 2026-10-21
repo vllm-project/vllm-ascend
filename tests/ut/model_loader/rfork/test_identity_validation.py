@@ -3,7 +3,6 @@
 
 import logging
 from dataclasses import dataclass
-from enum import Enum, auto
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -62,40 +61,7 @@ def planner_module(monkeypatch):
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.config", RForkConfig=object)
     _stub(monkeypatch, "vllm_ascend.model_loader.rfork.identity", build_seed_key=lambda **kwargs: "seed-key")
 
-    class LeaseReleaseResult(Enum):
-        RELEASED = auto()
-        RETRYABLE = auto()
-        REJECTED = auto()
-
-    class SeedReportStatus(Enum):
-        ACCEPTED = auto()
-        RETRYABLE = auto()
-        REJECTED = auto()
-
-    @dataclass(frozen=True)
-    class SeedReportResult:
-        status: SeedReportStatus
-        reason: str = ""
-
-    @dataclass(frozen=True)
-    class SeedLease:
-        seed_ip: str
-        seed_port: int
-        user_id: str
-        seed_rank: int
-        seed_key: str
-        lease_ttl_sec: float = 60.0
-
-    _stub(
-        monkeypatch,
-        "vllm_ascend.model_loader.rfork.types",
-        LeaseReleaseResult=LeaseReleaseResult,
-        SeedLease=SeedLease,
-        RForkIdentity=object,
-        SeedAdvertisement=object,
-        SeedReportResult=SeedReportResult,
-        SeedReportStatus=SeedReportStatus,
-    )
+    _load_module(monkeypatch, "vllm_ascend.model_loader.rfork.types", "types.py")
     return _load_module(monkeypatch, "rfork_test_planner_client", "planner_client.py")
 
 

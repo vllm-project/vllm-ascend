@@ -214,3 +214,16 @@ def test_removing_a_seed_with_an_active_lease_is_reported_as_failure(planner_htt
     assert client.last_advertisement is not None
     removal_calls = [path for _, path in planner_http.transport.calls].count("/remove_seed")
     assert removal_calls == planner_http.removal_max_attempts
+
+
+def test_completed_drain_acknowledges_absence_on_the_existing_planner(planner_http):
+    client = planner_http.client
+    _advertise(planner_http)
+    lease = client.acquire_seed()
+    assert lease is not None
+
+    assert client.remove_seed().name == "DRAINING"
+    assert client.release_seed_once(lease).name == "RELEASED"
+    assert planner_http.store.debug_snapshot()["seed_count"] == 0
+    assert client.remove_seed().name == "ABSENT"
+    assert client.last_advertisement is None

@@ -51,6 +51,7 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
 | **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. JSON configuration only. Must be a positive integer; invalid values fail configuration initialization. Permanent planner rejection still stops retries. |
 | **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. Must be a finite positive number; invalid values fail configuration initialization. |
+| **rfork_seed_removal_supported** | Boolean or `null` | Whether the planner implements the optional `/remove_seed` and draining contract. | Optional. JSON configuration only. If omitted, defaults to `false` (skip removal). Explicit `true` requires the administrator to confirm that `200` means removed, `409` means draining, and `404` means that the seed record is absent. `false` skips removal, and `null` enables auto-detection. In auto mode, only `200` or `409` confirms support; an unknown `404` is not treated as successful removal, and `405` or `501` means unsupported. |
 | **rfork_seed_bind_host** | String | Local address used by the seed HTTP service. | Optional. Default: `0.0.0.0`. |
 | **rfork_seed_port_base** | Integer | Base port for deterministic seed HTTP endpoints. | Optional. Default: `0`, which lets the OS assign a port. JSON configuration only. The base must be an integer in `[0, 65535]`; invalid values fail configuration initialization. For a nonzero base, main and draft models reserve adjacent slots per worker: main uses `base + 2 * global_rank`, draft uses `base + 2 * global_rank + 1`. If the calculated port exceeds `65535` or is already in use, the seed service falls back to OS assignment. Keep this range separate from TransferEngine, its HIXL endpoint range, and other service ports. |
 | **rfork_seed_advertise_host** | String | Seed address advertised to the planner. | Optional. Automatically detected when unset. |
@@ -109,11 +110,21 @@ The final manifest is still validated before transfer, and RFork falls back rath
 
 The planner treats the seed key as an opaque compatibility identifier. RFork derives it from the model/configuration fingerprint, the structural digest of transferable tensors, and shard topology. A planner should:
 
-- Match exact seed keys, track seed availability through heartbeats, and expire stale advertisements.
-- Allocate leases according to seed capacity, accept lease releases, and reclaim abandoned or expired leases.
+- Match exact seed keys, track seed availability through heartbeats, and expire stale advertisements according to the planner's configured policy.
+- Allocate leases according to seed capacity and accept lease releases. A planner that advertises `LEASE_TTL_SEC` can additionally reclaim abandoned or expired leases; a legacy planner without that header must provide its own operational recovery for failed releases.
 - Make seed selection and lease state observable for operations.
 
 Lease release is asynchronous. An unresolved release delays advertising the receiver as a seed, but does not block inference. The bundled planner is a functional example, not a production scheduler.
+
+### Compatibility with Legacy Planners
+
+RFork keeps the original seed protocol as the required baseline: `POST /add_seed`, `GET /get_seed`, and `POST /put_seed`. `SEED_KEY` is an opaque value and must be matched as the complete string. `SEED_RANK` remains required in `/get_seed` responses and in the corresponding seed and lease requests. Main and draft models may both publish seeds; this compatibility path does not relax the seed-key, version, or tensor-format checks.
+
+`LEASE_TTL_SEC` is an optional response header. When it is absent, RFork accepts the lease, does not start `/renew_seed_lease`, and does not apply a local expiration timer. RFork still sends `/put_seed` after successful or failed use, including when transfer validation fails. Heartbeats report seed liveness; they do not renew a receive lease or reset the planner's allocation counter. A valid positive TTL enables lease renewal. A present but invalid TTL is a protocol error. When the allocation identity is valid, RFork makes a best-effort `/put_seed` before falling back and retains a failed return for background release retries.
+
+Seed removal and draining are optional control-plane extensions. The default is `rfork_seed_removal_supported=false`, so RFork skips `/remove_seed`. A new planner that supports this capability should set `rfork_seed_removal_supported=true` explicitly, or set the JSON value to `null` to use auto-detection. Explicit `true` uses the administrator-confirmed contract (`200` means removed, `409` means draining, and `404` means that the seed record is absent). In auto mode, `200` or `409` proves that the route is supported, while an unknown `404` is not enough to declare removal successful; `405` and `501` are treated as unsupported. During shutdown or fallback cleanup, an unsupported or unknown removal result stops heartbeats and the metadata service but retains the published seed's registered memory and storage owner until a later withdrawal is confirmed and native cleanup succeeds, or the process exits. Other removal failures, such as a timeout or `5xx`, keep the HTTP service and registered memory available for retry. A confirmed draining response still requires native cleanup before these resources are released; a fixed sleep or the planner's heartbeat TTL is not proof that remote reads have ended.
+
+When a receiver has not published a seed, a failed legacy `/put_seed` is retained as pending bookkeeping and does not prevent native finalization. Shutdown makes one best-effort release attempt, subject to the planner request's connect/read inactivity timeout from `rfork_request_timeout_sec`; pending records and logs remain until the planner acknowledges the release, and a planner expiration policy must not be assumed to reclaim them. If local finalization has already completed, RFork continues reporting the pending bookkeeping until a later release acknowledgement. These rules preserve the receive path while allowing newer planners to use renewal, expiration, removal, and draining when they advertise those capabilities.
 
 ### Quantized and NZ Models
 
@@ -269,16 +280,20 @@ lease-release, and publication timing.
     - **Online weight transfer** (`weight_transfer_config` is set), because weights can be replaced after loading.
     - **Static expert placement** (`eplb_config.expert_map_path` is set), because the placement map is applied outside the transferred tensor set.
     - **Dynamic EPLB**, because expert weights and placement can change after the seed service starts. This covers `parallel_config.enable_eplb`, `eplb_config.dynamic_eplb`, and `eplb_config.expert_map_record_path`.
-- Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork makes at most two cleanup attempts (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2), with a short backoff before the second attempt, and only then reclaims memory and reruns the default loader. If cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
+- Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork makes at most two cleanup attempts (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2), with a short backoff before the second attempt, and only then reclaims memory and reruns the default loader. A pending legacy `/put_seed` for an unpublished receiver does not block native finalization, but if required local cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
 - The planner protocol headers `SEED_REFCNT` and `SEED_RANK` carry no scheduling meaning, but they are not optional on the wire today:
     - `SEED_REFCNT` is always sent as `0` on advertisement and is ignored for capacity decisions (seed capacity is controlled by planner configuration). A planner must still accept the header.
     - `SEED_RANK` remains a **required** field. RFork rejects a `/get_seed` response that omits it or carries a negative value, and sends it on every seed advertisement, lease renewal, lease release, and seed removal request. A planner must echo it back on `/get_seed` and accept it on the other routes. What is deprecated is using it for compatibility decisions: it duplicates the `tp_rank` already encoded in the seed key, so a planner must match on the seed key alone and treat `SEED_RANK` as an opaque part of the seed's identity tuple.
-- Each heartbeat verifies that the seed HTTP service remains alive. If the service exits, RFork stops heartbeats and
-  attempts to withdraw the advertisement while leaving the loaded model available for inference.
+- Each heartbeat verifies that the seed HTTP service remains alive. If the service exits, RFork stops sending heartbeats and
+  attempts to withdraw the advertisement when the planner supports removal. A heartbeat failure alone does not stop
+  the metadata service; shutdown or fallback cleanup handles that teardown. If removal is unsupported or unknown, RFork
+  retains the published seed's registered memory and storage owner until a later withdrawal is confirmed and native
+  cleanup succeeds, or the process exits, while keeping the loaded model available for inference.
 - Temporary planner outages do not stop inference. Retryable initial advertisements and lease releases continue in the
-  background, while permanent planner rejections prevent seed promotion. Outage logs are limited to the first failure,
-  periodic summaries, and recovery events.
+  background. Supported removal retries are bounded or happen during later cleanup; other removal failures keep the HTTP
+  service and registered memory available for retry. Permanent planner rejections prevent seed promotion. Outage logs are
+  limited to the first failure, periodic summaries, and recovery events.
 - Validate transfer accuracy and the logical-payload contract for newly supported NPU formats on the intended NPU and
   model combination; CPU tests cannot establish NPU storage correctness. This qualification is required when adding a
   format, but it is not a runtime requirement to copy allocator or descriptor padding outside a tensor's declared payload.
