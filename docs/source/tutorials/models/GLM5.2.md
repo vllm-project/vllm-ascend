@@ -4156,28 +4156,31 @@ Select the tab that matches your deployment hardware.
 
     | Role | Nodes | Global DP | TP | PP | DCP | Local DP ranks | Devices per role |
     | --- | --- | --- | --- | --- | --- | --- | --- |
-    | Prefill | P0, P1 | 2 | 16 | 1 | 16 | One per node | 32 |
-    | Decode | D0, D1 | 4 | 8 | 1 | 8 | Two per node | 32 |
+    | Prefill | P0, P1 | 1 | 16 | 2 | 16 | One per node | 32 |
+    | Decode | D0, D1 | 8 | 4 | 1 | 4 | Four per node | 32 |
 
-    P0 and P1 run DP ranks 0 and 1. D0 runs ranks 0-1 and D1 runs ranks 2-3.
-    Prefill context parallel size is 1 on both roles. This DCP layout is
-    separate from the PP2 layout in Sections 5.1.3 and 5.1.4.
+    P0 and P1 are the two stages of one PP engine, using
+    `VLLM_PP_LAYER_PARTITION="42,36"`. Only P0 exposes the Prefill API at
+    port 8077; P1 is headless. D0 runs DP ranks 0-3 and D1 runs ranks 4-7,
+    with API ports 8000-8003 on each node. PCP is 1 and KV interleave is
+    128 on both roles.
 
-    1. Prepare identical weights on all four nodes and verify
+    1. Prepare identical weights and software on all four nodes and verify
        [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-    2. Set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` separately on each node.
-       Replace the master address placeholders in the startup commands with
-       P0's IP for Prefill and D0's IP for Decode.
-    3. Reserve DP RPC ports 16591 and 16600, API port 8000 on each Prefill
-       node, API ports 8000-8001 on each Decode node, and Mooncake transfer
-       ports derived from the configured base ports 30000 and 30200.
-       Run the public proxy on a separate host at port 8000.
+       This configuration selects `hccs:device` and communication resource
+       version `1.2`; use a compatible HCCS network and software build.
+    2. Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and `PYTHON_LIB_DIR` on each
+       node. `PYTHON_LIB_DIR` is the library directory of the Python installation
+       used by vLLM. Install `fastokens` on both Prefill nodes.
+       Set `P0_IP` to P0's address on both Prefill nodes. `PROFILE_DIR` selects
+       a writable profiler directory and defaults to `./profiling`.
+    3. Reserve PP master port 7060, Decode DP RPC port 16600, P0 API port 8077,
+       Decode API ports 8000-8003, and Mooncake ports derived from the base
+       ports 30000 and 30100. Run the proxy on a separate host at port 8000.
 
     ##### Prepare the Scripts
 
-    Before you start, please do the following:
-
-    1. prepare the script `launch_online_dp.py` on each node:
+    1. Save `launch_online_dp.py` on each Decode node:
 
         ```python
         import argparse
@@ -4238,15 +4241,16 @@ Select the tab that matches your deployment hardware.
             LOCAL_IP="<PREFILL_NODE_IP>"
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
+            PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
+            P0_IP="<PREFILL_NODE0_IP>"
+            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
+            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export VLLM_ENGINE_READY_TIMEOUT_S=100000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
-            export HCCL_CONNECT_TIMEOUT=7200
-            export ASCEND_CONNECT_TIMEOUT=10000
+            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
-            export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
             export VLLM_HOST_IP="$LOCAL_IP"
             export HCCL_IF_IP="$LOCAL_IP"
@@ -4255,24 +4259,24 @@ Select the tab that matches your deployment hardware.
             export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=400
+            export HCCL_BUFFSIZE=1024
 
-            export ACL_OP_INIT_MODE=1
-            export ASCEND_A3_ENABLE=1
-            export ASCEND_RT_VISIBLE_DEVICES="$1"
+            export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+            export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
             export VLLM_USE_V2_MODEL_RUNNER=0
 
+            export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+            export TASK_QUEUE_ENABLE=1
+            export VLLM_USE_FASTOKENS=1
+            export VLLM_PP_LAYER_PARTITION="42,36"
+
             exec vllm serve "$MODEL_PATH" \
                 --host 0.0.0.0 \
-                --port "$2" \
-                --data-parallel-size "$3" \
-                --data-parallel-rank "$4" \
-                --data-parallel-address "$5" \
-                --data-parallel-rpc-port "$6" \
-                --tensor-parallel-size "$7" \
+                --port 8077 \
+                --tensor-parallel-size 16 \
                 --enable-expert-parallel \
                 --prefill-context-parallel-size 1 \
                 --decode-context-parallel-size 16 \
@@ -4284,10 +4288,11 @@ Select the tab that matches your deployment hardware.
                 --safetensors-load-strategy 'prefetch' \
                 --additional-config '{
                     "enable_dsa_cp": true,
-                    "enable_fused_mc2": 1,
-                    "enable_flashcomm1": true
+                    "enable_fused_mc2": 2,
+                    "enable_flashcomm1": true,
+                    "enable_shared_expert_dp": true
                 }' \
-                --max-num-batched-tokens 8192 \
+                --max-num-batched-tokens 16384 \
                 --trust-remote-code \
                 --enable-prefix-caching \
                 --max-num-seqs 64 \
@@ -4299,19 +4304,30 @@ Select the tab that matches your deployment hardware.
                 --reasoning-parser glm47 \
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
+                --pipeline-parallel-size 2 \
+                --distributed-executor-backend mp \
+                --master-addr "$P0_IP" \
+                --master-port 7060 \
+                --nnodes 2 \
+                --node-rank 0 \
+                --enable-chunked-prefill \
+                --async-scheduling \
+                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
-                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 16
+                            "dp_size": 1,
+                            "tp_size": 16,
+                            "pp_size": 2,
+                            "pp_layer_partition": "42,36"
                         },
                         "decode": {
-                            "dp_size": 4,
-                            "tp_size": 8
+                            "dp_size": 8,
+                            "tp_size": 4
                         }
                     }
                 }'
@@ -4325,15 +4341,16 @@ Select the tab that matches your deployment hardware.
             LOCAL_IP="<PREFILL_NODE_IP>"
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
+            PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
+            P0_IP="<PREFILL_NODE0_IP>"
+            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
+            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export VLLM_ENGINE_READY_TIMEOUT_S=100000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
-            export HCCL_CONNECT_TIMEOUT=7200
-            export ASCEND_CONNECT_TIMEOUT=10000
+            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
-            export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
             export VLLM_HOST_IP="$LOCAL_IP"
             export HCCL_IF_IP="$LOCAL_IP"
@@ -4342,24 +4359,24 @@ Select the tab that matches your deployment hardware.
             export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=400
+            export HCCL_BUFFSIZE=1024
 
-            export ACL_OP_INIT_MODE=1
-            export ASCEND_A3_ENABLE=1
-            export ASCEND_RT_VISIBLE_DEVICES="$1"
+            export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+            export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
             export VLLM_USE_V2_MODEL_RUNNER=0
 
+            export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+            export TASK_QUEUE_ENABLE=1
+            export VLLM_USE_FASTOKENS=1
+            export VLLM_PP_LAYER_PARTITION="42,36"
+
             exec vllm serve "$MODEL_PATH" \
                 --host 0.0.0.0 \
-                --port "$2" \
-                --data-parallel-size "$3" \
-                --data-parallel-rank "$4" \
-                --data-parallel-address "$5" \
-                --data-parallel-rpc-port "$6" \
-                --tensor-parallel-size "$7" \
+                --port 8077 \
+                --tensor-parallel-size 16 \
                 --enable-expert-parallel \
                 --prefill-context-parallel-size 1 \
                 --decode-context-parallel-size 16 \
@@ -4371,10 +4388,11 @@ Select the tab that matches your deployment hardware.
                 --safetensors-load-strategy 'prefetch' \
                 --additional-config '{
                     "enable_dsa_cp": true,
-                    "enable_fused_mc2": 1,
-                    "enable_flashcomm1": true
+                    "enable_fused_mc2": 2,
+                    "enable_flashcomm1": true,
+                    "enable_shared_expert_dp": true
                 }' \
-                --max-num-batched-tokens 8192 \
+                --max-num-batched-tokens 16384 \
                 --trust-remote-code \
                 --enable-prefix-caching \
                 --max-num-seqs 64 \
@@ -4386,19 +4404,31 @@ Select the tab that matches your deployment hardware.
                 --reasoning-parser glm47 \
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
+                --pipeline-parallel-size 2 \
+                --distributed-executor-backend mp \
+                --master-addr "$P0_IP" \
+                --master-port 7060 \
+                --nnodes 2 \
+                --node-rank 1 \
+                --headless \
+                --enable-chunked-prefill \
+                --async-scheduling \
+                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
-                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 16
+                            "dp_size": 1,
+                            "tp_size": 16,
+                            "pp_size": 2,
+                            "pp_layer_partition": "42,36"
                         },
                         "decode": {
-                            "dp_size": 4,
-                            "tp_size": 8
+                            "dp_size": 8,
+                            "tp_size": 4
                         }
                     }
                 }'
@@ -4412,15 +4442,15 @@ Select the tab that matches your deployment hardware.
             LOCAL_IP="<DECODE_NODE_IP>"
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
+            PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
+            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
+            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export VLLM_ENGINE_READY_TIMEOUT_S=100000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
-            export HCCL_CONNECT_TIMEOUT=7200
-            export ASCEND_CONNECT_TIMEOUT=10000
+            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
-            export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
             export VLLM_HOST_IP="$LOCAL_IP"
             export HCCL_IF_IP="$LOCAL_IP"
@@ -4429,15 +4459,17 @@ Select the tab that matches your deployment hardware.
             export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=400
+            export HCCL_BUFFSIZE=1024
 
-            export ACL_OP_INIT_MODE=1
-            export ASCEND_A3_ENABLE=1
             export TASK_QUEUE_ENABLE=1
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
-            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+            export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
             export VLLM_USE_V2_MODEL_RUNNER=0
+
+            export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+            export LOCAL_WORLD_SIZE=16
 
             exec vllm serve "$MODEL_PATH" \
                 --host 0.0.0.0 \
@@ -4449,22 +4481,25 @@ Select the tab that matches your deployment hardware.
                 --tensor-parallel-size "$7" \
                 --enable-expert-parallel \
                 --prefill-context-parallel-size 1 \
-                --decode-context-parallel-size 8 \
+                --decode-context-parallel-size 4 \
                 --cp-kv-cache-interleave-size 128 \
                 --seed 1024 \
                 --served-model-name glm \
                 --max-model-len 1048576 \
                 --safetensors-load-strategy 'prefetch' \
-                --max-num-batched-tokens 192 \
+                --max-num-batched-tokens 48 \
                 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
                 --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
                 --additional-config '{
                     "recompute_scheduler_enable": true,
-                    "enable_mlapo": true,
-                    "enable_fused_mc2": 1
+                    "ascend_compilation_config": {
+                        "enable_npugraph_ex": true,
+                        "enable_static_kernel": true
+                    },
+                    "multistream_overlap_shared_expert": true
                 }' \
                 --trust-remote-code \
-                --max-num-seqs 32 \
+                --max-num-seqs 8 \
                 --gpu-memory-utilization 0.90 \
                 --async-scheduling \
                 --quantization ascend \
@@ -4473,19 +4508,24 @@ Select the tab that matches your deployment hardware.
                 --reasoning-parser glm47 \
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
+                --enable-chunked-prefill \
+                --no-enable-prefix-caching \
+                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
-                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "kv_port": "30200",
+                    "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 16
+                            "dp_size": 1,
+                            "tp_size": 16,
+                            "pp_size": 2,
+                            "pp_layer_partition": "42,36"
                         },
                         "decode": {
-                            "dp_size": 4,
-                            "tp_size": 8
+                            "dp_size": 8,
+                            "tp_size": 4
                         }
                     }
                 }'
@@ -4499,15 +4539,15 @@ Select the tab that matches your deployment hardware.
             LOCAL_IP="<DECODE_NODE_IP>"
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
+            PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
+            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
+            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
-            export VLLM_ENGINE_READY_TIMEOUT_S=100000
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-            export HCCL_EXEC_TIMEOUT=204
-            export HCCL_CONNECT_TIMEOUT=7200
-            export ASCEND_CONNECT_TIMEOUT=10000
+            export HCCL_EXEC_TIMEOUT=1800
+            export HCCL_CONNECT_TIMEOUT=1800
             export ASCEND_TRANSFER_TIMEOUT=10000
-            export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
             export VLLM_HOST_IP="$LOCAL_IP"
             export HCCL_IF_IP="$LOCAL_IP"
@@ -4516,15 +4556,17 @@ Select the tab that matches your deployment hardware.
             export HCCL_SOCKET_IFNAME="$NIC_NAME"
 
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=400
+            export HCCL_BUFFSIZE=1024
 
-            export ACL_OP_INIT_MODE=1
-            export ASCEND_A3_ENABLE=1
             export TASK_QUEUE_ENABLE=1
             export ASCEND_RT_VISIBLE_DEVICES="$1"
 
-            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+            export LD_LIBRARY_PATH="$PYTHON_LIB_DIR:/usr/local/lib:${LD_LIBRARY_PATH:-}"
             export VLLM_USE_V2_MODEL_RUNNER=0
+
+            export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
+            export LOCAL_WORLD_SIZE=16
 
             exec vllm serve "$MODEL_PATH" \
                 --host 0.0.0.0 \
@@ -4536,22 +4578,25 @@ Select the tab that matches your deployment hardware.
                 --tensor-parallel-size "$7" \
                 --enable-expert-parallel \
                 --prefill-context-parallel-size 1 \
-                --decode-context-parallel-size 8 \
+                --decode-context-parallel-size 4 \
                 --cp-kv-cache-interleave-size 128 \
                 --seed 1024 \
                 --served-model-name glm \
                 --max-model-len 1048576 \
                 --safetensors-load-strategy 'prefetch' \
-                --max-num-batched-tokens 192 \
+                --max-num-batched-tokens 48 \
                 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
                 --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
                 --additional-config '{
                     "recompute_scheduler_enable": true,
-                    "enable_mlapo": true,
-                    "enable_fused_mc2": 1
+                    "ascend_compilation_config": {
+                        "enable_npugraph_ex": true,
+                        "enable_static_kernel": true
+                    },
+                    "multistream_overlap_shared_expert": true
                 }' \
                 --trust-remote-code \
-                --max-num-seqs 32 \
+                --max-num-seqs 8 \
                 --gpu-memory-utilization 0.90 \
                 --async-scheduling \
                 --quantization ascend \
@@ -4560,19 +4605,24 @@ Select the tab that matches your deployment hardware.
                 --reasoning-parser glm47 \
                 --kv-cache-dtype int8 \
                 --attention_config.indexer_kv_dtype int8 \
+                --enable-chunked-prefill \
+                --no-enable-prefix-caching \
+                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
-                    "kv_connector": "MooncakeConnectorV1",
+                    "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "kv_port": "30200",
+                    "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                            "dp_size": 2,
-                            "tp_size": 16
+                            "dp_size": 1,
+                            "tp_size": 16,
+                            "pp_size": 2,
+                            "pp_layer_partition": "42,36"
                         },
                         "decode": {
-                            "dp_size": 4,
-                            "tp_size": 8
+                            "dp_size": 8,
+                            "tp_size": 4
                         }
                     }
                 }'
@@ -4580,84 +4630,85 @@ Select the tab that matches your deployment hardware.
 
     ##### Start the Engines
 
-    Run these commands from the directory containing both scripts on each node.
-    The two Prefill commands use the same P0 master address, and the two Decode
-    commands use the same D0 master address.
+    Run the commands on their respective nodes in separate terminals.
+    Start both PP stages and all Decode ranks before waiting for readiness.
 
     1. Prefill node 0
 
         ```shell
-        P0_IP="<PREFILL_NODE0_IP>"
-        python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address "$P0_IP" --dp-rpc-port 16591 --vllm-start-port 8000
+        bash run_dp_template.sh
         ```
 
     2. Prefill node 1
 
         ```shell
-        P0_IP="<PREFILL_NODE0_IP>"
-        python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address "$P0_IP" --dp-rpc-port 16591 --vllm-start-port 8000
+        bash run_dp_template.sh
         ```
 
     3. Decode node 0
 
         ```shell
         D0_IP="<DECODE_NODE0_IP>"
-        python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     4. Decode node 1
 
         ```shell
         D0_IP="<DECODE_NODE0_IP>"
-        python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     ##### Start the Proxy
 
-    After all six APIs become healthy, start the proxy on its separate host:
+    Wait for P0:8077 and all eight Decode APIs to answer `GET /v1/models`,
+    and confirm P1 has joined its PP engine. Start the proxy on its separate host:
 
     ```shell
     P0_IP="<P0_IP>"
-    P1_IP="<P1_IP>"
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
-        --prefiller-hosts "$P0_IP" "$P1_IP" --prefiller-ports 8000 8000 \
-        --decoder-hosts "$D0_IP" "$D0_IP" "$D1_IP" "$D1_IP" \
-        --decoder-ports 8000 8001 8000 8001
+        --prefiller-hosts "$P0_IP" --prefiller-ports 8077 \
+        --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
+            "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
+        --decoder-ports 8000 8001 8002 8003 8000 8001 8002 8003
     ```
 
     Send requests to `http://<PROXY_IP>:8000` using the served model name `glm`.
 
     **Key Parameter Descriptions**
 
+    - Prefill uses DP1/PP2/TP16/DCP16 with the layer partition `42,36`.
+      P0 hosts the API; P1 joins through `--headless --node-rank 1`.
+      Decode uses DP8/TP4/DCP4, four local DP ranks per node.
     - The launcher passes `$1` = visible devices, `$2` = API port, `$3` = global
       DP size, `$4` = DP rank, `$5` = DP master IP, `$6` = DP RPC port, and
       `$7` = TP size to `run_dp_template.sh`.
-    - `--decode-context-parallel-size`: 16 on Prefill and 8 on Decode;
-      `--prefill-context-parallel-size` remains 1 and
-      `--cp-kv-cache-interleave-size` is 128 on both roles.
-    - `--max-num-batched-tokens`: 8192 on Prefill and 192 on Decode.
-      `--max-num-seqs`: 64 on Prefill and 32 on Decode. These are scheduler
-      limits; start the 1M workload with one concurrent request and increase
-      concurrency according to available KV cache capacity.
-    - MTP uses `deepseek_mtp` with an eager draft: 1 speculative token on
-      Prefill and 5 on Decode. Decode uses `FULL_DECODE_ONLY` graph mode.
-    - `MooncakeConnectorV1` uses `kv_producer` on Prefill and `kv_consumer`
-      on Decode, with the same `prefill: DP2/TP16` and `decode: DP4/TP8`
-      topology on both roles. This example does not enable MemCache pooling.
-    - Both roles use int8 KV and indexer KV caches. Prefill enables DSA CP,
-      fused MC2 and FlashComm1; Decode enables fused MC2, MLAPO and the
-      recomputation scheduler. See [Performance Tuning](#9-performance-tuning).
-    - `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant
-      quantization for the SFA packed main KV cache, as an alternative to
-      `--kv-cache-dtype int8`. It requires an A2/A3 device, does not support
-      context parallelism (DCP/PCP), and cannot be combined with the C8 cache.
-      It is therefore not supported by the DCP-enabled 1M example above.
-      In Prefill-Decode disaggregation the
-      Mooncake option `"use_ascend_direct"` must be `false`.
+    - `--max-model-len` is `1048576` on both roles. Prefill uses
+      `--max-num-seqs 64` and `--max-num-batched-tokens 16384`; Decode uses
+      `8` and `48`, respectively, per engine. Tune concurrency to available
+      KV cache capacity and reserve output tokens within the context limit.
+    - PCP remains 1, while DCP is 16 on Prefill and 4 on Decode.
+      `--cp-kv-cache-interleave-size 128` and int8 attention/indexer KV caches
+      are configured on both roles.
+    - Prefill enables chunked prefill, prefix caching, async scheduling, DSA CP,
+      FlashComm1, fused MC2 mode 2 and shared-expert DP. Decode explicitly disables
+      prefix caching, enables recomputation scheduling and shared-expert
+      multistream overlap, and selects NpuGraphEx/StaticKernel through
+      `ascend_compilation_config`.
+    - MTP uses an eager draft with one speculative token on Prefill and five
+      on Decode. Prefill uses `--enforce-eager`; Decode uses `FULL_DECODE_ONLY`.
+      Both roles set `HCCL_BUFFSIZE=1024`, HCCL execution/connection timeouts
+      to 1800 seconds, and `ASCEND_TRANSFER_TIMEOUT=10000`.
+    - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
+      on Decode, with base KV ports 30000 and 30100. Both declare the same
+      Prefill DP1/PP2/TP16 partition `42,36` and Decode DP8/TP4 topology.
+      This example does not enable MemCache pooling.
+    - TurboQuant cannot be combined with DCP or the int8 C8 cache and therefore
+      does not apply to this 1M example. See [Performance Tuning](#9-performance-tuning).
 
 ## 6 Functional Verification
 
@@ -4776,8 +4827,8 @@ the number of ranks on one node. Scheduler limits are per engine.
 | Colocated | A3 | Shared | 4 | 8 | 4 | 1 | 1 | 6 | 4096 | 202752 | 3 |
 | 198k PD, with or without pooling | A3 | Prefill | 16 | 1 | 1 | 2 | 1 | 64 | 16384 | 200000 | 1 |
 | 198k PD, with or without pooling | A3 | Decode | 2 | 16 | 8 | 1 | 1 | 64 | 256 | 200000 | 5 |
-| 1M PD | A3 | Prefill | 16 | 2 | 1 | 1 | 16 | 64 | 8192 | 1048576 | 1 |
-| 1M PD | A3 | Decode | 8 | 4 | 2 | 1 | 8 | 32 | 192 | 1048576 | 5 |
+| 1M PD | A3 | Prefill | 16 | 1 | 1 | 2 | 16 | 64 | 16384 | 1048576 | 1 |
+| 1M PD | A3 | Decode | 4 | 8 | 4 | 1 | 4 | 8 | 48 | 1048576 | 5 |
 | Colocated | A2 | Shared | 8 | 4 | 1 | 1 | 1 | 128 | 8192 | 135000 | 3 |
 | Ordinary PD | A2 | Prefill | 16 | 2 | 1 | 1 | 1 | 64 | 8192 | 135000 | 3 |
 | Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 135000 | 3 |

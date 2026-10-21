@@ -633,11 +633,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --additional-config '{
                 "enable_shared_expert_dp": true,
                 "multistream_overlap_shared_expert": true,
-                "recompute_scheduler_enable": true,
-                "ascend_compilation_config": {
-                  "enable_npugraph_ex": true,
-                  "enable_static_kernel": true
-                }
+                "recompute_scheduler_enable": true
               }' \
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
