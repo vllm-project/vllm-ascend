@@ -380,9 +380,7 @@ def _build_planes(builders, batch):
             slots = torch.where(slots >= 0, slots + 128, -1)
         result[PREFIXES[kind]] = builder.build(
             0,
-            batch.local.replace(slot_mapping=slots),
-            pcp_context=batch.context,
-            pcp_cache_group_idx=group,
+            batch.local.replace(slot_mapping=slots, pcp_context=batch.context, pcp_cache_group_idx=group),
             num_actual_reqs=1 if batch.graph else batch.local.num_reqs,
             full_graph_mode=batch.graph,
             common_v41_metadata={},
