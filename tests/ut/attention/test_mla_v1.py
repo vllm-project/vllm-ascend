@@ -302,9 +302,9 @@ class TestAscendMLABackend(TestBase):
         )
         self.mla_config_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_dcp
+        from vllm_ascend.attention.utils import is_dcp_enabled
 
-        enable_dcp.cache_clear()
+        is_dcp_enabled.cache_clear()
 
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
@@ -327,13 +327,13 @@ class TestAscendMLABackend(TestBase):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
         self.assertEqual(result, [128])
 
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
+    @patch("vllm_ascend.attention.mla_v1.is_dcp_enabled")
     def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
         mock_enable_dcp.return_value = True
         builder_cls = AscendMLABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
+    @patch("vllm_ascend.attention.mla_v1.is_dcp_enabled")
     def test_get_impl_cls_with_dcp(self, mock_enable_dcp):
         mock_enable_dcp.return_value = True
         impl_cls = AscendMLABackend.get_impl_cls()
@@ -819,7 +819,7 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
     def setUp(self):
-        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False)
         dcp_patcher.start()
         self.addCleanup(dcp_patcher.stop)
 
@@ -1164,7 +1164,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 class TestAscendMLAMetadataBuilderBuild(TestBase):
     def setUp(self):
-        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False)
         dcp_patcher.start()
         self.addCleanup(dcp_patcher.stop)
 
@@ -1396,7 +1396,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.mock_vllm_config.parallel_config.decode_context_parallel_size = 16
         self.mock_vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
         common_attn_metadata.is_prefilling = torch.ones(3, dtype=torch.bool)
-        with patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=True) as mock_enable_dcp:
+        with patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=True) as mock_enable_dcp:
             builder = AscendMLAMetadataBuilder(
                 self.kv_cache_spec, ["layer_0", "layer_1"], self.mock_vllm_config, self.mock_device
             )
@@ -1407,7 +1407,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
             patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
             patch(
-                "vllm_ascend.attention.mla_v1.enable_dcp",
+                "vllm_ascend.attention.mla_v1.is_dcp_enabled",
                 side_effect=AssertionError("DCP state must be cached during initialization"),
             ),
         ):

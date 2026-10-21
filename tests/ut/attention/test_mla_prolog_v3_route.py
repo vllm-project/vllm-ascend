@@ -183,7 +183,7 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     monkeypatch.setattr(mla_v1, "maybe_trans_nz", lambda tensor: tensor)
     monkeypatch.setattr(torch_npu, "npu_format_cast", lambda tensor, _format: tensor)
     monkeypatch.setattr(mla_v1, "get_offloader", lambda: NoopOffloader())
-    monkeypatch.setattr(mla_v1, "enable_dcp", lambda: impl.use_dcp)
+    monkeypatch.setattr(mla_v1, "is_dcp_enabled", lambda: impl.use_dcp)
     monkeypatch.setattr(
         mla_v1,
         "get_ascend_config",

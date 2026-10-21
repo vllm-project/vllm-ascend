@@ -1099,7 +1099,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
         )
 
         with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp", return_value=True) as dcp,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True) as dcp,
             patch.object(
                 DCPMetadataBuilderMixin,
                 "__init__",
@@ -1227,7 +1227,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
             return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp",
+            "vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled",
             side_effect=AssertionError("use cached DCP state"),
         ),
         patch.object(builder, "_get_dcp_local_block_table", return_value=blocks),
