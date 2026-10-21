@@ -311,12 +311,21 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
                 return
             self.refresh_config(scheduler_output=scheduler_output)
-            if self.needs_sample_phase_hooks():
-                self._cache_prompt_token_ids_from_scheduler_output(scheduler_output)
-                finished = getattr(scheduler_output, "finished_req_ids", None)
-                if finished and int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) == 0:
-                    self.mark_finished(finished)
-                self._reap_finished_requests()
+            # Prompt cache must not wait for sample-phase hooks. With hot-reload,
+            # the only prefill wave that carries ``scheduled_new_reqs`` can land
+            # while detectors are still off; bus may enable hooks at end-of-wave,
+            # after which n_new=0 forever and Bug #9 cache never writes (S06 empty
+            # prompt). Caching here is cheap (new reqs only) and idempotent.
+            self._cache_prompt_token_ids_from_scheduler_output(scheduler_output)
+            # Same gate as the prompt cache, not sample-phase hooks. Hot-reload
+            # can cache prompts while detectors are still off; those entries
+            # must still be marked and reaped or they leak until process exit.
+            # A busy wave's finish is marked in ``run_sample_phase``; this only
+            # covers the trailing empty batch, which never reaches sample.
+            finished = getattr(scheduler_output, "finished_req_ids", None)
+            if finished and int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) == 0:
+                self.mark_finished(finished)
+            self._reap_finished_requests()
             self._end_of_wave_sync_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
         finally:
             self._scheduler_output_for_step = None
@@ -347,6 +356,10 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         both windows make the snapshot path return zeros or empty. Cache the
         ids here on the first prefill wave so later snapshots (crash or
         finish) read the real prompt. Idempotent per request.
+
+        Called from ``sync_for_step`` even when ``needs_sample_phase_hooks`` is
+        false (hot-reload path): the sole ``scheduled_new_reqs`` wave must not
+        be skipped while detectors are still off.
         """
         if scheduler_output is None:
             return
@@ -484,22 +497,20 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         Appending ``AsyncOutput.sampled_token_ids`` (padded numpy) here inflated
         cumulative IO and false-triggered ``token_repeat`` (W2-3 / D-11).
         """
-        # Idle fast-path: detectors all off →
-        # skip soft-fail wrappers and observational hooks entirely.
-        # Still flush: TP>1 drain collectives must stay lockstep every sample.
+        # sample and mark_finished are shared. Detectors off still stamps
+        # finish before end-of-wave so a same-wave manual report can read the
+        # prompt cache; reap waits until the next ``sync_for_step``.
+        result = sample_fn()
+        # Hook 3: mark_finished
+        self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         if not self.needs_sample_phase_hooks():
-            result = sample_fn()
             # End-of-wave gate uses collectives — do not soft-fail (desync/hang).
             self.end_of_wave_sync(has_scheduled_tokens=True)
             return result
 
-        # Runner's sample work (sample + draft + bookkeeping + output + profiling + eplb)
-        result = sample_fn()
         # Retain wave batch for block_ids after MRV2 clears execute_model_state.
         if result.input_batch is not None:
             self._last_input_batch = result.input_batch
-        # Hook 3: mark_finished
-        self._soft_fail("mark_finished", lambda: self.mark_finished(result.finished_req_ids))
         # Hook 4: check_after_spec (spec only). Gate here to skip the
         # accepted_token_nums_fn callback when detection is off; soft-fail
         # lives inside check_after_spec itself.

@@ -254,6 +254,54 @@ def test_sync_for_step_refreshes_when_reload_on_without_detectors(tmp_path: Path
     RuntimeGuardProcessor.reset_for_tests()
 
 
+def test_sync_for_step_caches_prompt_while_hooks_off_under_hot_reload(tmp_path: Path):
+    """Prefill ``scheduled_new_reqs`` must be cached before detectors turn on.
+
+    Hot-reload can leave ``needs_sample_phase_hooks`` false on the only wave
+    that carries new requests; bus enables detectors at end-of-wave, after
+    which n_new=0. Skipping Bug #9 cache until hooks are on left reports with
+    empty ``prompt_token_ids`` (S06 empty-prompt timeline).
+    """
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    cfg = _cfg(tmp_path, reload=5.0)
+    cfg._last_reload_ts = time.time()
+    cfg._initial_broadcast_done = True
+    assert cfg.needs_sample_phase_hooks() is False
+    assert cfg.hot_reload_enabled is True
+
+    so = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="s06-req", prompt_token_ids=[11, 22, 33]),
+        ],
+        finished_req_ids=None,
+        total_num_scheduled_tokens=3,
+    )
+    RequestGuardStore.reset_for_tests()
+    try:
+        with (
+            patch.object(RuntimeGuardProcessor, "refresh_config"),
+            patch.object(RuntimeGuardProcessor, "mark_finished") as mark,
+            patch.object(RuntimeGuardProcessor, "_reap_finished_requests") as reap,
+            patch(
+                "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
+                side_effect=Exception("no pp"),
+            ),
+        ):
+            proc = _bind(cfg)
+            proc.sync_for_step(has_scheduled_tokens=True, scheduler_output=so)
+            # Busy wave: finish is stamped in run_sample_phase, not here.
+            # Reap still runs so prompts cached on earlier waves can be cleared.
+            mark.assert_not_called()
+            reap.assert_called_once()
+        st = RequestGuardStore.get().get_state("s06-req")
+        assert st is not None
+        assert st.prompt_token_ids == [11, 22, 33]
+    finally:
+        RequestGuardStore.reset_for_tests()
+        RuntimeGuardProcessor.reset_for_tests()
+
+
 def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
     """Final-request-before-idle: empty batch still marks+reaps finished reqs.
 
@@ -305,6 +353,41 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
     RuntimeGuardProcessor.reset_for_tests()
 
 
+def test_sync_for_step_reaps_while_hooks_off_under_hot_reload(tmp_path: Path):
+    """Prompts cached before detectors turn on must still be reaped."""
+    cfg = _cfg(tmp_path, reload=5.0)
+    cfg._last_reload_ts = time.time()
+    cfg._initial_broadcast_done = True
+    assert cfg.needs_sample_phase_hooks() is False
+
+    calls: list[str] = []
+    so_empty = SimpleNamespace(
+        scheduled_new_reqs=None,
+        finished_req_ids={"r_final"},
+        total_num_scheduled_tokens=0,
+    )
+
+    def _mark(*_a, **_k):
+        calls.append("mark")
+
+    def _reap(*_a, **_k):
+        calls.append("reap")
+
+    with (
+        patch.object(RuntimeGuardProcessor, "refresh_config"),
+        patch.object(RuntimeGuardProcessor, "mark_finished", _mark),
+        patch.object(RuntimeGuardProcessor, "_reap_finished_requests", _reap),
+        patch(
+            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
+            side_effect=Exception("no pp"),
+        ),
+    ):
+        proc = _bind(cfg)
+        proc.sync_for_step(has_scheduled_tokens=False, scheduler_output=so_empty)
+    assert calls == ["mark", "reap"]
+    RuntimeGuardProcessor.reset_for_tests()
+
+
 def test_refresh_config_skips_clear_wave_cache_when_idle(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.0)
     with patch("vllm_ascend.observability.runtime_guard.processor.RequestIoSnapshotManager") as io_mgr:
@@ -322,7 +405,7 @@ def test_refresh_config_skips_clear_wave_cache_when_idle(tmp_path: Path):
 
 
 def test_run_sample_phase_idle_skips_hooks(tmp_path: Path):
-    """A-path: detectors/block-meta off → sample_fn only."""
+    """Detectors off: sample + finish stamp, no wave record or after-sample."""
     cfg = _cfg(tmp_path, reload=0.0)
     proc = _bind(cfg)
     calls: list[str] = []
@@ -348,7 +431,44 @@ def test_run_sample_phase_idle_skips_hooks(tmp_path: Path):
         speculative_config=None,
         use_async=False,
     )
-    assert calls == ["sample"]
+    assert calls == ["sample", "mark"]
+    RuntimeGuardProcessor.reset_for_tests()
+
+
+def test_run_sample_phase_marks_finished_before_eow_when_hooks_off(tmp_path: Path):
+    """Hot-reload with detectors off must stamp finish before manual-dump eow.
+
+    Reap stays on the next sync_for_step so this wave's report can still read
+    the prompt cache.
+    """
+    cfg = _cfg(tmp_path, reload=5.0)
+    cfg._last_reload_ts = time.time()
+    cfg._initial_broadcast_done = True
+    assert cfg.needs_sample_phase_hooks() is False
+    order: list[str] = []
+
+    def sample_fn():
+        order.append("sample")
+        return SamplePhaseResult(
+            scheduler_output=None,
+            input_batch=None,
+            model_runner_output=None,
+            sampler_output=MagicMock(),
+            valid_sampled_token_ids=[1],
+            req_ids_output_copy=["r1"],
+            finished_req_ids=["r1"],
+        )
+
+    proc = _bind(cfg)
+    proc.mark_finished = lambda ids: order.append(f"mark:{list(ids)}")  # type: ignore[method-assign]
+    proc.end_of_wave_sync = lambda **k: order.append("eow")  # type: ignore[method-assign]
+    proc._reap_finished_requests = lambda: order.append("reap")  # type: ignore[method-assign]
+    proc.run_sample_phase(
+        sample_fn=sample_fn,
+        speculative_config=None,
+        use_async=False,
+    )
+    assert order == ["sample", "mark:['r1']", "eow"]
     RuntimeGuardProcessor.reset_for_tests()
 
 
