@@ -18,7 +18,6 @@
 #
 from collections.abc import Callable
 from contextlib import contextmanager
-from functools import partial
 from typing import Any
 
 import torch
@@ -30,11 +29,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import (
-    prepare_dcp_local_seq_lens as _prepare_dcp_local_seq_lens,
-)
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -52,60 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.utils import use_updatable_graph
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
-
-
-def _prepare_pcp_inputs_to_capture(
-    num_reqs: int,
-    num_tokens: int,
-    model_state: ModelState,
-    input_buffers: InputBuffers,
-    _block_tables: BlockTables,
-    attn_groups: list[list[AttentionGroup]],
-    kv_cache_config: KVCacheConfig,
-    full_cudagraph: bool,
-    max_query_len: int | None = None,
-    *,
-    pcp_manager: Any,
-) -> cudagraph_utils.AttentionState:
-    """Build graph inputs with the same PCP-local layout used on replay."""
-    # vLLM #53515 passes PCP-local input buffers into graph capture, so the
-    # dummy batch must not be partitioned a second time. vLLM #53869
-    # supplies capture-only PCP metadata instead. The block tables must
-    # retain the same PCP-local backing that runtime prepare_attn updates,
-    # because the SFA full graph cannot rebind their captured pointer.
-    # The Ascend dummy carries the seq_lens_np/attn_state views consumed
-    # by Ascend metadata builders and doubles as the capture-time PCP
-    # global batch (is_dummy=True).
-    input_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
-        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
-    )
-    input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
-    slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
-    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
-
-    if _block_tables.cp_size > 1:
-        input_batch.dcp_local_seq_lens = _prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            input_batch.num_reqs,
-            _block_tables.cp_size,
-            _block_tables.cp_rank,
-            _block_tables.cp_interleave,
-            num_reqs_padded=input_batch.num_reqs_after_padding,
-        )
-
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=full_cudagraph,
-    )
-    return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
 def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
@@ -275,12 +217,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
-        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
-        if pcp_manager is not None:
-            cudagraph_utils.prepare_inputs_to_capture = partial(
-                _prepare_pcp_inputs_to_capture,
-                pcp_manager=pcp_manager,
-            )
         try:
             with communicator_switch():
                 return super().capture(

@@ -381,16 +381,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         pcp_manager = self.pcp_manager
-        if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
-            assert isinstance(pcp_manager, AscendPCPManager)
-            # The last PP stage restores PCP outputs to the global request
-            # layout before sampling. Non-last stages do not own final hidden
-            # states, but their PP receive/postprocess path must use that same
-            # global request layout rather than PCP-local segment rows.
-            self.execute_model_state = self.execute_model_state._replace(
-                input_batch=pcp_manager.global_batch,
-            )
-
         # The pre-restore marker is scoped to this sampling step; stale state
         # from a previous step must not suppress the upstream all-gather.
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
@@ -488,8 +478,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
-                if self.speculator is not None:
-                    self.speculator.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
