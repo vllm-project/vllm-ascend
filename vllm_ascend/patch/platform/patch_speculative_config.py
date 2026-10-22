@@ -10,6 +10,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
+from vllm_ascend.spec_decode.eagle4 import normalize_eagle4_config
 from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
@@ -85,6 +86,7 @@ def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
 
 def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
     hf_config = _orig_hf_config_override(hf_config)
+    normalize_eagle4_config(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:

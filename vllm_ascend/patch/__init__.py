@@ -603,12 +603,17 @@
 #       `num_nextn_predict_layers` (or `mtp_num_hidden_layers`), and rewrite
 #       `model_type`/`architectures` to the corresponding MTP model. Also remaps
 #       MistralLarge3 to its Eagle variant.
+#       EAGLE-4 checkpoint architectures are normalized to the Ascend-specific
+#       model before inspection, avoiding the CUDA plugin's model registration.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend-specific MTP model type remapping.
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports loading these MTP draft
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
+#       Replace the EAGLE-4 architecture rewrite with a platform-aware model
+#       resolution hook when vLLM exposes one. The speculative method itself
+#       already uses the companion vLLM's registry; no algorithm patch is needed.
 #
 #   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
 #    Why:
