@@ -26,6 +26,7 @@ data correctness is verified end-to-end.
 from __future__ import annotations
 
 import types
+import weakref
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -91,7 +92,11 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.Tensor, "record_stream", lambda self, stream: None),
+    ):
         yield
 
 
@@ -221,6 +226,61 @@ def test_packed_broadcast_producer_passes_src_rank():
         buffer_size_bytes=1,
     )
     assert group.broadcast.call_args.kwargs.get("src") == 3
+
+
+@pytest.mark.parametrize("num_buffers", [1, 2, 3])
+def test_packed_broadcast_producer_keeps_storage_alive_until_async_broadcast_finishes(num_buffers):
+    """Raw HCCL enqueues a pointer; it does not retain the Tensor object.
+
+    Simulate the allocator's record_stream protection by retaining recorded
+    storage until the communication stream finishes. Without that protection,
+    rotating a slot drops its packed buffer while the broadcast still uses it.
+    """
+    received = []
+
+    class DelayedBroadcastStream(_FakeNpuStream):
+        def __init__(self):
+            self.pending = []
+            self.recorded = []
+
+        def synchronize(self):
+            for tensor_ref in self.pending:
+                tensor = tensor_ref()
+                assert tensor is not None, "packed storage released before HCCL broadcast completed"
+                received.append(tensor.view(torch.float32).clone())
+            self.pending.clear()
+            self.recorded.clear()
+
+    communication_stream = DelayedBroadcastStream()
+
+    class DelayedGroup:
+        def broadcast(self, tensor, src, stream=None):
+            assert stream is communication_stream
+            communication_stream.pending.append(weakref.ref(tensor))
+
+    def record_stream(tensor, stream):
+        assert stream is communication_stream
+        communication_stream.recorded.append(tensor)
+
+    with (
+        patch.object(torch.npu, "current_stream", return_value=communication_stream),
+        patch.object(torch.Tensor, "record_stream", record_stream),
+    ):
+        # Force every slot to rotate repeatedly in two independent updates.
+        for _ in range(2):
+            tensors = [(f"w{i}", torch.tensor([float(i)])) for i in range(7)]
+            packed_broadcast_producer(
+                iterator=iter(tensors),
+                group=DelayedGroup(),
+                src=0,
+                post_iter_func=lambda item: item[1],
+                buffer_size_bytes=1,
+                num_buffers=num_buffers,
+            )
+            assert not communication_stream.pending
+            assert not communication_stream.recorded
+
+    assert [value.item() for value in received] == list(range(7)) * 2
 
 
 # ---------------------------------------------------------------------------
