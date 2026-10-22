@@ -35,6 +35,7 @@ def _make_runner(need_timing: bool = True):
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
+        kvpp_config=SimpleNamespace(size=1),
     )
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="other_model"))
@@ -56,6 +57,7 @@ def _make_runner(need_timing: bool = True):
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
+    runner.speculative_config = None
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -1949,11 +1951,15 @@ def test_cpu_length_sync_preserves_original_condition_except_v41(model_type, spe
     output.scheduled_cached_reqs.req_ids = batch.req_ids
     runner.model_config.hf_config.model_type = model_type
     runner.sync_spec_pp_cpu_counts = pp_sync
-    runner._copy_num_computed_tokens_to_cpu = MagicMock()
+    runner.num_computed_tokens_stream = MagicMock()
     expected = pp_sync or (speculative and model_type != "deepseek_v41")
-    with patch.object(GPUModelRunner, "postprocess_sampled"):
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled"),
+        patch("torch.cuda.current_stream"),
+        patch("torch.npu.stream", return_value=nullcontext()),
+    ):
         runner.postprocess_sampled("idx", "tok", 3, 2)
-    assert runner._copy_num_computed_tokens_to_cpu.call_count == int(expected)
+    assert runner.num_computed_tokens_event.record.call_count == int(expected)
     runner._update_seq_lens_cpu(output, batch.req_ids)
     assert runner.num_computed_tokens_event.synchronize.call_count == int(expected)
     if expected:
@@ -1964,11 +1970,11 @@ def test_device_only_postprocess_keeps_device_update_without_d2h():
     runner = _make_runner()
     runner.speculator = object()
     runner.model_config.hf_config.model_type = "deepseek_v41"
-    runner._copy_num_computed_tokens_to_cpu = MagicMock()
+    runner.num_computed_tokens_event = MagicMock()
     with patch.object(GPUModelRunner, "postprocess_sampled") as parent:
         runner.postprocess_sampled("idx", "tok", 3, 2, query_start_loc="q")
     parent.assert_called_once_with("idx", "tok", 3, 2, "q")
-    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+    runner.num_computed_tokens_event.record.assert_not_called()
 
 
 def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
@@ -1981,3 +1987,82 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
     for i, req_id in enumerate(batch.req_ids):
         index = runner.req_states.req_id_to_index[req_id]
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+def _device_length_runner():
+    runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
+    runner.model_config.hf_text_config = SimpleNamespace(model_type="glm_moe_dsa")
+    runner.speculative_config = SimpleNamespace(
+        method="dflash",
+        draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+    )
+    return runner, output, batch
+
+
+def test_glm_dflash2_device_lengths_do_not_require_attention_groups():
+    runner, _, _ = _device_length_runner()
+    del runner.attn_groups
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    ["no_spec_config", "no_speculator", "method", "no_draft_config", "draft_arch", "target_arch"],
+)
+def test_dflash_device_length_policy_falls_back(unsupported):
+    runner, _, _ = _device_length_runner()
+    if unsupported == "no_spec_config":
+        runner.speculative_config = None
+    elif unsupported == "no_speculator":
+        runner.speculator = None
+    elif unsupported == "method":
+        runner.speculative_config.method = "eagle"
+    elif unsupported == "no_draft_config":
+        runner.speculative_config.draft_model_config = None
+    elif unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported == "target_arch":
+        runner.model_config.hf_text_config.model_type = "other_model"
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "glm_moe_dsa"])
+def test_pp_exact_counts_override_device_length_exemption(model_type):
+    runner, _, _ = _device_length_runner()
+    runner.model_config.hf_config.model_type = model_type
+    runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("rejected", [0, 1, 5])
+def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected):
+    runner, output, _ = _device_length_runner()
+    runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
+    runner.input_buffers.seq_lens_cpu.fill_(777)
+    runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])
+    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+    expected_device = runner.req_states.num_computed_tokens.gpu.clone()
+
+    def reject(_self, idx_mapping, _tokens, _num_sampled, num_rejected, _query_start_loc):
+        runner.req_states.num_computed_tokens.gpu[idx_mapping] -= num_rejected
+
+    for req_ids in (["r1", "r0"], ["r0", "r1"]):
+        expected_device[:2] -= rejected
+        before = runner.req_states.num_computed_tokens_cpu.clone()
+        with patch.object(GPUModelRunner, "postprocess_sampled", reject):
+            runner.postprocess_sampled(torch.tensor([1, 0]), None, 1, rejected)
+        runner._update_seq_lens_cpu(output, req_ids)
+        torch.testing.assert_close(runner.req_states.num_computed_tokens.gpu, expected_device)
+        torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, before)
+        assert runner.input_buffers.seq_lens_cpu[:2].tolist() == [
+            int(before[runner.req_states.req_id_to_index[req_id]]) + output.num_scheduled_tokens[req_id]
+            for req_id in req_ids
+        ]
+        assert runner.input_buffers.seq_lens_cpu[2:].tolist() == [777, 777]
+        # Simulate the upstream optimistic host count advancing to the next step.
+        runner.req_states.num_computed_tokens_cpu[:2] += 6
+        runner.req_states.num_computed_tokens.gpu[:2] += 6
+        expected_device[:2] += 6
+    runner.num_computed_tokens_event.record.assert_not_called()
+    runner.num_computed_tokens_event.synchronize.assert_not_called()
+    assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
