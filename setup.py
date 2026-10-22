@@ -456,8 +456,8 @@ def get_requirements() -> list[str]:
 
     try:
         requirements = _read_requirements("requirements.txt")
-    except ValueError:
-        print("Failed to read requirements.txt in vllm_ascend.")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read requirements.txt in vllm_ascend: {exc}") from exc
     return requirements
 
 
