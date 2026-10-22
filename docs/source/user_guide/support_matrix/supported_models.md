@@ -68,7 +68,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | InternLM                      | 🔵        | [#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)     | A2/A3 |
 | Baichuan                      | 🔵        |                                                                      | A2/A3 |
 | Baichuan2                     | 🔵        |                                                                      | A2/A3 |
-| Phi-4-mini                    | 🔵        |                                                                      | A2/A3 |
+| Phi-4-mini                    | 🔵        | BF16 verified (tp1, max-model-len 4096, eager); [Doc](../../tutorials/models/Phi-4-mini-instruct.md) | A2/A3 |
 | MiniCPM                       | 🔵        |                                                                      | A2/A3 |
 | MiniCPM3                      | 🔵        |                                                                      | A2/A3 |
 | Ernie4.5                      | 🔵        |                                                                      | A2/A3 |
