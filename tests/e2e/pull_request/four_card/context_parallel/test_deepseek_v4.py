@@ -169,6 +169,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
 )
 @patch.dict(os.environ, COMMON_ENV)
 @wait_until_npu_memory_free(target_free_percentage=0.8)
+# Control test trigger comment
 def test_deepseek_v4_dsa_pcp_dspark() -> None:
     """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
     _run_test(
