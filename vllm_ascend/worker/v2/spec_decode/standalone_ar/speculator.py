@@ -31,12 +31,16 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         dcp_local_seq_lens: torch.Tensor | None = None,
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
-        draft_seq_lens_cpu = None
+        draft_seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound
         if step == 0:
+            # TODO: Remove this workaround once upstream includes the correction
+            # token in the standalone AR prefill sequence-length bound.
             # Draft prefill appends the target's correction token to the
-            # expanded query, so FIA's KV sequence length is target length + 1.
-            draft_seq_lens_cpu = seq_lens_cpu_upper_bound[:num_reqs] + 1
-            draft_seq_lens_cpu.clamp_(max=self.max_model_len)
+            # expanded query, so the upstream builder must receive target
+            # length + 1. Keep the input batch's bounds unchanged.
+            draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(
+                max=self.max_model_len
+            )
 
         num_tokens = int(query_start_loc_np[-1])
         positions = self.expanded_positions if step == 0 else self.input_buffers.positions
@@ -48,7 +52,6 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
                 positions,
                 num_tokens,
                 self.draft_is_prefilling[:num_reqs],
-                seq_lens_cpu_upper_bound=draft_seq_lens_cpu,
                 attn_state=attn_state,
                 parallel_config=self.vllm_config.parallel_config,
             ),
@@ -57,7 +60,7 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
                 num_reqs,
                 batch_desc,
                 query_start_loc_np,
-                seq_lens_cpu_upper_bound,
+                draft_seq_lens_cpu_upper_bound,
                 step,
                 causal,
                 dcp_local_seq_lens,
