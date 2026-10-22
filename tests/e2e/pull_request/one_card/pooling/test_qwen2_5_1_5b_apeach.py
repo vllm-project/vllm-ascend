@@ -35,14 +35,21 @@ Scoping notes (see issue #10680):
 * Korean corpus is self-constructed (no third-party license) with >= 15
   samples per label; Chinese/English samples are smoke-only (the model is
   Korean-only, so they only assert that inference runs without crashing).
-* Ascend custom ops: the `aclnnAddRmsNormBias` kernel is shipped in the
-  `libcust_opapi.so` vendor package and discovered via
-  `ASCEND_CUSTOM_OPP_PATH`. Because `vllm_ascend_C.so` is loaded before
-  Python-side `bootstrap_custom_op_env()` runs, the environment variable
-  must be set before the process starts (source
-  `vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash`).
-  When it is not set, the fixture below transparently falls back to
-  `torch_npu.npu_add_rms_norm` so the test still runs.
+* Environment requirement (primary): the `aclnnAddRmsNormBias` custom op
+  kernel is shipped in the `libcust_opapi.so` vendor package and discovered
+  via `ASCEND_CUSTOM_OPP_PATH`. Because `vllm_ascend_C.so` is loaded before
+  Python-side `bootstrap_custom_op_env()` runs, the variable must be set
+  before the process starts. Source the vendor environment script before
+  running pytest (this is the PR-validated configuration; it keeps the
+  custom op path active):
+
+      . /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+
+  Fallback (only if the script is unavailable): `VLLM_BATCH_INVARIANT=1`
+  makes `enable_custom_op()` return `False`, selecting
+  `torch_npu.npu_add_rms_norm` instead. The fixture below applies this
+  fallback automatically when the vendor library is not discoverable, so
+  the test also runs without any special environment.
 """
 
 import glob
