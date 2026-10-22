@@ -128,10 +128,12 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         temperature: torch.Tensor,
         seeds: torch.Tensor,
         dp_sync: Any = None,
+        dp_sync_state: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
+        num_speculative_tokens: int | None = None,
     ):
         self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
@@ -148,7 +150,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
                 next_prefill_tokens=next_prefill_tokens,
                 temperature=temperature,
                 seeds=seeds,
-                dp_sync=dp_sync,
+                dp_sync=dp_sync_state if dp_sync is None else dp_sync,
                 dummy_run=dummy_run,
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 mm_inputs=mm_inputs,
