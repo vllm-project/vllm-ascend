@@ -12,6 +12,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
@@ -615,21 +616,66 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_rejects_v2_legacy_fields(self):
+    def test_validate_eplb_config_warns_and_ignores_unsupported_v2_fields(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
-        vllm_config.additional_config = {"eplb_config": {"dynamic_eplb": True}}
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator=None,
+        )
+        vllm_config.additional_config = {
+            "enable_cpu_binding": True,
+            "eplb_config": {
+                "load_collection_phase": "prefill",
+                "dynamic_eplb": True,
+                "policy": "stair",
+                "not_a_v2_parameter": 1,
+            },
+        }
 
-        with self.assertRaisesRegex(ValueError, "unsupported fields: dynamic_eplb"):
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_rejects_additional_policy(self):
+        self.assertEqual(
+            vllm_config.additional_config,
+            {
+                "enable_cpu_binding": True,
+                "eplb_config": {"load_collection_phase": "prefill"},
+            },
+        )
+        EplbConfig(**vllm_config.additional_config["eplb_config"])
+        warning.assert_called_once()
+        rendered_warning = warning.call_args.args[0] % warning.call_args.args[1:]
+        for supported_field in ("load_collection_phase", "stair_config", "rank_transfer_limit"):
+            self.assertIn(supported_field, rendered_warning)
+        for ignored_field in ("dynamic_eplb", "policy", "not_a_v2_parameter"):
+            self.assertIn(ignored_field, rendered_warning)
+
+    def test_validate_eplb_config_warns_and_ignores_unsupported_stair_fields(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
-        vllm_config.additional_config = {"eplb_config": {"policy": "stair"}}
+        vllm_config.additional_config = {
+            "eplb_config": {
+                "stair_config": {
+                    "rank_transfer_limit": 2,
+                    "hysteresis_relative": 0.1,
+                    "unknown_option": 1,
+                }
+            }
+        }
 
-        with self.assertRaisesRegex(ValueError, "unsupported fields: policy"):
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
             _validate_eplb_config(vllm_config)
+
+        filtered_config = vllm_config.additional_config["eplb_config"]
+        self.assertEqual(filtered_config, {"stair_config": {"rank_transfer_limit": 2}})
+        EplbConfig(**filtered_config)
+        warning.assert_called_once()
+        rendered_warning = warning.call_args.args[0] % warning.call_args.args[1:]
+        self.assertIn("placement_search_backtrack_limit", rendered_warning)
+        self.assertIn("stair_config.hysteresis_relative", rendered_warning)
+        self.assertIn("stair_config.unknown_option", rendered_warning)
 
     def test_validate_eplb_config_rejects_v1_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
@@ -655,15 +701,24 @@ class TestNPUPlatform(TestBase):
         with self.assertRaisesRegex(ValueError, "only supported by Model Runner V2"):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_rejects_v2_legacy_environment(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
+    def test_validate_eplb_config_warns_and_ignores_v2_legacy_environment(self):
+        for env_name in ("DYNAMIC_EPLB", "EXPERT_MAP_RECORD"):
+            with self.subTest(env_name=env_name):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = True
 
-        with (
-            patch.dict("os.environ", {"DYNAMIC_EPLB": "1"}, clear=True),
-            self.assertRaisesRegex(ValueError, "Model Runner V1 controls"),
-        ):
-            _validate_eplb_config(vllm_config)
+                with (
+                    patch.dict("os.environ", {env_name: "1"}, clear=True),
+                    patch("vllm_ascend.platform.logger.warning") as warning,
+                ):
+                    _validate_eplb_config(vllm_config)
+
+                warning.assert_called_once()
+                rendered_warning = warning.call_args.args[0] % warning.call_args.args[1:]
+                self.assertIn("Model Runner V1 controls", rendered_warning)
+                self.assertIn("ignored by Model Runner V2", rendered_warning)
+                self.assertIn("load_collection_phase", rendered_warning)
+                self.assertIn("stair_config", rendered_warning)
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
