@@ -468,6 +468,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(target_language_model)
 
+        # draft_model overrides _maybe_share_lm_head, but still needs its graph wrapper.
+        if self.use_cuda_graph and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            logger.info(
+                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+                self.use_eagle,
+                self.enable_enpu,
+            )
+            self.update_stream = None
+            self._runnable = ACLGraphWrapper(
+                self._run_merged_draft,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
+
         # Align draft weights before precomputing draft hidden states.
         if self.method in ("dspark", "dflash") and hasattr(self.model, "post_process"):
             self.model.post_process(self.vllm_config)
@@ -634,22 +651,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         layer_module.shared_head.head.weight, target_lm_head.weight
                     ):
                         layer_module.shared_head.head = target_lm_head
-
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
-            logger.info(
-                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
-                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
-                self.use_eagle,
-                self.enable_enpu,
-            )
-            self.update_stream = None
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
 
     def set_update_stream(self, update_stream):
         if hasattr(self._runnable, "set_update_stream"):
