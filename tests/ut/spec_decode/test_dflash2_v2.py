@@ -27,6 +27,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
@@ -190,9 +191,11 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
 
     monkeypatch.setattr(DFlashSpeculator, "propose", propose)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
     assert (
         speculator.propose(
-            batch, *[None] * 10, dp_sync=sync_state, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
+            batch, *[None] * 10, **{dp_sync_kwarg: sync_state}, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
         )
         is result
     )
@@ -235,3 +238,50 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
     dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
 
     kernel.assert_called_once_with(*inputs, kv_cache_block_size=128)
+
+
+def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):
+    """vLLM main forwards the physical block size, but the Ascend block table is
+    kernel-block addressed, so the factory restores the kernel size per group."""
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_table = torch.zeros(2, 4, dtype=torch.int32)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[block_table],
+    )
+    inputs = [object() for _ in range(28)]
+    inputs[16] = block_table
+    inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
+    inputs[-1] = True  # sample_from_anchor
+
+    if vllm_version_is("0.31.0"):
+        dflash_module.prepare_dflash_inputs_factory(384)(*inputs)
+    else:
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+
+    restored = kernel.call_args.args[17]
+    if vllm_version_is("0.31.0"):
+        # The release lane already forwards the kernel block size.
+        assert restored == 384
+    else:
+        assert restored == 128
+    assert kernel.call_args.kwargs["kv_cache_block_size"] == 384
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only kernel block size restore")
+def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_tables = SimpleNamespace(
+        kernel_block_sizes=[128],
+        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)],
+    )
+    inputs = [object() for _ in range(28)]
+    # A block table that AscendBlockTables never handed out.
+    inputs[16] = torch.zeros(2, 4, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="unknown to AscendBlockTables"):
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+
+    kernel.assert_not_called()

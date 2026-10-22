@@ -35,7 +35,7 @@ The symbols used have the following meanings:
 | [Quantization W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ |  |  |  |
 | <abbr title="Tensor Parallel">TP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |  |  |
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |  |
-| [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠 | ❌ | ❔ | ✅ | 🟠 | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
+| [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠 | ✅ | ❔ | ✅ | 🟠 | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
 | [Pipeline Parallel](../feature_guide/pipeline_parallel.md) | 🟠<sup>3</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>4</sup> | 🟠<sup>5</sup> | ✅ | ✅ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ✅ | ✅ | ❔ | ✅ |
 
 - <sup>1</sup> Lmhead TP is only enabled in the pure dp scenarios.

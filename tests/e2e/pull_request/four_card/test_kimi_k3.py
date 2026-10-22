@@ -315,7 +315,6 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")

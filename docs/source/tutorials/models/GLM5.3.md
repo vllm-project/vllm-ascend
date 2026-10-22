@@ -404,7 +404,7 @@ Only the key parameters specific to this model/scenario are described below. max
 
 **KV cache configuration:**
 
-- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, does not support context parallelism (DCP/PCP), cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
 
 **Notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
@@ -580,7 +580,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "glm53-prefill",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -668,7 +667,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "glm53-prefill",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -750,7 +748,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
                 "kv_port": "30100",
-                "engine_id": "glm53-decode-dp'"$4"'",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -831,7 +828,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
                 "kv_port": "30100",
-                "engine_id": "glm53-decode-dp'"$4"'",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
@@ -917,8 +913,6 @@ Key parameters:
 - `MooncakeConnectorV2` declares the same Prefill DP1/PP2/TP16 and
   Decode DP16/TP2 topology on both sides. The non-pooled base KV ports
   are 30000 on Prefill and 30100 on Decode; reserve derived worker ports.
-- The examples give Prefill and each Decode engine distinct `engine_id`
-  values so P-to-D peer registration cannot conflict.
 
 #### 5.1.3 MemCache KV Cache Pool Deployment
 
@@ -1031,7 +1025,6 @@ Before you start, please
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "glm53-prefill",
                 "kv_connector_extra_config": {
                     "connectors":[
                     {
@@ -1143,7 +1136,6 @@ Before you start, please
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "glm53-prefill",
                 "kv_connector_extra_config": {
                     "connectors":[
                     {
@@ -1251,7 +1243,6 @@ Before you start, please
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "glm53-decode-dp'"$4"'",
                 "kv_connector_extra_config": {
                     "connectors":[
                     {
@@ -1358,7 +1349,6 @@ Before you start, please
                 "kv_connector": "MultiConnector",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "glm53-decode-dp'"$4"'",
                 "kv_connector_extra_config": {
                     "connectors":[
                     {
@@ -1386,9 +1376,7 @@ Before you start, please
         ```
 
 The pooled configuration uses base KV ports 30000 on Prefill and
-30200 on Decode. The outer `engine_id` is unique per engine and is
-inherited by the child connectors. This differs from the supplied pooled
-reference's repeated `"0"` IDs to avoid Mooncake peer identity conflicts.
+30200 on Decode.
 `lookup_rpc_port="0"` is retained: Ascend Store uses an IPC endpoint that
 also includes the DP rank, and P/D run on separate hosts. It is not a TCP
 listener on port zero. `backend="memcache"` and `use_layerwise=false`
@@ -1619,7 +1607,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -1707,7 +1694,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -1795,7 +1781,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -1883,7 +1868,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -1973,8 +1957,9 @@ Key Parameter Descriptions:
   recomputation scheduler. See [Performance Tuning](#9-performance-tuning).
 - `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant
   quantization for the SFA packed main KV cache, as an alternative to
-  `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be
-  combined with the C8 cache, and in Prefill-Decode disaggregation the
+  `--kv-cache-dtype int8`. It requires an A2/A3 device, does not
+  support context parallelism (DCP/PCP), cannot be combined with the C8
+  cache, and in Prefill-Decode disaggregation the
   Mooncake option `"use_ascend_direct"` must be `false`.
 
 ## 6 Functional Verification

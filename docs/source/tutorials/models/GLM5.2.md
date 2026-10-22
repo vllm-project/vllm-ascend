@@ -499,7 +499,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -562,7 +561,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
-                "engine_id": "0",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -623,7 +621,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -684,7 +681,6 @@ Before you start, please
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "30200",
-                "engine_id": "2",
                 "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -765,7 +761,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--enforce-eager`: The prefill side runs in eager mode (the `FULL_DECODE_ONLY` graph capture is used on the decode side instead).
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
 - `fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
-- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
+- `--kv-cache-dtype turboquant_4bit_nc`: Enables 4-bit TurboQuant quantization for the SFA packed main KV cache, as an alternative to `--kv-cache-dtype int8`. It requires an A2/A3 device, does not support context parallelism (DCP/PCP), cannot be combined with the C8 cache, and in Prefill-Decode disaggregation the Mooncake option `"use_ascend_direct"` must be `false`.
 
 **Decode node-specific configurations (d0/d1):**
 
@@ -781,7 +777,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
 - `"kv_port"`: Port for Mooncake KV transfer communication. Use different port ranges for prefill (`30000`) and decode (`30200`) node groups.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache, reducing latency.
-- `"engine_id"`: Fixed engine id of the Mooncake connector per role group: `0` for the prefill engine (shared by the two PP ranks) and `2` for the decode engines.
 - `"prefill"` / `"decode"` sections: Specify the parallelism of the prefill and decode node groups respectively. These must match the actual deployment topology (`prefill: dp_size 1, pp_size 2, tp_size 16, pp_layer_partition "41,37"`, `decode: dp_size 16, tp_size 2`).
 
 **Request forwarding (proxy):**
@@ -1295,7 +1290,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1359,7 +1353,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1422,7 +1415,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},
@@ -1485,7 +1477,6 @@ prepare the script `run_dp_template.sh` on each node.
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 2, "tp_size": 16},

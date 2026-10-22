@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -20,6 +21,51 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
+
+
+class TestPPSequenceParallelTransport(unittest.TestCase):
+    @patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("No current config"))
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    def test_transport_without_current_config(self, tp_group, pp_group, ascend_config, _current_config):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        ascend_config.return_value.msmonitor_use_daemon = False
+        pp_group.return_value.is_first_rank = False
+        pp_group.return_value.is_last_rank = False
+        pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
+        for sp_enabled, use_v2 in ((False, False), (True, False), (False, True), (True, True)):
+            for forward_pass in (False, True):
+                with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
+                    pp_group.return_value.reset_mock()
+                    worker = NPUWorker.__new__(NPUWorker)
+                    worker.vllm_config = SimpleNamespace(
+                        parallel_config=SimpleNamespace(
+                            use_sequence_parallel_moe=sp_enabled,
+                            distributed_executor_backend="mp",
+                        )
+                    )
+                    worker.log_memory_stats = MagicMock()
+                    worker._pp_send_work = []
+                    worker.profiler = None
+                    worker.use_v2_model_runner = use_v2
+                    output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
+                    output.kv_connector_output = None
+                    worker.model_runner = MagicMock()
+                    worker.model_runner.execute_model.return_value = output
+                    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=int(forward_pass))
+
+                    self.assertIsNone(worker.execute_model(scheduler_output))
+
+                    group = None if use_v2 and sp_enabled else tp_group.return_value
+                    if forward_pass:
+                        pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
+                    else:
+                        pp_group.return_value.irecv_tensor_dict.assert_not_called()
+                    pp_group.return_value.isend_tensor_dict.assert_called_once_with(
+                        output.tensors, all_gather_group=group
+                    )
 
 
 class TestNPUWorker(TestBase):
@@ -428,6 +474,7 @@ class TestNPUWorker(TestBase):
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
+        self.model_config_mock.enable_sleep_mode = False
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -454,6 +501,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -527,6 +576,7 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker initialization with custom cache_dtype"""
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
+        self.model_config_mock.enable_sleep_mode = True
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -546,6 +596,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -743,6 +795,7 @@ class TestNPUWorker(TestBase):
             speculative_config=SimpleNamespace(method="mtp"),
         )
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_parameters = {}
 
         worker.wake_up(tags=["weights"])
 
@@ -1050,6 +1103,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
+            worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
@@ -1161,20 +1215,33 @@ class TestNPUWorker(TestBase):
         worker.get_kv_cache_spec.assert_called_once_with()
 
     def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
+        from vllm.config import get_current_vllm_config
+
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
         worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
-        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+
+        # Capture the active vLLM config while profile_run() executes, so we can
+        # verify the fast path runs it inside set_current_vllm_config().
+        profile_run_configs = []
+
+        def record_active_config(*args, **kwargs):
+            profile_run_configs.append(get_current_vllm_config())
+
+        worker.model_runner = MagicMock()
+        worker.model_runner.profile_run.side_effect = record_active_config
 
         result = worker.determine_available_memory()
 
         self.assertEqual(result, 4096)
-        worker.model_runner.profile_run.assert_called_once_with()
+        worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
         worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+        self.assertEqual(profile_run_configs, [worker.vllm_config])
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -1381,6 +1448,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None

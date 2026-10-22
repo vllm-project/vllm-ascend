@@ -21,6 +21,7 @@ import copy
 import gc
 import logging
 from contextlib import AbstractContextManager, nullcontext
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
 
@@ -29,11 +30,14 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -106,10 +110,10 @@ from vllm_ascend.utils import (
     enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -121,6 +125,21 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+# if true, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
+
+
+class _V1ModelRunnerFactory:
+    """Import the V1 model runner only when one is actually constructed."""
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+
+        return NPUModelRunner(*args, **kwargs)
+
+
+NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -141,9 +160,16 @@ class NPUWorker(WorkerBase):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # register patch for vllm
+        # Worker processes receive a pickled VllmConfig, so the platform config
+        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
+        # Ascend V2 model runner overrides so the worker resolves the same
+        # runner version as the engine. Idempotent.
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
+        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
+        apply_v2_model_runner_config_patch()
+        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         # Register ops when worker init.
@@ -177,9 +203,9 @@ class NPUWorker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         self.profiler: TorchNPUProfilerWrapper | None = None
         self.npugraph_memory_bytes = 0
-        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
-            # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # Buffers and parameters saved before sleep.
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # Weight transfer engine is created in `load_model` once the model
@@ -247,6 +273,29 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
+    def _save_sleep_parameters(self, model: nn.Module) -> None:
+        # Older supported vLLM versions do not expose the retention option.
+        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
+        if not patterns:
+            self._sleep_saved_parameters = {}
+            return
+        parameters = dict(model.named_parameters())
+        names: set[str] = set()
+        for pattern in patterns:
+            matches = fnmatch_filter(parameters, pattern)
+            if not matches:
+                raise ValueError(f"No parameter matches sleep retention: {pattern}")
+            names.update(matches)
+        self._sleep_saved_parameters = {
+            name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
+        }
+
+    @torch.no_grad()
+    def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        for name, value in self._sleep_saved_parameters.items():
+            model.get_parameter(name).copy_(value)
+        self._sleep_saved_parameters.clear()
+
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -255,8 +304,11 @@ class NPUWorker(WorkerBase):
         # stays resident and does not need a CPU backup.
         if level == 1:
             self._sleep_saved_buffers = {}
+            self._sleep_saved_parameters = {}
         else:
             model = self.model_runner.model
+            # Level-2 discards the weights pool; retain parameters the sender omits.
+            self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         rl_config = get_ascend_config().rl_config
@@ -291,8 +343,12 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
+        # Do not access or consume saved weights when only the KV pool wakes.
+        wake_weights = tags is None or "weights" in tags
+        if wake_weights and self._sleep_saved_parameters:
+            self._restore_sleep_parameters(self.model_runner.model)
         # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
@@ -505,15 +561,28 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        # FLA import-time capability queries must run on the selected worker
+        # device, and registration must finish before any model is constructed.
+        # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
+        # versions fix import-time NPU init and general registration is restored.
+        register_ascend_fla_customop()
         # Initialize workspace manager
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+                with torch_cuda_wrapper():
+                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
+            else:
+                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+
+                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
@@ -578,11 +647,14 @@ class NPUWorker(WorkerBase):
 
         maybe_apply_startup_plan(self)
 
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.parallel_config.data_parallel_size > 1
+
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            self.model_runner.profile_run()
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(randomize_inputs=randomize_inputs)
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -600,11 +672,14 @@ class NPUWorker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            set_current_vllm_config(self.vllm_config),
+        ):
+            self.model_runner.profile_run(randomize_inputs=randomize_inputs)
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
@@ -783,7 +858,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -809,7 +884,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
@@ -858,6 +933,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+            get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
@@ -1297,7 +1375,9 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
+        # Idle DP worker RPCs also need the current config for replay metadata.
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

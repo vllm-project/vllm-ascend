@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import compress
 from typing import Any, cast
 
 import numpy as np
@@ -346,6 +347,9 @@ class ChunkedTokenDatabase:
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
+        # Per descriptor: physical-block index and count within a logical block.
+        # Compact contiguous descriptors cover the whole block as (0, 1).
+        self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
             "state": {},
@@ -452,6 +456,7 @@ class ChunkedTokenDatabase:
         group_cache_families: dict[int, str] | None = None,
         group_num_layers: dict[int, int] | None = None,
         group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
+        group_cache_entry_segments: dict[int, list[tuple[int, int]]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -462,6 +467,7 @@ class ChunkedTokenDatabase:
             self.group_block_len = group_block_len
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
+            self.group_cache_entry_segments = group_cache_entry_segments or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -519,17 +525,32 @@ class ChunkedTokenDatabase:
         size_list: list[int] = []
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(0)
         num_layers = self.group_num_layers.get("kv", {}).get(0, 1)
-        entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
-        if layer_id >= num_layers or entries_per_layer == 0:
+        if layer_id < 0 or layer_id >= num_layers:
             return [], [], 0
-        start_idx = layer_id * entries_per_layer
-        for i in range(entries_per_layer):
-            idx = start_idx + i
+        layer_offsets = self.group_layer_cache_entry_offsets.get(0)
+        if layer_offsets is None:
+            entries_per_layer = len(group_addrs) // num_layers if num_layers else 0
+            start_idx = layer_id * entries_per_layer
+            end_idx = start_idx + entries_per_layer
+        else:
+            start_idx, end_idx = layer_offsets[layer_id : layer_id + 2]
+        segments = self.group_cache_entry_segments.get(0)
+        start_in_block = start - block_idx * group_block_size
+        end_in_block = end - block_idx * group_block_size
+        for idx in range(start_idx, end_idx):
+            segment_index, segment_count = segments[idx] if segments else (0, 1)
+            segment_tokens = group_block_size // segment_count
+            segment_start = segment_index * segment_tokens
+            copy_start = max(start_in_block, segment_start)
+            copy_end = min(end_in_block, segment_start + segment_tokens)
+            if copy_start >= copy_end:
+                continue
             block_stride = group_block_stride[idx] if group_block_stride else group_block_len[idx]
-            addr = group_addrs[idx] + block_id * block_stride
-            size = int(group_block_len[idx] / group_block_size * (end - start))
+            byte_start = group_block_len[idx] * (copy_start - segment_start) // segment_tokens
+            byte_end = group_block_len[idx] * (copy_end - segment_start) // segment_tokens
+            addr = group_addrs[idx] + block_id * block_stride + byte_start
             addr_list.append(addr)
-            size_list.append(size)
+            size_list.append(byte_end - byte_start)
         return addr_list, size_list, block_id
 
     def _iter_token_chunks(
@@ -545,6 +566,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -558,13 +580,17 @@ class ChunkedTokenDatabase:
             return
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
+        first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
+        chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
+        if chunk_mask is not None:
+            # Unlike transfer-range masks, a short lookup/store mask excludes
+            # chunks beyond its end. compress stops at the shorter iterator.
+            chunk_ids = compress(chunk_ids, chunk_mask[first_chunk:num_logical_blocks])
         candidate_index = 0
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in chunk_ids:
             start_idx = chunk_id * logical_block_size
             end_idx = min(start_idx + logical_block_size, token_len)
-            if start_idx < mask_num:
-                continue
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -624,6 +650,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -633,6 +660,7 @@ class ChunkedTokenDatabase:
             mask_num,
             kv_cache_group_id,
             chunk_filter=chunk_filter,
+            chunk_mask=chunk_mask,
         ):
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val
 
@@ -647,6 +675,7 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
         shard_rank: int | None = None,
         shard_size: int | None = None,
+        chunk_mask: Sequence[bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -660,6 +689,7 @@ class ChunkedTokenDatabase:
             chunk_filter=chunk_filter,
             shard_rank=shard_rank,
             shard_size=shard_size,
+            chunk_mask=chunk_mask,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
@@ -826,6 +856,15 @@ class LoadSpec:
 
     token_len: int = 0
 
+    # Exact request-scoped snapshot identity, separate from the logical length
+    # which can roll back after speculative-token rejection.
+    layerwise_snapshot_end_token: int | None = None
+    layerwise_snapshot_block_index: int | None = None
+    # Distinguish the preceding step of this request from external prefix hits.
+    layerwise_previous_step: bool = False
+    # First block stored under request-scoped keys, including unhashed full blocks.
+    layerwise_snapshot_start_block: int | None = None
+
 
 @dataclass(init=False)
 class RequestTracker:
@@ -857,6 +896,11 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
+    # Identity of the latest request-scoped layerwise partial snapshot.
+    last_layerwise_snapshot_end_token: int | None = None
+    last_layerwise_snapshot_block_index: int | None = None
+    last_layerwise_snapshot_start_block: int | None = None
+
     # Number of speculative scratch blocks for each Mamba cache group.
     num_speculative_blocks_by_group: dict[int, int] | None = None
 
@@ -878,6 +922,9 @@ class RequestTracker:
         last_block_gva: int | None = None,
         num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
+        last_layerwise_snapshot_end_token: int | None = None,
+        last_layerwise_snapshot_block_index: int | None = None,
+        last_layerwise_snapshot_start_block: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -895,6 +942,9 @@ class RequestTracker:
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
+        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
+        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
+        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1166,7 +1216,7 @@ class ReqMeta:
         )
         # Scheduled draft tokens can cross a page before that page has a
         # committed request hash. Do not mark an unsent page as saved.
-        if boundary_without_hash or (not save_partial_block and full_block_count > available_full_block_count):
+        if full_block_count > available_full_block_count:
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
@@ -1178,7 +1228,7 @@ class ReqMeta:
             partial_block_index = None
 
         should_save_partial_block = save_partial_block and (
-            target_token_len % cache_transfer_granularity != 0 or boundary_without_hash
+            target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
@@ -1197,6 +1247,16 @@ class ReqMeta:
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
+            if should_save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = target_token_len
+                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
+                tracker.last_layerwise_snapshot_block_index = (
+                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
+                )
+            elif save_partial_block:
+                tracker.last_layerwise_snapshot_end_token = None
+                tracker.last_layerwise_snapshot_block_index = None
+                tracker.last_layerwise_snapshot_start_block = None
 
         token_ids = None
         if tracker.token_ids and not skip_save:

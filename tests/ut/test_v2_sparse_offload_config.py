@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 import pytest
+from vllm.config import KVTransferConfig
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.attention.sfa_kv_offload import _validate_fused_copy_sfa_config
@@ -15,7 +16,7 @@ def make_config(v2, mtp):
             decode_context_parallel_size=1,
             pipeline_parallel_size=1,
         ),
-        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
         use_v2_model_runner=v2,
         speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=mtp) if mtp else None,
     )
@@ -57,7 +58,7 @@ def test_decode_pp_remains_rejected(v2):
 @pytest.mark.parametrize("v2", [False, True])
 def test_producer_offload_remains_rejected(v2):
     config = make_config(v2, 2)
-    config.kv_transfer_config.is_kv_consumer = False
+    config.kv_transfer_config.kv_role = "kv_producer"
     with pytest.raises(AssertionError):
         SparseKVOffloadConfig.from_additional_config(config, {"enabled": True})
 

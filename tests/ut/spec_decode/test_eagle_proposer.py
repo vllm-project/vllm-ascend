@@ -25,6 +25,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -35,7 +36,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -45,6 +46,16 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
 
 
 class _NullPatch:
@@ -1576,9 +1587,9 @@ class TestEagleProposerPropose:
         assert not missing, f"Missing dataclass fields: {missing}"
 
 
-        import vllm_ascend.worker.model_runner_v1
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        import vllm_ascend.worker.v1.model_runner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",
@@ -2403,7 +2414,10 @@ class TestRunMergedDraft(TestBase):
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
         assert hasattr(vllm.config, "PassConfig"), "PassConfig not found"
-        assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
+        # vLLM main (#60517) removed PassConfig.enable_sp with the torch.compile
+        # sequence-parallelism pass; v0.31.0 still declares it.
+        if vllm_version_is("0.31.0"):
+            assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
 
         import vllm.forward_context
 
@@ -2497,10 +2511,10 @@ class TestRunMergedDraft(TestBase):
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self", "num_input_tokens", "_context_slots"]
 
-        import vllm_ascend.worker.model_runner_v1
+        import vllm_ascend.worker.v1.model_runner
 
-        assert hasattr(vllm_ascend.worker.model_runner_v1, "NPUModelRunner")
-        RunnerCls = vllm_ascend.worker.model_runner_v1.NPUModelRunner
+        assert hasattr(vllm_ascend.worker.v1.model_runner, "NPUModelRunner")
+        RunnerCls = vllm_ascend.worker.v1.model_runner.NPUModelRunner
         src = inspect.getsource(RunnerCls.__init__)
         fields = {
             "dcp_size",

@@ -93,7 +93,7 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     residual = torch.randn_like(x)
     expected = (torch.empty_like(x), torch.empty_like(x))
 
-    with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
+    with patch("vllm_ascend.ops.fused_rms_norm_gated.rms_norm_gated", return_value=expected) as fused_norm_gate:
         actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
 
     assert isinstance(layer, AscendFusedRMSNormGated)

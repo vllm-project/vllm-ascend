@@ -28,7 +28,8 @@ ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 # ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 # MOONCAKE_TAG (optional): Version tag of the mooncake-transfer-engine-npu package.
-ARG MOONCAKE_TAG=0.3.11.post1
+ARG MOONCAKE_TAG=v0.3.14-rc1
+ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 # VLLM_REPO (optional): Git repository URL of vLLM.
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
@@ -59,19 +60,38 @@ ARG TRITON_ASCEND_VERSION
 ARG TRITON_ASCEND_PACKAGE_VERSION
 # DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
 ARG DAILY_DEPS_MODE="full"
-ARG FLA_VERSION="26.9.1+dev36e67d2"
-ARG FLA_RELEASE_TAG="v26.9.1-20261012-120905"
+ARG FLA_VERSION="26.9.1+dev5cc6990"
+ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
 
 WORKDIR /workspace
 
 SHELL ["/bin/bash", "-c"]
 
-# Install clang (for triton-ascend) and Mooncake
+
+# Install clang-15 (for triton-ascend)
 RUN yum update -y && \
     yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} && \
     rm -rf /var/cache/yum/*
+
+# ====== Install Mooncake ======
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl" ;; \
+        "linux/amd64"|"x86_64") \
+            MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl" ;; \
+        *) echo "Unsupported arch for mooncake: $ARCH" && exit 1 ;; \
+    esac && \
+    MOONCAKE_URL="${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" && \
+    echo "Download mooncake whl: ${MOONCAKE_URL}" && \
+    wget -q --no-check-certificate "${MOONCAKE_URL}" -P /tmp && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    echo "***********check mooncake-transfer-engine-npu version***********" && \
+    pip show mooncake-transfer-engine && \
+    rm -rf /tmp/${MOONCAKE_WHL} && \
+    pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
@@ -113,10 +133,10 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     case "$ARCH" in \
         "linux/arm64"|"aarch64") \
             FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_aarch64.whl"; \
-            FLA_SHA256="d2fff98d633fd93cc9f5a608a33ef8d134031f5d522482901b8e58d7e236fd3e" ;; \
+            FLA_SHA256="db137e15852a395adca3d54aeeaac68f931a119b4953f0388c2694245ed9aa98" ;; \
         "linux/amd64"|"x86_64") \
             FLA_WHL="flash_linear_attention_npu_a3-${FLA_VERSION}-py3-none-manylinux_2_34_x86_64.whl"; \
-            FLA_SHA256="7f81fe9b26fb4e5ca5f3e9a5e1f87d82857f0b3d40d3eaee20502689c7aed1e8" ;; \
+            FLA_SHA256="a21fcb404405bfe44aef1a05beaa04c4e543f05749abf8cedde091dc409ccf1f" ;; \
         *) echo "Unsupported arch for flash-linear-attention-npu: $ARCH" && exit 1 ;; \
     esac && \
     FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}"; \
@@ -135,8 +155,8 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
 ENV PATH="/root/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install setuptools-rust && \
-    ./build_rust.sh
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash tools/build_rust.sh
 
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
