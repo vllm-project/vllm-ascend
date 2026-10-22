@@ -60,6 +60,9 @@ class _FakeNpuStream:
     def synchronize(self) -> None:
         return None
 
+    def wait_event(self, event) -> None:
+        return None
+
     def __enter__(self) -> _FakeNpuStream:
         return self
 
@@ -81,6 +84,7 @@ def _stub_torch_npu():
     """
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
+        Event=MagicMock,
         current_stream=_FakeNpuStream,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
@@ -95,7 +99,11 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.Tensor, "record_stream"),
+    ):
         yield
 
 
@@ -1295,10 +1303,15 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
     pinned: list[torch.Tensor] = []
 
     def finish(*args, **kwargs):
-        nonlocal armed
-        armed = True
         if body_error is not None:
             raise body_error
+
+    drain = packed_module._drain_packed_streams
+
+    def fail_during_cleanup(*args):
+        nonlocal armed
+        armed = True
+        return drain(*args)
 
     errors = [error for error in (body_error, *failures) if error is not None]
     expected = next((error for error in errors if not isinstance(error, Exception)), errors[0])
@@ -1306,10 +1319,11 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(packed_module, "_UNSYNCHRONIZED_BUFFERS", pinned),
+        patch.object(packed_module, "_drain_packed_streams", side_effect=fail_during_cleanup),
         patch.object(packed_module.logger, "error") as log_error,
         pytest.raises(type(expected)) as error,
     ):
-        # One tensor below the threshold reaches finally without another slot wait.
+        # Inject drain failures only in finally, not at the layerwise barrier.
         if producer:
             packed_broadcast_producer(iter([("w", torch.ones(1))]), group, 0, lambda item: item[1], 8, 3)
         else:
@@ -1349,3 +1363,279 @@ def test_packed_roundtrip_odd_bf16_followed_by_unaligned_int64(backend):
     # Three BF16 elements put int64 at byte offset 6, not divisible by 8.
     assert tensors[0][1].numel() * tensors[0][1].element_size() == 6
     assert _assert_packed_roundtrip(backend, tensors, 32) == 1
+
+
+def test_packed_producer_waits_for_source_stream_before_packing():
+    source = torch.zeros(1)
+
+    class SourceStream(_FakeNpuStream):
+        def synchronize(self):
+            source.fill_(7)
+
+    group = _make_group_mock()
+    with patch.object(torch.npu, "current_stream", return_value=SourceStream()):
+        packed_broadcast_producer(iter([("w", source)]), group, 0, lambda item: item[1], 8)
+    torch.testing.assert_close(group.broadcast.call_args.args[0].view(torch.float32), torch.tensor([7.0]))
+
+
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_consumer_chains_clone_readiness_and_records_all_streams(num_buffers):
+    streams = [MagicMock(wraps=_FakeNpuStream()) for _ in range(num_buffers)]
+    caller = _FakeNpuStream()
+    events = []
+    phase = []
+    clone_tensor = torch.Tensor.clone
+
+    def clone(*args):
+        phase.append("clone")
+        return clone_tensor(*args)
+
+    def event():
+        ready = MagicMock()
+        ready.record.side_effect = lambda stream: phase.append("ready")
+        events.append(ready)
+        return ready
+
+    def load(weights):
+        assert phase[-2:] == ["clone", "ready"]
+
+    chunks = 2 * num_buffers + 1
+    with (
+        patch.object(torch.npu, "Stream", side_effect=streams),
+        patch.object(torch.npu, "current_stream", return_value=caller),
+        patch.object(torch.npu, "Event", side_effect=event),
+        patch.object(torch.Tensor, "record_stream") as record,
+        patch.object(torch.Tensor, "clone", new=clone),
+    ):
+        packed_broadcast_consumer(
+            iter((str(i), ([1], torch.float32)) for i in range(chunks)), _make_group_mock(), 0, load, 1, num_buffers
+        )
+    assert len(events) == chunks
+    for index, ready in enumerate(events):
+        ready.record.assert_called_once_with(streams[index % num_buffers])
+    for index, stream in enumerate(streams):
+        assert stream.wait_event.call_args_list == [
+            ((events[i - 1],), {}) for i in range(1, chunks) if i % num_buffers == index
+        ]
+    assert [call.args[0] for call in record.call_args_list] == [*streams, caller] * (2 * chunks)
+
+
+@pytest.mark.parametrize("failure_at", ["record_stream", "event"])
+def test_packed_consumer_drains_after_tracking_failure(failure_at):
+    drained = []
+    streams = [MagicMock(wraps=_FakeNpuStream()) for _ in range(2)]
+    for index, stream in enumerate(streams):
+        stream.synchronize.side_effect = lambda index=index: drained.append(index)
+    failure = RuntimeError("tracking failed")
+    event = MagicMock()
+    if failure_at == "event":
+        event.record.side_effect = failure
+    with (
+        patch.object(torch.npu, "Stream", side_effect=streams),
+        patch.object(torch.npu, "Event", return_value=event),
+        patch.object(torch.Tensor, "record_stream", side_effect=failure if failure_at == "record_stream" else None),
+        pytest.raises(RuntimeError, match="tracking failed") as error,
+    ):
+        packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), _make_group_mock(), 0, MagicMock(), 8, 2)
+    assert error.value is failure
+    assert drained[-2:] == [0, 1]
+
+
+def test_npu_ipc_importer_reuses_mapping_replaces_exports_and_closes():
+    from vllm.distributed.weight_transfer.packed_tensor import PackedBufferImporter
+
+    from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedBufferImporter
+
+    importer = NPUPackedBufferImporter()
+    assert isinstance(importer, PackedBufferImporter)
+    packed = torch.tensor([3.0]).view(torch.uint8)
+    args = (None,) * 6 + (0,)
+    with _install_fake_rebuild_npu_tensor(packed):
+        rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
+
+        def consume(handle=args):
+            return packed_npu_ipc_consumer({"node-0": handle}, "node-0", ["w"], [[1]], ["float32"], [4], 0, importer)
+
+        first = consume()[0][1]
+        packed.copy_(torch.tensor([9.0]).view(torch.uint8))
+        second = consume()[0][1]
+        assert rebuild.call_count == 1
+        torch.testing.assert_close(first, torch.tensor([3.0]))
+        torch.testing.assert_close(second, torch.tensor([9.0]))
+        new_args = ("next-export",) + args[1:]
+        consume(new_args)
+        assert rebuild.call_count == 2
+        rebuild.side_effect = RuntimeError("rebuild failed")
+        with pytest.raises(RuntimeError, match="rebuild failed"):
+            consume(("failed-export",) + args[1:])
+        # Failed rebuild leaves the previous valid mapping usable.
+        consume(new_args)
+        assert rebuild.call_count == 3
+        rebuild.side_effect = None
+        importer.close()
+        consume(new_args)
+        assert rebuild.call_count == 4
+
+
+@pytest.mark.parametrize("num_buffers", [1, 2, 3])
+def test_packed_consumer_orders_retained_inputs_and_layer_processing(num_buffers):
+    """Simulate async clones and a later stream overtaking an earlier loader."""
+    active = None
+
+    class QueuedStream(_FakeNpuStream):
+        def __init__(self):
+            self.pending = []
+
+        def synchronize(self):
+            while self.pending:
+                self.pending.pop(0)()
+
+        def __enter__(self):
+            nonlocal active
+            self.previous, active = active, self
+            return self
+
+        def __exit__(self, *exc):
+            nonlocal active
+            active = self.previous
+
+    for _ in range(2):
+        streams = [QueuedStream() for _ in range(num_buffers)]
+        caller = QueuedStream()
+        ready: list[bool] = []
+        completed: list[int] = []
+        retained: list[torch.Tensor] = []
+        caller.pending.append(lambda ready=ready: ready.append(True))
+        expected = torch.arange(1, 2 * num_buffers + 2, dtype=torch.float32)
+        payloads = iter(expected.split(1))
+
+        def broadcast(packed, *, src, stream=None, payloads=payloads, caller=caller):
+            value = next(payloads)
+            (stream or caller).pending.append(lambda: packed.copy_(value.view(torch.uint8)))
+
+        def delayed_clone(raw, *args, **kwargs):
+            owned = torch.zeros_like(raw)
+            assert active is not None
+            active.pending.append(lambda: owned.copy_(raw))
+            return owned
+
+        def load(weights, retained=retained, expected=expected, completed=completed, ready=ready):
+            assert ready == [True]
+            retained.extend(tensor for _, tensor in weights)
+            count = len(retained)
+
+            def process():
+                assert completed == list(range(1, count))
+                torch.testing.assert_close(torch.cat(retained[:count]), expected[:count])
+                completed.append(count)
+
+            assert active is not None
+            active.pending.append(process)
+            if count % 2 == 0:
+                active.synchronize()
+
+        with (
+            patch.object(torch.npu, "Stream", side_effect=streams),
+            patch.object(torch.npu, "current_stream", return_value=caller),
+            patch.object(torch.Tensor, "clone", new=delayed_clone),
+        ):
+            packed_broadcast_consumer(
+                iter((str(i), ([1], torch.float32)) for i in range(len(expected))),
+                types.SimpleNamespace(broadcast=broadcast),
+                0,
+                load,
+                1,
+                num_buffers,
+            )
+        assert completed == list(range(1, len(expected) + 1))
+
+
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_consumer_deferred_read_waits_for_earlier_chunk_clones(num_buffers):
+    """Adapt vLLM #62555: a later slot reads every retained earlier chunk.
+
+    Receives complete before unpacking, as required by HCCL. Owning clones
+    remain queued on their slot stream. Run the later callback immediately:
+    without a dependency it reads zeros from an unfinished earlier clone.
+    No sleeps or allocator placement are needed to expose the race.
+    """
+    active = None
+
+    class QueuedStream(_FakeNpuStream):
+        def __init__(self):
+            self.pending = []
+
+        def synchronize(self):
+            while self.pending:
+                self.pending.pop(0)()
+
+        def wait_event(self, event):
+            self.pending.append(event.complete)
+
+        def __enter__(self):
+            nonlocal active
+            self.previous, active = active, self
+            return self
+
+        def __exit__(self, *exc):
+            nonlocal active
+            active = self.previous
+
+    class ReadyEvent:
+        def record(self, stream):
+            self.ready = False
+            self.stream = stream
+            stream.pending.append(lambda: setattr(self, "ready", True))
+
+        def complete(self):
+            # Wait only for the recorded point, not for later callbacks.
+            while not self.ready:
+                self.stream.pending.pop(0)()
+
+    streams = [QueuedStream() for _ in range(num_buffers)]
+    caller = QueuedStream()
+    chunk_count = 2 * num_buffers + 1
+    retained: list[torch.Tensor] = []
+    observations = []
+    payloads = iter(range(1, chunk_count + 1))
+
+    def broadcast(packed, *, src, stream):
+        value = next(payloads)
+        stream.pending.append(lambda: packed.view(torch.float32).fill_(value))
+
+    def delayed_clone(raw, *args, **kwargs):
+        owned = torch.zeros_like(raw)
+        assert active is not None
+        active.pending.append(lambda: owned.copy_(raw))
+        return owned
+
+    def load(weights):
+        retained.extend(tensor for _, tensor in weights)
+        if len(retained) > 1:
+
+            def read():
+                observed = torch.cat(retained)
+                expected = torch.arange(1, len(retained) + 1, dtype=torch.float32)
+                torch.testing.assert_close(observed, expected)
+                observations.append(len(retained))
+
+            assert active is not None
+            active.pending.append(read)
+            # Make this slot overtake earlier slots unless explicitly ordered.
+            active.synchronize()
+
+    with (
+        patch.object(torch.npu, "Stream", side_effect=streams),
+        patch.object(torch.npu, "current_stream", return_value=caller),
+        patch.object(torch.npu, "Event", ReadyEvent),
+        patch.object(torch.Tensor, "clone", new=delayed_clone),
+    ):
+        packed_broadcast_consumer(
+            iter((str(i), ([1], torch.float32)) for i in range(chunk_count)),
+            types.SimpleNamespace(broadcast=broadcast),
+            0,
+            load,
+            1,
+            num_buffers,
+        )
+    assert observations == list(range(2, chunk_count + 1))

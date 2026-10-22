@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from vllm.distributed.weight_transfer.packed_tensor import PackedBufferImporter
 from vllm.logger import logger
 
 # Default values for packed tensor configuration.
@@ -92,6 +93,8 @@ def packed_broadcast_producer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    # Source writes must finish before packing on independently rotating streams.
+    torch.npu.current_stream().synchronize()
     buffer_idx = 0
     previous_broadcast_stream = None
 
@@ -211,6 +214,9 @@ def packed_broadcast_consumer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    caller_stream = torch.npu.current_stream()
+    caller_stream.synchronize()
+    previous_ready = None
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
@@ -258,17 +264,29 @@ def packed_broadcast_consumer(
 
             # Unpack and load weights on the custom stream
             with torch.npu.stream(streams[buffer_idx]):
+                # Later callbacks may consume tensors retained from earlier chunks.
+                if previous_ready is not None:
+                    streams[buffer_idx].wait_event(previous_ready)
                 names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-                post_unpack_func(
-                    unpack_tensor(
-                        packed_tensors[buffer_idx],
-                        list(names),
-                        list(shapes),
-                        list(dtypes),
-                        list(tensor_sizes),
-                    )
+                weights = unpack_tensor(
+                    packed_tensors[buffer_idx],
+                    list(names),
+                    list(shapes),
+                    list(dtypes),
+                    list(tensor_sizes),
                 )
+                # Protect raw storage and owning clones on all supported streams,
+                # including callbacks deferred to the caller's stream.
+                for tensor in (packed_tensors[buffer_idx], *(tensor for _, tensor in weights)):
+                    for stream in (*streams, caller_stream):
+                        tensor.record_stream(stream)
+                previous_ready = torch.npu.Event()
+                previous_ready.record(streams[buffer_idx])
+                post_unpack_func(weights)
 
+            # Keep layer processing ordered across slots until NPU validation
+            # establishes that event dependencies alone cover loader replay.
+            streams[buffer_idx].synchronize()
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
@@ -369,6 +387,26 @@ def packed_npu_ipc_producer(
         }
 
 
+class NPUPackedBufferImporter(PackedBufferImporter):
+    """Reuse upstream's one-export/one-mapping lifecycle with NPU rebuilds.
+
+    Share one instance across chunks; inherited close releases the held mapping
+    at finish/shutdown. This cache is not a transfer synchronization mechanism.
+    """
+
+    _entry: tuple[tuple, torch.Tensor] | None
+
+    def rebuild(self, list_args: list) -> torch.Tensor:
+        from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
+        key = tuple(list_args)
+        if self._entry is not None and self._entry[0] == key:
+            return self._entry[1]
+        packed = rebuild_npu_tensor(*list_args)
+        self._entry = (key, packed)
+        return packed
+
+
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
     physical_npu_id: str,
@@ -377,6 +415,7 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
+    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -397,11 +436,9 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
+        importer: Mapping cache shared across all chunks of one export. Omit
+            only for a single-chunk transfer; engines own and close this cache.
     """
-    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
-    # imported at module load time on non-NPU hosts.
-    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-
     if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
         raise ValueError(f"device_index must be a non-negative integer, got {device_index!r}")
     if physical_npu_id not in ipc_handle:
@@ -431,7 +468,9 @@ def packed_npu_ipc_consumer(
     if len(list_args) <= 6:
         raise ValueError(f"NPU IPC rebuild arguments do not contain a device index: got {len(list_args)} values")
     list_args[6] = device_index
-    packed = rebuild_npu_tensor(*list_args)
+    if importer is None:
+        importer = NPUPackedBufferImporter()
+    packed = importer.rebuild(list_args)
 
     content_size = sum(tensor_sizes)
     if content_size > packed.numel():

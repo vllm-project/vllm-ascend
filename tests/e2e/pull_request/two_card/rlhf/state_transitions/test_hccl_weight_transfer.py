@@ -37,6 +37,7 @@ from vllm.utils.network_utils import get_ip, get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+    MODEL_CASES,
     PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     WeightUpdateModelCase,
@@ -59,6 +60,7 @@ INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 INIT_TIMEOUT = 120
 UPDATE_TIMEOUT = 300
+PACKED_STRESS_UPDATE_TIMEOUT = 900
 CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.75
 
@@ -107,7 +109,16 @@ def _collect_weight_metadata(source: FixedRandomWeightSource):
     )
 
 
-def _send_update(server, source, model_update_group, *, packed: bool) -> None:
+def _send_update(
+    server,
+    source,
+    model_update_group,
+    *,
+    packed: bool,
+    num_buffers: int = 2,
+    buffer_size_bytes: int | None = None,
+    timeout: int = UPDATE_TIMEOUT,
+) -> None:
     """Run one START -> broadcast -> FINISH transaction over the server's RPCs."""
     from vllm_ascend.distributed.weight_transfer.hccl_engine import (
         HCCLTrainerSendWeightsArgs,
@@ -115,6 +126,8 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
     )
 
     names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(source)
+    if buffer_size_bytes is not None:
+        packed_buffer_size_bytes = buffer_size_bytes
     _post(server, "pause")
     _post(server, "start_weight_update")
 
@@ -130,9 +143,10 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
                 "shapes": shapes,
                 "packed": packed,
                 "packed_buffer_size_bytes": packed_buffer_size_bytes,
+                "packed_num_buffers": num_buffers,
             }
         },
-        timeout=UPDATE_TIMEOUT,
+        timeout=timeout,
     )
     update_thread.start()
     HCCLWeightTransferEngine.trainer_send_weights(
@@ -141,6 +155,7 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
             group=model_update_group,
             packed=packed,
             packed_buffer_size_bytes=packed_buffer_size_bytes,
+            packed_num_buffers=num_buffers,
         ),
     )
     update_thread.join()
@@ -156,13 +171,59 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+    _run_weight_transfer_transaction(case, packed=packed)
+
+
+@pytest.mark.skipif(torch.npu.device_count() < 2, reason="HCCL weight transfer e2e test requires at least 2 NPUs.")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model))
+        for case in MODEL_CASES
+        if case.id == "qwen3.5-35b-a3b-moe-layout"
+    ],
+)
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.filterwarnings("ignore:Tensor .*exceeds buffer_size_bytes.*:UserWarning")
+def test_hccl_packed_cross_chunk_reload(case: WeightUpdateModelCase, num_buffers: int):
+    """Force one nonempty tensor per chunk and repeat reload after generation.
+
+    The threshold is a flush trigger, not an allocation limit for HCCL. A
+    one-byte threshold splits layer weights across streams irrespective of
+    model size, exercising retained inputs and slot rotation on actual NPU.
+    """
+    _run_weight_transfer_transaction(
+        case,
+        packed=True,
+        num_buffers=num_buffers,
+        buffer_size_bytes=1,
+        update_rounds=4,
+        update_timeout=PACKED_STRESS_UPDATE_TIMEOUT,
+        packed_regression=True,
+    )
+
+
+def _run_weight_transfer_transaction(
+    case: WeightUpdateModelCase,
+    *,
+    packed: bool,
+    num_buffers: int = 2,
+    buffer_size_bytes: int | None = None,
+    update_rounds: int = 2,
+    update_timeout: int = UPDATE_TIMEOUT,
+    packed_regression: bool = False,
+) -> None:
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
-    if packed:
+    if packed and not packed_regression:
         pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
+    if buffer_size_bytes == 1:
+        # All BF16 weights exceed the threshold, so each is a separate chunk.
+        # Require enough chunks to rotate through every slot more than twice.
+        assert sum(math.prod(meta.shape) * meta.dtype.itemsize > 1 for meta in source.metadata()) > 2 * num_buffers
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
@@ -238,20 +299,28 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
         init_thread.raise_if_failed()
 
         signatures = []
-        for update_round in range(2):
+        for update_round in range(update_rounds):
             _log(
                 f"{case.id}: sending {('packed' if packed else 'unpacked')} "
                 f"fixed-random update round={update_round + 1}"
             )
             # START -> broadcast -> FINISH against the inference server.
-            _send_update(server, source, model_update_group, packed=packed)
+            _send_update(
+                server,
+                source,
+                model_update_group,
+                packed=packed,
+                num_buffers=num_buffers,
+                buffer_size_bytes=buffer_size_bytes,
+                timeout=update_timeout,
+            )
             signatures.append(generation_signature(client, case.model))
 
-    updated_signature, reloaded_signature = signatures
-    assert_weight_update_matches_reference(
-        dummy_signature,
-        reference,
-        updated_signature,
-        reloaded_signature,
-        case,
-    )
+    for reloaded_signature in signatures[1:]:
+        assert_weight_update_matches_reference(
+            dummy_signature,
+            reference,
+            signatures[0],
+            reloaded_signature,
+            case,
+        )
