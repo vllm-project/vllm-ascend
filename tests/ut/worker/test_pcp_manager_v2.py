@@ -1036,10 +1036,12 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.debugger = None
     runner._debugger_started = False
     runner.prompt_logprobs_worker = None
-    # vLLM main added these ExecuteModelState fields.
-    state_kwargs: dict = {}
-    state_kwargs["dp_sync"] = None
-    state_kwargs["cudagraph_stats"] = None
+    # Optional state fields differ between supported vLLM revisions.
+    state_kwargs: dict = {
+        field: None
+        for field in ("dp_sync", "cudagraph_stats", "routed_experts")
+        if field in vllm_model_runner.ExecuteModelState._fields
+    }
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
