@@ -42,13 +42,15 @@ class AscendInputBuffers(InputBuffers):
         )
         del self.query_start_loc
 
-        # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
-        # See _pad_query_start_loc_for_fia.
-        self.query_start_loc: torch.Tensor = torch.zeros(
-            max_num_reqs + 2,
-            dtype=torch.int32,
-            device=device,
+        self.batch_metadata: torch.Tensor = torch.zeros(
+            3 * max_num_reqs + 3,
+            dtype = torch.int32,
+            device = device,
         )
+        self.idx_mapping_buffer: torch.Tensor = self.batch_metadata[:max_num_reqs]
+        self.cu_num_logits_buffer: torch.Tensor = self.batch_metadata[max_num_reqs:2*max_num_reqs+1]
+        self.query_start_loc: torch.Tensor = self.batch_metadata[2*max_num_reqs+1:]
+
 
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
