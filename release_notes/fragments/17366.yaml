@@ -1,6 +1,0 @@
-pr: 17366
-entries:
-  - category: performance
-    text: Reduced RFork loading overhead by avoiding duplicate tensor scans and reusing tensor layout metadata.
-  - category: bugfix
-    text: Fixed RFork MTP checkpoint metadata preparation for vLLM 0.31.0 so draft models can receive weights and publish seeds.

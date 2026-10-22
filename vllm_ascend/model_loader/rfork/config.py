@@ -98,9 +98,7 @@ class RForkConfig:
         else:
             raise RuntimeError("RFork requires --model-loader-extra-config to be a JSON object.")
 
-        # Explicit JSON configuration takes priority over the RFork-owned switch.
-        # Environment default: 0; valid values: 0, 1, true or false (case-insensitive).
-        # The switch is not sensitive; emitted model metadata may be sensitive.
+        # Explicit JSON wins; env default 0 accepts 0/1/true/false (case-insensitive).
         if "rfork_model_identity_headers" in config:
             send_model_identity_headers = config["rfork_model_identity_headers"]
         else:

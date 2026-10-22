@@ -463,8 +463,7 @@ def test_bfs_expands_shared_diamond_once(tensor_runtime, monkeypatch, processed_
     assert len(collected) == 1
     assert all(node.scans == 1 for node in nodes)
     assert eligible.call_count == 1
-    # One path per BFS edge, one for the collected tensor's layout check, and one for the
-    # deepest edge back to the already collected weight, which still needs the duplicate-label check.
+    # Expect one scan per edge plus layout and duplicate-label checks.
     assert child_path.call_count == 2 * depth + 5 + contains_tensor
 
 

@@ -20,8 +20,7 @@ class _EngramLocalState:
 
 
 def _engram_tables(model: nn.Module | None) -> Iterator[Any]:
-    # The model is already initialized. Do not import NPU model dependencies
-    # for unrelated architectures, or treat a shared EngramConfig as opt-in.
+    # Avoid importing NPU model dependencies for unrelated architectures.
     module = sys.modules.get("vllm_ascend.models.deepseek_v41.engram.embedding")
     table_cls = getattr(module, "AscendParallelEngramEmbedding", None)
     if table_cls is None or not isinstance(model, nn.Module):
@@ -57,8 +56,7 @@ def _new_state(model: nn.Module, table: Any) -> _EngramLocalState:
 
 
 def _record_tensors(state: _EngramLocalState, table: Any) -> None:
-    # Weak references must not retain replaced tensors or aliases to released
-    # CANN host allocations. Check the live object and its storage on each use.
+    # Weak refs must not pin replaced tensors or released CANN allocations.
     state.tensors = tuple((weakref.ref(tensor), tensor.data_ptr()) for tensor in _table_tensors(table))
 
 
@@ -69,8 +67,7 @@ def load_local_weights(model: nn.Module) -> None:
             continue
         state = _new_state(model, table)
         table.load_checkpoint(*state.checkpoint)
-        # The existing reader synchronizes shared writers and propagates errors.
-        # A partial load must never exempt its weight/scale pair from the guard.
+        # A partial load must never exempt the weight/scale pair from the guard.
         _record_tensors(state, table)
 
 
@@ -93,11 +90,9 @@ def release_local_weights(model: nn.Module) -> None:
     for table in _engram_tables(model):
         state = getattr(table, "_rfork_engram_state", None)
         if isinstance(state, _EngramLocalState):
-            # A draft can refer to an already loaded target table. Its fallback
-            # must not release storage owned by the target model.
+            # A draft may share the target table; never release target storage.
             if state.owner() is not model:
                 continue
             state.tensors = ()
-        # Also release tables not reached when an earlier checkpoint read failed.
-        # A failed close propagates, preventing allocation of a second model.
+        # Release tables skipped when an earlier checkpoint read failed.
         table.close_host_offload()

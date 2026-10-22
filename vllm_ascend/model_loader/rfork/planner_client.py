@@ -198,8 +198,7 @@ class RForkPlannerClient:
         except (requests.RequestException, RuntimeError, ValueError) as exc:
             logger.warning("RFork planner seed acquisition failed: %s", exc)
             if lease_for_release is not None:
-                # Record the allocation before the release attempt so an escaping
-                # exception cannot lose the cleanup handle for the planner lease.
+                # Record the allocation first so an escaping error cannot lose it.
                 self._rejected_seed_lease = lease_for_release
                 result = self.release_seed_once(lease_for_release)
                 if result is LeaseReleaseResult.RELEASED:

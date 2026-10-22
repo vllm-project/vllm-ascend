@@ -387,8 +387,7 @@ def test_client_rejected_lease_blocks_followup_get_until_returned(runtime, monke
     assert [path for _, path in planner.calls].count("/get_seed") == 1
     assert planner.put_attempt_count == 1
 
-    # A failed best-effort put remains pending; the next acquisition must not
-    # allocate a second lease before retrying that pending return.
+    # A pending put must be retried before allocating a second lease.
     assert client.acquire_seed() is None
     assert [path for _, path in planner.calls].count("/get_seed") == 1
     assert planner.put_attempt_count == 2

@@ -268,8 +268,7 @@ def test_host_table_is_ready_but_only_device_weight_is_registered(
     model = torch.nn.Module()
     model.table = table
     model.device_weight = torch.nn.Parameter(torch.ones(4))
-    # UVA addresses belong to this process; even the processed-layout scan
-    # must leave these private runtime pointers out of the manifest.
+    # UVA pointers are process-local and must stay out of the manifest.
     pointers = torch.tensor([12345], dtype=torch.int64)
     table._codes_uva = SimpleNamespace(ptrs=pointers)
     monkeypatch.setattr(

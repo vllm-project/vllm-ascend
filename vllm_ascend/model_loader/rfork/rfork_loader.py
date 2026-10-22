@@ -702,8 +702,7 @@ class RForkModelLoader(BaseModelLoader):
                 _prepare_rfork_model_state(model, model_config, load_config)
                 model_state_prepared = True
 
-                # Host tables are not transferred. Fill them before either
-                # registration or the draft shared-weight fast path can succeed.
+                # Fill host tables before registration or draft shared-weight reuse.
                 load_local_weights(model)
 
                 if exclude_blocks and session.can_reuse_shared_weights(
@@ -785,8 +784,7 @@ class RForkModelLoader(BaseModelLoader):
             except RFORK_FALLBACK_EXCEPTIONS as e:
                 engram_config = getattr(vllm_config, "engram_config", None)
                 if model_init_started and model is None and getattr(engram_config, "cpu_offload", False):
-                    # Construction can allocate host tables before raising. Without
-                    # a complete model, their CANN ranges cannot be closed safely.
+                    # Partial host allocations cannot be closed without a model.
                     raise RuntimeError(
                         "RFork cannot safely retry failed model construction with Engram CPU offload; "
                         "partial host allocations may remain. Fix the initialization error and restart the worker."
@@ -817,9 +815,7 @@ class RForkModelLoader(BaseModelLoader):
 
             if model_init_started:
                 if model is not None:
-                    # CANN host allocations are not reclaimed by Python GC.
-                    # A failed release must stop fallback before a second model
-                    # is allocated while the old host tables remain registered.
+                    # Release host allocations before fallback allocates a second model.
                     release_local_weights(model)
                 model = None
                 for _ in range(FALLBACK_MEMORY_RECLAIM_PASSES):

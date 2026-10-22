@@ -30,8 +30,7 @@ TENSOR_LAYOUT_SAMPLE_LIMIT = 3
 # Exact types only: numeric subclasses can carry tensor attributes.
 _TENSOR_ATTRIBUTE_LEAF_TYPES = frozenset({str, bytes, int, float, bool, complex, type(None)})
 
-# Runtime scratch and locally derived caches are not checkpoint-derived model
-# state. Preserve receiver-owned capacity and storage instead of copying seed state.
+# Runtime scratch and locally derived caches keep receiver-owned storage.
 _RUNTIME_ONLY_TENSOR_NAMES = frozenset({"topk_indices_buffer", "_rope_derived_cos_cache", "_rope_derived_sin_cache"})
 
 _PLAIN_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_]+")
@@ -415,8 +414,7 @@ def _collect_shortest_path_tensors(
                 if child_key is None:
                     continue
                 candidate_path = _tensor_child_path(path, kind, name)
-                # Distinct keys with one label (e.g. two NaN keys) would let swapped subtrees
-                # share IDs and digests; leaf-level ID checks cannot see that collision.
+                # Distinct keys with one label could let swapped subtrees share IDs.
                 if candidate_path in child_paths:
                     raise ValueError(
                         f"RFork found distinct container entries with one tensor ID label: {candidate_path!r}"
