@@ -1,7 +1,0 @@
-pr: 19484
-entries:
-  - category: bugfix
-    text: >-
-      Fixed KVPP broadcasts racing Mooncake layerwise cache reloads, including
-      MLA decode and MultiConnector paths. KVPP pool objects now use a separate
-      namespace from replicated cache layouts.
