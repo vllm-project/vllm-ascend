@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import copy
 from dataclasses import replace
 from math import lcm
@@ -23,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
     MambaManager,
     get_manager_for_kv_cache_spec,
 )
@@ -35,6 +36,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.patch.platform.patch_per_group_pools import (
+    PerGroupBlockPools,
+    get_full_attention_group_ids,
+)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -150,28 +155,23 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_config,
             )
         group_num_blocks = getattr(kv_cache_config, "group_num_blocks", None)
-        if (
-            group_num_blocks
-            and len(group_num_blocks) == len(kv_cache_config.kv_cache_groups)
-            and len(set(group_num_blocks)) > 1
-        ):
-            # Window-capped per-group pools (Plan B): one BlockPool per KV
-            # cache group (sliding groups window-sized, full group the rest).
-            # The NPU runner sizes each layer's buffer by its group's block
-            # count (see model_runner_v1), so groups no longer share one pool.
-            from vllm_ascend.patch.platform.patch_per_group_pools import PerGroupBlockPools
-
+        if group_num_blocks and len(group_num_blocks) == len(kv_cache_config.kv_cache_groups):
+            full_group_ids = get_full_attention_group_ids(kv_cache_config.kv_cache_groups)
+            if not full_group_ids:
+                raise ValueError("Window-capped pools require a full-attention group")
+            # Equal block counts do not make independently backed ID spaces shared.
             self.block_pools = [
                 BlockPool(
                     num_gpu_blocks=nb,
                     enable_caching=enable_caching,
                     hash_block_size=hash_block_size,
                     enable_kv_cache_events=enable_kv_cache_events,
-                    metrics_collector=metrics_collector,
+                    # The collector keys by bare block ID, not (group, block).
+                    metrics_collector=metrics_collector if group_id == full_group_ids[0] else None,
                 )
-                for nb in group_num_blocks
+                for group_id, nb in enumerate(group_num_blocks)
             ]
-            self.block_pool = PerGroupBlockPools(self.block_pools)
+            self.block_pool = PerGroupBlockPools(self.block_pools, full_group_ids)
         else:
             single_pool = BlockPool(
                 num_gpu_blocks=kv_cache_config.num_blocks,
@@ -291,6 +291,56 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if self.dcp_world_size > 1:
             block_size *= self.dcp_world_size
         return block_size
+
+    def get_num_blocks_to_allocate_by_group(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> tuple[int, ...]:
+        """Predict demand without allocating, touching hits or consulting free space."""
+        return tuple(
+            manager.get_num_blocks_to_allocate(
+                request_id,
+                num_encoder_tokens if isinstance(manager, CrossAttentionManager) else num_tokens,
+                [] if isinstance(manager, CrossAttentionManager) else new_computed_blocks[group_id],
+                0 if isinstance(manager, CrossAttentionManager) else total_computed_tokens,
+                0 if isinstance(manager, CrossAttentionManager) else num_local_computed_tokens,
+                num_encoder_tokens if isinstance(manager, CrossAttentionManager) else num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+            )
+            for group_id, manager in enumerate(self.single_type_managers)
+        )
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        demands = self.get_num_blocks_to_allocate_by_group(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            num_encoder_tokens,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap=apply_admission_cap,
+        )
+        if isinstance(self.block_pool, PerGroupBlockPools):
+            return demands[self.block_pool.primary_group_id]
+        return sum(demands)
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -567,7 +617,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
-    if num_cacheable_groups and (_is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups):
+    group_num_blocks = getattr(kv_cache_config, "group_num_blocks", None)
+    has_independent_pools = bool(group_num_blocks) and len(group_num_blocks) == len(kv_cache_config.kv_cache_groups)
+    if has_independent_pools or (
+        num_cacheable_groups and (_is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups)
+    ):
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if num_cacheable_groups == 0 or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:

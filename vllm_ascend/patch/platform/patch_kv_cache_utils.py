@@ -10,7 +10,6 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -651,9 +650,7 @@ def _ascend_get_kv_cache_config_from_groups(
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _is_window_capped_hybrid_groups(vllm_config, kv_cache_groups):
-        kv_cache_config = _get_window_capped_hybrid_kv_cache_config(
-            vllm_config, kv_cache_groups, available_memory
-        )
+        kv_cache_config = _get_window_capped_hybrid_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif not _is_deepseek_v4_groups(kv_cache_groups):
         kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     else:
@@ -722,18 +719,13 @@ def _get_window_capped_hybrid_kv_cache_config(
     # case) over-reserves the sliding pools ~2x and shrinks C (hence the full
     # pool); set VLLM_ASCEND_WINDOW_CAPPED_IN_FLIGHT_FACTOR=2 to restore it.
     import os as _os
-    _in_flight_factor = int(
-        _os.environ.get("VLLM_ASCEND_WINDOW_CAPPED_IN_FLIGHT_FACTOR", "1")
-    )
+
+    _in_flight_factor = int(_os.environ.get("VLLM_ASCEND_WINDOW_CAPPED_IN_FLIGHT_FACTOR", "1"))
     in_flight = vllm_config.scheduler_config.max_num_batched_tokens * _in_flight_factor
     group_bounds: list[int] = []
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
-        inner = (
-            list(spec.kv_cache_specs.values())
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else [spec]
-        )
+        inner = list(spec.kv_cache_specs.values()) if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
         bound = 0
         for layer_spec in inner:
             if isinstance(layer_spec, SlidingWindowSpec):
@@ -747,11 +739,7 @@ def _get_window_capped_hybrid_kv_cache_config(
     unit_bytes = 0
     for group, bound in zip(kv_cache_groups, group_bounds):
         spec = group.kv_cache_spec
-        inner = (
-            spec.kv_cache_specs
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else None
-        )
+        inner = spec.kv_cache_specs if isinstance(spec, UniformTypeKVCacheSpecs) else None
         group_pages = 0
         for layer_name in group.layer_names:
             layer_spec = inner[layer_name] if inner is not None else spec
@@ -766,10 +754,12 @@ def _get_window_capped_hybrid_kv_cache_config(
     # (same mechanism as the kv_transfer_config attachment above).
     kv_cache_config.group_num_blocks = tuple(group_num_blocks)
     kv_cache_config.window_capped_concurrency = float(concurrency)
-    # num_blocks keeps the "largest pool" semantics so shared-pool consumers
-    # (watermark, metrics, single-pool fallbacks) stay consistent; per-group
-    # consumers (coordinator pools, per-layer buffers) use group_num_blocks.
-    kv_cache_config.num_blocks = max(group_num_blocks)
+    # Scalar scheduler capacity and watermark are in primary Full-pool units.
+    # Per-layer buffers and connector registration use group_num_blocks.
+    from vllm_ascend.patch.platform.patch_per_group_pools import get_full_attention_group_ids
+
+    primary_group_id = get_full_attention_group_ids(kv_cache_groups)[0]
+    kv_cache_config.num_blocks = group_num_blocks[primary_group_id]
     logger.info(
         "Window-capped per-group KV pools: concurrency=%d group_num_blocks=%s "
         "(per-group bounds %s, in_flight %d tokens, per-rank budget %d bytes). "

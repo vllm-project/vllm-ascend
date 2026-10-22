@@ -9,47 +9,73 @@ backing. For hybrid full+sliding models (e.g. gemma4: 5 sliding + 1 full
 equal-page group) this makes the generic 1/n budget scaling shrink every
 group's pool, collapsing the token capacity of the prefix cache.
 
-``PerGroupBlockPools`` presents one ``BlockPool`` per KV cache group (sliding
-groups sized by their window-aware admission bound, the full group sized by
-the full-sequence bound) as a single pool interface, so the scheduler-side
-call sites that assume one shared pool keep working unchanged.
+``PerGroupBlockPools`` keeps each group's allocation independent. Full
+attention defines the scheduler's scalar capacity unit. The coordinator
+predicts pure demand vectors; the manager checks every pool at admission.
 """
+
 from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+
+
+def get_full_attention_group_ids(kv_cache_groups) -> tuple[int, ...]:
+    full_group_ids = []
+    for group_id, group in enumerate(kv_cache_groups):
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = next(iter(spec.kv_cache_specs.values()))
+        if isinstance(spec, FullAttentionSpec):
+            full_group_ids.append(group_id)
+    return tuple(full_group_ids)
+
+
+@dataclass(frozen=True)
+class GroupBlockReservation:
+    """Remaining in-flight demand, in each group's own block units."""
+
+    blocks: tuple[int, ...]
 
 
 class PerGroupBlockPools:
-    """Aggregate of per-group :class:`BlockPool` instances behind one-pool API.
+    """Independent block pools with a full-attention capacity interface.
 
-    Block IDs are group-local: each group's manager draws from its own pool,
-    so a sliding group's block tables only ever contain IDs in its own
-    (smaller) ID space. The aggregate exposes the conservative semantics the
-    scheduler needs:
-
-    - ``get_num_free_blocks``: total free across pools, because the
-      top-level admission gate compares a request's total (summed over
-      groups) block need against it; per-group shortfalls then surface as
-      per-group allocation backpressure, not as over-rejection;
-    - ``free_blocks``: routed to each block's owning pool (``KVCacheBlock.pool``);
-    - ``evict_blocks``: each pool evicts the IDs in its own range (IDs beyond
-      a pool's range belong to another group; skipping is correct);
-    - ``null_block``: every pool's null block has ID 0, which is always the
-      "no block" sentinel inside any group-local block table.
+    The first full-attention group defines scalar capacity and reservation
+    units. Admission checks every pool; unused sliding blocks cannot satisfy
+    a full-attention allocation. Usage reports the most pressured full group.
     """
 
-    def __init__(self, pools: list[BlockPool]):
+    def __init__(self, pools: list[BlockPool], full_group_ids: tuple[int, ...]):
         self.pools = list(pools)
         if not self.pools:
             raise ValueError("PerGroupBlockPools requires at least one pool")
+        if (
+            not full_group_ids
+            or len(set(full_group_ids)) != len(full_group_ids)
+            or any(group_id < 0 or group_id >= len(self.pools) for group_id in full_group_ids)
+        ):
+            raise ValueError("PerGroupBlockPools requires valid full-attention group IDs")
+        self.full_group_ids = tuple(full_group_ids)
+        self.primary_group_id = self.full_group_ids[0]
+        self.primary_pool = self.pools[self.primary_group_id]
         logger.info(
             "Window-capped per-group KV block pools: %d pools with %s blocks "
-            "(group-local ID spaces).",
+            "(group-local ID spaces); full groups=%s, primary=%d.",
             len(self.pools),
             [pool.num_gpu_blocks for pool in self.pools],
+            self.full_group_ids,
+            self.primary_group_id,
         )
+
+    @property
+    def num_gpu_blocks(self) -> int:
+        return self.primary_pool.num_gpu_blocks
 
     @property
     def null_block(self) -> KVCacheBlock:
@@ -77,23 +103,35 @@ class PerGroupBlockPools:
         return cached_blocks
 
     def get_num_free_blocks(self) -> int:
-        # Total free across pools. The top-level admission gate
-        # (KVCacheManager.allocate_slots) compares a request's TOTAL
-        # across-groups block need against this value, so the total free is
-        # the correct pre-screen. A per-group shortfall (one pool tight while
-        # others have room) then surfaces as per-group allocation
-        # backpressure — the request simply waits — instead of min(), which
-        # rejected requests that fit per-group whenever the single tightest
-        # pool was below the total need (e.g. full pool near capacity capped
-        # every new request even though the sliding pools were mostly free).
-        return sum(pool.get_num_free_blocks() for pool in self.pools)
+        return self.primary_pool.get_num_free_blocks()
 
     def get_usage(self) -> float:
-        total = sum(pool.num_gpu_blocks for pool in self.pools)
-        if total == 0:
-            return 0.0
-        free = sum(pool.get_num_free_blocks() for pool in self.pools)
-        return (total - free) / total
+        # Delegate null-block accounting to the real pools.
+        return max(self.pools[group_id].get_usage() for group_id in self.full_group_ids)
+
+    def can_allocate(
+        self,
+        group_demands: Sequence[int],
+        reserved_blocks: int | GroupBlockReservation = 0,
+        watermark_blocks: int = 0,
+    ) -> bool:
+        if len(group_demands) != len(self.pools):
+            raise ValueError("Block demand must contain every KV cache group")
+        if isinstance(reserved_blocks, GroupBlockReservation):
+            reservations = reserved_blocks.blocks
+        elif reserved_blocks == 0:
+            reservations = (0,) * len(self.pools)
+        else:
+            raise ValueError("Independent pools require a per-group reservation, not a nonzero scalar")
+        if len(reservations) != len(self.pools):
+            raise ValueError("Block reservation must contain every KV cache group")
+        if watermark_blocks < 0 or any(n < 0 for n in (*group_demands, *reservations)):
+            raise ValueError("Block demand, reservation and watermark must be non-negative")
+        return all(
+            demand + reserved + (watermark_blocks if group_id == self.primary_group_id else 0)
+            <= pool.get_num_free_blocks()
+            for group_id, (pool, demand, reserved) in enumerate(zip(self.pools, group_demands, reservations))
+        )
 
     def free_blocks(self, ordered_blocks) -> None:
         # Group by owning pool, preserving per-pool relative order (free
@@ -144,10 +182,8 @@ def is_window_capped_hybrid(vllm_config, kv_cache_groups) -> bool:
     models never do.
 
     Kill switch: set ``VLLM_ASCEND_DISABLE_WINDOW_CAPPED_POOLS=1`` to force the
-    stock homogeneous per-group block count. Required for KV Pool
-    (AscendStoreConnector) runs: the connector's pool_worker requires every KV
-    tensor's block count to be a multiple of the single ``num_blocks``, while
-    per-group pools are deliberately heterogeneous (949 vs 1664 on gemma4)."""
+    stock shared-pool path. AscendStoreConnector additionally requires the
+    per-group tensor-registration support from companion PR #19249."""
     import os as _os
 
     if _os.environ.get("VLLM_ASCEND_DISABLE_WINDOW_CAPPED_POOLS", "0") == "1":
@@ -162,24 +198,24 @@ def is_window_capped_hybrid(vllm_config, kv_cache_groups) -> bool:
         return False
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
+        FullAttentionSpec,
         MambaSpec,
         SlidingWindowSpec,
         UniformTypeKVCacheSpecs,
     )
 
+    has_full = False
     has_sliding = False
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
-        inner = (
-            spec.kv_cache_specs.values()
-            if isinstance(spec, UniformTypeKVCacheSpecs)
-            else (spec,)
-        )
+        inner = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
         for layer_spec in inner:
             if isinstance(layer_spec, MambaSpec):
                 return False
             if not isinstance(layer_spec, AttentionSpec):
                 return False
+            if isinstance(layer_spec, FullAttentionSpec):
+                has_full = True
             if isinstance(layer_spec, SlidingWindowSpec):
                 has_sliding = True
-    return has_sliding
+    return has_full and has_sliding
