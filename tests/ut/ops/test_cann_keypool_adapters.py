@@ -194,16 +194,7 @@ def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monke
             **kwargs,
         )
 
-    prepare.assert_called_once_with(
-        query,
-        weights,
-        ends,
-        lengths,
-        tails,
-        table,
-        q_descale=q_descale if quantized else None,
-        padded_q_descale=native.call_args.kwargs.get("q_descale"),
-    )
+    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table)
     assert native.call_count == 1
     assert native.call_args.args == (padded[0], cache, padded[1], padded[4])
     assert native.call_args.kwargs["actual_seq_q"] is padded[2]
@@ -213,8 +204,9 @@ def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monke
     assert indices.data_ptr() == native_indices.data_ptr()
     if quantized:
         scales = native.call_args.kwargs["q_descale"]
+        torch.testing.assert_close(scales[:tokens], q_descale)
+        torch.testing.assert_close(scales[-1], torch.ones(heads))
         assert scales.shape == (tokens + 1, heads)
-        assert scales.data_ptr() != q_descale.data_ptr()
         assert native.call_args.kwargs["k_descale"] is k_descale
         assert native.call_args.kwargs["quant_mode"] == 0
     else:

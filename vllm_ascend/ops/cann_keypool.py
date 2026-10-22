@@ -4,6 +4,7 @@
 
 import torch
 import torch_npu
+from torch.nn import functional as F
 
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 
@@ -33,7 +34,9 @@ def gather_retained_hidden(hidden, indices):
 
 
 def quantize_keypool_query(query):
-    return torch_npu.npu_dynamic_quant(query, dst_type=torch.float8_e4m3fn)
+    result, scale = torch_npu.npu_dynamic_quant(query, dst_type=torch.float8_e4m3fn)
+    scale.masked_fill_(scale == 0, 1.0)
+    return result, scale
 
 
 def pool_key_indexer_nonempty(
@@ -68,23 +71,17 @@ def pool_key_indexer_nonempty(
         raise ValueError("The KPool empty-work adapter requires causal TND/PA_BBND inputs.")
     if (q_descale is None) != (k_descale is None):
         raise ValueError("FP8 KPool indexing requires both query and key descales.")
-    tokens = query.shape[0]
-    padded_q_descale = None
     quant_kwargs = {}
     if q_descale is not None:
         if q_descale.shape != query.shape[:2]:
             raise ValueError("FP8 query descales must match the token and head dimensions.")
-        padded_q_descale = q_descale.new_empty((tokens + 1, query.shape[1]))
-        quant_kwargs = dict(q_descale=padded_q_descale, k_descale=k_descale, quant_mode=quant_mode)
+        # The trailing zero query has a unit scale; real query scales stay unchanged.
+        quant_kwargs = dict(
+            q_descale=F.pad(q_descale, (0, 0, 0, 1), value=1.0), k_descale=k_descale, quant_mode=quant_mode
+        )
+    tokens = query.shape[0]
     query_padded, weights_padded, query_ends, key_lengths, tails, tables = prepare_nonempty_keypool_inputs(
-        query,
-        weights,
-        actual_seq_q,
-        actual_seq_k,
-        pool_tail_k,
-        block_table,
-        q_descale=q_descale,
-        padded_q_descale=padded_q_descale,
+        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table
     )
     indices, values = op(
         query_padded,
