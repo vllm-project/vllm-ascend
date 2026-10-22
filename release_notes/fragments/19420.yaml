@@ -1,0 +1,7 @@
+pr: 19420
+entries:
+  - category: bugfix
+    text: >-
+      Fixed missing prefix-cache query and hit counters in logs and Prometheus
+      metrics when balance scheduling is enabled. Deferred cache lookups are
+      recorded only after the request is admitted.
