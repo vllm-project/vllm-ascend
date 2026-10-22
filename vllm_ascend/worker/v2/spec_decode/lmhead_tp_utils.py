@@ -32,10 +32,29 @@ class LmheadTPDraftSamplingMixin:
     use_local_argmax_reduction: bool
     enable_adaptive_verification: bool
 
-    # Speculators whose sampling bypasses sample_draft cannot be row-aligned;
-    # they opt out and are rejected at construction (DFlash2:
-    # get_top_k_tokens on the sharded head).
+    # Speculators whose draft collectives cannot be fed group-uniform rows
+    # opt out here and are rejected at construction. No current family opts
+    # out: DFlash2's head call is collective-free and its candidate top-k
+    # merge gathers over the lmhead-TP group on uniformly padded draft-batch
+    # rows (qwen3_dflash2.compute_candidates); the flag stays as the guard
+    # for a future family whose draft collectives cannot be aligned.
     _lmhead_tp_sample_draft_supported = True
+
+    # The DP-agreed request count of the current propose round, stashed by
+    # the hosting speculator's propose (from the target's DPSyncState —
+    # every field is identical on every rank, and FULL descriptors pad it
+    # to the bucket request count). The autoregressive draft syncs are
+    # request-scaled, not head-row-scaled: the bootstrap reuses the
+    # target's verify sync (num_reqs * (num_speculative_steps + 1) query
+    # rows per request) and the continuations rebuild on a one-row basis,
+    # while the draft head samples exactly one row per request. The synced
+    # token max therefore overshoots those head rows on the bootstrap by
+    # the verify basis, so the stashed request count is the tightest
+    # group-uniform capacity for one-row-per-request heads in every phase.
+    # None = not stashed (DFlash/DSpark sample off the raw synced query
+    # rows; replicated drafts sync global tokens): publish the raw synced
+    # max exactly as before.
+    _lmhead_tp_uniform_num_reqs: int | None = None
 
     def _lmhead_tp_validate_draft_sampling(self) -> None:
         """Fail unsupported draft sampling at construction, not first use."""
@@ -100,20 +119,25 @@ class LmheadTPDraftSamplingMixin:
 
         ``num_tokens_across_dp`` is the group-agreed per-rank query token
         count (upstream ``_build_uniform_batch_dp_sync``): identical on
-        every rank, so its max is the tightest group-uniform row bound.
-        The draft head runs inside the same step on at most those rows —
-        autoregressive families (EAGLE) draft one query token per request
-        and the head runs on exactly those rows; the DFlash family's
-        ``num_query_per_req`` query rows per request already cover the
-        head's sample rows — so the raw synced max is the capacity.
-        ``tokens_per_req`` only sanity-checks that the synced rows are a
-        whole number of requests. Called from ``_run_model`` before this
-        step's head call — inside the captured region for FULL graphs,
-        where the capture-time value matches the capture shapes. Without a
-        sync value the previous dynamic value is dropped so the static
-        ``lmhead_tp_capacity`` (the deliberately loose load-time bound)
-        stays authoritative. Gated on lmhead TP so non-lmhead-TP runs do
-        not pay the per-step DP-sync ``.item()``.
+        every rank, so its max is a group-uniform row bound. When the
+        round's DP-agreed request count is stashed
+        (``_lmhead_tp_uniform_num_reqs``), heads that sample one row per
+        request (EAGLE) convert the synced rows to that basis: the
+        autoregressive draft syncs are request-scaled (the bootstrap
+        reuses the target's (k+1)-rows-per-request verify sync, the
+        continuations rebuild on a one-row basis), so the request count —
+        not the raw synced token max — is the tightest group-uniform
+        capacity for those heads in every phase. Heads whose sample rows
+        the synced query rows already cover (DFlash/DSpark's
+        ``num_query_per_req`` rows per request) never stash and keep the
+        raw synced max. On the raw path ``tokens_per_req`` sanity-checks
+        that the synced rows are a whole number of requests. Called from
+        ``_run_model`` before this step's head call — inside the captured
+        region for FULL graphs, where the capture-time value matches the
+        capture shapes. Without a sync value the previous dynamic value is
+        dropped so the static ``lmhead_tp_capacity`` (the deliberately
+        loose load-time bound) stays authoritative. Gated on lmhead TP so
+        non-lmhead-TP runs do not pay the per-step DP-sync ``.item()``.
         """
         if not lmhead_tp_enable():
             return
@@ -126,6 +150,15 @@ class LmheadTPDraftSamplingMixin:
             )
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
             max_query_rows = int(num_tokens_across_dp.max().item())
+            # Stashed request count: convert the synced query rows to the
+            # one-row-per-request head basis (the bootstrap sync overshoots
+            # by the (k+1)-token verify basis). The guard ignores a stale
+            # stash (a valid request count can never exceed this round's
+            # synced rows) so it cannot publish a desynced capacity.
+            uniform_reqs = self._lmhead_tp_uniform_num_reqs
+            if uniform_reqs is not None and uniform_reqs <= max_query_rows:
+                lm_head._lmhead_tp_dynamic_capacity = uniform_reqs * tokens_per_req
+                return
             if max_query_rows % tokens_per_req != 0:
                 raise ValueError(
                     f"lmhead TP: synced draft query rows ({max_query_rows}) are "
