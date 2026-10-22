@@ -34,6 +34,9 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
     _selector_walk_kernel_ascend,
 )
+from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
+    AscendLiLiCorrSpeculator,
+)
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -95,6 +98,47 @@ def test_init_speculator_routes_dflash2_draft_model():
     ):
         assert init_speculator(cfg, torch.device("cpu")) is d1.return_value
         d2.assert_not_called()
+
+
+def test_init_speculator_routes_lilicorr_before_dflash2():
+    cfg = SimpleNamespace(speculative_config=_spec_config("LiLiCorrDraftModel"))
+    with (
+        patch("vllm_ascend.worker.v2.spec_decode.lilicorr.speculator.AscendLiLiCorrSpeculator") as lilicorr,
+        patch("vllm_ascend.worker.v2.spec_decode.dflash2.speculator.AscendDFlash2Speculator") as dflash2,
+    ):
+        assert init_speculator(cfg, torch.device("cpu")) is lilicorr.return_value
+        lilicorr.assert_called_once_with(cfg, torch.device("cpu"))
+        dflash2.assert_not_called()
+
+
+def test_lilicorr_uses_ascend_dflash_runtime_hooks():
+    assert AscendLiLiCorrSpeculator.build_draft_attn_metadatas is AscendDFlashSpeculator.build_draft_attn_metadatas
+    assert AscendLiLiCorrSpeculator.propose is AscendDFlashSpeculator.propose
+
+
+def test_lilicorr_rejects_lmhead_tp_before_candidate_sampling(monkeypatch):
+    monkeypatch.setattr("vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable", lambda: True)
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+    with pytest.raises(NotImplementedError, match="lmhead TP does not support AscendLiLiCorrSpeculator"):
+        speculator._lmhead_tp_validate_draft_sampling()
+
+
+def test_lilicorr_requires_enforce_eager(monkeypatch):
+    calls: list[CUDAGraphMode] = []
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
+        lambda self, mode: calls.append(mode),
+    )
+    speculator = AscendLiLiCorrSpeculator.__new__(AscendLiLiCorrSpeculator)
+
+    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
+    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    assert calls == [CUDAGraphMode.NONE]
+
+    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
+    with pytest.raises(NotImplementedError, match="graph mode"):
+        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    assert calls == [CUDAGraphMode.NONE]
 
 
 def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):

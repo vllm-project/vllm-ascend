@@ -59,6 +59,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
+        if "LiLiCorrDraftModel" in (vllm_config.speculative_config.draft_model_config.architectures or []):
+            raise NotImplementedError("LiLiCorr requires Model Runner V2 on Ascend; set VLLM_USE_V2_MODEL_RUNNER=1.")
         if is_dflash2_draft(vllm_config.speculative_config):
             return AscendDflash2Proposer(vllm_config, device, runner)
         return AscendDflashProposer(vllm_config, device, runner)

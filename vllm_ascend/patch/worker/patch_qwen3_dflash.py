@@ -1,16 +1,54 @@
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.models.qwen3_dflash import (
-    DFlashQwen3ForCausalLM,
-    DFlashQwen3Model,
-)
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
+
+try:
+    import vllm.model_executor.models.lilicorr as lilicorr_module
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.model_executor.models.lilicorr":
+        raise
+    # LiLiCorr is supplied by an upstream vLLM change. Keep this general
+    # DFlash patch importable while the paired vLLM revision lacks the model.
+    lilicorr_module = None
+
+if lilicorr_module is not None:
+    # LiLiCorr's convolutional variant selects this module-level decoder
+    # factory. Keep its upstream head and checkpoint loader, but use the NPU
+    # implementation for the DFlash2 backbone.
+    lilicorr_module.DFlash2Qwen3DecoderLayer = DFlash2Qwen3DecoderLayer
+
+
+def _project_context_kv(
+    self,
+    context_states: torch.Tensor,
+    num_ctx: int,
+    num_layers: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    normed_context_states = self.hidden_norm(context_states)
+    if self._fused_kv_weight is not None:
+        all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
+        all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+    else:
+        # Packed quantized weights must run through their linear method.
+        layer_kv = []
+        for proj, q_size in zip(self._context_qkv_projs, self._context_q_sizes, strict=True):
+            qkv, _ = proj(normed_context_states)
+            layer_kv.append(qkv[:, q_size:].view(num_ctx, 2, num_kv_heads, head_dim))
+        all_kv = torch.stack(layer_kv, dim=1)
+
+    all_kv = all_kv.permute(2, 1, 0, 3, 4).contiguous()
+    return all_kv[0], all_kv[1]
 
 
 def precompute_and_store_context_kv(
     self,
     context_states: torch.Tensor,
     context_positions: torch.Tensor,
-    context_slot_mapping: torch.Tensor | None = None,
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
 ) -> None:
     if not hasattr(self, "_num_attn_layers"):
         self._build_fused_kv_buffers()
@@ -21,15 +59,7 @@ def precompute_and_store_context_kv(
     hd = self._head_dim
     nkv = self._num_kv_heads
 
-    # --- Fused KV projection (one GEMM for all layers) ---
-    normed_context_states = self.hidden_norm(context_states)
-    all_kv_flat = F.linear(normed_context_states, self._fused_kv_weight, self._fused_kv_bias)
-    # Single contiguous copy that separates K/V and transposes to
-    # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-    # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-    all_kv = all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
-    all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
-    all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+    all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
 
     # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
     all_k_normed = torch.empty_like(all_k)
@@ -39,14 +69,18 @@ def precompute_and_store_context_kv(
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
+    # Ascend RoPE can return a new tensor (e.g. the non-Triton path).
+    # Consume its result rather than relying on an in-place update.
     all_k_flat = all_k_normed.view(L * num_ctx, kv)
     positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    all_k_flat, _ = self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, None)
 
     if context_slot_mapping is None:
         return
+
+    v_scale = getattr(self.layers[0].self_attn, "v_scale", None)
+    if v_scale is not None:
+        all_v.mul_(v_scale)
 
     # --- Per-layer cache insert ---
     all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
@@ -66,16 +100,5 @@ def precompute_and_store_context_kv(
         )
 
 
+DFlashQwen3Model._project_context_kv = _project_context_kv
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
-
-_orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
-
-
-def _patched_read_mask_embedding(self):
-    try:
-        return _orig_read_mask_embedding(self)
-    except Exception:
-        return None
-
-
-DFlashQwen3ForCausalLM._read_mask_embedding = _patched_read_mask_embedding
