@@ -103,7 +103,9 @@ def prepare_dense_draft_read(
     # Every gather address denotes an actual token in [S,E), including padding.
     absolute = starts[:, None] + torch.minimum(columns[None, :], visible[:, None] - 1)
     block_columns = torch.div(absolute, source.block_span, rounding_mode="floor")
-    blocks = source.table[row_indices[:, None], block_columns]
+    # Flat gathers avoid the advanced-index AICPU fallback on current CANN.
+    table_indices = row_indices[:, None] * source.table.shape[1] + block_columns
+    blocks = source.table.reshape(-1).index_select(0, table_indices.reshape(-1)).reshape(n, capacity)
     slots = blocks.to(torch.int64) * source.block_span + absolute % source.block_span
     mask = (columns[None, None, :] >= visible[:, None, None]).expand(n, query_width, capacity)
     if causal:
