@@ -50,7 +50,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_BUFFSIZE: "1024"
   VLLM_USE_V1: "1"
-  DYNAMIC_EPLB: "true"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
 templates:
   - node_index: 0
     envs:
@@ -92,8 +92,11 @@ templates:
       - --enforce-eager
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":50,"step_interval":70,"num_redundant_experts":32,"use_async":true,"log_balancedness":false}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":20, "eplb_policy_type":2, "num_redundant_experts":32}}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"load_collection_phase":"all"}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -161,8 +164,11 @@ templates:
       - --enforce-eager
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":50,"step_interval":70,"num_redundant_experts":32,"use_async":true,"log_balancedness":false}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":20, "eplb_policy_type":2, "num_redundant_experts":32}}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"load_collection_phase":"all"}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -231,8 +237,11 @@ templates:
       - '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":600,"step_interval":650,"num_redundant_experts":32,"use_async":true,"log_balancedness":false}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":600,"algorithm_execution_interval":50, "eplb_policy_type":2, "num_redundant_experts":32}}'
+      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2" : 0, "eplb_config":{"load_collection_phase":"all"}}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
