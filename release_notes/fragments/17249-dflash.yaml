@@ -4,3 +4,5 @@ entries:
     text: Added DFlash target-feature capture and separate draft attention caches for Qwen3.8-Flash-Next on Model Runner V2. DFlash2 uses an eager draft while the target can use decode graphs.
     model: Qwen3.8-Flash-Next
     hardware: [A3]
+  - category: bugfix
+    text: Fixed Qwen3.8-Flash-Next rejecting DFlash during Model Runner V2 startup configuration validation.

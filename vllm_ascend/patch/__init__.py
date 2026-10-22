@@ -350,6 +350,23 @@
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
+# ** File: platform/patch_qwen4_exp_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.config.Qwen4ExpForConditionalGenerationConfig.verify_and_update_config`
+#    Why:
+#       The upstream Qwen4Exp model-local allowlist rejects DFlash before the
+#       Ascend Model Runner V2 feature-capture and draft-cache adapters can load.
+#    How:
+#       For DFlash on V2, run the original verifier on a shallow target-only
+#       config view. Cache/model subconfigs retain all upstream updates and
+#       checks; the real speculative config is preserved for generic validation
+#       and worker initialization. Other speculative methods use the original.
+#    Related PR (if no, explain why):
+#       No upstream PR currently enables this Ascend-specific DFlash adapter.
+#    Future Plan:
+#       Remove this patch when upstream Qwen4Exp validation accepts DFlash and
+#       its model implementation supplies compatible auxiliary hidden states.
+#
 # ** 13. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
