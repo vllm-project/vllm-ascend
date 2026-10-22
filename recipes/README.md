@@ -1,13 +1,15 @@
 # vLLM Ascend recipes
 
-This directory holds Ascend overlays for recipes published by
-[recipes.vllm.ai](https://recipes.vllm.ai). The initial import contains ten
-recipes already merged upstream: nine owned by vLLM and MiniMax-H3 owned by
-vLLM-Omni. Pending recipe PRs and Markdown-only tutorials are not imported.
+This directory holds Huawei-scoped overlays for
+[recipes.vllm.ai](https://recipes.vllm.ai), following the migration in
+[recipes PR #1160](https://github.com/vllm-project/recipes/pull/1160).
+The initial import contains the Ascend portions of nine recipes already
+merged in vLLM. MiniMax-H3 and other Omni content, pending recipe PRs, and
+additional tutorials are deferred to later migrations.
 
 The [recipes renderer](https://github.com/vllm-project/recipes) owns the site,
 command builder, JSON API, schema, and shared vocabulary. Adding this
-directory does not register a new website source or change published pages.
+directory does not register a website source or change published pages.
 
 ## Layout and ownership
 
@@ -15,103 +17,97 @@ directory does not register a new website source or change published pages.
 recipes/
 ├── README.md
 ├── manifest.yaml
-├── validate.mjs
 └── overlays/
     └── <hf_org>/<hf_repo>.yaml
 ```
 
 - `manifest.yaml` declares the schema version, matching vLLM's manifest.
-  It does not grant ownership or hardware scope.
+  The renderer's `sources.yaml` grants the source's role and hardware scope.
 - An overlay extends the base recipe with the same case-sensitive Hugging
-  Face ID. It contains Ascend hardware settings, variants, dependencies,
-  and guide sections rather than a second complete model recipe.
-- Optional `models/<hf_org>/<hf_repo>.yaml` files may own complete
-  Ascend-only recipes after source registration. The model must have no
-  other owner; all `meta.hardware` entries and every variant's explicit
-  `supported_hardware` list must be within the granted Huawei scope.
-
-Overlays are additive: they cannot replace base values or change NVIDIA and
-AMD settings. A new variant must explicitly restrict `supported_hardware`
-to Ascend profiles. `guide_sections` fills
-`<!-- overlay:vllm-ascend:<name> -->` markers in the base guide, or appends
-sections when no marker exists.
+  Face ID. vLLM retains shared metadata and GPU settings; vLLM-Ascend owns
+  the Ascend hardware settings, variants, dependencies, and guide sections.
+- Overlays are additive and cannot change NVIDIA or AMD settings. New
+  variants must explicitly restrict `supported_hardware` to Ascend profiles.
+  PR #1160 allows entries identical to the base as no-ops during cutover;
+  conflicting values remain errors.
+- Qwen3.8-27B uses `guide_sections.ascend`, matching the base guide marker
+  `<!-- overlay:vllm-ascend:ascend -->` in the companion vLLM split.
+- Complete Ascend-only recipes may later live under `models/` if they have
+  no other owner and all hardware and variant support stays in Huawei scope.
+  No complete recipes are included in this initial migration.
 
 ## Imported content and provenance
 
-The import uses the official renderer at
-[`b08ad738`](https://github.com/vllm-project/recipes/commit/b08ad73889f9e33319d8ac9c887dec6a0975c55d)
-and its committed `sources.lock.json`. Both source revisions are merged
-official commits. No content is taken from an unmerged PR or fork branch.
+All nine overlays come from the merged vLLM recipes at
+[`52a65d7b`](https://github.com/vllm-project/vllm/tree/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models):
 
-| Base owner and revision | Imported overlays |
-| --- | --- |
-| [vLLM `52a65d7b`](https://github.com/vllm-project/vllm/tree/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models) | Qwen3-30B-A3B, Qwen3.5-397B-A17B, Qwen3.6-27B, Qwen3.8-27B; DeepSeek-V4-Flash, DeepSeek-V4-Flash-Vision-Exp; Kimi-K3; GLM-5.3, GLM-5.3-Flash |
-| [vLLM-Omni `24f0cf37`](https://github.com/vllm-project/vllm-omni/tree/24f0cf37b94076baece79a685dbf04f66b14aef4/recipes/models) | MiniMax-H3 |
+- Qwen3-30B-A3B, Qwen3.5-397B-A17B, Qwen3.6-27B, Qwen3.8-27B
+- DeepSeek-V4-Flash, DeepSeek-V4-Flash-Vision-Exp
+- Kimi-K3
+- GLM-5.3, GLM-5.3-Flash
 
-The renderer's `split-overlay.mjs` extracts Huawei-scoped fields and guide
-sections whose headings contain `Ascend`. YAML formatting and comments
-change during extraction; configuration values are inherited unchanged.
-Existing `verified` labels and measurements describe the source recipes,
-not new NPU validation performed for this import.
+Each overlay links to its fixed source file. The initial extraction used
+the official renderer's `split-overlay.mjs` at
+[`b08ad738`](https://github.com/vllm-project/recipes/commit/b08ad73889f9e33319d8ac9c887dec6a0975c55d),
+with Qwen3.8's section name aligned to PR #1160's `ascend` marker.
+Configuration values are preserved. Existing `verified` labels and
+measurements describe source evidence, not new NPU validation for this import.
 
-Scattered Ascend prose, links, and shared metadata remain in the base
-recipes. Only Qwen3.8-27B and MiniMax-H3 have standalone guide sections
-extracted in this batch. They are not complete documentation migrations.
-
-The current merge API places Huawei dependencies before base dependencies
-(or at the end when requested). For MiniMax-H3, its Ascend pip prerequisite
-moves before the shared weight-download step; it still precedes the
-vLLM-Omni installation. The command contents are unchanged. Review this
-ordering with the Omni maintainer before the published source cutover.
+Only Qwen3.8-27B has standalone Ascend guide sections in this batch.
+Scattered Ascend prose and reference links remain in the other base guides,
+as in PR #1160. Moving those sections needs separate marker changes.
 
 ## Editing and validation
 
-Follow the renderer's [contribution guide](https://github.com/vllm-project/recipes/blob/main/CONTRIBUTING.md)
-and [recipe authoring guide](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md).
-Use [SCHEMA.md](https://github.com/vllm-project/recipes/blob/main/SCHEMA.md)
-and [taxonomy.yaml](https://github.com/vllm-project/recipes/blob/main/taxonomy.yaml)
-for fields and hardware IDs. Schema, catalog, and command builder changes
-belong in the renderer repository.
+Follow the renderer's [contribution guide](https://github.com/vllm-project/recipes/blob/main/CONTRIBUTING.md),
+[authoring guide](https://github.com/vllm-project/recipes/blob/main/.agents/skills/add-recipe/SKILL.md),
+[schema](https://github.com/vllm-project/recipes/blob/main/SCHEMA.md), and
+[taxonomy](https://github.com/vllm-project/recipes/blob/main/taxonomy.yaml).
+Keep shared metadata in the base recipe and schema/command-builder changes
+in the renderer. Link to [model tutorials](../docs/source/tutorials/models)
+for deployment details and record actual hardware validation for new settings.
 
-Keep shared model metadata in the base recipe. The
-[recipe template](https://github.com/vllm-project/recipes/blob/main/templates/recipe.yaml)
-and [JSON Schema](https://recipes.vllm.ai/recipe.schema.json) apply to
-complete recipes; do not apply the full-recipe schema directly to partial
-overlays. Link to [model tutorials](../docs/source/tutorials/models) for
-deployment details and record actual hardware validation when adding
-configurations.
+The `Recipes` PR check calls the renderer's reusable
+`validate-recipes.yml` workflow with `source: vllm-ascend` and `path: recipes`.
+While source registration is pending, `renderer-ref` is pinned to PR #1160's
+[`9ffe8f5d`](https://github.com/vllm-project/recipes/commit/9ffe8f5da08b1f2ae862464805ebc487529c34d4).
+This is an **unmerged preview renderer**, whose lock uses the companion
+vLLM split at
+[`7846aee8`](https://github.com/esmeetu/vllm/commit/7846aee877aa763108476ed035d410fe8e175bca).
+The validator replaces its Ascend source with the recipes under review,
+checks ownership, Huawei scope, conflicts and orphaned overlays, then builds
+the schema-validated JSON API. It does not enforce a fixed import count.
 
-Until the official channel registers Ascend, the `Recipes` PR check uses
-`validate.mjs` with the merged renderer snapshot above. It invokes the
-official sync, assemble, split, and validation tools to:
-
-1. Resolve the pinned vLLM and Omni sources and check their ownership.
-2. Split an isolated copy of the merged recipes into base and Huawei parts.
-3. Check that this directory contains exactly the extracted overlays and
-   values, rejecting missing content or additions from pending PRs.
-4. Merge this directory into the temporary base with Huawei scope, check
-   orphaned overlays and schema, and build the JSON API.
-
-Run the same check from a separate renderer checkout:
+Run the same validation in a fresh, disposable renderer checkout:
 
 ```bash
-git clone https://github.com/vllm-project/recipes.git recipes-renderer
-cd recipes-renderer
-git checkout --detach b08ad73889f9e33319d8ac9c887dec6a0975c55d
+git clone https://github.com/vllm-project/recipes.git recipes-renderer-check
+cd recipes-renderer-check
+git fetch origin pull/1160/head
+git checkout --detach 9ffe8f5da08b1f2ae862464805ebc487529c34d4
 pnpm install --frozen-lockfile
-node /path/to/vllm-ascend/recipes/validate.mjs
+node scripts/validate-source.mjs --source vllm-ascend --dir /path/to/vllm-ascend/recipes
 ```
 
-The adapter ignores local source overrides and creates temporary channels.
-It does not change the upstream source recipes or the published website.
-The check currently requires the imported merged snapshot to remain
-unchanged; update the source snapshot deliberately when adding newly merged
-content. Static validation does not establish NPU correctness or performance.
+Use a disposable checkout because this renderer version writes and removes
+`.content/validate`. Clear inherited `RECIPES_*` overrides when reproducing CI.
+Static validation does not establish NPU correctness or performance.
 
-## Registering the source
+## Staged source cutover
 
-Before publishing these overlays, register this directory in the renderer's
-`sources.yaml` under the intended channel:
+Follow PR #1160's order, validating compatible source pins at each step:
+
+1. Merge these nine overlays into `vllm-project/vllm-ascend@main`.
+2. Merge the renderer changes with official vLLM and vLLM-Ascend sources,
+   keeping vLLM's Ascend content and leaving `exclude_brands` disabled.
+   Identical overlay entries are no-ops during this overlap.
+3. Merge the companion vLLM change that removes those Ascend fields and
+   inserts the matching guide marker. The source-lock update then picks up
+   the split, and the overlays supply the Ascend content.
+4. Enable `scope.exclude_brands: [Huawei]` for the vLLM source so new
+   structured Ascend settings must be contributed to vLLM-Ascend.
+
+The renderer registration is:
 
 ```yaml
 vllm-ascend:
@@ -122,26 +118,13 @@ vllm-ascend:
   scope: { brands: [Huawei] }
 ```
 
-Coordinate the matching base changes in both vLLM and vLLM-Omni and update
-the renderer's `sources.lock.json`. Its current merge rejects keys already
-set by a base recipe even when their values match. Validate compatible
-base and overlay revisions before changing the published pins; preserve
-GPU behavior and reconcile pending Ascend recipe PRs separately.
+Update the renderer's `sources.lock.json` to official revisions rather than
+publishing its preview fork pins. Once renderer `main` includes registration
+and identical-entry support, remove `renderer-ref` from this repository's
+workflow so validation follows the published source configuration.
 
-Once the official channel reads this source with compatible base recipes,
-remove `validate.mjs` and replace the bootstrap job with the reusable
-`vllm-project/recipes/.github/workflows/validate-recipes.yml@main`
-(`source: vllm-ascend`, `path: recipes`).
-
-For preview after registration, add a gitignored `sources.local.yaml` in
-the renderer checkout:
-
-```yaml
-overrides:
-  vllm-ascend: /path/to/vllm-ascend/recipes
-```
-
-Run `pnpm dev` and inspect the commands and guides together. An override
-alone does not register a new source. During cutover, override the base
-sources with matching local vLLM and vLLM-Omni recipes as well. Do not
-commit generated `public/`, `.content/`, or `.sources/` files.
+Compare the generated commands and guide placement before and after the
+split. Overlay keys are appended after base keys, so variant display order
+can change (for example Kimi-K3), as documented in PR #1160. Reconcile pending
+Ascend PRs separately after this source is available. Do not commit generated
+`public/`, `.content/`, or `.sources/` files.

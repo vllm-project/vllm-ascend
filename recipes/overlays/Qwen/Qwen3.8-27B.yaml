@@ -38,7 +38,7 @@ meta:
   hardware:
     ascend_950pr: verified
 guide_sections:
-  section1: |+
+  ascend: |
     ### Huawei Ascend 950PR-w8a8 (vLLM Ascend)
 
     Verified on a single 950PR, TP1, vLLM Ascend 0.23.0 from the
@@ -107,5 +107,3 @@ guide_sections:
       --mm-encoder-tp-mode data \
       --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
     ```
-
-# End of extracted Ascend guide.

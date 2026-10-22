@@ -1,8 +1,7 @@
 name: Recipes
 
-# Bootstrap the migration against an official merged renderer snapshot.
-# Replace this adapter with the reusable validate-recipes workflow after
-# the official channel registers vllm-ascend and uses split base recipes.
+# Validate Huawei-scoped overlays with the upstream renderer workflow.
+# PR #1160 supplies the source registration and staged cutover support.
 
 on:
   pull_request:
@@ -21,39 +20,10 @@ jobs:
   validate:
     name: Recipes
     if: github.repository_owner == 'vllm-project'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out the recipes under review
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          path: source
-          sparse-checkout: recipes
-          persist-credentials: false
-
-      - name: Check out the official renderer snapshot
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: vllm-project/recipes
-          # Merged main revision; its lock pins the imported vLLM/Omni sources.
-          ref: b08ad73889f9e33319d8ac9c887dec6a0975c55d
-          path: renderer
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: renderer/package.json
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: renderer/pnpm-lock.yaml
-
-      - name: Install renderer dependencies
-        working-directory: renderer
-        run: pnpm install --frozen-lockfile
-
-      - name: Validate merged content and overlay integration
-        working-directory: renderer
-        run: node ../source/recipes/validate.mjs
+    uses: vllm-project/recipes/.github/workflows/validate-recipes.yml@main
+    with:
+      source: vllm-ascend
+      path: recipes
+      # Temporary preview pin from recipes PR #1160. Remove once main
+      # registers the official Ascend source and supports identical entries.
+      renderer-ref: 9ffe8f5da08b1f2ae862464805ebc487529c34d4
