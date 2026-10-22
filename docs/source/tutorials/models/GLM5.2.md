@@ -4899,4 +4899,6 @@ For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).
 
 ### Q: Can thinking be disabled for GLM-5.3?
 
-No. Keep thinking enabled for the GLM-5.3 commands on this page.
+No. Keep thinking enabled for the GLM-5.3 commands on this page. If thinking is disabled for GLM-5.3,
+the model still generates reasoning text. vLLM returns this text in the
+`content` field, while vLLM-Ascend returns it in the `reasoning` field.
