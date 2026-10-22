@@ -363,14 +363,19 @@ A few important things to consider when using DFlash2 draft models:
     VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
       --tensor-parallel-size 2 \
       --max-model-len 2048 \
+      --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8, "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[9]}' \
+      --speculative-config '{"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 8}'
     ```
 
-2. **Model runner V2 requires an eager draft**: DFlash2 on model runner V2
-   does not yet support graph mode for the draft. Set `"enforce_eager": true`
-   in `speculative_config`; the target model keeps its own graph mode (e.g.
-   `FULL_DECODE_ONLY`).
+2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
+   target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
+   or false. The draft backbone and candidate selector skip Dynamo compilation
+   while their operations, candidate TopK, path sampling, and proposal-cache
+   updates are captured by the draft ACL graph. Set `"enforce_eager": true`
+   to compare against eager drafting. Validate graph/eager equivalence and
+   request reuse on the intended NPU configuration before deployment.
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`

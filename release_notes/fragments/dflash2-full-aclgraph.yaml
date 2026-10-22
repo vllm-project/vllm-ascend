@@ -1,0 +1,5 @@
+# Assign the PR number and rename this fragment when opening a pull request.
+pr: null
+entries:
+  - category: feature
+    text: Enabled full ACL graph capture for DFlash2 drafting on Model Runner V2, including candidate selection and proposal-cache updates. Set enforce_eager to true to retain eager drafting.
