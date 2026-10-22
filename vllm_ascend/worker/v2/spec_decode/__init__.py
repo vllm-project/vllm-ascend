@@ -21,7 +21,11 @@ import copy
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
-from vllm_ascend.worker.v1.spec_decode.method import SpecDecodeFamily, resolve_spec_decode_family
+from vllm_ascend.worker.v1.spec_decode.method import (
+    SpecDecodeFamily,
+    resolve_spec_decode_family,
+    uses_ascend_mtp_speculator,
+)
 
 
 def init_speculator(
@@ -64,7 +68,7 @@ def init_speculator(
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
-    if family is SpecDecodeFamily.MTP:
+    if uses_ascend_mtp_speculator(family):
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )

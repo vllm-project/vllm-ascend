@@ -55,6 +55,20 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: False,
+                use_step3p5_mtp=lambda: False,
+                draft_model_config=SimpleNamespace(
+                    architectures=[],
+                    hf_config=SimpleNamespace(
+                        model_type="glm5_next_mtp",
+                        architectures=["Glm5NextMTPModel"],
+                    ),
+                ),
+            )
+        ),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
                 method="dflash",
                 enforce_eager=True,
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
@@ -97,6 +111,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "lora",
         "parallel-drafting",
         "eagle3-without-parallel-drafting",
+        "multi-kv-group-mtp",
         "dflash2-eager",
         "hy3-preview",
         "hy3-preview-architecture",
@@ -149,7 +164,22 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="medusa")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: True,
+                use_step3p5_mtp=lambda: False,
+            )
+        ),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: False,
+                use_step3p5_mtp=lambda: True,
+            )
+        ),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
@@ -167,7 +197,10 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
+        "medusa-speculative-decoding",
         "draft-model-speculative-decoding",
+        "gemma4-mtp-speculative-decoding",
+        "step3p5-mtp-speculative-decoding",
         "p-eagle",
         "p-eagle-method-eagle",
     ],

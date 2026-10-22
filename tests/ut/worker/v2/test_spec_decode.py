@@ -39,6 +39,7 @@ def _make_config(
     use_dflash=False,
     use_eagle=False,
     architectures=None,
+    model_type=None,
     use_gemma4_mtp=False,
     use_step3p5_mtp=False,
 ):
@@ -52,7 +53,10 @@ def _make_config(
         uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
-        draft_model_config=SimpleNamespace(architectures=architectures or []),
+        draft_model_config=SimpleNamespace(
+            architectures=architectures or [],
+            hf_config=SimpleNamespace(model_type=model_type, architectures=architectures or []),
+        ),
     )
     return SimpleNamespace(speculative_config=speculative_config)
 
@@ -144,6 +148,22 @@ def test_init_speculator_dflash(monkeypatch):
 def test_init_speculator_mtp(monkeypatch):
     """Test dispatching the regular MTP speculative decoding path."""
     config = _make_config("mtp")
+    device = torch.device("cpu")
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
+        "AscendMTPSpeculator",
+    )
+
+    result = init_speculator(config, device)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device)
+
+
+def test_init_speculator_multi_kv_group_mtp(monkeypatch):
+    """Multi-KV-group MTP shares the generic Ascend MTP speculator on MRV2."""
+    config = _make_config("mtp", model_type="glm5_next_mtp")
     device = torch.device("cpu")
     speculator_cls = _mock_speculator_module(
         monkeypatch,

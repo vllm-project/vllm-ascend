@@ -64,10 +64,16 @@ def _spec_decode_reasons(vllm_config: VllmConfig, speculative_config: object) ->
         reasons.append("suffix speculative decoding")
     if family in (SpecDecodeFamily.NGRAM, SpecDecodeFamily.NGRAM_GPU):
         reasons.append("ngram speculative decoding")
+    if family is SpecDecodeFamily.MEDUSA:
+        reasons.append("medusa speculative decoding")
     # V2 init_speculator has no draft_model branch. Parallel drafting with a
     # separate draft model still runs on the V1 proposer.
     if family is SpecDecodeFamily.DRAFT_MODEL:
         reasons.append("draft_model speculative decoding")
+    if family is SpecDecodeFamily.GEMMA4_MTP:
+        reasons.append("gemma4 MTP speculative decoding")
+    if family is SpecDecodeFamily.STEP3P5_MTP:
+        reasons.append("step3.5 MTP speculative decoding")
     if family is SpecDecodeFamily.DFLASH2 and getattr(speculative_config, "enforce_eager", False) is not True:
         reasons.append("dflash2 graph")
     # V2 FULL capture builds attention metadata inside ACL graph GLOBAL
@@ -126,7 +132,9 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * enable_dsa_cp
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
+    * medusa speculative decoding
     * draft_model speculative decoding
+    * Gemma4 MTP and Step3.5 MTP speculative decoding
     * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
     * p-eagle (``eagle`` / ``eagle3`` with ``parallel_drafting``)
 

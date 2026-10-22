@@ -42,6 +42,7 @@ router, and the MRV2 readiness gate all consume that result.
 | MRV1 DFlash | Upstream DFlash proposer | NPU copy/expand kernel and persistent slot-mapping buffers | Model-specific input preparation stays behind narrow overrides. |
 | MRV1 DSpark | Upstream DSpark proposer interfaces | NPU attention metadata, multi-group KV layout, and graph updates | Sampling and sequential draft generation remain upstream-owned. |
 | MRV2 autoregressive | Upstream `TargetDependentARSpeculator` propose loop | Ascend metadata construction, replicated PCP, graph capture, and hidden-state broadcast | Overrides wrap upstream calls instead of reimplementing the control flow. |
+| MRV2 multi-KV-group MTP | Upstream `MTPSpeculator` lifecycle | Ascend model loading, metadata, graph handling, and LM-head TP alignment | Shares the generic Ascend MTP speculator with regular MTP; MRV1 keeps its dedicated proposer. |
 | MRV2 DSpark | Upstream DSpark sampling and sequential decode | Ascend model loading, LM-head TP alignment, attention metadata, and graph handling | Draft sampling remains inherited from upstream. |
 | Rejection sampling | Upstream rejection-sampler host orchestration and portable helpers | Ascend Triton kernel and NPU launch constraints | Retain only the kernel implementation that cannot run upstream on NPU. |
 | KV cache metadata | vLLM block-table and slot-mapping interfaces | PCP/DCP ownership mapping, ACL graph padding, and reusable NPU buffers | MTP, Step3.5, and multi-KV-group paths share one slot-mapping write helper. |
@@ -51,6 +52,11 @@ The slot-mapping write contract is centralized in
 `vllm_ascend.spec_decode.utils.copy_slot_mapping_to_padded_buffer`. It owns
 dtype conversion, source aliasing, and graph-padding sentinel values for MTP,
 Step3.5 MTP, and multi-KV-group MTP.
+
+MRV2 readiness falls back to MRV1 for speculative families without an Ascend
+V2 speculator: suffix, NGram, Medusa, standalone draft model, Gemma4 MTP, and
+Step3.5 MTP. DFlash2 and parallel-drafting EAGLE are excluded only when their
+documented graph limitations apply.
 
 ## NPU-Only Adaptations
 
