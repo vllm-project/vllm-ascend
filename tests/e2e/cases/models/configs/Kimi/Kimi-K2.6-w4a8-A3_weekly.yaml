@@ -12,7 +12,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "800"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      DYNAMIC_EPLB: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -43,8 +43,11 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size":600,"step_interval":650,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"eplb_config":{"load_collection_phase":"all"},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -75,7 +78,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1300"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      DYNAMIC_EPLB: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -106,8 +109,11 @@ test_cases:
       - "--async-scheduling"
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size":600,"step_interval":650,"num_redundant_experts":0,"use_async":true,"log_balancedness":false}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"eplb_config":{"load_collection_phase":"all"},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
