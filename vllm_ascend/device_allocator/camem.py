@@ -157,10 +157,17 @@ class CaMemAllocator(CuMemAllocator):
         allocators.clear()
 
     def _python_free_callback(self, ptr: int) -> HandleType:
-        """Release an allocation after draining pending NPU work."""
+        """Internal method to look up the allocation data
+        when memory is freed in the memory pool.
+        """
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        # Drain pending kernels before the C extension's aclrtUnmapMem.
+        # The pluggable allocator path doesn't defer reclaim like the
+        # regular caching allocator, so without this, in-flight work
+        # (e.g. quant helpers' transient tensors during weight loading)
+        # races the unmap and surfaces as ACL error.
         torch.npu.synchronize(data.handle[0])
         logger.debug(
             "Freed %s bytes for %s with address %s from camem allocator",
@@ -267,6 +274,9 @@ class CaMemAllocator(CuMemAllocator):
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
+        gc.collect()
+        torch.accelerator.empty_cache()
+
         restore_count = sum(1 for data in self.pointer_to_data.values() if tags is None or data.tag in tags)
         logger.info(
             "CaMem wake_up: restoring %s/%s allocations (tags=%s)",
@@ -307,14 +317,16 @@ class CaMemAllocator(CuMemAllocator):
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
-            # start to hit another PyTorch bug in PyTorch 2.6,
-            # possibly because of gc-related issue w.r.t. the allocator and
-            # the memory pool.
-            # to avoid the issue, we keep a reference of the data.
-            # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools[tag] = data
-            yield
+        try:
+            with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
+                # start to hit another PyTorch bug in PyTorch 2.6,
+                # possibly because of gc-related issue w.r.t. the allocator and
+                # the memory pool.
+                # to avoid the issue, we keep a reference of the data.
+                # see https://github.com/pytorch/pytorch/issues/146431 .
+                self.allocator_and_pools[tag] = data
+                yield
+        finally:
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see
             # https://github.com/pytorch/pytorch/issues/145168 .
