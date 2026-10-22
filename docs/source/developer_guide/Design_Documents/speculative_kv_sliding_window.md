@@ -330,6 +330,9 @@ the reader maps token indices through the actual page stride without copying
 the full cache or reading the gaps.
 The preparation contract supplies current-generation `0 < E <= U`; the CPU
 upper checks address capacity for that contract, without reconstructing E.
+Scratch capacity is bounded by both `W+B-1` and the current batch's maximum
+Host upper, then rounded for allocation. This avoids gathering a large
+window's padding on short contexts; it does not change exact `S` or `V`.
 Continuing prefill, ragged queries and other consumers retain the existing
 exact path. This preserves Window semantics rather than forcing Window OFF.
 Eagle3, MLA, DSA and SFA exact-path synchronization remains separate work.

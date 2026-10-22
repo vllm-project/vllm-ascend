@@ -93,7 +93,7 @@ def test_apply_keeps_full_write_and_absolute_query_operands():
     assert common.block_table_tensor is full and common.slot_mapping is slots and common.positions is positions
     assert common.seq_lens.tolist() == [129, 0]
     assert common.seq_lens_cpu is None and common._seq_lens_cpu is None
-    assert read.capacity_cpu(common).tolist() == [256, 256]
+    assert read.capacity_cpu(common).tolist() == [160, 160]
     with pytest.raises(ValueError, match="another common"):
         read.capacity_cpu(SimpleNamespace(num_reqs=2))
 
@@ -133,3 +133,23 @@ def test_cpu_capacity_fields_ignore_default_tensor_device():
         read.apply(common)
         assert common.seq_lens_cpu_upper_bound.device.type == "cpu"
         assert read.capacity_cpu(common).device.type == "cpu"
+
+
+def test_short_context_large_window_does_not_gather_window_sized_padding():
+    source = DirectPrefixSource(torch.tensor([[1]], dtype=torch.int32), (0,), (1,), 128)
+    read = prepare_dense_draft_read(
+        source,
+        exact_device=torch.tensor([31], dtype=torch.int32),
+        row_indices=torch.tensor([0]),
+        upper_cpu=torch.tensor([34]),
+        window_size=4096,
+        anchor_span=128,
+        query_width=8,
+        causal=False,
+        retain=lambda *objects: None,
+    )
+    assert read.capacity == 64
+    assert read.starts.tolist() == [0] and read.seq_lens.tolist() == [31]
+    assert read.slots[0, :31].tolist() == list(range(128, 159))
+    assert read.slots[0, 31:].tolist() == [158] * 33
+    assert not read.mask[..., :31].any() and read.mask[..., 31:].all()

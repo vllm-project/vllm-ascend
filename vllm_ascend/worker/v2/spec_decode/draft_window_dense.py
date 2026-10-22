@@ -98,8 +98,10 @@ def prepare_dense_draft_read(
     exact = exact_device[:n].clone()
     starts = torch.div(torch.clamp(exact - window_size, min=0), anchor_span, rounding_mode="floor") * anchor_span
     visible = exact - starts
-    # Align dense FIA mask rows; this allocation rounding never changes S/V.
-    capacity = (window_size + anchor_span - 1 + 31) // 32 * 32
+    # Both are allocation bounds: V <= E <= U and V <= W+B-1. Avoid
+    # window-sized padding on short contexts without using U to choose S/V.
+    capacity_bound = min(window_size + anchor_span - 1, int(upper_cpu.max()))
+    capacity = (capacity_bound + 31) // 32 * 32
     columns = torch.arange(capacity, device=exact.device, dtype=torch.int64)
     # Every gather address denotes an actual token in [S,E), including padding.
     absolute = starts[:, None] + torch.minimum(columns[None, :], visible[:, None] - 1)
