@@ -128,8 +128,12 @@ ENV SOC_VERSION=$SOC_VERSION \
     MAX_JOBS=$MAX_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+RUN --mount=type=cache,target=/root/.cache/vllm-ascend-build \
+    export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
+    export VLLM_ASCEND_BUILD_CACHE_DIR=/root/.cache/vllm-ascend-build && \
+    export FETCHCONTENT_BASE_DIR=/root/.cache/vllm-ascend-build/deps && \
+    export OMP_NUM_THREADS=${MAX_JOBS} && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \

@@ -40,6 +40,8 @@ ARG VLLM_COMMIT=""
 ARG SOC_VERSION="ascend910_9391"
 # COMPILE_CUSTOM_KERNELS (optional): Whether to compile custom Ascend kernels (1 = yes, 0 = no).
 ARG COMPILE_CUSTOM_KERNELS=1
+# MAX_JOBS (optional): Number of parallel build jobs passed to make/ninja.
+ARG MAX_JOBS=16
 # BUILD_TYPE (optional): Build type: 'release' or 'daily' (daily installs extra deps).
 ARG BUILD_TYPE="release"
 # MEMCACHE_VERSION (optional, empty if unset): memcache package version for daily builds.
@@ -117,11 +119,16 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    MAX_JOBS=$MAX_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+RUN --mount=type=cache,target=/root/.cache/vllm-ascend-build \
+    export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
+    export VLLM_ASCEND_BUILD_CACHE_DIR=/root/.cache/vllm-ascend-build && \
+    export FETCHCONTENT_BASE_DIR=/root/.cache/vllm-ascend-build/deps && \
+    export OMP_NUM_THREADS=${MAX_JOBS} && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
