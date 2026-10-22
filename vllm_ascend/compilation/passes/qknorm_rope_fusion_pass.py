@@ -50,7 +50,7 @@ class QKNormRopeFusionPattern(BasePattern):
         qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
         q_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings, self.rope_dim, dtype=torch.bfloat16, device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
         return [qkv, q_weight, k_weight, cos_sin_cache, positions]
 
@@ -126,7 +126,7 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
         k_weight = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         q_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
         k_bias = torch.empty(self.head_dim, dtype=torch.bfloat16, device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.head_dim, dtype=torch.bfloat16, device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings, self.rope_dim, dtype=torch.bfloat16, device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
 
         return [qkv, q_weight, k_weight, q_bias, k_bias, cos_sin_cache, positions]
@@ -313,6 +313,17 @@ class QKNormRopeFusionPass(VllmInductorPass):
         for epsilon in [1e-6, 1e-5]:
             if layer.head_size != 128:
                 logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
+                continue
+            # The shared forward context also contains draft Attention layers.
+            # Their head size need not accommodate the target model's RoPE.
+            # Skip incompatible patterns before registration traces real ops.
+            rope_dim = get_rope_dim(vllm_config)
+            if rope_dim > layer.head_size:
+                logger.debug(
+                    "QKNorm and Rope fusion not enabled: model RoPE dimension %d exceeds Attention head_dim %d",
+                    rope_dim,
+                    layer.head_size,
+                )
                 continue
             QKNormRopeFusionPattern(
                 vllm_config=vllm_config,

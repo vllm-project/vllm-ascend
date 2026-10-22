@@ -8,3 +8,5 @@ entries:
     text: Fixed Qwen3.8-Flash-Next rejecting DFlash during Model Runner V2 startup configuration validation.
   - category: feature
     text: Enabled full ACL graph capture for DFlash2 drafting on Model Runner V2, including candidate selection and proposal-cache updates. Set enforce_eager to true to retain eager drafting.
+  - category: bugfix
+    text: Fixed QKNorm/RoPE fusion registration failing during compilation when a DFlash draft Attention head is smaller than the target model's inferred rotary dimension.

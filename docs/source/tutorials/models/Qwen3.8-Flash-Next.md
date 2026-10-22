@@ -216,6 +216,13 @@ not supported by this adaptation. This recipe uses a single serving instance
 without a KV-transfer connector; disaggregated prefill/decode is outside its
 validation scope.
 
+If an older revision fails while registering `QKNormRopeFusionPass` with
+`assert rope_dim <= head_dim`, update this branch. The fusion pass now skips
+incompatible target/draft dimension combinations while retaining ACL graph
+capture. As a workaround for older revisions, merge `"fuse_qknorm_rope":false`
+into `ascend_compilation_config` in the existing `--additional-config` value;
+this only disables that fusion and does not require eager execution.
+
 Before deployment, compare greedy token IDs against a target-only baseline
 under eager execution, then repeat with target graph replay and asynchronous
 scheduling. Include chunked prefill, mixed request lengths, padded decode
