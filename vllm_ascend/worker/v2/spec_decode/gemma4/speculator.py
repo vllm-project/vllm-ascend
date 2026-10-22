@@ -66,42 +66,39 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
     num_reqs = input_batch.num_reqs
     if num_reqs == 0:
         return
-    try:
-        if int(input_batch.positions.max()) == 0:
-            return
-        qsl = input_batch.query_start_loc_np
-        num_sampled_h = num_sampled[:num_reqs].tolist()
-        idx_slots = input_batch.idx_mapping[:num_reqs].tolist()
-        is_prefilling = input_batch.is_prefilling_np
-        saw_decode_continue = False
+    if int(input_batch.positions.max()) == 0:
+        return
+    qsl = input_batch.query_start_loc_np
+    num_sampled_h = num_sampled[:num_reqs].tolist()
+    idx_slots = input_batch.idx_mapping[:num_reqs].tolist()
+    is_prefilling = input_batch.is_prefilling_np
+    saw_decode_continue = False
 
-        pos_buf = spec.input_buffers.positions
-        hidden = spec.hidden_states
-        stash = spec._g4_stash
-        committed = []
-        for i in range(num_reqs):
-            qs = int(qsl[i])
-            full_len = int(qsl[i + 1]) - qs
-            qe = qs + full_len
-            if full_len <= 0:
-                committed.append(0)
-                continue
-            slot = idx_slots[i]
-            if num_sampled_h[i] > 0 and not is_prefilling[i]:
-                saw_decode_continue = True
-                head_hidden = stash[slot].clone()
-                stash[slot].copy_(hidden[qs])
-                shifted = hidden[qs : qe - 1].clone()
-                hidden[qs].copy_(head_hidden)
-                hidden[qs + 1 : qe].copy_(shifted)
-                pos_buf[qs:qe].copy_(input_batch.positions[qs:qe])
-            else:
-                committed.append(int(input_batch.positions[qe - 1].item()) + 1)
-                stash[slot].copy_(hidden[qe - 1])
-        if not saw_decode_continue:
-            spec._g4_committed = np.asarray(committed, dtype=np.int32)
-    except Exception:
-        logger.exception("[gemma4] window rebuild failed; keeping stock window")
+    pos_buf = spec.input_buffers.positions
+    hidden = spec.hidden_states
+    stash = spec._g4_stash
+    committed = []
+    for i in range(num_reqs):
+        qs = int(qsl[i])
+        full_len = int(qsl[i + 1]) - qs
+        qe = qs + full_len
+        if full_len <= 0:
+            committed.append(0)
+            continue
+        slot = idx_slots[i]
+        if num_sampled_h[i] > 0 and not is_prefilling[i]:
+            saw_decode_continue = True
+            head_hidden = stash[slot].clone()
+            stash[slot].copy_(hidden[qs])
+            shifted = hidden[qs : qe - 1].clone()
+            hidden[qs].copy_(head_hidden)
+            hidden[qs + 1 : qe].copy_(shifted)
+            pos_buf[qs:qe].copy_(input_batch.positions[qs:qe])
+        else:
+            committed.append(int(input_batch.positions[qe - 1].item()) + 1)
+            stash[slot].copy_(hidden[qe - 1])
+    if not saw_decode_continue:
+        spec._g4_committed = np.asarray(committed, dtype=np.int32)
 
 
 class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
