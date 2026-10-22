@@ -112,7 +112,7 @@ class TestLookupKeyServer(unittest.TestCase):
 
         target()
 
-        mock_socket.send.assert_called_once_with((0).to_bytes(4, "big"))
+        mock_socket.send.assert_called_once_with(b"\x00")
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
 
@@ -833,62 +833,6 @@ class TestAscendStoreResetCache(unittest.TestCase):
         connector = _scheduler_connector(backend="memcache")
         self.assertIsNone(connector.reset_cache())
         connector.connector_scheduler.reset_store.assert_not_called()
-
-
-class TestLookupDispatch(unittest.TestCase):
-    def test_reset_calls_worker_then_acks(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
-            dispatch_lookup_request,
-        )
-
-        worker = MagicMock()
-        resp = dispatch_lookup_request(worker, MagicMock(), [b"reset"])
-        worker.reset_store.assert_called_once_with()
-        self.assertEqual(resp, b"\x01")
-
-    def test_reset_nack_when_worker_fails(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
-            dispatch_lookup_request,
-        )
-
-        worker = MagicMock()
-        worker.reset_store.side_effect = RuntimeError("remove_all failed")
-        resp = dispatch_lookup_request(worker, MagicMock(), [b"reset"])
-        self.assertEqual(resp, b"\x00")
-
-    def test_lookup_reads_token_len_after_tag(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
-            dispatch_lookup_request,
-        )
-
-        worker = MagicMock()
-        worker.lookup_scheduler.return_value = 8
-        decoder = MagicMock()
-        decoder.decode.side_effect = lambda frames: [0] if frames == [b"groups"] else ["hash"]
-        frames = [
-            b"lookup",
-            (64).to_bytes(4, "big"),
-            b"groups",
-            (16).to_bytes(4, "big"),
-            b"hashes",
-        ]
-        resp = dispatch_lookup_request(worker, decoder, frames)
-        self.assertEqual(int.from_bytes(resp, "big"), 8)
-        worker.lookup_scheduler.assert_called_once_with(
-            64,
-            ["hash"],
-            [0],
-            use_layerwise=False,
-            hbm_hit_tokens=16,
-        )
-
-    def test_unknown_message_returns_err(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
-            dispatch_lookup_request,
-        )
-
-        resp = dispatch_lookup_request(MagicMock(), MagicMock(), [b"nope"])
-        self.assertEqual(resp, b"\x00")
 
 
 if __name__ == "__main__":

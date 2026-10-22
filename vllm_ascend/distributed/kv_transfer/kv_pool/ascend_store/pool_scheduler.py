@@ -8,6 +8,11 @@ import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
+    LOOKUP_MSG,
+    RESET_MSG,
+    RESP_OK,
+)
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
@@ -1235,26 +1240,31 @@ class KVPoolScheduler:
             self._loading_req_ids.difference_update(finished_recving)
 
     def reset_store(self) -> bool:
-        """Ask worker rank 0 to drain its send queue and ``remove_all``.
+        """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
+        if self.sending_events or self.sending_blocks:
+            logger.error(
+                "AscendStore reset_store refused; in-flight saves still track sending_events=%s sending_blocks=%s",
+                list(self.sending_events),
+                list(self.sending_blocks),
+            )
+            return False
 
-        Caller must already have paused generation. Pending scheduler
-        bookkeeping is logged and left in place; clearing it here would
-        race with block references still held for in-flight saves.
-        """
-        pending = [
-            name
-            for name, state in (
-                ("sending_events", self.sending_events),
-                ("sending_blocks", self.sending_blocks),
-                ("loading_req_ids", self._loading_req_ids),
+        stale_ids = bool(self._loading_req_ids)
+        # True when any block besides the null block is still held.
+        if self._block_pool is None:
+            blocks_still_referenced = True
+        else:
+            used = self._block_pool.num_gpu_blocks - self._block_pool.get_num_free_blocks()
+            blocks_still_referenced = used != 1
+        if stale_ids and blocks_still_referenced:
+            logger.error(
+                "AscendStore reset_store refused; blocks still referenced loading_req_ids=%s",
+                self._loading_req_ids,
             )
-            if state
-        ]
-        if pending:
-            logger.warning(
-                "AscendStore reset_store while scheduler still tracks %s. Caller must pause generation before reset.",
-                pending,
-            )
+            return False
+        if stale_ids:
+            self._loading_req_ids.clear()
+
         if self.client is None:
             self.client = LookupKeyClient(self.vllm_config)
         try:
@@ -1270,12 +1280,6 @@ class KVPoolScheduler:
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
-
-
-LOOKUP_MSG = b"lookup"
-RESET_MSG = b"reset"
-RESP_OK = b"\x01"
-RESP_ERR = b"\x00"
 
 
 class LookupKeyClient:

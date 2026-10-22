@@ -1163,7 +1163,14 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
         scheduler.sending_events = {}
         scheduler.sending_blocks = {}
         scheduler._loading_req_ids = set()
+        scheduler._block_pool = None
         return scheduler
+
+    def _bind_pool(self, scheduler, used: int):
+        pool = MagicMock()
+        pool.num_gpu_blocks = used + 10
+        pool.get_num_free_blocks.return_value = 10
+        scheduler._block_pool = pool
 
     def test_reset_store_acks(self):
         scheduler = self._scheduler()
@@ -1179,6 +1186,38 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
         scheduler = self._scheduler()
         scheduler.client.reset.side_effect = RuntimeError("zmq")
         self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rejects_inflight_sends(self):
+        scheduler = self._scheduler()
+        scheduler.sending_events = {1: 0}
+        scheduler.sending_blocks = {1: [10, 11]}
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler.sending_events, {1: 0})
+        self.assertEqual(scheduler.sending_blocks, {1: [10, 11]})
+
+    def test_reset_store_rejects_loading_while_blocks_held(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self._bind_pool(scheduler, used=21)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler._loading_req_ids, {"req"})
+
+    def test_reset_store_clears_stale_ids_when_blocks_free(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"loading"}
+        self._bind_pool(scheduler, used=1)
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+        self.assertEqual(scheduler._loading_req_ids, set())
+
+    def test_reset_store_rejects_loading_without_block_pool(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self.assertIsNone(scheduler._block_pool)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):

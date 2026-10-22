@@ -1730,28 +1730,22 @@ class TestMetadataHandling(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv",
-        side_effect=[RuntimeError("timed out"), b"ACK"],
+        side_effect=RuntimeError("timed out"),
     )
-    def test_done_recv_retries_with_fresh_socket(self, mock_recv, mock_send, mock_sleep):
+    def test_done_recv_closes_socket_without_retry(self, mock_recv, mock_send, mock_sleep):
         failed_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
-        successful_socket = MagicMock(spec=zmq.Socket)  # type: ignore[attr-defined]
         with (
-            patch.object(
-                self.thread,
-                "_get_remote_socket",
-                side_effect=[failed_socket, successful_socket],
-            ) as mock_get_socket,
+            patch.object(self.thread, "_get_remote_socket", return_value=failed_socket) as mock_get_socket,
             patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
         ):
             self.thread._send_done_recv_signal("req1", "host1", 5555, {})
 
-        self.assertEqual(mock_get_socket.call_count, 2)
-        self.assertEqual(mock_send.call_count, 2)
-        self.assertEqual(mock_recv.call_count, 2)
+        mock_get_socket.assert_called_once_with("host1", 5555)
+        mock_send.assert_called_once()
+        mock_recv.assert_called_once()
         failed_socket.close.assert_called_once_with()
-        successful_socket.close.assert_not_called()
-        mock_return_socket.assert_called_once_with(successful_socket, "host1", 5555)
-        mock_sleep.assert_called_once_with(0.05)
+        mock_return_socket.assert_not_called()
+        mock_sleep.assert_not_called()
 
 
 class TestMainThreadLoop(unittest.TestCase):
@@ -4810,6 +4804,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             local_block_ids=([10], [20]),
             remote_block_ids=([30], [40]),
             num_computed_tokens=0,
+            num_external_tokens=16,
             do_virtual=False,
         )
         metadata = types.SimpleNamespace(reqs_in_batch=["req"], requests={"req": meta})

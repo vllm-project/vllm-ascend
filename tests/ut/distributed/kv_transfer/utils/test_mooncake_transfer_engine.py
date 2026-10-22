@@ -29,10 +29,9 @@ def test_unregister_and_reregister_registered_buffers():
     assert global_te.transfer_engine.register_memory.call_count == 4
 
 
-def test_unregister_failure_rolls_back_completed_buffers():
+def test_unregister_failure_leaves_completed_buffers_unregistered():
     global_te = GlobalTE()
     global_te.transfer_engine = MagicMock()
-    global_te.transfer_engine.register_memory.return_value = 0
     global_te.transfer_engine.unregister_memory.side_effect = [0, -1]
     global_te.transfer_engine.disconnect_all_peers.return_value = 0
     global_te.registered_buffers = [(0x1000, 128), (0x2000, 256)]
@@ -45,7 +44,7 @@ def test_unregister_failure_rolls_back_completed_buffers():
     else:
         raise AssertionError("unregister_buffer should fail")
 
-    global_te.transfer_engine.register_memory.assert_called_once_with(0x1000, 128)
+    global_te.transfer_engine.register_memory.assert_not_called()
     assert global_te.is_register_buffer
 
 

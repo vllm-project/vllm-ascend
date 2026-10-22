@@ -60,21 +60,10 @@ class GlobalTE:
 
             self._disconnect_all_peers()
 
-            unregistered_buffers: list[tuple[int, int]] = []
-            for ptr, size in self.registered_buffers:
+            for ptr, _ in self.registered_buffers:
                 ret_value = self.transfer_engine.unregister_memory(ptr)
                 if ret_value != 0:
-                    rollback_failures = []
-                    for unregistered_ptr, unregistered_size in reversed(unregistered_buffers):
-                        rollback_ret = self.transfer_engine.register_memory(unregistered_ptr, unregistered_size)
-                        if rollback_ret != 0:
-                            rollback_failures.append((unregistered_ptr, rollback_ret))
-                    self.is_register_buffer = not rollback_failures
-                    raise RuntimeError(
-                        f"Mooncake memory unregistration failed for ptr={ptr:#x}, "
-                        f"ret_value={ret_value}, rollback_failures={rollback_failures}"
-                    )
-                unregistered_buffers.append((ptr, size))
+                    raise RuntimeError(f"Mooncake memory unregistration failed for ptr={ptr:#x}, ret_value={ret_value}")
 
             self.is_register_buffer = False
 
@@ -84,21 +73,12 @@ class GlobalTE:
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
-            reregistered_buffers: list[tuple[int, int]] = []
             for ptr, size in self.registered_buffers:
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
-                    rollback_failures = []
-                    for reregistered_ptr, _ in reversed(reregistered_buffers):
-                        rollback_ret = self.transfer_engine.unregister_memory(reregistered_ptr)
-                        if rollback_ret != 0:
-                            rollback_failures.append((reregistered_ptr, rollback_ret))
-                    self.is_register_buffer = bool(rollback_failures)
                     raise RuntimeError(
-                        f"Mooncake memory re-registration failed for ptr={ptr:#x}, "
-                        f"ret_value={ret_value}, rollback_failures={rollback_failures}"
+                        f"Mooncake memory re-registration failed for ptr={ptr:#x}, ret_value={ret_value}"
                     )
-                reregistered_buffers.append((ptr, size))
 
             self.is_register_buffer = True
 
