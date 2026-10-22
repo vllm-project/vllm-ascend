@@ -43,7 +43,7 @@ def test_kvpp_pd_disaggregation():
             (d_port, False, "kv_consumer", 26970),
         )
     ]
-    with RemotePDServer(servers, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0", "VLLM_SERVER_DEV_MODE": "1"}):
+    with RemotePDServer(servers, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"}):
         expected = [output_texts(complete(p_url, prompt)) for prompt in PROMPTS]
         requests.post(p_url + "/reset_prefix_cache", timeout=30).raise_for_status()
 

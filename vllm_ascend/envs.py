@@ -79,14 +79,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
-    # Valid values: 0 or 1. This configuration is not sensitive.
-    "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
-    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
-    # 0 (default): auto-detect from device properties, falling back to 192 KB
-    # (safe for Ascend 910B/A3). Set to a positive value to override when
-    # auto-detection is unavailable or for debugging UB overflow issues.
-    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
     # Number of reusable 2 MiB-aligned NPU staging chunks used when Mooncake
     # transfers into DSA PD CPU-offloaded KV buffers. Default: 16; valid: >= 1.
     # This setting is not sensitive.

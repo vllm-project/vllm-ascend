@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
@@ -79,6 +80,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
+    vllm_version_is,
 )
 
 # isort: off
@@ -197,8 +199,13 @@ class KVCacheTaskTracker:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
 
-    def update_done_task_count(self, request_id: str):
+    def update_done_task_count(self, request_id: str, *, report_completion: bool = True):
         with self.done_task_lock:
+            if not report_completion:
+                # A notification-only request never entered WAITING_FOR_REMOTE_KVS.
+                self.reqs_to_process.discard(request_id)
+                self.delayed_free_requests.pop(request_id, None)
+                return
             if request_id in self.reqs_to_process:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
@@ -439,6 +446,7 @@ class KVCacheRecvingThread(threading.Thread):
         prefill_pp_layer_partition: str | None = None,
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
+        use_request_level_recv_errors: bool = False,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -564,6 +572,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_mla = self.model_config.is_deepseek_mla
         self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
+        self.use_request_level_recv_errors = use_request_level_recv_errors
         self.block_size = self.vllm_config.cache_config.block_size
         try:
             hf_text_config = self.model_config.hf_text_config
@@ -622,6 +631,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        awaiting_kvs: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -642,6 +652,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "awaiting_kvs": awaiting_kvs,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -665,14 +676,18 @@ class KVCacheRecvingThread(threading.Thread):
         with self.failed_recv_requests_lock:
             return request_id in self.failed_recv_requests
 
+    def get_and_clear_failed_recv_requests(self, finished_req_ids: set[str]) -> set[str]:
+        """Retain failures until every local pull and reformat has finished."""
+        with self.failed_recv_requests_lock:
+            failed_req_ids = self.failed_recv_requests & finished_req_ids
+            self.failed_recv_requests.difference_update(failed_req_ids)
+        return failed_req_ids if self.use_request_level_recv_errors else set()
+
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids[0])
-
-    def _clear_failed_recv_request(self, request_id: str) -> None:
-        with self.failed_recv_requests_lock:
-            self.failed_recv_requests.discard(request_id)
+            if not self.use_request_level_recv_errors:
+                self.invalid_block_ids.update(local_block_ids[0])
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -798,10 +813,13 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
-                self.task_tracker.update_done_task_count(request_id)
+                # Drain the failure with completion, after all local writes end.
+                if req_meta.get("awaiting_kvs", True):
+                    self.task_tracker.update_done_task_count(request_id)
+                else:
+                    self.task_tracker.update_done_task_count(request_id, report_completion=False)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
-                self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             # Always send the done signal to the remote host to ensure proper
@@ -1965,7 +1983,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
     ):
         assert vllm_config.kv_transfer_config is not None
-        self._kv_transfer_config = vllm_config.kv_transfer_config
+        if vllm_version_is("0.31.0"):
+            self._kv_transfer_config = vllm_config.kv_transfer_config
+        else:
+            # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
+            # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
+            super().__init__(vllm_config, role, kv_cache_config)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
@@ -1981,6 +2004,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    if not vllm_version_is("0.31.0"):
+
+        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+            # vLLM main's scheduler uses this for skip_zeroing_group_ids.
+            # Mooncake restores the request's own transfer blocks.
+            return self._kv_cache_config.transfer_group_ids
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
@@ -2033,6 +2063,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the block ids whose KV load failed."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -2530,6 +2564,9 @@ class MooncakeConnectorWorker:
         self._is_hma_required = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and not all(
             _is_fullattn_group
         )
+        # Use the logical cache layout and HMA state, before registration expands
+        # _is_hma_required for transfer-only groups sharing one block table.
+        self._use_request_level_recv_errors = self._is_hma_required or len(kv_cache_config.kv_cache_groups) > 1
         self._layer_specs = self._build_layer_specs_from_kv_cache_config(kv_cache_config)
 
         # Handshake base port
@@ -3106,6 +3143,7 @@ class MooncakeConnectorWorker:
                 self._prefill_pp_layer_partition,
                 self.kv_group2layeridx,
                 self.block_size_scale,
+                use_request_level_recv_errors=self._use_request_level_recv_errors,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()
@@ -3119,6 +3157,10 @@ class MooncakeConnectorWorker:
             time.sleep(3)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         done_sending = (
             self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
             )
@@ -3131,6 +3173,11 @@ class MooncakeConnectorWorker:
             if self.kv_role == "kv_consumer"
             else set()
         )
+        failed_recving = (
+            self.kv_recv_thread.get_and_clear_failed_recv_requests(done_recving)  # type: ignore[union-attr]
+            if self.kv_role == "kv_consumer"
+            else set()
+        )
         if self.tp_rank == 0:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -3138,7 +3185,11 @@ class MooncakeConnectorWorker:
                     len(done_sending),
                     len(done_recving),
                 )
-        return done_sending, done_recving
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
@@ -3415,6 +3466,22 @@ class MooncakeConnectorWorker:
         across P workers. Unequal P/D prefix-cache hits reduce the number of
         remote blocks that still need to be pulled.
         """
+        if meta.num_external_tokens == 0 and not any(meta.local_block_ids):
+            # Prefix replay can discard a short remote hit entirely. Keep the
+            # normal PCP/DCP/HMA notification routing, but provide empty groups
+            # before any path indexes logical cache IDs. Clear remote IDs too:
+            # Mamba's whole-state path must not request a copy into an empty group.
+            meta = copy.copy(meta)
+            num_groups = (
+                max(
+                    (self._get_kv_cache_group_id(idx, spec) for idx, (spec, _) in self.kv_group2layeridx.items()),
+                    default=-1,
+                )
+                + 1
+            )
+            meta.local_block_ids = tuple([] for _ in range(num_groups))
+            meta.remote_block_ids = tuple([] for _ in range(num_groups))
+
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
         is_decode_only_dcp = self.dcp_size > 1 and meta.remote_dcp_size == 1
@@ -4287,6 +4354,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        awaiting_kvs=meta.num_external_tokens > 0,
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:

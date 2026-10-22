@@ -103,9 +103,6 @@ class HardwareCapability(Enum):
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
-    # Fuse non-MX INT8/INT4 grouped matmul, dequantization, SiTU, and per-token
-    # quantization through the ACLNN GmmDequantSituQuant operator.
-    GMM_DEQUANT_SITU_QUANT = auto()
     # Register the FX graph rewrite that fuses a supported matmul/reduce-scatter pattern.
     GRAPH_MM_REDUCE_SCATTER_FUSION = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
@@ -124,6 +121,8 @@ class HardwareCapability(Enum):
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
+    # Use the token-fused MLA cache protocol for eligible FlashMLA models.
+    MLA_FLASH = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -217,14 +216,6 @@ class WeightLayoutPolicy(Enum):
     FORCE_NZ = auto()
 
 
-class DeepSeekV4TPPolicy(Enum):
-    """Tensor-parallel limits for DeepSeek V4-family models."""
-
-    STANDARD_LIMITS = auto()
-    SINGLE_RANK_ONLY = auto()
-    UNRESTRICTED = auto()
-
-
 @dataclass(frozen=True, slots=True)
 class HardwareProfile:
     """Immutable semantic contracts registered for one SoC family.
@@ -242,7 +233,6 @@ class HardwareProfile:
     default_worker_cls: str
     device_adaptor_family: DeviceAdaptorFamily
     device_addressing_mode: DeviceAddressingMode
-    deepseek_v4_tp_policy: DeepSeekV4TPPolicy
     weight_layout_policy: WeightLayoutPolicy
     moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
@@ -285,7 +275,6 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -299,7 +288,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.STANDARD_LIMITS,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -312,7 +300,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.STANDARD_LIMITS,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -330,7 +317,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls="vllm_ascend._310p.worker_310p.NPUWorker310",
             device_adaptor_family=DeviceAdaptorFamily.COMPATIBILITY,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.UNRESTRICTED,
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
             moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
@@ -354,7 +340,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.SINGLE_RANK_ONLY,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -383,6 +368,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
+                    HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,

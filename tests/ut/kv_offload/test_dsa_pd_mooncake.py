@@ -27,7 +27,7 @@ from vllm_ascend.kv_offload.dsa_pd_mooncake import (
     should_use_dsa_pd_mooncake_cpu_kv,
     should_use_dsa_pd_mooncake_long_context_kv,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 class TestDSAPDMooncakeCPUKV(TestCase):
@@ -192,7 +192,7 @@ class TestDSAPDMooncakeCPUKVRuntimeCaches(TestCase):
         raw_tensor = raw_storage[raw_offset:]
         self.assertNotEqual(raw_tensor.data_ptr() % 64, 0)
         with patch(
-            "vllm_ascend.worker.model_runner_v1.empty_mooncake_cpu_kv_memory",
+            "vllm_ascend.worker.v1.model_runner.empty_mooncake_cpu_kv_memory",
             return_value=raw_tensor,
         ):
             raw_kv_tensor = NPUModelRunner._allocate_dsa_pd_mooncake_kv_tensor(impl, 4096, 64)
