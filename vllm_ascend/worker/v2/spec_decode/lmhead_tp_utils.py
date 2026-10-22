@@ -108,9 +108,7 @@ class LmheadTPDraftSamplingMixin:
                 "attach the draft row capacity. Report this draft model to "
                 "the vllm-ascend maintainers."
             )
-        lm_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(
-            self.max_num_reqs, self.num_speculative_steps + 1
-        )
+        lm_head.lmhead_tp_capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
 
     def _lmhead_tp_publish_draft_capacity(
         self, num_tokens_across_dp: torch.Tensor | None, tokens_per_req: int = 1
