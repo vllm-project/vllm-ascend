@@ -36,6 +36,40 @@ SMALL_QWEN3_OVERRIDES = {
     "num_hidden_layers": 2,
 }
 
+# Qwen3.5-35B-A3B is a hybrid MoE: its 40 layers repeat a 3:1 pattern, so 30 of
+# them are gated-delta-net linear-attention layers and 10 are full-attention
+# layers, and every layer routes to 256 experts with top-8. The published
+# checkpoint is multimodal and ~70 GB in BF16, so this case serves the language
+# tower alone (Qwen3_5MoeForCausalLM) and instantiates the first 4 of the 40
+# layers: three linear-attention layers plus one full-attention layer, which
+# keeps both attention kernels on the batch-invariance path. Weights are
+# random-initialized via dummy load, so no checkpoint is needed either.
+QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
+
+# gpu_memory_utilization for the Qwen3.5 case. The slice above keeps a single
+# full-attention layer, so the decode attention path sizes its workspace from
+# that layer's entire KV cache (attention_v1.py builds the fused-infer max
+# workspace from the layer's key/value cache, updatable_graph.py keeps it for the
+# lifetime of each captured graph), i.e. this case has to fit the cache twice
+# plus ~2.2 GiB of weights. 0.45 puts that pair at ~57 GiB of 61 GiB; the 0.95 the
+# other cases use is only reachable when the cache is spread over many
+# full-attention layers, as it is in the real 40-layer model.
+# VLLM_GPU_MEMORY_UTILIZATION may lower the value further, never raise it.
+QWEN35_GPU_MEMORY_UTILIZATION = 0.45
+
+SMALL_QWEN35_OVERRIDES = {
+    "architectures": ["Qwen3_5MoeForCausalLM"],
+    "text_config": {
+        "num_hidden_layers": 4,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+    },
+}
+
 
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
@@ -98,37 +132,13 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="batch_invariant,logprobs",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="BF16",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.model(
-    model_name=DEFAULT_MODEL,
-    max_num_seqs=144,
-    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
-    max_model_len=8192,
-    dtype="bfloat16",
-    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
-    enable_prefix_caching=False,
-    distributed_executor_backend="mp",
-    compilation_config={
-        "cudagraph_capture_sizes": [1, 32, 64],
-    },
-    extra_kwargs={
-        "load_format": "dummy",
-        "hf_overrides": SMALL_QWEN3_OVERRIDES,
-        "enable_chunked_prefill": False,
-        "block_size": 128,
-    },
-)
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
-    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+def _assert_bitwise_batch_invariance(vllm_runner) -> None:
+    """Compare a BS=1 and a BS=N run of the same prompt set, step by step.
+
+    Both runs share one engine instance, so any difference -- in the sampled
+    token ids or in the float32 logprobs of the sampled tokens -- means a
+    batch-size dependent reduction in the model or in one of the kernels.
+    """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "4"))
@@ -302,3 +312,97 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
             f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
         )
         pytest.fail(msg)
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_and_piecewise",
+)
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
+    max_model_len=8192,
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    compilation_config={
+        "cudagraph_capture_sizes": [1, 32, 64],
+    },
+    extra_kwargs={
+        "load_format": "dummy",
+        "hf_overrides": SMALL_QWEN3_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
+    },
+)
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
+    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+    _assert_bitwise_batch_invariance(vllm_runner)
+
+
+# The model id is a literal on purpose: tests/e2e/generate_coverage_html.py reads
+# these markers with ast and only accepts a str constant, so a module constant
+# would leave this case without a model in the coverage report.
+@pytest.mark.e2e_model("Qwen/Qwen3.5-35B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="eager",
+)
+@pytest.mark.model(
+    model_name=QWEN35_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=min(
+        float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", str(QWEN35_GPU_MEMORY_UTILIZATION))),
+        QWEN35_GPU_MEMORY_UTILIZATION,
+    ),
+    max_model_len=8192,
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    extra_kwargs={
+        "load_format": "dummy",
+        "hf_overrides": SMALL_QWEN35_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
+        # A graph would keep that workspace alive for as long as it lives: at 0.9
+        # the engine reported a 51.82 GiB KV cache and then asked for another
+        # 51.93 GiB during decode-FULL capture, which cannot fit. Eager mode only
+        # pays for the transient workspace, so keep graphs off for now. Drop this
+        # once the slice stops owning the whole cache (more full-attention
+        # layers) or the capture path stops materialising that workspace.
+        "enforce_eager": True,
+    },
+)
+def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
+    """Same bitwise check as above, for the hybrid linear/full attention MoE model."""
+    # Pin the shape of the served slice, not just "the override merged": if the
+    # upstream 40-layer 3:1 interleave changed or the text tower stopped
+    # resolving to the vllm-ascend Qwen3_5Moe implementation, this case would
+    # keep passing while covering neither the GDN kernels nor the 256-expert
+    # top-8 routing it exists for.
+    hf_config = vllm_runner.model.llm_engine.model_config.hf_text_config
+    assert hf_config.model_type == "qwen3_5_moe_text", f"unexpected text tower: {hf_config.model_type}"
+    assert hf_config.num_hidden_layers == 4, f"expected the 4-layer slice, got {hf_config.num_hidden_layers}"
+    assert list(hf_config.layer_types) == [
+        "linear_attention",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+    ], f"unexpected layer interleave: {hf_config.layer_types}"
+    assert hf_config.num_experts == 256, f"expected 256 experts, got {hf_config.num_experts}"
+    assert hf_config.num_experts_per_tok == 8, f"expected top-8 routing, got {hf_config.num_experts_per_tok}"
+    _assert_bitwise_batch_invariance(vllm_runner)
