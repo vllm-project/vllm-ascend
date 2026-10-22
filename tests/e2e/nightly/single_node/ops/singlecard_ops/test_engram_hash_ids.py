@@ -135,7 +135,9 @@ def make_data(case):
     ]
     if case.ragged and case.requests >= 3 and case.tokens:
         lengths = [1] + [0] * (case.requests - 2) + [case.tokens - 1]
-    starts, requests, positions = [0], [], []
+    starts: list[int] = [0]
+    requests: list[int] = []
+    positions: list[int] = []
     position_bits = 32 if case.dtypes[2] == torch.int32 else 64
     for request, length in enumerate(lengths):
         start = 12 + request
