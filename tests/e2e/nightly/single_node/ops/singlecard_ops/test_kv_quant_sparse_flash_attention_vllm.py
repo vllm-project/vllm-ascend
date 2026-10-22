@@ -21,7 +21,7 @@ import torch_npu
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, custom_kv_rmsnorm_rope
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
 
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
@@ -207,6 +207,7 @@ def _reference_attention(inputs):
 
 def _run_custom_op(inputs, return_softmax_lse=False):
     if get_ascend_device_type() == AscendDeviceType.A5:
+        bootstrap_custom_op_env()
         import_module("vllm_ascend.vllm_ascend_C")
     return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
         inputs["query"],
@@ -542,14 +543,16 @@ def _check_uniform(outputs, expected, counts, return_lse):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="C8 rope=0 custom-kernel tests require an A2 or A3 hardware profile.",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="C8 rope=0 custom-kernel tests require Ascend A2/A3/A5.",
 )
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("return_lse", (False, True))
 @torch.inference_mode()
 def test_rope0_compact_matches_padded_bitwise(case, dtype, return_lse):
+    if get_ascend_device_type() == AscendDeviceType.A5 and case.sparse_block_size != 1:
+        pytest.skip("A5 C8 sparse attention requires sparse_block_size=1")
     cpu = _make_cpu_case(case, dtype, 0)
     compact = _to_npu(cpu)
     padded = _to_npu(_pad_zero_rope(cpu))
@@ -563,8 +566,8 @@ def test_rope0_compact_matches_padded_bitwise(case, dtype, return_lse):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="C8 rope=0 custom-kernel tests require an A2 or A3 hardware profile.",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="C8 rope=0 custom-kernel tests require Ascend A2/A3/A5.",
 )
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -572,6 +575,8 @@ def test_rope0_compact_matches_padded_bitwise(case, dtype, return_lse):
 @pytest.mark.parametrize("return_lse", (False, True))
 @torch.inference_mode()
 def test_rope_uniform_attention_and_lse(case, dtype, rope_dim, return_lse, record_property):
+    if get_ascend_device_type() == AscendDeviceType.A5 and case.sparse_block_size != 1:
+        pytest.skip("A5 C8 sparse attention requires sparse_block_size=1")
     cpu = _make_cpu_case(case, dtype, rope_dim, uniform=True)
     expected, counts = _uniform_reference(cpu, case)
     inputs = _to_npu(cpu)
@@ -615,8 +620,8 @@ def test_rope_graph_capture_replay(dtype, rope_dim, return_lse):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="C8 rope=0 custom-kernel tests require an A2 or A3 hardware profile.",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="C8 rope=0 custom-kernel tests require Ascend A2/A3/A5.",
 )
 @pytest.mark.parametrize(
     "rope_dim,query_dim,key_dim",

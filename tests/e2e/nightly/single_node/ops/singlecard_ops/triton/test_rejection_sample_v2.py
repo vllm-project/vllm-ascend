@@ -73,7 +73,8 @@ def _build_rejection_sample_inputs(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     "num_speculative_steps,temperature,unconditional_rates",
@@ -161,7 +162,8 @@ def test_synthetic_rejection_sample(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("use_block_verification", [False, True])
@@ -228,7 +230,8 @@ def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_bloc
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
@@ -289,7 +292,8 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 @pytest.mark.parametrize("temperature", [0.6, 1.0])
@@ -324,7 +328,8 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("placeholder_step", [0, 1])
 @pytest.mark.parametrize("method", ["standard", "synthetic", "block"])
@@ -361,7 +366,8 @@ def test_placeholder_recovers_from_target(placeholder_step, method, has_draft_lo
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_block_verification_extends_accepted_prefix():
@@ -378,7 +384,8 @@ def test_block_verification_extends_accepted_prefix():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()
@@ -414,7 +421,8 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
@@ -437,7 +445,8 @@ def test_block_verification_single_bonus_only_request(has_draft_logits, temperat
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [True, False])
 @torch.inference_mode()

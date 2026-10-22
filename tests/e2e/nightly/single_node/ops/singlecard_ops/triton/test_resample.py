@@ -78,7 +78,8 @@ def _repeat_rows(rows: torch.Tensor, repeats: int) -> torch.Tensor:
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @torch.inference_mode()
@@ -124,7 +125,8 @@ def test_random_bonus_single_support_accepts_logits_dtypes(dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @torch.inference_mode()
@@ -162,7 +164,8 @@ def test_full_draft_residual_accepts_logits_dtypes(dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_partial_negative_inf_has_zero_probability_mass():
@@ -195,7 +198,8 @@ def test_partial_negative_inf_has_zero_probability_mass():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_ragged_requests_and_shuffled_mapping_select_correct_rows():
@@ -238,7 +242,8 @@ def test_ragged_requests_and_shuffled_mapping_select_correct_rows():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("vocab_size", [1023, 1024, 1025])
 @torch.inference_mode()
@@ -270,7 +275,8 @@ def test_greedy_bonus_handles_block_tail(vocab_size):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_greedy_non_bonus_preserves_verification_result():
@@ -307,7 +313,8 @@ def test_greedy_non_bonus_preserves_verification_result():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
@@ -366,7 +373,8 @@ def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_full_draft_residual_uses_request_state_mapping():
@@ -414,7 +422,8 @@ def test_full_draft_residual_uses_request_state_mapping():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_random_bonus_distribution_matches_softmax():
@@ -446,7 +455,8 @@ def test_random_bonus_distribution_matches_softmax():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_full_draft_residual_distribution_matches_positive_p_minus_q():
@@ -487,7 +497,8 @@ def test_full_draft_residual_distribution_matches_positive_p_minus_q():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_block_residual_scales_target_by_accepted_prefix():
@@ -573,7 +584,8 @@ def test_one_hot_residual_distribution_excludes_rejected_token_and_renormalizes(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_business_vocab_shape_single_support():
@@ -613,7 +625,8 @@ def test_business_vocab_shape_single_support():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_mixed_greedy_bonus_random_bonus_and_residual_in_one_launch():
@@ -665,7 +678,8 @@ def test_mixed_greedy_bonus_random_bonus_and_residual_in_one_launch():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_full_draft_moderate_near_cancellation_keeps_positive_residual():
@@ -700,7 +714,8 @@ def test_full_draft_moderate_near_cancellation_keeps_positive_residual():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_same_seed_and_position_are_deterministic():
@@ -744,7 +759,8 @@ def test_same_seed_and_position_are_deterministic():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("has_draft_logits", [False, True])
 @pytest.mark.parametrize("rejection_step", [0, 1])
@@ -793,7 +809,8 @@ def test_rejection_sample_residual_is_independent_of_acceptance_draw(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_rejection_sample_greedy_end_to_end():
@@ -870,7 +887,8 @@ def test_rejection_sample_greedy_end_to_end():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_empty_batch_is_noop():
@@ -901,7 +919,8 @@ def test_empty_batch_is_noop():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_zero_vocab_is_rejected():
@@ -923,7 +942,8 @@ def test_zero_vocab_is_rejected():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_explicit_full_draft_requires_draft_logits():
@@ -946,7 +966,8 @@ def test_explicit_full_draft_requires_draft_logits():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_target_vocab_dimension_must_be_contiguous():
@@ -973,7 +994,8 @@ def test_target_vocab_dimension_must_be_contiguous():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @torch.inference_mode()
 def test_draft_vocab_dimension_must_be_contiguous():

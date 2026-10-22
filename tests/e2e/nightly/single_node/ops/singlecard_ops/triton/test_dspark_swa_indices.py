@@ -89,7 +89,8 @@ def _make_inputs(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     (
@@ -162,7 +163,8 @@ def test_triton_matches_eager(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_capacity_grid_padding():
     """max_num_reqs > num_reqs: pad rows are reset to (-1, 0), not stale."""
@@ -239,7 +241,8 @@ def test_capacity_grid_padding():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_num_decode_tokens_is_authoritative():
     """num_decode_tokens drives T_active without any D2H sync."""
@@ -281,7 +284,8 @@ def test_num_decode_tokens_is_authoritative():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_capacity_grid_exact_sized_inputs():
     """Capacity grid over exact-sized (non-padded) input tensors is safe.
@@ -345,7 +349,8 @@ def test_capacity_grid_exact_sized_inputs():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_active_sized_buffer_warns_and_disables_cleanup():
     """A buffer sliced to the active rows under graph intent must warn.
@@ -413,7 +418,8 @@ def test_active_sized_buffer_warns_and_disables_cleanup():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_anchor_sampling_num_query_per_req():
     """num_query_per_req=spec (anchor sampling) sizes the grid correctly.
@@ -482,7 +488,8 @@ def test_anchor_sampling_num_query_per_req():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_capacity_grid_exact_allocation_boundary():
     """num_reqs == R_alloc: every grid program owns an active request.
@@ -550,7 +557,8 @@ def test_capacity_grid_exact_allocation_boundary():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_non_contiguous_block_table():
     """A column-sliced block table must resolve rows via stride(0), not B.
@@ -601,7 +609,8 @@ def test_non_contiguous_block_table():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_int32_metadata_inputs():
     """int32 query_start_loc / seq_lens / block_table must work end-to-end.
@@ -647,7 +656,8 @@ def test_int32_metadata_inputs():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("bad_block_size", [100, 96, 0])
 def test_gate_rejects_non_pow2_block_size(bad_block_size):
@@ -657,7 +667,8 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)

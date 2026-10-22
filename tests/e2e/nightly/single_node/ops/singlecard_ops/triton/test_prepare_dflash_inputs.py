@@ -566,7 +566,8 @@ def _run_case(case):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("case", ACCURACY_CASES, ids=lambda case: case["name"])
 def test_prepare_dflash_inputs_impl(case):
@@ -574,7 +575,8 @@ def test_prepare_dflash_inputs_impl(case):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("num_reqs,context_len", [(39, 9), (40, 9), (41, 9), (48, 9), (8, 1024), (1, 16384)])
 def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
@@ -594,7 +596,8 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_prepare_dflash_inputs_wrapper_forwards_dcp():
     case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_physical384_kernel128")

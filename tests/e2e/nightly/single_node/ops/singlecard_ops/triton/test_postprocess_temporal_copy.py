@@ -21,7 +21,8 @@ def _copy_temporal_test_kernel(src, dst, size, TILES: tl.constexpr):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("size", [0, 7, 1027, 786432, 786435, 786443])
 @pytest.mark.parametrize("offsets", [(0, 0), (1, 1), (1, 3), (0, 8)])
@@ -37,7 +38,8 @@ def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     "state_shape,dtype",
@@ -62,7 +64,8 @@ def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("precomputed", [False, True])
 @pytest.mark.parametrize("graph_mode", [False, True])
@@ -196,7 +199,8 @@ def test_mixed_postprocess_replay_uses_updated_metadata(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("tp", [pytest.param(8, id="tp8"), pytest.param(16, id="tp16")])
 def test_kimi_k3_full_recurrent_layer_grid(tp):

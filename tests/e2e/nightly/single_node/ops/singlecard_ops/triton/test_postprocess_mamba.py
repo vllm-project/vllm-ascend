@@ -244,7 +244,8 @@ def _run_gpu_postprocess(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
 def test_matches_python_postprocess_mamba():

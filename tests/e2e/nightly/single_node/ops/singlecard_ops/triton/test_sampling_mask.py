@@ -42,7 +42,8 @@ def _to_nested_list(tensors, num_sampled_tokens):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
 def test_sampling_mask_matches_finite_support(max_num_kept):
@@ -88,7 +89,8 @@ def test_sampling_mask_matches_finite_support(max_num_kept):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_sampling_mask_matches_processed_top_k_top_p_support():
     """Mirror the processed-logits integration case from vLLM v0.29.0."""
@@ -115,7 +117,8 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_sampling_mask_non_contiguous_vocab_dimension():
     init_device_properties_triton()

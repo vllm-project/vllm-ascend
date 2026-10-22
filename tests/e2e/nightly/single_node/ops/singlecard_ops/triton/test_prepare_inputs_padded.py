@@ -35,7 +35,8 @@ def prepare_inputs_padded_ref(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("num_reqs", [1, 7, 32, 128, 2048])
 def test_prepare_inputs_padded(num_reqs):

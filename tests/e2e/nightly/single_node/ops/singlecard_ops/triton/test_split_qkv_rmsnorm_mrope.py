@@ -221,7 +221,8 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("num_tokens, num_q_heads, num_kv_heads, head_size, mrope_section", STRUCTURAL_CASES)
 @pytest.mark.parametrize("eps", EPS)

@@ -33,7 +33,8 @@ def torch_compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) 
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("layout", ["broadcast", "strided"])
 def test_prompt_scoring_token_id_row_stride(layout):
@@ -65,7 +66,8 @@ TOPK_VALUES = [1, 2, 5, 10, 32, 64]
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
@@ -111,7 +113,8 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
 def test_topk_log_softmax_edge_cases(vocab_size):
@@ -157,7 +160,8 @@ def test_topk_log_softmax_edge_cases(vocab_size):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
@@ -194,7 +198,8 @@ def test_topk_log_softmax_deterministic(batch_size, vocab_size, topk):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_topk_log_softmax_dtypes(dtype):

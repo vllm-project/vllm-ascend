@@ -65,7 +65,8 @@ def _sample(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("num_tokens", [1, 16, 64])
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
@@ -111,7 +112,8 @@ def test_categorical_sample_greedy(num_tokens, dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 def test_categorical_sample_mixed_temperature_and_hierarchy_boundaries(dtype):
@@ -176,7 +178,8 @@ def test_categorical_sample_mixed_temperature_and_hierarchy_boundaries(dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("is_drafting", [False, True])
 def test_categorical_sample_deterministic_same_seed_and_pos(is_drafting):
@@ -225,7 +228,8 @@ def test_categorical_sample_deterministic_same_seed_and_pos(is_drafting):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_draft_rng_uses_position_salt():
     """Draft RNG must be equivalent to the target stream at pos + 2**30."""
@@ -274,7 +278,8 @@ def test_categorical_sample_draft_rng_uses_position_salt():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_apply_temperature_matches_prescaled_logits():
     """In-kernel scaling must match sampling from pre-scaled FP32 logits."""
@@ -330,7 +335,8 @@ def test_categorical_sample_apply_temperature_matches_prescaled_logits():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("per_token_col", [False, True])
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
@@ -411,7 +417,8 @@ def test_categorical_sample_logits_cache(per_token_col, dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_padding_mapping_does_not_write_cache():
     """CUDAGraph padding request index -1 must not write logits_cache."""
@@ -473,7 +480,8 @@ def test_categorical_sample_padding_mapping_does_not_write_cache():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_shared_request_mapping():
     """Rows sharing a request must share its seed and temperature stream."""
@@ -530,7 +538,8 @@ def test_categorical_sample_shared_request_mapping():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_cache_does_not_change_sampled_tokens():
     """Raw-logit cache writes must not change sampled token IDs."""
@@ -595,7 +604,8 @@ def test_categorical_sample_cache_does_not_change_sampled_tokens():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_random_distribution_sanity():
     """Equal finite logits should reach every supported token."""
@@ -642,7 +652,8 @@ def test_categorical_sample_random_distribution_sanity():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_business_shape_distribution_accuracy():
     """B64/V151936 samples must match the torch.softmax reference."""
@@ -728,7 +739,8 @@ def test_categorical_sample_business_shape_distribution_accuracy():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_empty_input():
     """Empty expanded batches must return an empty int64 tensor."""
@@ -773,7 +785,8 @@ def test_categorical_sample_empty_input():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_categorical_sample_use_fp64_is_not_supported():
     logits = torch.zeros(

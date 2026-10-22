@@ -28,7 +28,8 @@ def _tensor(values, dtype):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_trace_replay_patches_only_outer_call(monkeypatch):
     from vllm_ascend.patch.worker.patch_v2 import patch_triton
@@ -44,7 +45,8 @@ def test_trace_replay_patches_only_outer_call(monkeypatch):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_trace_replay_empty_batch_is_a_noop():
     sampled = torch.empty(0, dtype=torch.int64, device=DEVICE)
@@ -68,7 +70,8 @@ def test_trace_replay_empty_batch_is_a_noop():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_trace_replay_uses_request_state_step_and_idx_mapping():
     sampled = _tensor([99, 98], torch.int64)
@@ -100,7 +103,8 @@ def test_trace_replay_uses_request_state_step_and_idx_mapping():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_trace_replay_guards_padding_empty_and_finished_rows():
     sampled = _tensor([90, 91, 92, 93, 94], torch.int64)

@@ -29,7 +29,8 @@ def _write_reference(raw, slots, values, blocks, heads, pitch, offset):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("heads", [1, 2])
 @pytest.mark.parametrize("padding", [0, 256])
@@ -75,7 +76,8 @@ def test_scatter_matches_reference_and_graph_replay(heads, padding, offset, nonc
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("heads", [1, 2])
 def test_token_counts_reuse_compilation(heads, monkeypatch):
@@ -111,7 +113,8 @@ def test_token_counts_reuse_compilation(heads, monkeypatch):
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_empty_scatter_preserves_cache():
     raw = torch.full((2 * mxfp_packet_size_bytes(1, 512, 256, 256),), 13, dtype=torch.int8, device="npu")
@@ -123,7 +126,8 @@ def test_empty_scatter_preserves_cache():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("heads", [1, 2])
 @pytest.mark.parametrize("source_tokens", [0, 1, 3])
@@ -147,7 +151,8 @@ def test_mismatched_source_size_is_rejected_before_launch(heads, source_tokens, 
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_graph_scatter_preserves_concurrent_transfer_to_unselected_page():
     acl = pytest.importorskip("acl")
@@ -219,7 +224,8 @@ def test_graph_scatter_preserves_concurrent_transfer_to_unselected_page():
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 def test_scatter_preserves_unselected_dense_view_elements():
     cache = torch.full((3, 2, 2, 4, 16, 2), 13, dtype=torch.uint8, device="npu")
@@ -285,7 +291,8 @@ class TestKScaleScatterPadding(TestCase):
         return cache
 
     @pytest.mark.skipif(
-        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
     )
     def test_scatter_valid_and_padded_slots(self):
         key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
@@ -306,7 +313,8 @@ class TestKScaleScatterPadding(TestCase):
             self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
 
     @pytest.mark.skipif(
-        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
     )
     def test_scatter_all_padding_rows_touch_only_the_null_slot(self):
         """A pure-padding batch (all -1, e.g. a dummy run) must leave every
@@ -316,7 +324,8 @@ class TestKScaleScatterPadding(TestCase):
         self.assertTrue(torch.all(self._without_null_slot(self.key_scale_cache) == 0))
 
     @pytest.mark.skipif(
-        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
     )
     def test_scatter_padding_and_real_at_nonzero_slot_coexist(self):
         key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
@@ -331,7 +340,8 @@ class TestKScaleScatterPadding(TestCase):
         self.assertTrue(torch.equal(self._without_null_slot(self.key_scale_cache), expected))
 
     @pytest.mark.skipif(
-        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
     )
     def test_prefill_shaped_batch_is_bit_identical_to_the_read_modify_write(self):
         # Eager batches are sliced to num_actual_tokens, so they carry no -1
@@ -343,7 +353,8 @@ class TestKScaleScatterPadding(TestCase):
         self.assertTrue(torch.equal(new, old))
 
     @pytest.mark.skipif(
-        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+        reason="Requires Ascend A2/A3/A5",
     )
     def test_padded_decode_batch_differs_only_in_the_null_slot(self):
         # FULL-graph replays pad the batch up to the captured size with -1.
