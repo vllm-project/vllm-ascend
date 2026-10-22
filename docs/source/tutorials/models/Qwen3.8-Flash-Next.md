@@ -165,6 +165,69 @@ Before starting the service:
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
 
+### 5.2 Model Runner V2 with DFlash
+
+Model Runner V2 can use a separate DFlash draft instead of the built-in MTP
+head. For the [Flash-Next DFlash2 checkpoint](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2),
+keep `method` set to `dflash`; the checkpoint architecture selects DFlash2
+automatically. The target supplies the completed decoder-layer features listed
+in the draft configuration, averaged over the HyperConnection streams.
+
+The following A3 TP8/EP8 configuration is a validation recipe. This combination
+still requires NPU accuracy and performance validation; the checkpoint author's
+SGLang results do not establish Ascend support or expected acceptance rates.
+Install this branch together with the vLLM revision required by the parent PR
+(`a98247ab4db686ee03c66d5feb3c761e52a2f8ab`).
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
+export DRAFT_MODEL_PATH=/models/Qwen3.8-Flash-Next-DFlash2
+
+vllm serve "$MODEL_PATH" \
+    --served-model-name qwen3.8-flash-next \
+    --trust-remote-code \
+    --quantization ascend \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --block-size 128 \
+    --max-model-len 32768 \
+    --max-num-seqs 8 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.9 \
+    --no-enable-prefix-caching \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32]}' \
+    --speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT_MODEL_PATH\",\"num_speculative_tokens\":3,\"enforce_eager\":true}" \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+```
+
+Download the draft checkpoint separately into `DRAFT_MODEL_PATH`. It must match
+the target's vocabulary, embeddings, and LM head. DFlash2 requires an
+unquantized target LM head and an eager draft (`enforce_eager=true`); the target
+can retain `FULL_DECODE_ONLY`. Capture sizes must be multiples of
+`num_speculative_tokens + 1`. Pipeline parallelism with auxiliary features is
+not supported by this adaptation. This recipe uses a single serving instance
+without a KV-transfer connector; disaggregated prefill/decode is outside its
+validation scope.
+
+Before deployment, compare greedy token IDs against a target-only baseline
+under eager execution, then repeat with target graph replay and asynchronous
+scheduling. Include chunked prefill, mixed request lengths, padded decode
+batches, and request reuse. Measure draft acceptance and throughput on the same
+workload; do not assume that a working draft improves performance. Validate
+image inputs separately when using the multimodal target.
+
+The opt-in eight-card regression compares greedy token IDs with a target-only
+baseline in both target graph modes, exercises chunked prefill and request
+reuse, and checks that drafting actually ran:
+
+```shell
+QWEN38_DFLASH_TARGET_MODEL="$MODEL_PATH" \
+QWEN38_DFLASH_DRAFT_MODEL="$DRAFT_MODEL_PATH" \
+pytest -sv tests/e2e/pull_request/eight_card/model_runner_v2/test_qwen38_dflash.py
+```
+
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).

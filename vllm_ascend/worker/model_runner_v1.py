@@ -157,8 +157,9 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.six_region_kv_cache_layout import (
+    ATTENTION,
     GDN,
-    HIDDEN,
+    INDEPENDENT_CACHE_ROLES,
     PLE,
     QSA_COMPRESSED,
     QSA_MAIN,
@@ -5659,7 +5660,12 @@ class NPUModelRunner(GPUModelRunner):
                 alignment,
             )
             for owner in six_region_layout.owners:
-                if owner.role != HIDDEN:
+                if owner.role in INDEPENDENT_CACHE_ROLES:
+                    kv_cache_raw_tensors[owner.layer_name] = self._allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * owner.spec.page_size_bytes,
+                        alignment,
+                    )
+                else:
                     kv_cache_raw_tensors[owner.layer_name] = backing
 
         if uses_page_strided_shared_backing:
@@ -6181,6 +6187,29 @@ class NPUModelRunner(GPUModelRunner):
                     owner = six_region_layout.owner(layer_name)
                     raw_slab = kv_cache_raw_tensors[layer_name]
                     assert isinstance(raw_slab, torch.Tensor)
+                    if owner.role == ATTENTION:
+                        # Ordinary DFlash attention owns independent padded
+                        # pages and uses kernel-block addressed tables.
+                        spec = current_kv_cache_spec
+                        assert isinstance(spec, AttentionSpec)
+                        blocks_per_page = spec.block_size // kernel_block_size
+                        page_stride = spec.page_size_bytes // blocks_per_page
+                        shape = (
+                            kv_cache_config.num_blocks * blocks_per_page,
+                            kernel_block_size,
+                            spec.num_kv_heads,
+                            spec.head_size,
+                        )
+                        k_cache = make_page_strided_cache_view(raw_slab, shape, spec.dtype, page_stride)
+                        v_cache = make_page_strided_cache_view(
+                            raw_slab,
+                            (*shape[:-1], spec.head_size_v),
+                            spec.dtype,
+                            page_stride,
+                            offset_bytes=math.prod(shape[1:]) * get_dtype_size(spec.dtype),
+                        )
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
                     slot_offset = (
                         owner.slot * six_region_layout.slot_backing_size
                     )
@@ -6297,7 +6326,7 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         ]
                         continue
-                    if owner.role != HIDDEN:
+                    if owner.role not in INDEPENDENT_CACHE_ROLES:
                         raise RuntimeError(
                             f"Unsupported six-region owner {owner}."
                         )

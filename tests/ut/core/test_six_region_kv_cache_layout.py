@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,18 +12,22 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.six_region_kv_cache_layout import (
+    ATTENTION,
     GDN,
     HIDDEN,
+    INDEPENDENT_CACHE_ROLES,
     PLE,
     build_six_region_kv_cache_layout,
     make_contiguous_slab_view,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_max_memory_usage_bytes_from_groups,
+    _get_ascend_kv_cache_groups,
     _get_qwen4_exp_six_region_kv_cache_config,
     _merge_mamba_state_groups,
     _merge_qsa_composite_groups,
@@ -30,6 +35,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 )
 from vllm_ascend.worker import model_runner_v1
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils
 
 
 def _groups() -> list[KVCacheGroupSpec]:
@@ -153,6 +159,177 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     specs["model.ple"] = ple
     assert len(specs) == 76
     return specs
+
+
+def _groups_with_dflash(padding: int = 0) -> list[KVCacheGroupSpec]:
+    groups = _groups()
+    for layer_idx, spec in enumerate(
+        (
+            FullAttentionSpec(block_size=64, num_kv_heads=2, head_size=32, dtype=torch.bfloat16),
+            SlidingWindowSpec(block_size=64, num_kv_heads=2, head_size=32, dtype=torch.bfloat16, sliding_window=128),
+        )
+    ):
+        groups.append(
+            KVCacheGroupSpec(
+                [f"draft.model.layers.{layer_idx}.self_attn.attn"],
+                replace(spec, page_size_padded=spec.page_size_bytes + padding) if padding else spec,
+                is_eagle_group=True,
+            )
+        )
+    return groups
+
+
+@pytest.mark.parametrize("padding", [0, 512])
+def test_dflash_attention_keeps_qsa_and_mtp_six_region_geometry(padding: int) -> None:
+    baseline = build_six_region_kv_cache_layout(_groups(), num_blocks=3)
+    layout = build_six_region_kv_cache_layout(_groups_with_dflash(padding), num_blocks=3)
+    assert baseline is not None and layout is not None
+    assert layout.regions == baseline.regions
+    assert layout.slot_count == baseline.slot_count
+    assert layout.slot_backing_size == baseline.slot_backing_size
+    assert layout.owner("model.mtp.layers.48.self_attn.attn").role == "qsa_main"
+    for layer_idx in range(2):
+        name = f"draft.model.layers.{layer_idx}.self_attn.attn"
+        assert layout.owner(name).role == ATTENTION
+        assert name not in layout.slot_shared_by(layer_idx)
+
+
+@pytest.mark.parametrize("padding", [0, 512])
+def test_dflash_planner_budget_and_admission_include_independent_attention(padding: int) -> None:
+    groups = _groups_with_dflash(padding)
+    probe = build_six_region_kv_cache_layout(groups, num_blocks=1)
+    assert probe is not None
+    independent = [owner for owner in probe.owners if owner.role in INDEPENDENT_CACHE_ROLES]
+    bytes_per_block = probe.slot_count * probe.slot_backing_size + sum(
+        owner.spec.page_size_bytes for owner in independent
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=768),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align", num_gpu_blocks_override=None, prefix_cache_retention_interval=None
+        ),
+        max_in_flight_tokens=16,
+    )
+    planned = _get_qwen4_exp_six_region_kv_cache_config(config, groups, bytes_per_block * 3)
+    assert planned is not None and planned.num_blocks == 3
+    independent_descriptors = {descriptor.layers[0]: descriptor for descriptor in planned.kv_cache_tensors[5:]}
+    for owner in independent:
+        descriptor = independent_descriptors[owner.layer_name]
+        assert descriptor.size == owner.spec.page_size_bytes * planned.num_blocks
+        assert descriptor.block_stride == owner.spec.page_size_bytes
+        assert descriptor.offset == 0
+    required_blocks = sum(
+        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
+    assert _ascend_max_memory_usage_bytes_from_groups(config, groups) == bytes_per_block * required_blocks
+
+
+@pytest.mark.parametrize("block_drop", [False, True])
+def test_dflash_groups_only_mark_ordinary_draft_attention(monkeypatch, block_drop: bool) -> None:
+    from vllm_ascend.patch.platform import patch_kv_cache_utils
+
+    specs = {
+        name: spec
+        for group in _groups_with_dflash()
+        for name, spec in (
+            group.kv_cache_spec.kv_cache_specs.items()
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else ((name, group.kv_cache_spec) for name in group.layer_names)
+        )
+    }
+    original_grouping = Mock(
+        side_effect=lambda _config, members: [KVCacheGroupSpec([n], s) for n, s in members.items()]
+    )
+    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_groups", original_grouping)
+    groups = _get_ascend_kv_cache_groups(
+        SimpleNamespace(speculative_config=SimpleNamespace(method="dflash", use_eagle_block_drop=lambda: block_drop)),
+        specs,
+    )
+    draft_groups = [group for group in groups if any(name.startswith("draft.") for name in group.layer_names)]
+    assert len(draft_groups) == 2
+    assert all(group.is_eagle_group == block_drop for group in draft_groups)
+    assert all(not group.is_eagle_group for group in groups if group not in draft_groups)
+    assert len(original_grouping.call_args_list) == 2
+    assert all(name.startswith("draft.") for name in original_grouping.call_args_list[1].args[1])
+
+
+@pytest.mark.parametrize("runner_version", [1, 2])
+@pytest.mark.parametrize("padding", [0, 512])
+def test_dflash_independent_cache_writes_preserve_target_and_other_requests(
+    monkeypatch, runner_version, padding
+) -> None:
+    config = _get_qwen4_exp_six_region_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        _groups_with_dflash(padding),
+        10**9,
+    )
+    assert config is not None
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace(model_type="qwen4_exp")
+        ),
+    )
+    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, *args: (2, n, b, h, d))
+    attn_groups = [
+        SimpleNamespace(
+            backend=backend,
+            kv_cache_group_id=gid,
+            kv_cache_spec=group.kv_cache_spec,
+            layer_names=group.layer_names,
+        )
+        for gid, group in enumerate(config.kv_cache_groups)
+    ]
+    if runner_version == 1:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.ascend_config = SimpleNamespace(
+            kvpp_config=SimpleNamespace(size=1), xlite_graph_config=SimpleNamespace(enabled=True)
+        )
+        runner.vllm_config = vllm_config
+        runner.model_config = vllm_config.model_config
+        runner.use_dcp = False
+        runner.use_sparse = runner.use_compress = runner.use_hybrid_blocks = False
+        runner.runner_only_attn_layers = set()
+        runner.sparse_kv_offload_enabled = False
+        runner._kv_cache_spec_attn_group_iterator = lambda: attn_groups
+        raw = runner._allocate_kv_cache_tensors(config)
+        caches = runner._reshape_kv_cache_tensors(config, raw, kernel_block_sizes=[16] * len(attn_groups))
+    else:
+        monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+        monkeypatch.setattr(
+            attn_utils, "KVPPConfig", SimpleNamespace(from_vllm_config=lambda _: SimpleNamespace(size=1))
+        )
+        monkeypatch.setattr(attn_utils, "is_c8_mxfp_kv_quant", lambda _: False)
+        monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+        raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+        caches = attn_utils._reshape_kv_cache_v2(attn_groups, raw, "auto", [16] * len(attn_groups), {}, config)
+
+    qsa_name = "model.layers.11.self_attn.attn"
+    draft_names = [f"draft.model.layers.{layer_idx}.self_attn.attn" for layer_idx in range(2)]
+    assert raw[draft_names[0]].data_ptr() != raw[qsa_name].data_ptr()
+    assert raw[draft_names[1]].data_ptr() != raw[draft_names[0]].data_ptr()
+    for name in draft_names:
+        assert torch.count_nonzero(raw[name]).item() == 0
+        key, value = caches[name]
+        assert key.shape == value.shape == (12, 16, 2, 32)
+        # Physical scheduler page 1 contains four kernel blocks. Context and
+        # query writes must leave another request's pages and the target intact.
+        key[4, 0].fill_(3)
+        value[7, 15].fill_(5)
+        assert torch.all(key[4, 0] == 3)
+        assert torch.all(value[4, 0] == 0)
+        assert torch.all(value[7, 15] == 5)
+        assert torch.all(key[7, 15] == 0)
+        assert torch.count_nonzero(key[:4]).item() == 0
+        assert torch.count_nonzero(value[:4]).item() == 0
+        assert torch.count_nonzero(key[8:]).item() == 0
+        assert torch.count_nonzero(value[8:]).item() == 0
+        assert torch.count_nonzero(raw[qsa_name]).item() == 0
 
 
 def test_six_region_offsets_are_contiguous_non_overlapping_slabs() -> None:

@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
@@ -30,7 +31,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.core.six_region_kv_cache_layout import (
     GDN,
-    HIDDEN,
+    INDEPENDENT_CACHE_ROLES,
     PLE,
     QSA_COMPRESSED,
     QSA_MAIN,
@@ -658,8 +659,12 @@ if vllm_version_is("0.31.0"):
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
-            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
+            independent_bytes = sum(
+                owner.spec.page_size_bytes
+                for owner in six_region_layout.owners
+                if owner.role in INDEPENDENT_CACHE_ROLES
+            )
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + independent_bytes
         if not _is_deepseek_v4_groups(kv_cache_groups):
             return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -691,8 +696,12 @@ else:
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
-            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
+            independent_bytes = sum(
+                owner.spec.page_size_bytes
+                for owner in six_region_layout.owners
+                if owner.role in INDEPENDENT_CACHE_ROLES
+            )
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + independent_bytes
         if not _is_deepseek_v4_groups(kv_cache_groups):
             return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
@@ -715,8 +724,14 @@ def _ascend_max_memory_usage_bytes_from_groups(
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
-            bytes_per_pool_block = six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
+            independent_bytes = sum(
+                owner.spec.page_size_bytes
+                for owner in six_region_layout.owners
+                if owner.role in INDEPENDENT_CACHE_ROLES
+            )
+            bytes_per_pool_block = (
+                six_region_layout.slot_count * six_region_layout.slot_backing_size + independent_bytes
+            )
             required_pool_blocks = sum(
                 cdiv(
                     group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
@@ -932,9 +947,27 @@ def _get_ascend_kv_cache_groups(
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     qsa_owners = _prepare_qsa_composite_groups(kv_cache_spec)
-    groups = _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
     if qsa_owners is None:
-        return groups
+        return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    # Full-attention DFlash layers can otherwise share a lifetime bucket
+    # with QSA main/compressed owners. Keep the draft's block table separate
+    # before merging the QSA owners and applying draft-only block dropping.
+    ordinary_attention_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name not in qsa_owners[0] and (type(spec) is FullAttentionSpec or isinstance(spec, SlidingWindowSpec))
+    }
+    groups = _orig_get_kv_cache_groups(
+        vllm_config,
+        {name: spec for name, spec in kv_cache_spec.items() if name not in ordinary_attention_specs},
+    )
+    if ordinary_attention_specs:
+        ordinary_groups = _orig_get_kv_cache_groups(vllm_config, ordinary_attention_specs)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if getattr(speculative_config, "method", None) == "dflash" and speculative_config.use_eagle_block_drop():
+            for group in ordinary_groups:
+                group.is_eagle_group = True
+        groups.extend(ordinary_groups)
     merged = _merge_qsa_composite_groups(
         groups,
         kv_cache_spec,
@@ -973,10 +1006,10 @@ def _get_qwen4_exp_six_region_kv_cache_config(
     if probe is None:
         return None
 
-    hidden_owners = [owner for owner in probe.owners if owner.role == HIDDEN]
-    hidden_bytes_per_block = sum(owner.spec.page_size_bytes for owner in hidden_owners)
+    independent_owners = [owner for owner in probe.owners if owner.role in INDEPENDENT_CACHE_ROLES]
+    independent_bytes_per_block = sum(owner.spec.page_size_bytes for owner in independent_owners)
     slab_bytes_per_block = sum(region.page_size_bytes for region in probe.regions)
-    bytes_per_block = probe.slot_count * slab_bytes_per_block + hidden_bytes_per_block
+    bytes_per_block = probe.slot_count * slab_bytes_per_block + independent_bytes_per_block
     candidate = available_memory // bytes_per_block
     while candidate > 0:
         candidate_layout = build_six_region_kv_cache_layout(
@@ -984,7 +1017,9 @@ def _get_qwen4_exp_six_region_kv_cache_config(
             num_blocks=candidate,
         )
         assert candidate_layout is not None
-        required = candidate_layout.slot_count * candidate_layout.slot_backing_size + hidden_bytes_per_block * candidate
+        required = (
+            candidate_layout.slot_count * candidate_layout.slot_backing_size + independent_bytes_per_block * candidate
+        )
         if required <= available_memory:
             break
         candidate -= 1
@@ -1029,7 +1064,7 @@ def _get_qwen4_exp_six_region_kv_cache_config(
             block_stride=owner.spec.page_size_bytes,
             offset=0,
         )
-        for owner in hidden_owners
+        for owner in independent_owners
     )
 
     return KVCacheConfig(

@@ -88,7 +88,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.core.six_region_kv_cache_layout import (
     GDN,
-    HIDDEN,
+    INDEPENDENT_CACHE_ROLES,
     PLE,
     QSA_COMPRESSED,
     QSA_MAIN,
@@ -374,7 +374,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
             for layer_name in attention_layer_names:
                 spec = kv_cache_spec[layer_name]
-                page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+                page_size_padded = (
+                    common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+                )
                 kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
             for layer_name, spec in mamba_specs.items():
                 if spec.page_size_bytes < common_page_size:
@@ -1057,7 +1059,13 @@ def _allocate_kv_cache(
                 device,
             )
             for owner in six_region_layout.owners:
-                if owner.role != HIDDEN:
+                if owner.role in INDEPENDENT_CACHE_ROLES:
+                    kv_cache_raw_tensors[owner.layer_name] = _allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * owner.spec.page_size_bytes,
+                        alignment,
+                        device,
+                    )
+                else:
                     kv_cache_raw_tensors[owner.layer_name] = backing
             return kv_cache_raw_tensors
 
@@ -1584,9 +1592,7 @@ def _reshape_kv_cache_v2(
                     # row ratio on current vLLM. QSA_RAW keeps the logical
                     # 768-token scheduler block; QSA_COMPRESSED stores
                     # block_size/ratio states per page.
-                    storage_block_size = (
-                        kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
-                    )
+                    storage_block_size = kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
                     region = six_region_layout.region("r4" if owner.role == QSA_RAW else "r5")
                     expected_page_bytes = (
                         storage_block_size
@@ -1639,7 +1645,7 @@ def _reshape_kv_cache_v2(
                         )
                     ]
                     continue
-                if owner.role != HIDDEN:
+                if owner.role not in INDEPENDENT_CACHE_ROLES:
                     raise RuntimeError(f"Unsupported six-region owner {owner}.")
 
             if layer_name in layer_tuple_strides:

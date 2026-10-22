@@ -1,0 +1,6 @@
+pr: 17249
+entries:
+  - category: feature
+    text: Added DFlash target-feature capture and separate draft attention caches for Qwen3.8-Flash-Next on Model Runner V2. DFlash2 uses an eager draft while the target can use decode graphs.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

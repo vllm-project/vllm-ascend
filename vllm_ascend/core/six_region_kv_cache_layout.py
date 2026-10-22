@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -29,6 +30,8 @@ QSA_COMPRESSED: Final = "qsa_compressed"
 GDN: Final = "gdn"
 PLE: Final = "ple"
 HIDDEN: Final = "hidden"
+ATTENTION: Final = "attention"
+INDEPENDENT_CACHE_ROLES: Final = (HIDDEN, ATTENTION)
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,11 @@ class SixRegionKVCacheLayout:
         return next(owner for owner in self.owners if owner.layer_name == layer_name)
 
     def slot_shared_by(self, slot: int) -> list[str]:
-        return [owner.layer_name for owner in self.owners if owner.role != HIDDEN and owner.slot == slot]
+        return [
+            owner.layer_name
+            for owner in self.owners
+            if owner.role not in INDEPENDENT_CACHE_ROLES and owner.slot == slot
+        ]
 
     def region_name_for_owner(self, layer_name: str) -> str:
         return {
@@ -93,7 +100,7 @@ def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     return {name: group.kv_cache_spec for name in group.layer_names}
 
 
-def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
+def _classify_spec(layer_name: str, spec: KVCacheSpec, qsa_sources: set[str]) -> str | None:
     if isinstance(spec, HiddenStateCacheSpec):
         return HIDDEN
     if layer_name.endswith(".raw_key_cache") and isinstance(spec, CircularBufferSpec):
@@ -104,8 +111,13 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
         and get_kv_cache_compression_ratio(spec) > 1
     ):
         return QSA_COMPRESSED
-    if layer_name.endswith(".attn") and isinstance(spec, FullAttentionSpec):
+    if layer_name.endswith(".attn") and layer_name[: -len(".attn")] in qsa_sources and type(spec) is FullAttentionSpec:
         return QSA_MAIN
+    # A DFlash drafter has ordinary attention without the QSA side caches.
+    # Its pages must remain outside the six slabs, even when its attention
+    # layer has the same ``.attn`` suffix as a QSA main owner.
+    if type(spec) is FullAttentionSpec or isinstance(spec, SlidingWindowSpec):
+        return ATTENTION
     if isinstance(spec, MambaSpec):
         if len(spec.shapes) == 2:
             return GDN
@@ -169,6 +181,13 @@ def build_six_region_kv_cache_layout(
         GDN: [],
         PLE: [],
         HIDDEN: [],
+        ATTENTION: [],
+    }
+    qsa_source_names = {
+        name[: -len(".indexer.raw_key_cache")]
+        for group in kv_cache_groups
+        for name, spec in _group_member_specs(group).items()
+        if name.endswith(".indexer.raw_key_cache") and isinstance(spec, CircularBufferSpec)
     }
     owner_group_ids: dict[str, int] = {}
     unknown: list[tuple[str, KVCacheSpec]] = []
@@ -177,7 +196,7 @@ def build_six_region_kv_cache_layout(
         for layer_name in group.layer_names:
             owner_group_ids[layer_name] = group_id
             spec = member_specs[layer_name]
-            role = _classify_spec(layer_name, spec)
+            role = _classify_spec(layer_name, spec, qsa_source_names)
             if role is None:
                 unknown.append((layer_name, spec))
             else:
@@ -206,7 +225,7 @@ def build_six_region_kv_cache_layout(
     qsa_sources = sorted(source_sets[QSA_MAIN], key=_layer_sort_key)
     for role in (QSA_MAIN, QSA_RAW, QSA_COMPRESSED):
         role_members[role] = [qsa_by_role[role][source] for source in qsa_sources]
-    for role in (GDN, PLE, HIDDEN):
+    for role in (GDN, PLE, HIDDEN, ATTENTION):
         role_members[role].sort(key=lambda item: _owner_sort_key(item[0]))
 
     dtype_sizes = {
@@ -314,9 +333,10 @@ def build_six_region_kv_cache_layout(
         owners.extend(
             CacheOwner(layer_name, spec, role, slot) for slot, (layer_name, spec) in enumerate(role_members[role])
         )
-    owners.extend(
-        CacheOwner(layer_name, spec, HIDDEN, slot) for slot, (layer_name, spec) in enumerate(role_members[HIDDEN])
-    )
+    for role in INDEPENDENT_CACHE_ROLES:
+        owners.extend(
+            CacheOwner(layer_name, spec, role, slot) for slot, (layer_name, spec) in enumerate(role_members[role])
+        )
     slot_count = max(len(role_members[role]) for role in required)
     layout = SixRegionKVCacheLayout(
         regions=tuple(regions),
@@ -334,7 +354,7 @@ def build_six_region_kv_cache_layout(
         assert region.end <= slot_backing_size
         previous_end = region.end
     for owner in layout.owners:
-        if owner.role == HIDDEN:
+        if owner.role in INDEPENDENT_CACHE_ROLES:
             continue
         region = layout.region(layout.region_name_for_owner(owner.layer_name))
         dtypes = owner.spec.dtypes if isinstance(owner.spec, MambaSpec) else (owner.spec.dtype,)
@@ -370,6 +390,8 @@ def make_contiguous_slab_view(
 __all__ = [
     "GDN",
     "HIDDEN",
+    "ATTENTION",
+    "INDEPENDENT_CACHE_ROLES",
     "PLE",
     "QSA_COMPRESSED",
     "QSA_MAIN",
