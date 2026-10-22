@@ -69,9 +69,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         # model's submodules (identity, not weight equality — mirrors the
         # DFlash detection; the loader ties the objects, not the tensors).
         target_module_ids = {id(module) for module in target_model.modules()}
-        self._lmhead_tp_head_is_shared = any(
-            id(head) in target_module_ids for _, head in layer_heads
-        )
+        self._lmhead_tp_head_is_shared = any(id(head) in target_module_ids for _, head in layer_heads)
         if self._lmhead_tp_head_is_shared:
             # Decouple each shared head OBJECT while sharing the weight
             # tensors: the per-layer capacity publish lands on the copies,
@@ -81,9 +79,7 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             # live in the copy's own __dict__. The loader replaced the
             # constructor's head (which carried the static capacity), so
             # re-attach the static bound on every decoupled copy.
-            static_capacity = lmhead_tp_max_num_logits(
-                self.max_num_reqs, self.num_speculative_steps + 1
-            )
+            static_capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
             for shared_head, head in layer_heads:
                 if id(head) in target_module_ids:
                     shared_head.head = copy.copy(head)

@@ -545,9 +545,7 @@ def test_dspark_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(
-        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-    ):
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode):
         return "hidden"
 
     with _patch_super_method(AscendDSparkSpeculator, "_run_model") as super_run_model:
@@ -687,9 +685,7 @@ def test_dflash_run_model_publishes_draft_capacity():
     spec.model = MagicMock()
     spec.model.lm_head = MagicMock()
 
-    def fake_run_model(
-        num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-    ):
+    def fake_run_model(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode):
         return "hidden"
 
     with (
@@ -776,10 +772,10 @@ def test_dflash_load_draft_model_decouples_shared_head(monkeypatch):
 
     assert loaded is draft
     assert spec._lmhead_tp_head_is_shared is True
-    assert loaded.lm_head is not shared_head               # decoupled object
-    assert loaded.lm_head.weight is shared_head.weight     # same weight tensors
+    assert loaded.lm_head is not shared_head  # decoupled object
+    assert loaded.lm_head.weight is shared_head.weight  # same weight tensors
     assert not hasattr(shared_head, "lmhead_tp_capacity")  # target head clean
-    assert loaded.lm_head.lmhead_tp_capacity == 16         # capacity on the copy
+    assert loaded.lm_head.lmhead_tp_capacity == 16  # capacity on the copy
 
 
 def test_dflash_load_draft_model_detects_nested_shared_head(monkeypatch):
@@ -810,9 +806,9 @@ def test_dflash_load_draft_model_detects_nested_shared_head(monkeypatch):
 
     assert loaded is draft
     assert spec._lmhead_tp_head_is_shared is True
-    assert loaded.lm_head is not shared_head               # decoupled object
+    assert loaded.lm_head is not shared_head  # decoupled object
     assert not hasattr(shared_head, "lmhead_tp_capacity")  # target head clean
-    assert loaded.lm_head.lmhead_tp_capacity == 16         # capacity on the copy
+    assert loaded.lm_head.lmhead_tp_capacity == 16  # capacity on the copy
 
 
 def test_dflash2_lmhead_tp_supported_at_construction():
@@ -836,6 +832,7 @@ def test_dflash2_compute_candidates_merges_top_k_over_lmhead_group():
     candidate top-k must gather over the lmhead-TP group, or every rank
     drafts from its own vocab shard only (silently wrong candidates)."""
     from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
+
     import vllm_ascend.models.qwen3_dflash2 as dflash2_module
     from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 
@@ -1045,10 +1042,7 @@ def test_mtp_load_draft_model_decouples_shared_layer_heads():
     spec.num_speculative_steps = 1
     target_head = SimpleNamespace(weight=object())
     # Two MTP layers, both heads tied to the target's head object.
-    layers = {
-        str(i): SimpleNamespace(shared_head=SimpleNamespace(head=target_head))
-        for i in range(2)
-    }
+    layers = {str(i): SimpleNamespace(shared_head=SimpleNamespace(head=target_head)) for i in range(2)}
     draft = SimpleNamespace(
         model=SimpleNamespace(layers=layers),
         lm_head=target_head,  # the loader's top-level alias
@@ -1069,10 +1063,10 @@ def test_mtp_load_draft_model_decouples_shared_layer_heads():
     assert spec._lmhead_tp_head_is_shared is True
     for layer in layers.values():
         head = layer.shared_head.head
-        assert head is not target_head               # decoupled object
-        assert head.weight is target_head.weight     # same weight tensors
-        assert head.lmhead_tp_capacity == 16         # static bound re-attached
-    assert loaded.lm_head is not target_head         # top-level alias decoupled
+        assert head is not target_head  # decoupled object
+        assert head.weight is target_head.weight  # same weight tensors
+        assert head.lmhead_tp_capacity == 16  # static bound re-attached
+    assert loaded.lm_head is not target_head  # top-level alias decoupled
     assert not hasattr(target_head, "lmhead_tp_capacity")  # target head clean
 
 
@@ -1088,9 +1082,7 @@ def test_mtp_load_draft_model_keeps_owned_layer_heads():
     own_head = SimpleNamespace(weight=object(), lmhead_tp_capacity=24)
     layers = {"0": SimpleNamespace(shared_head=SimpleNamespace(head=own_head))}
     draft = SimpleNamespace(model=SimpleNamespace(layers=layers))
-    target = SimpleNamespace(
-        lm_head=SimpleNamespace(weight=object()), modules=lambda: []
-    )
+    target = SimpleNamespace(lm_head=SimpleNamespace(weight=object()), modules=lambda: [])
 
     import vllm_ascend.worker.v2.spec_decode.mtp.speculator as mtp_module
 
@@ -1104,5 +1096,5 @@ def test_mtp_load_draft_model_keeps_owned_layer_heads():
 
     assert loaded is draft
     assert spec._lmhead_tp_head_is_shared is False
-    assert layers["0"].shared_head.head is own_head   # untouched
-    assert own_head.lmhead_tp_capacity == 24          # constructor value kept
+    assert layers["0"].shared_head.head is own_head  # untouched
+    assert own_head.lmhead_tp_capacity == 24  # constructor value kept

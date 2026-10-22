@@ -536,6 +536,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     is_profile=is_profile,
                     num_speculative_tokens=num_speculative_tokens,
                 )
+
     def _lmhead_tp_publish_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
         """Publish the per-step DSpark draft LM-head capacity.
 
