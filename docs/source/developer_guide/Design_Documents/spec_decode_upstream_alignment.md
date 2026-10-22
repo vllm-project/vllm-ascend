@@ -166,13 +166,16 @@ Current hardware verification uses an Ascend A3 device:
 - MTP with `Qwen3.5-4B` passed eager and `FULL_DECODE_ONLY` execution in MRV2.
 - EAGLE3 with `Qwen3-0.6B` and the public SpecForge draft checkpoint passed the
   same two execution paths in MRV2.
+- DSpark with `Qwen3-0.6B` and `yosefw/Qwen3-0.6B-DSpark` passed eager and
+  `FULL_DECODE_ONLY`; both paths used acceptance length 2.7083.
 - The public draft checkpoints are configurable through
-  `SPEC_DECODE_MTP_MODEL`, `SPEC_DECODE_EAGLE3_MODEL`, and the corresponding
-  `*_DRAFT_MODEL` variables.
+  `SPEC_DECODE_MTP_MODEL`, `SPEC_DECODE_EAGLE3_MODEL`,
+  `SPEC_DECODE_DSPARK_MODEL`, and the corresponding `*_DRAFT_MODEL` variables.
 
-Model-backed DSpark requires the 27B target and exceeds the memory of the
-single-NPU development environment. Its two-card nightly case is registered
-separately and is not claimed as locally executed by this change. DFlash remains
+The special `MULTI_KV_CACHE_GROUP_MTP` family is exercised by unit tests in this
+change and by the existing 16-card GLM5.2 MTP/MTP-V2 nightly jobs. Public 3-layer
+GLM5.2 test checkpoints are backbone-only and explicitly omit the MTP layer, so
+they are not valid substitutes for that runtime case. DFlash remains
 family-specific CI coverage. CPU-only unit tests are not acceptance evidence for
 NPU attention layouts or graph replay.
 
@@ -197,6 +200,9 @@ graph mode, seed, and memory utilization before and after the refactor. Record
 throughput, TTFT, decode latency/ITL, and peak HBM. Any regression must be
 reproduced and explained; an unexplained slowdown above 3% blocks acceptance.
 Correctness parity takes precedence over performance when the two conflict.
+Short offline runs use three independent engine starts and report median
+throughput, latency, and HBM; this avoids treating one scheduling outlier as a
+refactor regression.
 
 The offline comparison is reproducible from each checkout with separate compile
 caches:
@@ -204,11 +210,11 @@ caches:
 ```bash
 VLLM_CACHE_ROOT=/tmp/vllm-cache-baseline \
 python -m tests.e2e.nightly.feature.spec_decode_refactor_benchmark record \
-  --family mtp --mode full_decode_only --output /tmp/base-mtp.json
+  --family mtp --mode full_decode_only --repeats 3 --output /tmp/base-mtp.json
 
 VLLM_CACHE_ROOT=/tmp/vllm-cache-candidate \
 python -m tests.e2e.nightly.feature.spec_decode_refactor_benchmark record \
-  --family mtp --mode full_decode_only --output /tmp/candidate-mtp.json
+  --family mtp --mode full_decode_only --repeats 3 --output /tmp/candidate-mtp.json
 
 python -m tests.e2e.nightly.feature.spec_decode_refactor_benchmark compare \
   /tmp/base-mtp.json /tmp/candidate-mtp.json
@@ -235,6 +241,20 @@ gate. Graph changes are 0.90% throughput, 0.90% latency, and 0.001% HBM. The
 per-position acceptance rates were `[1.0, 1.0, 1.0]` for all four runs and the
 cache signatures were identical.
 
+The same-mode EAGLE3 and DSpark comparisons also preserved all 64 greedy output
+tokens, the complete KV-cache signature, and every per-position acceptance rate:
+
+| Family | Mode | Samples | Acceptance | Throughput (tok/s) | Latency (s) | HBM (bytes) |
+| --- | --- | ---: | --- | --- | --- | --- |
+| EAGLE3 | eager | 1 | 2.1000 -> 2.1000 | 34.34 -> 36.95 | 1.8636 -> 1.7318 | 55,037,382,656 -> 55,038,156,800 |
+| EAGLE3 | Graph | 1 | 2.1000 -> 2.1000 | 37.36 -> 40.55 | 1.7129 -> 1.5784 | 58,950,696,960 -> 58,930,081,792 |
+| DSpark | eager | 3 | 2.7083 -> 2.7083 | 57.22 -> 58.04 | 1.1185 -> 1.1027 | 54,709,252,096 -> 54,708,879,360 |
+| DSpark | Graph | 1 | 2.7083 -> 2.7083 | 38.91 -> 38.90 | 1.6448 -> 1.6451 | 58,112,360,448 -> 58,112,479,232 |
+
+A single DSpark eager sample was 3.02% below baseline throughput. Three
+independent engine starts produced a 1.43% median improvement instead, so the
+outlier is retained here rather than hidden by the aggregate.
+
 Serving measurements used `vllm bench serve`, eight random prompts, one warmup,
 128 input tokens, 16 output tokens, concurrency one, and greedy sampling:
 
@@ -246,7 +266,7 @@ Serving measurements used `vllm bench serve`, eight random prompts, one warmup,
 | Output throughput (tok/s) | 20.48 | 20.38 | -0.49% |
 | Acceptance length | 2.37 | 2.37 | 0% |
 
-EAGLE3 on `Qwen3-0.6B` passed eager/Graph execution with acceptance length 2.10
-on both paths. Its local generation rates were 32.68 tok/s eager and 61.06 tok/s
-Graph. The development environment has one NPU, so the two-card DSpark case is
-left to the registered nightly lane rather than reported as a local pass.
+The eager/Graph correctness gate, same-mode baseline/candidate benchmark, and
+all candidate regression runs passed for MTP, EAGLE3, and DSpark. The special
+`MULTI_KV_CACHE_GROUP_MTP` path remains covered by its 16-card nightly lane and
+is not claimed as a single-NPU local run.
