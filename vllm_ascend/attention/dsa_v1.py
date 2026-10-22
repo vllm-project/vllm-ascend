@@ -91,7 +91,7 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
+# The SAS and QLI metadata operators use a fixed 1024-element int32 layout. (control test)
 DSA_METADATA_BUFFER_SIZE = 1024
 
 
