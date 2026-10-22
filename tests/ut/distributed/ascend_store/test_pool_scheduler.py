@@ -190,6 +190,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config = MagicMock()
+    config.additional_config = {}
     config.kv_events_config = None
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = extra_config or {}

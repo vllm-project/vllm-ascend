@@ -2423,6 +2423,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.layer_name is not None
 
         if self.layerwise_kv_cache_hook is not None:
+            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+                wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
         if num_decode_tokens > 0:
@@ -2478,7 +2480,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_actual_tokens > num_decode_tokens:
             if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
                 raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
-            wait_for_kv_layer_from_connector(self.layer_name)
+            if self.layerwise_kv_cache_hook is None or not getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+                wait_for_kv_layer_from_connector(self.layer_name)
             prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
             num_prefill_tokens = num_actual_tokens - num_decode_tokens
             # Metadata can include graph padding beyond the actual prefill rows.
@@ -2867,6 +2870,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        if self.layerwise_kv_cache_hook is not None and getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+            record_attention_compute_start()
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -3248,7 +3253,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         # Sharded decode writes other ranks' KV even without local queries.
         should_write_kv_cache = has_decode or has_prefill or self.is_pcp_decode_sharded
-        if has_prefill:
+        if has_prefill or (
+            self.layerwise_kv_cache_hook is not None and getattr(self.layerwise_kv_cache_hook, "layerwise", False)
+        ):
             wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
@@ -3396,6 +3403,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_prefills == 0
         ):
             if self.layerwise_kv_cache_hook is not None:
+                if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+                    wait_for_kv_layer_from_connector(layer_name)
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
                 hidden_states, kv_cache, attn_metadata
