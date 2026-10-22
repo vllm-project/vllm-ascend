@@ -58,13 +58,14 @@ class KVPPRuntime:
         transfer = vllm_config.kv_transfer_config
         connectors = []
         if transfer is not None:
+            extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
             connectors = (
-                transfer.kv_connector_extra_config.get("connectors", [])
+                extra_config.get("connectors", [])
                 if transfer.kv_connector == "MultiConnector"
                 else [
                     {
                         "kv_connector": transfer.kv_connector,
-                        "kv_connector_extra_config": transfer.kv_connector_extra_config,
+                        "kv_connector_extra_config": extra_config,
                     }
                 ]
             )
@@ -73,7 +74,7 @@ class KVPPRuntime:
             attention_layer_names=tuple(layer_buffers),
             layerwise=any(
                 connector.get("kv_connector") == "AscendStoreConnector"
-                and connector.get("kv_connector_extra_config", {}).get("use_layerwise", False)
+                and (connector.get("kv_connector_extra_config") or {}).get("use_layerwise", False)
                 for connector in connectors
             ),
         )
@@ -120,8 +121,6 @@ class KVPPScheduler:
     def run_layer_prefetch(self, layer_name: str, cache_ready: Any) -> None:
         torch.npu.set_device(self._npu_device_id)
         if self.layerwise:
-            # Observe completion without advancing the connector's attention
-            # hooks. Only the owner has external loads for this layer.
             get_kv_transfer_group().wait_for_layer_load_ready(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
@@ -129,8 +128,6 @@ class KVPPScheduler:
         if not self._has_history:
             return
         if self.layerwise and self._prefetch_future is None:
-            # The first attention hook has submitted this step's loads. Starting
-            # earlier can race metadata binding or the initial load submission.
             self.start_layer_prefetch(layer_name)
         assert self._prefetch_future is not None
         self._prefetch_future.result()

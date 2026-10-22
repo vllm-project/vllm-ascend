@@ -103,6 +103,46 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
     assert torch.count_nonzero(caches[mtp][0]) == 0
 
 
+@pytest.mark.parametrize(
+    "transfer",
+    [
+        SimpleNamespace(kv_connector=name, **extra)
+        for name in ("AscendStoreConnector", "MultiConnector")
+        for extra in ({}, {"kv_connector_extra_config": None}, {"kv_connector_extra_config": {}})
+    ]
+    + [
+        SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config={"connectors": [{"kv_connector": "AscendStoreConnector", **extra}]},
+        )
+        for extra in ({}, {"kv_connector_extra_config": None}, {"kv_connector_extra_config": {}})
+    ],
+)
+def test_runtime_accepts_missing_or_empty_connector_extra_config(monkeypatch, scheduler_device, transfer):
+    name = layer_name(0)
+    plan = KVPPPhysicalCachePlan(
+        logical_cache_spec={},
+        layer_owner_ranks={name: 0},
+        layer_bundles={name: (name,)},
+        tensor_sizes={name: (8,)},
+        kvpp_rank=0,
+    )
+    monkeypatch.setattr(kvpp, "create_kvpp_cache_allocation_plan", lambda *_args: plan)
+    monkeypatch.setattr(
+        kvpp, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0, 1], device_group=object())
+    )
+    config = make_kvpp_config(2)
+    config.kv_transfer_config = transfer
+    runtime = kvpp.KVPPRuntime.create_from_kv_cache(
+        vllm_config=config,
+        kv_cache_config=SimpleNamespace(num_blocks=1, kv_cache_groups=[]),
+        static_forward_context={name: SimpleNamespace(impl=SimpleNamespace())},
+        kv_caches={name: (torch.zeros(8, dtype=torch.int8),)},
+    )
+    assert runtime.scheduler is not None
+    assert runtime.scheduler.layerwise is False
+
+
 def test_prefetch_sequence_across_forwards(scheduler_device):
     events, compute, transfer = scheduler_device
     transport = Mock()
