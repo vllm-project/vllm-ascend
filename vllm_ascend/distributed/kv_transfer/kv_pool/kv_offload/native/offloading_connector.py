@@ -34,6 +34,7 @@ from vllm.v1.kv_offload.base import (
 )
 
 from vllm_ascend.core.kv_cache_interface import requires_padded_page_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.layout import _canonicalize_physical_pages
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -93,17 +94,15 @@ def _canonicalize_split_cache(
     cache_parts: Sequence[torch.Tensor],
     num_blocks: int,
     unpadded_page_size_bytes: int,
-    *,
-    page_size_bytes: int | None = None,
 ) -> tuple[tuple[torch.Tensor, int], ...]:
-    """Canonicalize components, preserving complete pages for stride-addressed layouts."""
+    """Canonicalize separate K/V, scale, or recurrent-state payloads."""
     parts = tuple(cache_parts)
     if not parts or any(not isinstance(part, torch.Tensor) for part in parts):
         raise TypeError("An Ascend KV cache must contain one or more tensors")
-
+    parts = tuple(part for part in parts if part.numel())
+    if not parts:
+        raise ValueError("An Ascend KV cache must contain a non-empty tensor")
     part_block_bytes = tuple(math.prod(part.shape[1:]) * part.element_size() for part in parts)
-    if any(size <= 0 for size in part_block_bytes):
-        raise ValueError("Ascend KV cache components must be non-empty")
 
     # Some backends expose component views and an overlapping full-page view.
     # Use the full view only if it really contains every component's first
@@ -138,36 +137,6 @@ def _canonicalize_split_cache(
 
     bytes_per_physical_block = sum(size for _, size in selected)
     factor = unpadded_page_size_bytes // bytes_per_physical_block
-    if page_size_bytes is not None:
-        first = min(parts, key=lambda part: part.data_ptr())
-        stride_bytes = first.stride(0) * first.element_size()
-        storage_ptr = first.untyped_storage().data_ptr()
-        if page_size_bytes % factor or page_size_bytes > stride_bytes * factor:
-            raise ValueError("Physical KV cache pages must fit complete, non-overlapping blocks")
-        for part in parts:
-            offset = part.data_ptr() - first.data_ptr()
-            span_bytes = (
-                1 + sum((size - 1) * stride for size, stride in zip(part.shape[1:], part.stride()[1:]))
-            ) * part.element_size()
-            if (
-                part.untyped_storage().data_ptr() != storage_ptr
-                or part.stride(0) * part.element_size() != stride_bytes
-                or part.shape[0] < num_blocks * factor
-                or offset + span_bytes > page_size_bytes // factor
-            ):
-                raise ValueError("Physical KV cache components must share one page layout and backing storage")
-        raw = torch.empty(0, dtype=torch.int8, device=first.device).set_(first.untyped_storage())
-        return (
-            (
-                torch.as_strided(
-                    raw,
-                    (num_blocks, page_size_bytes),
-                    (stride_bytes * factor, 1),
-                    first.storage_offset() * first.element_size(),
-                ),
-                page_size_bytes,
-            ),
-        )
     return tuple(
         (
             _make_int8_block_view(
@@ -273,7 +242,11 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
                 if isinstance(layer_spec, AttentionSpec):
                     physical_pages = getattr(layer_spec, "indexes_kv_by_block_stride", False)
-                    if isinstance(layer_cache, torch.Tensor) and not physical_pages:
+                    if physical_pages:
+                        parts = (layer_cache,) if isinstance(layer_cache, torch.Tensor) else layer_cache
+                        view = _canonicalize_physical_pages(parts, num_blocks, layer_spec.page_size_bytes)
+                        add_view(layer_name, view, layer_spec.page_size_bytes)
+                    elif isinstance(layer_cache, torch.Tensor):
                         page_size_bytes = layer_spec.page_size_bytes
                         element_size = layer_cache.element_size()
                         block_stride_bytes = (
@@ -296,18 +269,17 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             layer_spec.unpadded_page_size_bytes,
                             mappings.get(layer_name),
                         )
-                    elif isinstance(layer_cache, (torch.Tensor, tuple, list)):
+                    elif isinstance(layer_cache, (tuple, list)):
                         views = _canonicalize_split_cache(
-                            (layer_cache,) if isinstance(layer_cache, torch.Tensor) else layer_cache,
+                            layer_cache,
                             num_blocks,
                             layer_spec.unpadded_page_size_bytes,
-                            page_size_bytes=layer_spec.page_size_bytes if physical_pages else None,
                         )
                         # A page mapping describes the complete local page and
                         # is valid only when one canonical view covers it. For
                         # genuinely split K/V refs, leave mapping unset rather
                         # than applying incorrect offsets to every component.
-                        mapping = mappings.get(layer_name) if len(views) == 1 and not physical_pages else None
+                        mapping = mappings.get(layer_name) if len(views) == 1 else None
                         for view, copy_size_bytes in views:
                             add_view(
                                 layer_name,
@@ -320,6 +292,10 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 elif isinstance(layer_spec, MambaSpec):
                     if not isinstance(layer_cache, list) or not layer_cache:
                         raise TypeError(f"Mamba KV cache for {layer_name} must be a non-empty list")
+                    if padded_state_layout:
+                        view = _canonicalize_physical_pages(layer_cache, num_blocks, layer_spec.page_size_bytes)
+                        add_view(layer_name, view, layer_spec.page_size_bytes)
+                        continue
                     unpadded_page_size_bytes = sum(
                         math.prod(state.shape[1:]) * state.element_size() for state in layer_cache
                     )
@@ -334,7 +310,6 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                         layer_cache,
                         num_blocks,
                         unpadded_page_size_bytes,
-                        page_size_bytes=layer_spec.page_size_bytes if padded_state_layout else None,
                     ):
                         add_view(layer_name, view, copy_size_bytes)
                 else:

@@ -1055,6 +1055,62 @@ def test_worker_registers_largest_same_pointer_view(reverse, large_scale):
     assert worker.cpu_kv_caches[first_name].numel() == 48
 
 
+def test_worker_restores_shared_fp8_indexer_and_mtp_tail_pages(glm_shared_physical_pages):
+    layout = glm_shared_physical_pages
+    worker = PreemptOffloadWorker(layout.config, layout.kv_config, None)
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.torch.npu.synchronize"),
+        patch(f"{module}.torch.npu.stream", side_effect=lambda _: nullcontext()),
+        patch(f"{module}.torch.npu.Event"),
+    ):
+        worker.register_kv_caches(layout.caches)
+        assert worker.gpu_kv_caches is not None
+        assert worker.num_spec_tokens == 5
+        snapshots = [backing.clone() for backing, _, _ in layout.backings]
+        worker.handle_preemptions(
+            PreemptOffloadMetadata(
+                preempt_store_event=10, preempt_store_gpu_blocks=[2, 0], preempt_store_cpu_blocks=[1, 2]
+            )
+        )
+        for _, raw, page_bytes in layout.backings:
+            raw.view(3, page_bytes)[0].zero_()
+            raw.view(3, page_bytes)[2].zero_()
+        worker.bind_connector_metadata(
+            PreemptOffloadMetadata(
+                preempt_load_event=11, preempt_load_gpu_blocks=[0, 2], preempt_load_cpu_blocks=[1, 2]
+            )
+        )
+        worker.start_load_kv()
+
+    assert worker._completed_store_events == {10: 1} and worker._load_hwm == 11
+    for (backing, _, page_bytes), before in zip(layout.backings, snapshots):
+        expected = before.clone()
+        for dst, src in ((0, 2), (2, 0)):
+            expected[layout.offset + dst * page_bytes : layout.offset + (dst + 1) * page_bytes] = before[
+                layout.offset + src * page_bytes : layout.offset + (src + 1) * page_bytes
+            ]
+        torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+    assert len(worker.gpu_kv_caches) == 4 and set(worker.block_size_scale.values()) == {1}
+    assert sum(t.dtype == torch.int8 for t in worker.gpu_kv_caches.values()) == 2
+    assert list(worker.mamba_conv_cache_bindings) == ["mamba.0"]
+    conv, recurrent = layout.caches["mamba"]
+    recurrent_before = recurrent[0].clone()
+    conv_before = conv[0].clone()
+    worker._copy_mamba_conv_loads([MambaConvLoadMeta(0, 1, 2)])
+    restored_width = conv.shape[1] - worker.num_spec_tokens
+    torch.testing.assert_close(conv[0, :restored_width], conv_before[2 : 2 + restored_width], rtol=0, atol=0)
+    torch.testing.assert_close(recurrent[0], recurrent_before, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("attention_scale", [1, 9])
 @pytest.mark.parametrize("alias", [False, True])

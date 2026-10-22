@@ -9,8 +9,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.layout import _canonicalize_physical_pages
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
     PreemptOffloadMetadata,
@@ -104,20 +105,29 @@ class PreemptOffloadWorker:
                 self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes,
             )
 
-        mamba_layers: dict[str, MambaSpec] = {}
-        for group in self.kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                layer_spec = group.kv_cache_spec
-                if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = layer_spec.kv_cache_specs[layer_name]
-                if isinstance(layer_spec, MambaSpec):
-                    mamba_layers[layer_name] = layer_spec
-
+        layer_specs = {
+            name: group.kv_cache_spec.kv_cache_specs[name]
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group.kv_cache_spec
+            for group in self.kv_cache_config.kv_cache_groups
+            for name in group.layer_names
+        }
+        mamba_layers = {name: spec for name, spec in layer_specs.items() if isinstance(spec, MambaSpec)}
         unique_gpu_caches: dict[str, torch.Tensor] = {}
+        physical_cache_names: dict[tuple[int, torch.Size, tuple[int, ...]], str] = {}
         cache_name_by_ptr: dict[int, str] = {}
         mamba_cache_name_by_view: dict[tuple[int, torch.Size, tuple[int, ...], torch.dtype, bool], str] = {}
         cache_name_max_size: dict[int, int] = {}
         for layer_name, layer_tensor in kv_caches.items():
+            layer_spec = layer_specs.get(layer_name)
+            if isinstance(layer_spec, AttentionSpec) and getattr(layer_spec, "indexes_kv_by_block_stride", False):
+                parts = layer_tensor if isinstance(layer_tensor, (tuple, list)) else (layer_tensor,)
+                view = _canonicalize_physical_pages(parts, self.num_gpu_blocks, layer_spec.page_size_bytes)
+                physical_key = (view.data_ptr(), view.shape, view.stride())
+                page_name = physical_cache_names.setdefault(physical_key, layer_name)
+                unique_gpu_caches[page_name] = view
+                self.block_size_scale[page_name] = 1
+                continue
             states = list(enumerate(layer_tensor)) if isinstance(layer_tensor, (tuple, list)) else [(0, layer_tensor)]
             for state_idx, single_tensor in states:
                 logical_name = f"{layer_name}.{state_idx}" if isinstance(layer_tensor, (tuple, list)) else layer_name

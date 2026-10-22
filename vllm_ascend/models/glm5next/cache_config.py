@@ -32,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
+    get_storage_block_size,
 )
 
 
@@ -121,7 +122,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
     small_page_alignment = lcm(
         *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs),
         *(
-            spec.block_size // get_kv_cache_compression_ratio(spec) * get_dtype_size(spec.scale_dtype)
+            get_storage_block_size(spec) * get_dtype_size(spec.scale_dtype)
             for spec in indexer_specs
             if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
         ),
