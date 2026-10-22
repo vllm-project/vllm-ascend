@@ -5,6 +5,8 @@ import math
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.mamba.state_index import (
     STATE_IO_BLOCK_SIZE,
     gather_ssm_states,
@@ -17,6 +19,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("padding", [0, 13])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize(
@@ -108,6 +113,9 @@ def test_gather_and_scatter_ssm_states(
             )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_rejects_empty_state_cache() -> None:
     state = torch.empty((0, 8), dtype=torch.float32, device="npu")
     indices = torch.empty((0,), dtype=torch.int32, device="npu")
@@ -117,6 +125,9 @@ def test_rejects_empty_state_cache() -> None:
         gather_ssm_states(state, indices, has_initial_state)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_rejects_overlapping_state_rows() -> None:
     row_size = 8
     storage = torch.zeros((2 * row_size,), dtype=torch.float32, device="npu")

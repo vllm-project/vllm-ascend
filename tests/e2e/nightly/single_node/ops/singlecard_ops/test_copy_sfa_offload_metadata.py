@@ -265,7 +265,8 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
     impl.lim_reuse_request_count = 0
     impl.lim_key_scale = None
     indexer = SimpleNamespace(
-        k_cache=SimpleNamespace(kv_cache=[torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="npu")])
+        enable_sparse_li_c8=False,
+        k_cache=SimpleNamespace(kv_cache=[torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="npu")]),
     )
     query = torch.empty((12, 32, 128), dtype=torch.bfloat16, device="npu")
     weights = torch.empty((12, 32), dtype=torch.bfloat16, device="npu")
