@@ -276,16 +276,14 @@ jobs:
 
   recommend-tests:
     name: Recommend tests
-    needs: [pre-commit, cpu-ut]
-    # The recommendation only runs under the ready-precise label: that is the
-    # only mode whose result depends on it. ready-all and main2main run
-    # --all-tests and unlabeled runs select nothing, so all of them skip this
-    # job. The pre-commit + cpu-ut checks are explicit so the job can never be
-    # made to run after a failed upstream by adding !cancelled().
+    needs: [pre-commit]
+    # The recommendation only runs under the ready-precise label. Runs without
+    # that label skip this job, including ready-all and main2main alone.
+    # Prepare E2E tests in parallel with CPU UT after pre-commit succeeds;
+    # each NPU entry point separately requires CPU UT to succeed.
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-8-hk
@@ -388,16 +386,15 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - cpu-ut
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It runs only when a run-enabling label (ready-precise / ready-all /
     # main2main) asks for test execution; unlabeled runs skip it and ci-gate
     # decides whether that is allowed (no src paths) or requires a label (src or
-    # ci_pipeline paths present). !cancelled() keeps it out of the graph only
-    # when the workflow itself is cancelled; the explicit pre-commit + cpu-ut
-    # success check stops it from running when either failed (!cancelled() alone
-    # would override the transitive skip).
+    # ci_pipeline paths present). !cancelled() allows skipped recommendations
+    # while the explicit pre-commit success check preserves the first gate.
+    # Selection and cache preparation can finish even if the parallel CPU UT
+    # fails; each NPU entry point still requires CPU UT to succeed.
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
@@ -408,7 +405,6 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
@@ -616,8 +612,10 @@ jobs:
   run-selected-tests:
     needs:
       - pre-commit
+      - cpu-ut
       - select-tests
       - prepare-csrc-cache
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all or main2main) through select-tests, without
     # running after workflow cancel.
@@ -625,6 +623,8 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
+        needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'main2main') ||
@@ -652,14 +652,18 @@ jobs:
   run-selected-tests-upstream:
     needs:
       - pre-commit
+      - cpu-ut
       - select-tests
       - prepare-csrc-cache
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
+        needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
@@ -680,13 +684,15 @@ jobs:
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   run-selected-tests-a5:
-    needs: [pre-commit, select-tests]
+    needs: [pre-commit, cpu-ut, select-tests]
+    # Require both CPU UT versions before allocating NPU runners.
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-a5')
