@@ -225,12 +225,44 @@ class LayerBatchBuilder:
         self,
         block_range: LayerBlockRange,
         is_save: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         request = block_range.request
         group_id = self.group_id
         block_ids_np: np.ndarray | None
         block_gvas_np: np.ndarray | None
         if is_save:
+            _state_bg = getattr(request, "save_window_base_state", None)
+            if _state_bg is not None and any(s == "WINDOW" for s in _state_bg):
+                # A window base was proved for this request: the requested range is
+                # expressed in absolute block numbers, so it must be served by
+                # the aligned (padded) arrays. Never fall back to the legacy
+                # table-indexed arrays here -- that is exactly the silent
+                # mis-write the assertion was guarding against.
+                group_block_ids = getattr(request, "save_block_ids_by_group_np", None)
+                group_block_gvas = getattr(request, "save_block_gvas_by_group_np", None)
+                if (
+                    group_block_ids is None
+                    or group_block_gvas is None
+                    or group_id >= len(group_block_ids)
+                    or group_id >= len(group_block_gvas)
+                ):
+                    logger.warning(
+                        "save skipped: aligned block arrays unavailable req=%s group_id=%d state=%s",
+                        getattr(request, "req_id", "?"),
+                        group_id,
+                        _state_bg,
+                    )
+                    return None, None
+                if len(group_block_ids[group_id]) != len(group_block_gvas[group_id]):
+                    logger.warning(
+                        "save skipped: aligned array length mismatch req=%s group_id=%d ids=%d gvas=%d",
+                        getattr(request, "req_id", "?"),
+                        group_id,
+                        len(group_block_ids[group_id]),
+                        len(group_block_gvas[group_id]),
+                    )
+                    return None, None
+                return group_block_ids[group_id], group_block_gvas[group_id]
             group_block_ids = request.block_ids_by_group_np
             group_block_gvas = request.block_gvas_by_group_np
             if (
@@ -289,6 +321,11 @@ class LayerBatchBuilder:
 
         for block_range in task.block_ranges:
             request = block_range.request
+            block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
+            if block_ids_np is None or block_gvas_np is None:
+                # This range cannot be served from a consistent base; the
+                # range is skipped without falling back to legacy arrays.
+                continue
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
             if request.save_keys:
@@ -297,7 +334,6 @@ class LayerBatchBuilder:
                 # Avoid collecting the same request's load_keys multiple times
                 collected_load_keys_request_ids.add(id(request))
                 all_load_keys.extend(request.load_keys)
-            block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
             gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
 
             num_blocks = block_range.end_block - block_range.start_block
