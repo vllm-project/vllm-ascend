@@ -1153,7 +1153,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._finalize_o_proj = lambda x, output, _: output.copy_(x)
                 output = torch.empty_like(hidden)
                 with (
-                    patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
+                    patch("vllm_ascend.attention.utils.wait_for_kv_layer_from_connector"),
                     patch.object(sfa_v1, "notify_kv_cache_written"),
                     patch.object(sfa_v1, "attention_transfer_window"),
                     patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),

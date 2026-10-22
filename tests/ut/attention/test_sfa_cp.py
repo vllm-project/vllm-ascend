@@ -976,7 +976,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     impl._finalize_o_proj = MagicMock(return_value=hidden_states)
     with (
         patch("vllm_ascend.attention.sfa_v1.get_forward_context", return_value=forward_context),
-        patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.utils.wait_for_kv_layer_from_connector"),
         patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify,
         patch("vllm_ascend.attention.sfa_v1.attention_transfer_window"),
         patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),

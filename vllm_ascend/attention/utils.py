@@ -603,6 +603,25 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     connector.wait_for_layer_load(layer_name)
 
 
+def wait_for_kv_layer_ready(
+    layer_name: str,
+    layerwise_kv_cache_hook: Any = None,
+    *,
+    load_from_connector: bool = True,
+    wait_for_broadcast: bool = True,
+) -> bool:
+    layerwise = getattr(layerwise_kv_cache_hook, "layerwise", False)
+    if layerwise and wait_for_broadcast:
+        layerwise_kv_cache_hook.wait_for_layer(layer_name, prepare_layer_load=wait_for_kv_layer_from_connector)
+        return True
+    load_prepared = load_from_connector or layerwise
+    if load_prepared:
+        wait_for_kv_layer_from_connector(layer_name)
+    if layerwise_kv_cache_hook is not None and wait_for_broadcast:
+        layerwise_kv_cache_hook.wait_for_layer(layer_name)
+    return load_prepared
+
+
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
     kv_cache_layer: list[torch.Tensor],

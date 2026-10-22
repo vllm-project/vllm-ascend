@@ -811,10 +811,14 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
 def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding, layerwise):
     impl = _make_impl()
     order = []
+
+    def wait_for_layer(name, *, prepare_layer_load=None):
+        if prepare_layer_load is not None:
+            prepare_layer_load(name)
+        order.append(("broadcast", name))
+
     if layerwise:
-        impl.layerwise_kv_cache_hook = SimpleNamespace(
-            layerwise=True, wait_for_layer=lambda name: order.append(("broadcast", name))
-        )
+        impl.layerwise_kv_cache_hook = SimpleNamespace(layerwise=True, wait_for_layer=wait_for_layer)
     num_prefill = 3
     total_tokens = num_decode + num_prefill + padding
     qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
@@ -865,11 +869,15 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
         patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
         patch.object(
             mla_v1, "wait_for_kv_layer_from_connector", side_effect=lambda name: order.append(("load", name))
-        ) as wait_load,
+        ) as prefill_wait,
+        patch(
+            "vllm_ascend.attention.utils.wait_for_kv_layer_from_connector",
+            side_effect=lambda name: order.append(("load", name)),
+        ) as entry_wait,
     ):
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
-    wait_load.assert_called_once_with(impl.layer_name)
+    assert prefill_wait.call_count + entry_wait.call_count == 1
     assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
     assert (decode is not None) == bool(num_decode)

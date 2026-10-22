@@ -35,6 +35,40 @@ CPU_SEQ_LENS = torch.tensor([10, 20, 30], dtype=torch.int32)
 NPU_SEQ_LENS = torch.tensor([99, 99, 99], dtype=torch.int32)
 
 
+@pytest.mark.parametrize(
+    "layerwise,load_from_connector,wait_for_broadcast,expected",
+    [
+        (None, True, True, ["load"]),
+        (None, False, True, []),
+        (False, True, True, ["load", "broadcast"]),
+        (False, False, True, ["broadcast"]),
+        (True, False, True, ["load", "broadcast"]),
+        (True, True, True, ["load", "broadcast"]),
+        (True, False, False, ["load"]),
+        (False, False, False, []),
+    ],
+)
+def test_wait_for_kv_layer_ready_routes_once(monkeypatch, layerwise, load_from_connector, wait_for_broadcast, expected):
+    events = []
+
+    def prepare_load(name):
+        assert name == "layer.0"
+        events.append("load")
+
+    def wait_for_layer(name, *, prepare_layer_load=None):
+        if prepare_layer_load is not None:
+            prepare_layer_load(name)
+        events.append("broadcast")
+
+    monkeypatch.setattr(attention_utils, "wait_for_kv_layer_from_connector", prepare_load)
+    hook = None if layerwise is None else SimpleNamespace(layerwise=layerwise, wait_for_layer=wait_for_layer)
+    prepared = attention_utils.wait_for_kv_layer_ready(
+        "layer.0", hook, load_from_connector=load_from_connector, wait_for_broadcast=wait_for_broadcast
+    )
+    assert events == expected
+    assert prepared == ("load" in expected)
+
+
 def test_get_flashmla_ops_returns_none_without_cann_module(monkeypatch):
     monkeypatch.setattr(attention_utils, "_has_flashmla_module", lambda: False)
 

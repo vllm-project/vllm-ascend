@@ -43,7 +43,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     trans_rope_weight,
     transdata,
-    wait_for_kv_layer_from_connector,
+    wait_for_kv_layer_ready,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
@@ -1968,11 +1968,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # preprocess below returns new tensors and does not modify this
             # one in place.
             k_hidden_states = hidden_states if self.runtime_has_indexer else None
-            wait_for_kv_layer_from_connector(layer_name)
-            if self.layerwise_kv_cache_hook is not None:
-                # The fused preprocess is the first operation that may read or
-                # update the paged SFA and LI caches.
-                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            wait_for_kv_layer_ready(layer_name, self.layerwise_kv_cache_hook)
 
             if fused_type == PreprocessType.PROLOG_V3:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_prolog_v3(
@@ -2011,11 +2007,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # as the weights path input).
             k_hidden_states = hidden_states if self.runtime_has_indexer else None
 
-            wait_for_kv_layer_from_connector(layer_name)
-            if self.layerwise_kv_cache_hook is not None:
-                # Q/KV projections above overlap the full-layer broadcast.
-                # Wait before the first main or indexer cache access.
-                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            wait_for_kv_layer_ready(layer_name, self.layerwise_kv_cache_hook)
 
             kv_outputs = self.exec_kv(
                 kv_no_split,
