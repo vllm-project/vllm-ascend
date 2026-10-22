@@ -69,16 +69,20 @@ VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL (optional, unit: elements):
   An all-reduce takes the quantized path only when its tensor holds at
   least this many elements. The tensor is the hidden state of the whole
   batch, so numel == num_tokens * hidden_size, and the default
-  (4 * 1024 * 1024 // 2 = 2,097,152 elements == 4 MiB of bf16 payload)
+  (32 * 1024 * 1024 = 33,554,432 elements == 64 MiB of bf16 payload)
   maps to the following token count:
 
-      min_tokens = min_numel / hidden_size = 2,097,152 / hidden_size
+      min_tokens = min_numel / hidden_size = 33,554,432 / hidden_size
 
       hidden_size   tokens to trigger the int8 path
-      1024          2048
-      2048          1024   (e.g. Qwen3.6-35B-A3B: 1k-token prefill)
-      4096           512
-      8192           256
+      1024          32768
+      2048          16384   (e.g. Qwen3.6-35B-A3B: 16k-token prefill)
+      4096           8192
+      8192           4096
+
+  The default is sized from the measured break-even (~36 MiB of bf16
+  payload): below it the fixed per-call cost of the scheme outweighs the
+  halved transfer, so smaller messages are left on the bf16 path.
 
   Notes:
   - For a single-sequence prefill, num_tokens == sequence length; for
@@ -153,14 +157,14 @@ class QuantizedAllReduce:
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size
         # Messages smaller than this stay on the bf16 path: they are
-        # latency-bound, and the extra scale sync would cost more than the
-        # halved transfer saves. Default 4 MiB of bf16 payload, i.e.
-        # 2,097,152 elements. The all-reduce tensor is the batch hidden
-        # state (numel == num_tokens * hidden_size), so this maps to
-        # min_tokens = 2,097,152 / hidden_size (2048 -> 1024, 4096 -> 512,
-        # 8192 -> 256); see the module docstring for the full table.
+        # latency-bound, and the fixed per-call cost of the scheme (~0.75 ms
+        # for the local amax, the small fp32 MAX all-reduce and the
+        # quantize/dequantize pair) outweighs the halved transfer. Default
+        # 32 Mi elements == 64 MiB of bf16 payload, i.e. the measured
+        # break-even (~36 MiB) rounded up; maps to
+        # min_tokens = 33,554,432 / hidden_size (2048 -> 16384).
         self.min_numel = _env_int(
-            "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 4 * 1024 * 1024 // 2
+            "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 32 * 1024 * 1024
         )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
