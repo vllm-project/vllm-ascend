@@ -7,6 +7,7 @@ from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
 )
+from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
@@ -26,6 +27,11 @@ vllm.v1.worker.gpu.attn_utils._reshape_kv_cache = _reshape_kv_cache_v2
 vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
 gpu_model_runner_v2.init_kv_cache.__globals__["allocate_kv_cache"] = allocate_kv_cache_main
 gpu_model_runner_v2.init_kv_cache.__globals__["bind_kv_cache"] = bind_kv_cache
+
+# vLLM #57169's packed-KV heuristic reads Ascend layerwise alias layouts
+# (`layer_stride == 0`) as block-outermost packing and drops the kernel-block
+# split, so correct the selection before `init_attn_backend` consumes it.
+vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes = prepare_ascend_kernel_block_sizes
 
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
 # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers,

@@ -1001,6 +1001,86 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
     build_device_chunk_metadata = False
 
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._conv_layer_name = layer_names[0] if layer_names else None
+        self._spec_conv_indices: torch.Tensor | None = None
+        self._non_spec_conv_indices: torch.Tensor | None = None
+
+    def _ensure_conv_index_buffers(self) -> None:
+        if self._spec_conv_indices is not None:
+            return
+        # Resolve the group's representative layer when building metadata.
+        # Only opted-in models allocate the additional convolution buffers.
+        layers = getattr(self.compilation_config, "static_forward_context", {})
+        if not getattr(layers.get(self._conv_layer_name), "use_contiguous_conv_indices", False):
+            return
+        # Each group owns its buffers, with fixed addresses for graph replay.
+        device = self.spec_sequence_masks.device
+        self._spec_conv_indices = torch.empty(self.spec_sequence_masks.numel(), dtype=torch.int32, device=device)
+        self._non_spec_conv_indices = torch.empty_like(self._spec_conv_indices)
+
+    @staticmethod
+    def _prepare_conv_indices(indices: torch.Tensor, buffer: torch.Tensor) -> torch.Tensor:
+        # Mixed batches and ordinary graph decode already provide a contiguous
+        # vector. Matrix sources are prepared once, including single-row MTP.
+        if indices.ndim == 1 and indices.is_contiguous():
+            return indices
+        column = indices[:, 0] if indices.ndim == 2 else indices
+        requests = column.numel()
+        if requests > buffer.numel():
+            raise ValueError("Convolution index count exceeds the cache-group buffer capacity")
+        prepared = buffer[:requests]
+        prepared.copy_(column, non_blocking=True)
+        return prepared
+
+    def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
+        super()._reset_spec_decode_graph_inputs(graph_batch_size)
+        if self._spec_conv_indices is not None:
+            self._spec_conv_indices[:graph_batch_size].fill_(PAD_SLOT_ID)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+        num_actual_reqs: int | None = None,
+    ) -> GDNAttentionMetadata:
+        self._ensure_conv_index_buffers()
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            fast_build=fast_build,
+            num_actual_reqs=num_actual_reqs,
+        )
+        if self._spec_conv_indices is None:
+            return metadata
+        assert self._non_spec_conv_indices is not None
+        # Parent build has finalized request counts and graph padding. Keep
+        # recurrent indices intact and only replace the convolution view.
+        if metadata.spec_decode_metadata is not None:
+            conv = metadata.spec_decode_metadata.spec_causal_conv1d
+            conv.cache_indices = self._prepare_conv_indices(conv.cache_indices, self._spec_conv_indices)
+        non_spec_phases = (metadata.non_spec_prefill_metadata, metadata.non_spec_decode_metadata)
+        conv_metadata = [phase.causal_conv1d for phase in non_spec_phases if phase is not None]
+        if conv_metadata:
+            # Both phases reference prefixes of the same non-spec index table.
+            source = max(conv_metadata, key=lambda conv: conv.cache_indices.shape[0])
+            prepared = self._prepare_conv_indices(source.cache_indices, self._non_spec_conv_indices)
+            for conv in conv_metadata:
+                conv.cache_indices = prepared[: conv.cache_indices.shape[0]]
+        return metadata
+
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod

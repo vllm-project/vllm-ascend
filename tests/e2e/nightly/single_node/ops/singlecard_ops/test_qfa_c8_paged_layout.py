@@ -20,7 +20,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     scatter_mxfp_pa_nz_kv_cache,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 
 @pytest.mark.parametrize("query_tokens", [1, 64])

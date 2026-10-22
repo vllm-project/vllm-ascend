@@ -103,9 +103,6 @@ class HardwareCapability(Enum):
     FUSED_SWIGLU_TUNING_ARGS = auto()
     # Select the compatibility GatedDeltaNet core and state-dtype implementation.
     GDN_COMPATIBILITY = auto()
-    # Fuse non-MX INT8/INT4 grouped matmul, dequantization, SiTU, and per-token
-    # quantization through the ACLNN GmmDequantSituQuant operator.
-    GMM_DEQUANT_SITU_QUANT = auto()
     # Register the FX graph rewrite that fuses a supported matmul/reduce-scatter pattern.
     GRAPH_MM_REDUCE_SCATTER_FUSION = auto()
     # Register the FX graph rewrite that fuses the supported muls-plus-add pattern.
@@ -124,6 +121,8 @@ class HardwareCapability(Enum):
     LOCAL_KV_COMM_RESOURCE = auto()
     # Use vLLM-Ascend's custom BGMV/SGMV LoRA kernels when rank constraints also pass.
     LORA_CUSTOM_OPS = auto()
+    # Use the token-fused MLA cache protocol for eligible FlashMLA models.
+    MLA_FLASH = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
@@ -151,8 +150,6 @@ class HardwareCapability(Enum):
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
-    # Allow C8 SFA decode-context parallelism with a replicated indexer.
-    SFA_C8_DCP_REPLICATED_INDEXER = auto()
     # Legacy implementation selector: install the standard worker patch bundle.
     STANDARD_WORKER_PATCHES = auto()
     # Legacy implementation selector: install the standard Mamba platform patch.
@@ -271,7 +268,6 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SCATTER_ND_STRIDED_CACHE_STORE,
-        HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
@@ -279,7 +275,6 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
-    HardwareCapability.GMM_DEQUANT_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -373,6 +368,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
+                    HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,

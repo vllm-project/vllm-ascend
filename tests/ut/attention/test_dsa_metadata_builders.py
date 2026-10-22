@@ -71,6 +71,14 @@ class TestDSAMetadataBuilders(TestCase):
     def setUp(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
+        stack.enter_context(
+            patch.object(
+                dsa_v1.AscendDSAMetadataBuilder,
+                "_dspark_swa_indices_fast_path_eligible",
+                return_value=False,
+            )
+        )
+        stack.enter_context(patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=False))
         self.builder = make_builder(dsa_v1.AscendDSASWAMetadataBuilder)
         self.common = CommonMetadata(
             num_reqs=1,
@@ -213,6 +221,39 @@ class TestDSAMetadataBuilders(TestCase):
         self.assertIsNone(req.start_pos)
         self.assertIsNone(req.slot_mapping)
         self.qli_op.assert_not_called()
+
+    def test_sparse_flash_draft_preserves_logical_indices_and_lengths(self):
+        self.builder.dspark_swa_topk_lengths_buffer = torch.zeros(8, dtype=torch.int32)
+        indices = torch.ones((2, 1, 8), dtype=torch.int32)
+        lengths = self.builder.dspark_swa_topk_lengths_buffer[:2]
+        self.indices_op.return_value = (indices, lengths)
+        with (
+            patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=True),
+            patch.object(
+                self.builder,
+                "_build_dspark_sparse_flash_mla_metadata",
+                return_value=torch.full_like(self.builder.sas_metadata_buffer, 7),
+            ) as sparse,
+        ):
+            req = self.build_req()
+        self.assertIs(req.dspark_swa_indices, indices)
+        self.assertIs(req.dspark_swa_topk_lengths, lengths)
+        self.assertTrue(self.indices_op.call_args.kwargs["use_logical_indices"])
+        self.assertIs(sparse.call_args.kwargs["ori_topk_length"], lengths)
+        self.assertEqual(sparse.call_args.kwargs["ori_topk"], 8)
+        self.assertTrue(torch.all(req.sas_metadata == 7))
+        self.sas_op.assert_not_called()
+
+    def test_cache_only_skips_sparse_flash_preparation(self):
+        with (
+            patch.object(dsa_v1, "_draft_uses_sparse_flash_mla", return_value=True),
+            patch.object(self.builder, "_build_dspark_sparse_flash_mla_metadata") as sparse,
+        ):
+            req = self.build_req(build_query=False)
+        self.assertIsNone(req.sas_metadata)
+        self.assertIsNone(req.dspark_swa_indices)
+        sparse.assert_not_called()
+        self.indices_op.assert_not_called()
 
     def test_causal_and_noncausal_sas_do_not_alias(self):
         self.common.causal = True

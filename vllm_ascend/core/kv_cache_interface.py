@@ -25,6 +25,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
@@ -42,8 +44,11 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
     if isinstance(kv_cache_spec, MLAAttentionSpec):
-        storage_block_size = kv_cache_spec.storage_block_size
-        return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
+        # vLLM #57169 removed the MLA `storage_block_size` override on main.
+        if vllm_version_is("0.31.0"):
+            storage_block_size = kv_cache_spec.storage_block_size
+            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
+        return kv_cache_spec.block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
@@ -173,6 +178,35 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
+def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
+    """Whether PD transfer can preserve a component-major MLA cache layout.
+
+    A component-major MLA page packs NoPE and RoPE into one physical slot:
+    ``[all NoPE][all RoPE][padding]``.  MooncakeV2 pull connectors transfer
+    that page as one raw block when the published base address, block length,
+    and block stride describe the complete slot.  Other connectors still use
+    the legacy separate NoPE/RoPE protocol.
+
+    Without PD, local layout selection is unrestricted. With supported PD,
+    both endpoints must agree on the page layout: raw transfers carry no
+    metadata distinguishing component-major from token-fused FlashMLA pages.
+    This helper identifies connector support, not cross-endpoint agreement.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return True
+
+    # Connectors loaded through a custom module path are not identified by the
+    # registry name, so conservatively fall back to the legacy layout.
+    if getattr(kv_transfer_config, "kv_connector_module_path", None) is not None:
+        return False
+
+    return getattr(kv_transfer_config, "kv_connector", None) in {
+        "MooncakeConnectorV2",
+        "MooncakePullConnector",
+    }
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.
@@ -182,6 +216,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
+    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
+    # caches without query heads use the one-latent-head cache contract.
+    num_heads: int = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -199,6 +236,16 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def uses_packed_sfa_main_cache(self) -> bool:
         """Whether the SFA main cache is stored in one packed tensor."""
         return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant
+
+    @property
+    def supports_single_raw_backing(self) -> bool:
+        """Whether this geometry can be exposed from one raw MLA backing."""
+        return (
+            get_kv_cache_compression_ratio(self) == 1
+            and self.model_version is None
+            and not self.indexes_kv_by_block_stride
+            and not self.cache_sparse_sfa_c8
+        )
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -222,6 +269,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ascend_layouts = {
             (
                 spec.scale_dim,
+                spec.num_heads,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -244,6 +292,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
+            num_heads=first_spec.num_heads,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
@@ -412,7 +461,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 @dataclass(frozen=True, kw_only=True)
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
-    """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
+    """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
     pool boundaries independently. The dedicated manager never slides or grows.

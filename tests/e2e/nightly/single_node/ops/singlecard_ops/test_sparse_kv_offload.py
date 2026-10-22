@@ -23,10 +23,8 @@ def _load_sparse_kv_ops():
 
     required = {
         "sparse_kv_warmup_lru_resident_threads",
-        "sparse_kv_lru_resident_compact",
         "sparse_kv_lru_resident_compact_with_plan_stable_rows",
         "sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows",
-        "sparse_kv_compute_lru_resident_addrs",
         "sparse_kv_restore_bfloat16_tensor",
         "sparse_kv_restore_int16_tensor",
     }
@@ -144,43 +142,6 @@ def test_sparse_kv_restore_tensor_views(sparse_kv_ops):
     assert int16_view.data_ptr() == int16.data_ptr()
     assert bf16_view.dtype == torch.bfloat16
     assert int16_view.dtype == torch.int16
-
-
-def test_sparse_kv_compute_lru_resident_addrs(sparse_kv_ops):
-    miss_count = torch.tensor([2, 1], dtype=torch.int32)
-    miss_tokens = torch.tensor([[1, 6, -1], [4, -1, -1]], dtype=torch.int32)
-    miss_slots = torch.tensor([[0, 2, -1], [1, -1, -1]], dtype=torch.int32)
-    block_table = torch.tensor([[10, 11, 12], [20, 21, 22]], dtype=torch.int32)
-    gvas_buffer = torch.full((12,), -1, dtype=torch.int64)
-    addr_buffer = torch.full((12,), -1, dtype=torch.int64)
-    size_buffer = torch.full((12,), -1, dtype=torch.int32)
-    num_tokens_buffer = torch.zeros(1, dtype=torch.int32)
-
-    num_tokens_to_load = sparse_kv_ops.sparse_kv_compute_lru_resident_addrs(
-        miss_count,
-        miss_tokens,
-        miss_slots,
-        block_table,
-        4,
-        8,
-        12,
-        1000,
-        2000,
-        3000,
-        4000,
-        4,
-        2,
-        gvas_buffer,
-        addr_buffer,
-        size_buffer,
-        num_tokens_buffer,
-    )
-
-    assert num_tokens_to_load == 3
-    assert num_tokens_buffer.item() == 6
-    assert gvas_buffer[:6].tolist() == [1328, 1368, 1672, 2492, 2552, 3008]
-    assert addr_buffer[:6].tolist() == [3000, 3016, 3040, 4000, 4024, 4060]
-    assert size_buffer[:6].tolist() == [8, 8, 8, 12, 12, 12]
 
 
 def test_stable_rows_suffix_invalidation_and_plan_encoding(sparse_kv_ops):

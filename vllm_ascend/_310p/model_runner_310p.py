@@ -61,7 +61,7 @@ from vllm_ascend.utils import (
     is_rc_device,
     lmhead_tp_enable,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -581,6 +581,7 @@ class NPUModelRunner310(NPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         skip_gdn_state_update: bool = False,
+        randomize_inputs: bool = False,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.
@@ -608,6 +609,7 @@ class NPUModelRunner310(NPUModelRunner):
                     num_active_loras=num_active_loras,
                     profile_seq_lens=profile_seq_lens,
                     skip_gdn_state_update=skip_gdn_state_update,
+                    randomize_inputs=randomize_inputs,
                 )
             finally:
                 self._spec_dummy_capture = False
@@ -619,8 +621,12 @@ class NPUModelRunner310(NPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        decoder_replay_dummy: bool = False,
         **model_kwargs: dict[str, Any],
     ):
+        # This runner has no decoder replay; keep the runner-only flag out of
+        # model_kwargs when the inherited dummy-run path supplies it.
+        del decoder_replay_dummy
         if self.uses_mrope:
             assert positions is not None
             prepare_mrope_cos_sin_slices_from_runner(self, positions)
@@ -678,7 +684,7 @@ class NPUModelRunner310(NPUModelRunner):
         self._kv_block_zeroer = AscendKVBlockZeroer310(self.device, self.pin_memory)
         self._kv_block_zeroer.init_meta(
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
-            kernel_block_sizes=self.kernel_block_sizes,
+            kernel_block_sizes=cast(list[list[int]], self.kernel_block_sizes),
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
@@ -954,7 +960,7 @@ class NPUModelRunner310(NPUModelRunner):
         # use the supported block sizes from the backend
         # For other backends (like Mamba), use [0] (no splitting)
         block_sizes = []
-        self.kernel_block_sizes = []
+        kernel_block_sizes_310p: list[list[int]] = []
         kv_cache_specs = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -978,9 +984,11 @@ class NPUModelRunner310(NPUModelRunner):
                     kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
                 except IndexError:
                     kernel_block_size_list = [self.cache_config.block_size]
-                self.kernel_block_sizes.append(kernel_block_size_list)
+                kernel_block_sizes_310p.append(kernel_block_size_list)
             else:
-                self.kernel_block_sizes.append([0])
+                kernel_block_sizes_310p.append([0])
+
+        self.kernel_block_sizes = cast(list[int], kernel_block_sizes_310p)
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
@@ -999,7 +1007,7 @@ class NPUModelRunner310(NPUModelRunner):
         # otherwise a 128-token table can survive a switch to 64-token caches.
         if (
             block_sizes != [self.block_size]
-            or self.kernel_block_sizes != [[self.block_size]]
+            or kernel_block_sizes_310p != [[self.block_size]]
             or len(kv_cache_config.kv_cache_groups) > 1
         ):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
@@ -1023,7 +1031,7 @@ class NPUModelRunner310(NPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=self.kernel_block_sizes,
+                kernel_block_sizes=kernel_block_sizes_310p,
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,

@@ -102,7 +102,7 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-      toc_depth: 3
+      toc_depth: 4
   # Python Markdown Extensions
   - pymdownx.arithmatex:
       generic: true
@@ -213,6 +213,7 @@ nav:
         - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
         - tutorials/models/SigLIP2.md
+        - tutorials/models/Step-5-Preview.md
         - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
@@ -235,8 +236,7 @@ nav:
         - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
-        - tutorials/models/GLM5.2.md
-        - tutorials/models/GLM5.3.md
+        - "GLM-5.2 & GLM-5.3": tutorials/models/GLM5.2.md
         - tutorials/models/GLM5.3-Flash.md
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
@@ -303,6 +303,7 @@ nav:
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kvpp.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
+        - user_guide/feature_guide/encoder_cache_cpu_offload.md
         - user_guide/feature_guide/preempt_offload_connector.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md

@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
+    DONE_RECVING_MSG,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
@@ -257,18 +258,61 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
         make_sending_thread({0: metadata, 1: mismatched}, tp_size=2)
 
 
-def test_sending_thread_handles_early_and_normal_completion_once() -> None:
+def test_sending_thread_handles_completion_once() -> None:
     thread = make_sending_thread()
-
-    thread._handle_finished_request("early")
-    assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("early", time.time())
-    assert thread.get_and_clear_finished_requests() == {"early"}
 
     thread.add_delayed_request("normal", time.time())
     thread._handle_finished_request("normal")
     thread._handle_finished_request("normal")
     assert thread.get_and_clear_finished_requests() == {"normal"}
+    assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("normal")
+    assert thread.get_and_clear_finished_requests() == set()
+
+
+def test_sending_thread_ignores_unknown_completion() -> None:
+    thread = make_sending_thread()
+
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == set()
+    thread.add_delayed_request("unknown", time.time())
+    assert thread.get_and_clear_finished_requests() == set()
+    thread._handle_finished_request("unknown")
+    assert thread.get_and_clear_finished_requests() == {"unknown"}
+
+
+def test_sending_thread_acks_duplicate_and_unknown_completion() -> None:
+    thread = make_sending_thread()
+    thread.add_delayed_request("normal", time.time())
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = [
+        [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id))]
+        for request_id in ("normal", "normal", "unknown")
+    ] + [KeyboardInterrupt()]
+
+    with pytest.raises(KeyboardInterrupt):
+        thread._run_busy_loop(sock)
+
+    assert sock.send_multipart.call_args_list == [call((b"consumer", b"", ACK_MSG))] * 3
+    assert thread.get_and_clear_finished_requests() == {"normal"}
+
+
+def test_sending_thread_does_not_retain_completed_request_ids() -> None:
+    thread = make_sending_thread()
+
+    for index in range(100):
+        request_id = f"request-{index}"
+        thread.add_delayed_request(request_id, time.time())
+        thread._handle_finished_request(request_id)
+        assert thread.get_and_clear_finished_requests() == {request_id}
+        thread._handle_finished_request(request_id)
+
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+    assert not getattr(thread, "finished_request_ids", set())
+    assert not getattr(thread, "early_finished_requests", set())
 
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,6 +331,9 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
 
     assert thread.get_and_clear_finished_requests() == {"expired"}
     assert not thread.delayed_free_requests
+
+    thread._handle_finished_request("expired")
+    assert thread.get_and_clear_finished_requests() == set()
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
@@ -554,21 +601,22 @@ def test_sending_busy_loop_serves_metadata_and_completion_ack() -> None:
     thread._handle_finished_request.assert_called_once_with("request-p")
 
 
-def test_recving_run_requeues_failed_completion() -> None:
+def test_recving_run_discards_failed_completion_and_cleans_queue() -> None:
     ready_event = threading.Event()
     thread = MooncakeSchedulerRecvingThread(ready_event)
     request = ("10.0.0.1", 6000, "request-p")
-    request_queue = MagicMock()
-    request_queue.get.side_effect = [request, _StopLoop()]
-    thread.request_queue = request_queue
+    thread.request_queue.put(request)
+    thread.request_queue.put(None)
+    # Pending work after the stop sentinel must also be cleared on exit.
+    thread.request_queue.put(("10.0.0.2", 6000, "pending"))
     thread._send_done_recving = MagicMock(side_effect=RuntimeError("network error"))  # type: ignore[method-assign]
 
-    with pytest.raises(_StopLoop):
-        thread.run()
+    thread.run()
 
     assert ready_event.is_set()
-    request_queue.put.assert_called_once_with(request)
-    request_queue.task_done.assert_called_once_with()
+    thread._send_done_recving.assert_called_once_with(*request)
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
 
 
 def test_set_worker_metadata_starts_only_one_producer_sending_thread(
@@ -695,3 +743,109 @@ def test_matched_token_query_does_not_change_prompt_length(prefix_connector):
     assert prefix_connector.get_num_new_matched_tokens(request, 512) == (0, False)
     assert request.num_prompt_tokens == 513
     assert len(request.all_token_ids) == 513
+
+
+def test_recving_thread_does_not_requeue_failed_notification() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.add_request("10.0.0.1", 6000, "failed")
+    thread.add_request("10.0.0.2", 6000, "healthy")
+    thread.request_queue.put(None)
+    thread._send_done_recving = MagicMock(side_effect=[RuntimeError("unreachable"), None])
+
+    thread.run()
+
+    assert thread._send_done_recving.call_args_list == [
+        call("10.0.0.1", 6000, "failed"),
+        call("10.0.0.2", 6000, "healthy"),
+    ]
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_wakes_idle_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+
+
+def test_recving_thread_shutdown_closes_resources_in_owner_thread() -> None:
+    thread = MooncakeSchedulerRecvingThread(threading.Event())
+    socket = MagicMock()
+    context = MagicMock()
+    cleanup_threads = []
+    socket.close.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+    context.destroy.side_effect = lambda **kwargs: cleanup_threads.append(threading.get_ident())
+
+    def send_done(*args):
+        thread.remote_sockets["tcp://10.0.0.1:6000"].append(socket)
+        thread.zmq_context = context
+        thread.stop_event.set()
+
+    thread._send_done_recving = MagicMock(side_effect=send_done)
+    thread.add_request("10.0.0.1", 6000, "first")
+    thread.add_request("10.0.0.1", 6000, "pending")
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    thread.shutdown()
+
+    socket.close.assert_called_once_with(linger=0)
+    context.destroy.assert_called_once_with(linger=0)
+    assert cleanup_threads == [thread.ident, thread.ident]
+    assert not thread.remote_sockets
+    assert thread.zmq_context is None
+    assert thread.request_queue.empty()
+    assert thread.request_queue.unfinished_tasks == 0
+    assert thread._send_done_recving.call_count == 1
+
+
+def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = make_sending_thread()
+    socket = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = socket
+    monkeypatch.setattr(pull_scheduler, "zmq_ctx", MagicMock(return_value=context))
+
+    def recv():
+        thread.stop_event.wait(timeout=5)
+        raise zmq.Again()  # type: ignore[attr-defined]
+
+    socket.recv_multipart.side_effect = recv
+    thread.add_delayed_request("pending", time.time())
+    thread.start()
+    assert thread.ready_event.wait(timeout=5)
+    thread.shutdown()
+    thread.shutdown()
+
+    assert not thread.is_alive()
+    context.__exit__.assert_called_once()
+    assert not thread.delayed_free_requests
+    assert thread.finished_requests.empty()
+
+
+def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = MagicMock()
+    scheduler._recving_thread = MagicMock()
+    scheduler._reqs_need_recv["recv"] = MagicMock()
+    scheduler._reqs_need_send["send"] = time.time()
+    scheduler._reqs_in_batch.add("recv")
+    scheduler._reqs_recv_info["recv"] = ("10.0.0.1", 6000, "remote")
+    connector = MooncakePullConnector.__new__(MooncakePullConnector)
+    connector.connector_scheduler = scheduler
+
+    connector.shutdown()
+
+    scheduler._sending_thread.shutdown.assert_called_once()
+    scheduler._recving_thread.shutdown.assert_called_once()
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_need_send
+    assert not scheduler._reqs_in_batch
+    assert not scheduler._reqs_recv_info

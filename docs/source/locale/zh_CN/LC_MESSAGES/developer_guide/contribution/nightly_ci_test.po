@@ -200,12 +200,6 @@ msgid ""
 "multi-node):"
 msgstr "**双节点测试** (`a3.double_node.test_config`，2 节点，在多节点之后运行)："
 
-msgid "**Single-node tests** (`a3.single_node.test_config`):"
-msgstr "**单节点测试** (`a3.single_node.test_config`)："
-
-msgid "**Multi-card tests** (`a3.multi_card.test_config`):"
-msgstr "**多卡测试** (`a3.multi_card.test_config`)："
-
 msgid ""
 "The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests\n"
 "    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on\n"
@@ -451,16 +445,6 @@ msgstr ""
 "| `pr-accuracy-group-2` | Qwen2.5-Math-RM-72B、Hunyuan-A13B-Instruct | "
 "pr_only |"
 
-msgid "| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |"
-msgstr "| `multi-node-qwen3-dp` | Qwen3-235B-A22B，2节点 DP |"
-
-msgid ""
-"| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |"
-msgstr "| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8，EPLB，2节点 |"
-
-msgid "| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |"
-msgstr "| `multi-node-qwen-disagg-pd` | Qwen3-235B 分离式 PD，2节点 |"
-
 msgid ""
 "| `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |"
 msgstr "| `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B 分离式 PD，2节点 |"
@@ -471,54 +455,11 @@ msgstr "| `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16，2节点 |"
 msgid "| `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |"
 msgstr "| `multi-node-glm-5.2` | GLM-5.1-W8A8，2节点 |"
 
-msgid "| `mtpx-deepseek-r1-0528-w8a8` | MTP-X + DeepSeek-R1-0528-W8A8 |"
-msgstr "| `mtpx-deepseek-r1-0528-w8a8` | MTP-X + DeepSeek-R1-0528-W8A8 |"
-
-msgid "| `deepseek-r1-0528-w8a8` | DeepSeek-R1-0528-W8A8 |"
-msgstr "| `deepseek-r1-0528-w8a8` | DeepSeek-R1-0528-W8A8 |"
-
-msgid "| `kimi-k2-thinking` | Kimi-K2-Thinking |"
-msgstr "| `kimi-k2-thinking` | Kimi-K2-Thinking |"
-
-msgid ""
-"| `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |"
-msgstr ""
-"| `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |"
-
-msgid ""
-"| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache "
-"|"
-msgstr "| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 前缀缓存 |"
-
-msgid "| `kimi-k2.5` | Kimi-K2.5 |"
-msgstr "| `kimi-k2.5` | Kimi-K2.5 |"
-
-msgid "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
-msgstr "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
-
 msgid "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 msgstr "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 
-msgid "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
-msgstr "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
-
-msgid "| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |"
-msgstr "| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |"
-
-msgid "| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |"
-msgstr "| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |"
-
 msgid "| `qwen3-30b-acc` | Qwen3-30B accuracy test |"
 msgstr "| `qwen3-30b-acc` | Qwen3-30B 精度测试 |"
-
-msgid "| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B-W8A8 |"
-msgstr "| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B-W8A8 |"
-
-msgid "| `qwen3-32b-int8` | Qwen3-32B-Int8 |"
-msgstr "| `qwen3-32b-int8` | Qwen3-32B-Int8 |"
-
-msgid "| `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |"
-msgstr "| `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 前缀缓存 |"
 
 msgid ""
 "| `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8 via llm-"
@@ -526,12 +467,6 @@ msgid ""
 msgstr ""
 "| `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8（通过 llm-"
 "compressor） |"
-
-msgid "| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |"
-msgstr "| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |"
-
-msgid "| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |"
-msgstr "| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |"
 
 msgid "To add `my-new-test` to the A3 multi-card section:"
 msgstr "要将 `my-new-test` 添加到 A3 多卡部分："
@@ -570,3 +505,157 @@ msgstr ""
 "    `schedule:`（cron）触发器；它们由外部自动化通过\n"
 "    `workflow_dispatch` 触发。请参阅\n"
 "    [CI 工作流触发器与 schedule_ 前缀](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix)。"
+
+msgid "### Maintenance window"
+msgstr "### 维护窗口"
+
+msgid ""
+"Maintainers can pause PR-triggered commands during a maintenance window by setting\n"
+"the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW`. The value is an optional\n"
+"switch followed by an `HH:MM-HH:MM` range in Beijing time (UTC+8):"
+msgstr ""
+"维护者可以通过设置仓库变量 `NIGHTLY_COMMAND_BLOCK_WINDOW` 在维护窗口期间暂停由 PR "
+"触发的命令。该值由一个可选的开关以及一个北京时间（UTC+8）的 `HH:MM-HH:MM` 时间范围组成："
+
+msgid "| Value | Behavior |"
+msgstr "| 值 | 行为 |"
+
+msgid "| `true 22:00-08:00` | Gate enabled; block inside the window |"
+msgstr "| `true 22:00-08:00` | 启用门控；在窗口内阻止 |"
+
+msgid "| `22:00-08:00` | Same as above (switch omitted) |"
+msgstr "| `22:00-08:00` | 与上述相同（省略开关） |"
+
+msgid "| `false 22:00-08:00` | Gate explicitly disabled |"
+msgstr "| `false 22:00-08:00` | 显式禁用门控 |"
+
+msgid "| unset / invalid | Gate disabled (fail-open) |"
+msgstr "| 未设置 / 无效 | 门控禁用（失效开放） |"
+
+msgid ""
+"Switch aliases are `true/1/yes/on` and `false/0/no/off` (case-insensitive); a space\n"
+"or comma may separate the switch from the range. Cross-midnight ranges are\n"
+"supported. While the gate is enabled and the current Beijing time falls inside the\n"
+"range, `/nightly` and `/weekly` comments do not dispatch tests; the bot replies with\n"
+"the active window instead."
+msgstr ""
+"开关的别名有 `true/1/yes/on` 和 "
+"`false/0/no/off`（不区分大小写）；开关与时间范围之间可以用空格或逗号分隔。支持跨午夜的时间范围。当门控启用且当前北京时间处于该范围内时，`/nightly`"
+" 和 `/weekly` 评论不会触发测试；机器人会改为回复当前生效的窗口。"
+
+msgid "**My `/nightly` comment was ignored during the maintenance window.**"
+msgstr "**我的 `/nightly` 评论在维护窗口期间被忽略了。**"
+
+msgid ""
+"- If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current\n"
+"  Beijing time is inside the configured range, `/nightly` and `/weekly` are\n"
+"  intentionally blocked to protect the third-party scheduling tests. The bot replies\n"
+"  with the active window; retry after it ends."
+msgstr ""
+"- 如果仓库变量 `NIGHTLY_COMMAND_BLOCK_WINDOW` 已设置，且当前北京时间处于配置的范围内，则 `/nightly` 和 "
+"`/weekly` 会被有意阻止，以保护第三方调度测试。机器人会回复当前生效的窗口；请在窗口结束后重试。"
+
+msgid ""
+"### A3-560T workflow "
+"(`.github/workflows/schedule_nightly_test_a3_560t.yaml`)"
+msgstr ""
+"### A3-560T 工作流（`.github/workflows/schedule_nightly_test_a3_560t.yaml`）"
+
+msgid "**Single-node tests** (`a3-560t.single_node.test_config`):"
+msgstr "**单节点测试**（`a3-560t.single_node.test_config`）："
+
+msgid "| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 + MTP |"
+msgstr "| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 + MTP |"
+
+msgid "| `MiniMax-M3-W8A8-A3` | MiniMax-M3 W8A8 |"
+msgstr "| `MiniMax-M3-W8A8-A3` | MiniMax-M3 W8A8 |"
+
+msgid "| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 + MTP |"
+msgstr "| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 + MTP |"
+
+msgid "| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 + MTP |"
+msgstr "| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 + MTP |"
+
+msgid ""
+"| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8, MRV2 + DSpark |"
+msgstr ""
+"| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8，MRV2 + DSpark |"
+
+msgid "| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 + MTP |"
+msgstr "| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 + MTP |"
+
+msgid "| `kimi-k2.6_max_model_len` | Kimi-K2.6 W4A8, maximum model length |"
+msgstr "| `kimi-k2.6_max_model_len` | Kimi-K2.6 W4A8，最大模型长度 |"
+
+msgid "| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 + DFlash |"
+msgstr "| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 + DFlash |"
+
+msgid "| `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8, prefill MC2 |"
+msgstr "| `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8，prefill MC2 |"
+
+msgid "| `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |"
+msgstr "| `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |"
+
+msgid "| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |"
+msgstr "| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |"
+
+msgid "| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |"
+msgstr "| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |"
+
+msgid ""
+"| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, "
+"PIECEWISE and full graph |"
+msgstr ""
+"| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B "
+"W8A8，PIECEWISE 与全图模式 |"
+
+msgid ""
+"| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
+"acceptance rate |"
+msgstr ""
+"| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP "
+"接受率 |"
+
+msgid "| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8, DCP16 |"
+msgstr "| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8，DCP16 |"
+
+msgid "| `glm-5.2-w4a8-dspark` | GLM-5.2 W4A8 + DSpark |"
+msgstr "| `glm-5.2-w4a8-dspark` | GLM-5.2 W4A8 + DSpark |"
+
+msgid "| `glm-5.2-w4a8-mtp` | GLM-5.2 W4A8 + MTP |"
+msgstr "| `glm-5.2-w4a8-mtp` | GLM-5.2 W4A8 + MTP |"
+
+msgid "| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8, MRV2 + DSpark |"
+msgstr "| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8，MRV2 + DSpark |"
+
+msgid "| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8, MRV2 + MTP |"
+msgstr "| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8，MRV2 + MTP |"
+
+msgid "**Multi-card tests** (`a3-560t.multi_card.test_config`):"
+msgstr "**多卡测试**（`a3-560t.multi_card.test_config`）："
+
+msgid "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 + MTP |"
+msgstr "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 + MTP |"
+
+msgid "| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B W8A8 |"
+msgstr "| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B W8A8 |"
+
+msgid "| `qwen3-32b-int8-prefix-cache` | Qwen3-32B W8A8 QuaRot prefix cache |"
+msgstr "| `qwen3-32b-int8-prefix-cache` | Qwen3-32B W8A8 QuaRot 前缀缓存 |"
+
+msgid "| `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |"
+msgstr "| `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |"
+
+msgid "| `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |"
+msgstr "| `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |"
+
+msgid "| `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |"
+msgstr "| `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |"
+
+msgid ""
+"| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP |"
+msgstr ""
+"| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP |"
+
+msgid "Run the MLA, GQA and SFA context-parallel tests on A3-560T:"
+msgstr "在 A3-560T 上运行 MLA、GQA 和 SFA 上下文并行测试："

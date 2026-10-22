@@ -7,8 +7,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendGroupedTopKRouter(BaseRouter):
     def __init__(
@@ -47,7 +45,6 @@ class AscendGroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group if self.use_grouped_topk else None,
             has_e_score_bias=self.e_score_correction_bias is not None,
-            **({"routed_scaling_factor": self.routed_scaling_factor} if vllm_version_is("0.30.0") else {}),
         )
 
     def _renormalize_topk_weights(

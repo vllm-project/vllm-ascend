@@ -27,6 +27,7 @@ import pytest
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 
+from vllm_ascend.patch.platform import patch_swa_bounded_replay as replay_patch
 from vllm_ascend.patch.platform.patch_swa_bounded_replay import (
     _EXPECTED_PARAMETERS,
     _patch_cached_request_data_replay_start,
@@ -137,18 +138,20 @@ def test_payload_without_resumed_requests_carries_an_empty_map():
 
 
 def test_patch_is_idempotent():
-    patched = Scheduler._make_cached_request_data
+    patched = replay_patch.Scheduler._make_cached_request_data
 
     _patch_make_cached_request_data()
 
-    assert Scheduler._make_cached_request_data is patched
+    assert replay_patch.Scheduler._make_cached_request_data is patched
 
 
 def test_signature_drift_raises_instead_of_silently_stopping(monkeypatch):
     def _renamed(self, running_reqs, resumed, num_scheduled_tokens, spec_decode_tokens, req_to_new_blocks):
         raise AssertionError("the patch must not have been applied")
 
-    monkeypatch.setattr(Scheduler, "_make_cached_request_data", _renamed)
+    # The platform may replace the public Scheduler with a subclass after
+    # this patch loads. Patch the class that the guard actually inspects.
+    monkeypatch.setattr(replay_patch.Scheduler, "_make_cached_request_data", _renamed)
 
     with pytest.raises(RuntimeError, match="unexpected Scheduler._make_cached_request_data signature"):
         _patch_make_cached_request_data()
