@@ -14,10 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1, KVC
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    build_offloading_config,
-    get_offloading_group_ids,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import build_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import OffloadingConnectorScheduler
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
@@ -30,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    iter_layer_specs,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -47,12 +45,6 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 def _build_offloading_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> OffloadingConfig:
     config = build_offloading_config(vllm_config, kv_cache_config)
-    specs = (
-        group.kv_cache_spec.kv_cache_specs.values()
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        else (group.kv_cache_spec,)
-        for group in kv_cache_config.kv_cache_groups
-    )
     selected_layers = {name for group in config.groups for name in group.layer_names}
     tensors = [
         tensor
@@ -62,7 +54,9 @@ def _build_offloading_config(vllm_config: VllmConfig, kv_cache_config: KVCacheCo
     if (
         kv_cache_config.num_blocks > 0
         and kv_cache_config.hisparse_host_num_blocks is None
-        and requires_padded_page_layout(spec for group_specs in specs for spec in group_specs)
+        and requires_padded_page_layout(
+            spec for group in kv_cache_config.kv_cache_groups for spec in iter_layer_specs(group.kv_cache_spec)
+        )
         and tensors
         and all(
             t.offset == 0 and t.layer_stride == 0 and t.size == t.block_stride * kv_cache_config.num_blocks
@@ -199,9 +193,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
-        selected_groups = tuple(
-            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
-        )
+        selected_groups = tuple(kv_cache_config.kv_cache_groups[group.group_id] for group in self.spec.config.groups)
         layer_specs = {
             name: group.kv_cache_spec.kv_cache_specs[name]
             if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)

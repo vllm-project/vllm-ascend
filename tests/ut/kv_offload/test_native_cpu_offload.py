@@ -246,6 +246,7 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(config=_make_config({}))
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []
@@ -292,6 +293,7 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(config=_make_config({}))
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []

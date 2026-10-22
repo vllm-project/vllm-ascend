@@ -242,6 +242,11 @@ def _make_layout_worker(kv_cache_config, monkeypatch: pytest.MonkeyPatch):
     kv_cache_config.hisparse_host_num_blocks = None
     kv_cache_config.prefix_cacheable_group_ids = tuple(range(len(kv_cache_config.kv_cache_groups)))
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(
+        config=SimpleNamespace(
+            groups=tuple(SimpleNamespace(group_id=i) for i in kv_cache_config.prefix_cacheable_group_ids)
+        )
+    )
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[Any] = []
@@ -346,6 +351,19 @@ def test_shared_physical_pages_round_trip_all_components_and_padding(monkeypatch
                 layout.offset + src * page_bytes : layout.offset + (src + 1) * page_bytes
             ]
         torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+
+
+def test_layout_worker_preserves_normalized_group_selection_and_order(monkeypatch, glm_shared_physical_pages):
+    layout = glm_shared_physical_pages
+    worker, captured = _make_layout_worker(layout.kv_config, monkeypatch)
+    worker.spec.config.groups = (SimpleNamespace(group_id=3), SimpleNamespace(group_id=1))
+    worker.register_kv_caches({name: layout.caches[name] for name in ("indexer", "mamba")})
+    canonical = captured[0]
+    assert [tensor.tensor.data_ptr() for tensor in canonical.tensors] == [
+        layout.backings[0][1].data_ptr(),
+        layout.backings[1][1].data_ptr(),
+    ]
+    assert [[ref.tensor_idx for ref in group] for group in canonical.group_data_refs] == [[0], [1]]
 
 
 def test_physical_page_contract_rejects_unrelated_component_storage():
