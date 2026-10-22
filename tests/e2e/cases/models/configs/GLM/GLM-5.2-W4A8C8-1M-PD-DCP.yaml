@@ -48,7 +48,6 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
-  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
@@ -112,7 +111,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"enable_flashcomm1": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
@@ -170,7 +169,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"enable_flashcomm1": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
