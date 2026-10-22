@@ -105,12 +105,8 @@ class TestFlatGatherEquivalence:
 
     def test_use_cache_path_bitwise_equal(self, monkeypatch):
         _register_interleaved(monkeypatch, _make_cache())
-        monkeypatch.setattr(
-            rope, "_cos_mla", torch.zeros(NUM_POSITIONS, 1, 1, ROTARY_DIM, dtype=torch.bfloat16)
-        )
-        monkeypatch.setattr(
-            rope, "_sin_mla", torch.zeros(NUM_POSITIONS, 1, 1, ROTARY_DIM, dtype=torch.bfloat16)
-        )
+        monkeypatch.setattr(rope, "_cos_mla", torch.zeros(NUM_POSITIONS, 1, 1, ROTARY_DIM, dtype=torch.bfloat16))
+        monkeypatch.setattr(rope, "_sin_mla", torch.zeros(NUM_POSITIONS, 1, 1, ROTARY_DIM, dtype=torch.bfloat16))
         positions = torch.tensor([1, 2, 3], dtype=torch.int64)
         cos_fast = rope.get_cos_and_sin_mla(positions, use_cache=True)[0].clone()
         sin_fast = rope.get_cos_and_sin_mla(positions, use_cache=True)[1].clone()
