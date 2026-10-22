@@ -807,6 +807,126 @@ def test_balance_gather_all_gathers_when_enabled():
     mock_gather.assert_not_called()
 
 
+def test_balance_prefix_stats_records_miss_once():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, request.num_tokens, 0)
+
+    scheduler.update_from_output(output, _make_output(scheduler))
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+
+def test_balance_prefix_stats_records_reused_prefix_after_allocation_retry():
+    scheduler = _make_balance_scheduler()
+    first = _create_requests(1, num_tokens=4 * _BLOCK_SIZE, max_tokens=1)[0]
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_output(scheduler))
+    scheduler.kv_cache_manager.make_prefix_cache_stats()
+
+    second = _create_requests(1, num_tokens=first.num_prompt_tokens, id_offset=100)[0]
+    scheduler.add_request(second)
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        assert not scheduler.schedule().num_scheduled_tokens
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    assert second.request_id in scheduler.schedule().num_scheduled_tokens
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, second.num_tokens, second.num_tokens - _BLOCK_SIZE)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_balance_prefix_stats_waits_for_connector_admission(hybrid):
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE)[0]
+    manager = scheduler.kv_cache_manager
+    coordinator = manager.coordinator
+    scheduler.connector = MagicMock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [(None, False), (None, False), (0, False)]
+    scheduler._build_kv_connector_meta = MagicMock()
+    scheduler.has_mamba_layers = hybrid
+    # Exercise the per-group branch while retaining the real block allocator.
+    with (
+        patch.object(pbs, "HybridKVCacheCoordinator", type(coordinator)),
+        patch.object(
+            coordinator,
+            "find_longest_cache_hit_per_group",
+            return_value=(manager.empty_kv_cache_blocks.blocks, [0]),
+            create=True,
+        ),
+    ):
+        scheduler.add_request(request)
+        for _ in range(2):
+            assert not scheduler.schedule().num_scheduled_tokens
+            stats = manager.make_prefix_cache_stats()
+            assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+        assert request.request_id in scheduler.schedule().num_scheduled_tokens
+    stats = manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, request.num_tokens, 0)
+
+
+@pytest.mark.parametrize("mode", ["cache_disabled", "stats_disabled", "skip_reading"])
+def test_balance_prefix_stats_respects_lookup_guards(mode):
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE)[0]
+    manager = scheduler.kv_cache_manager
+    if mode == "cache_disabled":
+        manager.enable_caching = False
+    elif mode == "stats_disabled":
+        manager.log_stats = False
+    else:
+        request.skip_reading_prefix_cache = True
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    stats = manager.prefix_cache_stats
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+
+def test_balance_prefix_stats_separates_preempted_requests():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+    scheduler.kv_cache_manager.make_prefix_cache_stats()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+    assert (stats.preempted_requests, stats.preempted_queries) == (1, request.num_tokens)
+
+
+def test_balance_prefix_stats_does_not_recount_after_async_kv_load():
+    scheduler = _make_balance_scheduler()
+    request = _create_requests(1, num_tokens=4 * _BLOCK_SIZE)[0]
+    scheduler.connector = MagicMock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (_BLOCK_SIZE, True)
+    scheduler._build_kv_connector_meta = MagicMock()
+    scheduler.add_request(request)
+
+    scheduler.schedule()
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (1, request.num_tokens, 0)
+
+    scheduler.finished_recving_kv_req_ids.add(request.request_id)
+    assert request.request_id in scheduler.schedule().num_scheduled_tokens
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+    scheduler.connector.get_num_new_matched_tokens.assert_called_once()
+
+
 def test_balance_schedule_waiting_and_running_paths():
     scheduler = _make_balance_scheduler()
     for req in _create_requests(2, num_tokens=32, max_tokens=8):

@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare the with and without prefix caching."""
+"""Compare prefix caching outputs and verify balance-scheduler metrics."""
+
+import time
 
 import pytest
+import requests
+from prometheus_client.parser import text_string_to_metric_families
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
@@ -88,3 +92,89 @@ def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
         name_0="vllm_output",
         name_1="prefix_cache_output",
     )
+
+
+def _prefix_cache_counts(url: str) -> tuple[float, float]:
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    counts = {"vllm:prefix_cache_queries_total": 0.0, "vllm:prefix_cache_hits_total": 0.0}
+    for family in text_string_to_metric_families(response.text):
+        for sample in family.samples:
+            if sample.name in counts:
+                counts[sample.name] += sample.value
+    return counts["vllm:prefix_cache_queries_total"], counts["vllm:prefix_cache_hits_total"]
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3-0.6B")
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="prefix_caching",
+    parallel="DP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="eager",
+)
+@wait_until_npu_memory_free()
+def test_balance_prefix_cache_metrics_dp2():
+    """Check real cache reuse and token counters through the balance scheduler."""
+    model = "Qwen/Qwen3-0.6B"
+    dp_size = 2
+    block_size = 16
+    args = [
+        "--data-parallel-size",
+        str(dp_size),
+        "--max-model-len",
+        "1024",
+        "--max-num-batched-tokens",
+        "1024",
+        "--max-num-seqs",
+        "4",
+        "--block-size",
+        str(block_size),
+        "--enable-prefix-caching",
+        "--enable-prompt-tokens-details",
+        "--no-async-scheduling",
+        "--enforce-eager",
+        "--api-server-count",
+        "1",
+        "--additional-config",
+        '{"scheduler_config":{"enable_balance_scheduling":true}}',
+    ]
+    with RemoteOpenAIServer(model, args, server_host="127.0.0.1") as server:
+        before_queries, before_hits = _prefix_cache_counts(server.url_for("metrics"))
+        usages = []
+        outputs = []
+        # More identical, sequential requests than ranks guarantee revisiting
+        # a warm rank without relying on the API server's DP routing choice.
+        for _ in range(dp_size + 1):
+            response = requests.post(
+                server.url_for("v1", "completions"),
+                json={
+                    "model": model,
+                    "prompt": [10] * (4 * block_size),
+                    "max_tokens": 1,
+                    "temperature": 0,
+                    "ignore_eos": True,
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            result = response.json()
+            usages.append(result["usage"])
+            outputs.append(result["choices"][0]["text"])
+            assert result["usage"]["completion_tokens"] == 1
+
+        assert all(output == outputs[0] for output in outputs)
+        assert any(usage["prompt_tokens_details"]["cached_tokens"] > 0 for usage in usages)
+        expected_queries = sum(usage["prompt_tokens"] for usage in usages)
+        deadline = time.monotonic() + 10
+        while True:
+            queries, hits = _prefix_cache_counts(server.url_for("metrics"))
+            if queries - before_queries >= expected_queries and hits > before_hits:
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Prefix cache metrics were not reported: queries={queries}, hits={hits}")
+            time.sleep(0.1)
+        assert queries - before_queries == expected_queries
+        assert hits - before_hits == sum(usage["prompt_tokens_details"]["cached_tokens"] for usage in usages)

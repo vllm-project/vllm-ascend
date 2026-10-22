@@ -44,8 +44,11 @@
 #    How：
 #       Set --additional-config '{"enable_balance_scheduling": true}' or
 #       set environmental variable VLLM_ASCEND_BALANCE_SCHEDULING=1 (deprecated).
+#       Record local prefix-cache statistics after successful admission, matching
+#       upstream's lookup/record split so deferred lookups are not counted.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/29721
+#       https://github.com/vllm-project/vllm/pull/48860 (prefix-cache statistics)
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
