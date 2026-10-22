@@ -730,17 +730,27 @@ class TestProfilingChunkScheduler(TestBase):
         ]
         return request
 
+    def _patch_encoder_stall(self, scheduler):
+        """Force the encoder-stall zero-token path deterministically.
+
+        Mocked because the real ``_try_schedule_encoder_inputs`` return shape
+        differs across supported vLLM refs (4-tuple on v0.31.0, 5-tuple on
+        main); the scheduler-side unpack expects the 4-tuple. The stall still
+        flows through the real waiting-loop control flow under test.
+        """
+        return patch.object(scheduler, "_try_schedule_encoder_inputs", return_value=(None, 0, 0, []))
+
     def test_waiting_encoder_stall_does_not_starve_later_requests(self):
         """Upstream vllm#59030: an encoder-stalled waiting request must be
         requeued instead of ending the pass and starving requests behind it."""
         scheduler = self.create_scheduler()
-        scheduler.max_num_encoder_input_tokens = 0
         stalled, ready = create_requests(num_requests=2, num_tokens=100)
         self._encoder_stalled_request(stalled)
         scheduler.add_request(stalled)
         scheduler.add_request(ready)
 
-        output = scheduler.schedule()
+        with self._patch_encoder_stall(scheduler):
+            output = scheduler.schedule()
 
         self.assertNotIn(stalled.request_id, output.num_scheduled_tokens)
         self.assertIn(ready.request_id, output.num_scheduled_tokens)
@@ -751,23 +761,23 @@ class TestProfilingChunkScheduler(TestBase):
 
     def test_waiting_encoder_stall_is_counted_as_deferred(self):
         scheduler = self.create_scheduler()
-        scheduler.max_num_encoder_input_tokens = 0
         stalled = self._encoder_stalled_request(create_requests(num_requests=1, num_tokens=100)[0])
         scheduler.add_request(stalled)
 
-        scheduler.schedule()
+        with self._patch_encoder_stall(scheduler):
+            scheduler.schedule()
 
         self.assertIn(stalled, scheduler.deferred_waiting)
 
     def test_waiting_encoder_stall_kv_holder_keeps_drain_priority(self):
         """A stalled request holding KV blocks must stay on the drain-first queue."""
         scheduler = self.create_scheduler()
-        scheduler.max_num_encoder_input_tokens = 0
         stalled = self._encoder_stalled_request(create_requests(num_requests=1, num_tokens=100)[0])
         stalled.num_computed_tokens = 10
         scheduler.add_request(stalled)
 
-        scheduler.schedule()
+        with self._patch_encoder_stall(scheduler):
+            scheduler.schedule()
 
         self.assertIn(stalled, scheduler.kv_holding_waiting)
 
