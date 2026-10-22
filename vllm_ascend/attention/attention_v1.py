@@ -347,11 +347,21 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         block_table = common_attn_metadata.block_table_tensor
 
         # TODO: This will be moved to propose and deleted after fia ops fixed.
-        seq_lens = _select_seq_lens(
-            common_attn_metadata,
-            kv_cache_spec=self.kv_cache_spec,
-            speculative_config=self.speculative_config,
-            vllm_config=self.vllm_config,
+        device_read = getattr(common_attn_metadata, "_draft_window_device_read", None)
+        if device_read is not None:
+            from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead
+
+            if not isinstance(device_read, DenseDraftRead):
+                device_read = None
+        seq_lens = (
+            device_read.capacity_cpu(common_attn_metadata)
+            if device_read is not None
+            else _select_seq_lens(
+                common_attn_metadata,
+                kv_cache_spec=self.kv_cache_spec,
+                speculative_config=self.speculative_config,
+                vllm_config=self.vllm_config,
+            )
         )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
@@ -466,6 +476,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
+        if device_read is not None:
+            # Only the dedicated eager reader consumes these capacity lengths.
+            # Device exact lengths/mask remain separately owned by the proposal.
+            attn_metadata._draft_window_device_read = device_read
         return attn_metadata
 
     def _finalize_pcp_metadata(
@@ -1293,6 +1307,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         with attention_transfer_window():
             num_tokens = query.shape[0]
+
+            device_read = getattr(attn_metadata, "_draft_window_device_read", None)
+            if device_read is not None:
+                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead
+
+                if not isinstance(device_read, DenseDraftRead):
+                    device_read = None
+            if device_read is not None:
+                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import dense_draft_attention
+
+                if _EXTRA_CTX.capturing:
+                    raise RuntimeError("Device exact Draft reads require eager execution")
+                result = dense_draft_attention(
+                    device_read,
+                    query.reshape(-1, self.num_heads, self.head_size),
+                    self.key_cache,
+                    self.value_cache,
+                    self.scale,
+                )
+                real_tokens = device_read.num_reqs * device_read.query_width
+                output[:real_tokens] = result.reshape(real_tokens, *output.shape[1:])
+                output[real_tokens:] = 0
+                return output
 
             if (
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly

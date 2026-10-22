@@ -311,3 +311,33 @@ context regressions, and separately compare candidate OFF to the clean base.
 - MRV2 policy and integration: `vllm_ascend/worker/v2/spec_decode/`
 - MRV2 source/math/ownership: `draft_window_read.py`, `draft_window_plan.py`, `draft_window_lifetime.py`
 - MRV2 builder seam: `vllm_ascend/worker/v2/attn_utils.py`
+## Parallel GQA device exact reader (candidate)
+
+For ordinary contiguous FP16/BF16 GQA caches, DFlash and DSpark can prepare
+the read set from the current device exact lengths. The owned read contains
+physical token indices and a device exact attention mask. Each layer gathers
+only valid tokens into private KV scratch; padding repeats the last valid
+token and is masked. Host native lengths describe scratch capacity, explicitly
+separate from device exact lengths. Capacity never selects the window start.
+Directly masking an unwritten paged-cache tail is unsafe: NaNs in that tail
+can contaminate the result despite zero attention weights.
+
+This path requires uniform parallel query width, ordinary unquantized cache
+layout, and scheduling uppers covered by initialized Full block-table columns.
+The preparation contract supplies current-generation `0 < E <= U`; the CPU
+upper checks address capacity for that contract, without reconstructing E.
+Continuing prefill, ragged queries and other consumers retain the existing
+exact path. This preserves Window semantics rather than forcing Window OFF.
+Eagle3, MLA, DSA and SFA exact-path synchronization remains separate work.
+
+The GQA builder carries a typed device read only on enabled proposals. Its
+capacity CPU fields are consumed exclusively by the dedicated eager reader;
+the original Full write slots, absolute positions and canonical cache stay
+unchanged. Every per-layer scratch is retained by the proposal owner through
+its completion boundary. OFF, Target metadata and dummy/profile paths create
+no device read; Target Graph remains compatible with Draft eager execution.
+Device-to-device gathering adds traffic and storage; actual
+engine correctness, reader completion and performance must be measured before
+declaring this candidate accepted. In the installed torch_npu version,
+`torch._assert_async` itself synchronizes through a scalar copy and is not
+used to validate device lengths in this path.

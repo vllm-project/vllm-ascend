@@ -76,6 +76,7 @@ class DraftWindowRuntime:
         self.dsa_layer_names: tuple[str, ...] = ()
         self.dsa_native_windows: dict[int, int] = {}
         self._dsa_builders = None
+        self._dense_device_reads = False
         self.gids = self._validate_route(speculator)
         if self.dsa_native_windows:
             from vllm_ascend.worker.v2.spec_decode.draft_window_dsa import DSABuilderOwners
@@ -123,6 +124,22 @@ class DraftWindowRuntime:
         # padding and Full write coordinates; actual CP builders are excluded
         # by the provider inventory rather than a target-global CP switch.
         routes = require_direct_prefix_routes(speculator)
+        if self.method in ("dflash", "dspark") and all(
+            route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes
+        ):
+            from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+            specs = [speculator.kv_cache_config.kv_cache_groups[route.gid].kv_cache_spec for route in routes]
+            specs = [item for spec in specs for item in getattr(spec, "kv_cache_specs", {"": spec}).values()]
+            context = config.compilation_config.static_forward_context
+            implementations = [getattr(context.get(name), "impl", None) for route in routes for name in route.layers]
+            self._dense_device_reads = all(spec.dtype in (torch.float16, torch.bfloat16) for spec in specs) and all(
+                type(impl) is AscendAttentionBackendImpl
+                and not impl.use_bnsd_kv_cache
+                and impl.sinks is None
+                and impl.sliding_window is None
+                for impl in implementations
+            )
         self.mla_layer_names = tuple(
             name for route in routes if route.status is DraftWindowProviderStatus.DIRECT_MLA for name in route.layers
         )
@@ -183,6 +200,94 @@ class DraftWindowRuntime:
                 self._proposal_mapping = None
 
     def metadata_callback(
+        self,
+        step: int,
+        num_reqs: int,
+        *,
+        prepared_exact_cpu: torch.Tensor | None = None,
+        prepared_exact_device: torch.Tensor | None = None,
+    ):
+        legacy = self._host_metadata_callback(
+            step,
+            num_reqs,
+            prepared_exact_cpu=prepared_exact_cpu,
+            prepared_exact_device=prepared_exact_device,
+        )
+        if (
+            legacy is not None
+            and getattr(self, "_dense_device_reads", False)
+            and not continuing_prefill_rows(self._input_batch, num_reqs).any()
+        ):
+            return self._dense_metadata_callback(num_reqs, legacy)
+        return legacy
+
+    def _dense_metadata_callback(self, num_reqs: int, legacy):
+        from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
+
+        owner = self._owner
+        seen = set()
+        mapping = None
+        full_exact = None
+        use_device = None
+        sources = None
+
+        def apply(gid: int, common: Any) -> None:
+            nonlocal mapping, full_exact, use_device, sources
+            if gid not in self.gids:
+                return
+            if self._owner is not owner or gid in seen:
+                raise RuntimeError("Dense Draft callback is stale or its group was already projected")
+            batch = self._input_batch
+            current = (tuple(batch.req_ids), tuple(int(row) for row in batch.idx_mapping_np[:num_reqs]))
+            if batch.num_reqs != num_reqs or len(current[0]) != num_reqs:
+                raise ValueError("Dense Draft request mapping does not match its preparation")
+            if use_device is None:
+                mapping = current
+                full_exact = common.seq_lens
+                rows = batch.idx_mapping_np[:num_reqs]
+                sources = {
+                    group: DirectPrefixSource.from_block_tables(self.speculator.block_tables, group, rows)
+                    for group in self.gids
+                }
+                upper = common.seq_lens_cpu_upper_bound[:num_reqs]
+                widths = common.query_start_loc_cpu[: num_reqs + 1].diff()
+                # Keep the existing exact path when scheduling bounds do not
+                # prove allocated address capacity, or query widths are ragged.
+                use_device = bool((widths == self.speculator.num_query_per_req).all()) and all(
+                    all(
+                        0 < int(bound) <= count * source.block_span for bound, count in zip(upper, source.valid_columns)
+                    )
+                    for source in sources.values()
+                )
+            if not use_device:
+                legacy(gid, common)
+                return
+            if current != mapping or (self._proposal_mapping is not None and self._proposal_mapping != mapping):
+                raise RuntimeError("Dense Draft request mapping changed within a proposal")
+            if common.seq_lens.data_ptr() != full_exact.data_ptr():
+                raise ValueError("Dense Draft groups must share current preparation lengths")
+            self._proposal_mapping = mapping
+            retain = lambda *objects: self.pool.retain(owner, *objects)
+            read = prepare_dense_draft_read(
+                sources[gid],
+                exact_device=common.seq_lens,
+                row_indices=batch.idx_mapping[:num_reqs],
+                upper_cpu=common.seq_lens_cpu_upper_bound[:num_reqs],
+                window_size=self.window_size,
+                anchor_span=self.anchor_block_span,
+                query_width=self.speculator.num_query_per_req,
+                causal=common.causal,
+                retain=retain,
+            )
+            retain(common)
+            read.apply(common)
+            seen.add(gid)
+            if len(seen) == len(self.gids):
+                self._build_count += 1
+
+        return apply
+
+    def _host_metadata_callback(
         self,
         step: int,
         num_reqs: int,

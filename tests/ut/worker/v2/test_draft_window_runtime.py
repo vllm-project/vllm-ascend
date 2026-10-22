@@ -569,3 +569,35 @@ def test_prepared_exact_pair_keeps_owner_and_step_guards(setup):
         callback(0, common())
     with pytest.raises(RuntimeError, match="stale proposal"), runtime.proposal_context(spec, batch()):
         callback(0, common())
+
+
+@pytest.mark.parametrize("upper", [(21, 30), (33, 33)])
+def test_dense_device_callback_or_exact_fallback_keeps_the_same_window(setup, upper):
+    runtime, spec, canonical, completions = setup
+    runtime._dense_device_reads = True
+    current_batch = batch(computed=(16, 24))
+    current_batch.idx_mapping = torch.tensor(current_batch.idx_mapping_np)
+    metadata = common(exact=(20, 27), upper=upper)
+    metadata.query_start_loc_cpu = metadata.query_start_loc.clone()
+    metadata.causal = False
+    full_table, slots, positions = metadata.block_table_tensor, metadata.slot_mapping, metadata.positions
+    original = canonical.clone()
+    with runtime.proposal_context(spec, current_batch):
+        callback = runtime.metadata_callback(3, 2)
+        callback(0, metadata)
+        runtime.retain_metadata(metadata)
+        assert metadata.seq_lens.tolist() == [8, 11, 0]
+        if max(upper) <= 32:
+            read = metadata._draft_window_device_read
+            assert read.starts.tolist() == [12, 16]
+            assert metadata.seq_lens_cpu is None
+            assert metadata.block_table_tensor is full_table
+            assert any(value is read for value in runtime._owner.retained)
+        else:
+            assert not hasattr(metadata, "_draft_window_device_read")
+            assert metadata.seq_lens_cpu.tolist() == [8, 11, 0]
+        assert metadata.slot_mapping is slots and metadata.positions is positions
+    torch.testing.assert_close(canonical, original, rtol=0, atol=0)
+    assert len(completions) == 1
+    with pytest.raises(RuntimeError, match="stale"):
+        callback(0, common())
