@@ -249,6 +249,10 @@ a3-560t:
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: spec-decode-refactor-parity
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/feature/test_spec_decode_refactor_parity.py
+        testcase_timeout: 1200
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
         tests: tests/e2e/cases/features/kv_pool/test_qwen3_30b_acc.py
