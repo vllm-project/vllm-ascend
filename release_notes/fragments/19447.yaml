@@ -1,0 +1,7 @@
+pr: 19447
+entries:
+  - category: performance
+    text: >-
+      Block-FP8 linear weights on Ascend 950 are converted to MXFP8 in row chunks,
+      avoiding a full model-dtype intermediate for large weight matrices.
+    hardware: [A5]
