@@ -271,7 +271,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```
@@ -949,7 +949,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":true,"fuse_norm_quant":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -1649,7 +1649,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
       --enforce-eager \
       --enable-chunked-prefill \
       --enable-prefix-caching \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":true,"fuse_norm_quant":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --kv-transfer-config \
       '{
           "kv_connector":"MultiConnector",
@@ -2135,7 +2135,6 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
             --additional-config '{
                 "enable_cpu_binding": true,
                 "ascend_compilation_config": {
-                    "fuse_qknorm_rope": false,
                     "fuse_norm_quant": false,
                     "enable_static_kernel": false
                 },
@@ -2185,7 +2184,6 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
             --additional-config '{
                 "enable_cpu_binding": true,
                 "ascend_compilation_config": {
-                    "fuse_qknorm_rope": false,
                     "fuse_norm_quant": false,
                     "enable_static_kernel": false
                 },
