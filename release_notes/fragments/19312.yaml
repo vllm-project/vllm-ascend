@@ -1,5 +1,0 @@
-pr: 19312
-entries:
-  - category: performance
-    text: Removed redundant output initialization from GLM-5.3 Flash KDA attention and the active causal-convolution path.
-    model: glm-5.3-flash

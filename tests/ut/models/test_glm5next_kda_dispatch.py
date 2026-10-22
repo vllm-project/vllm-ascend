@@ -180,8 +180,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
-    # Rows outside the scheduled token groups are left untouched.
-    assert torch.isnan(out[:, tokens:]).all()
+    assert torch.count_nonzero(out[:, tokens:]) == 0
     assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
@@ -281,7 +280,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []
-        assert torch.isnan(target).all()
+        assert torch.count_nonzero(target) == 0
         return
     assert calls == [True]
     torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)

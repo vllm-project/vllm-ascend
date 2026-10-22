@@ -1,0 +1,5 @@
+pr: 19408
+entries:
+  - category: performance
+    text: Removed unused output allocation and initialization from the active GLM-5.3 Flash causal-convolution path.
+    model: glm-5.3-flash
