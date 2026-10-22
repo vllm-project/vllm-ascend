@@ -19,12 +19,22 @@ Large bf16 all-reduces (prefill o_proj / MoE combine, typically tens of MiB)
 are bandwidth-bound on HCCS. Quantizing the payload to int8 halves the
 communication volume with a negligible compute cost on the Vector cores.
 
-Scheme (mathematically safe with HCCL wrapping int8 arithmetic):
-  1. per-channel symmetric scale with a world-size headroom:
-        scale[c] = global_amax(channel c) * world_size / 127
-     The headroom guarantees every rank's quantized values stay in
-     [-127/ws, 127/ws], so the element-wise sum over `ws` ranks can never
-     overflow int8 (HCCL int8 reduce wraps modulo 256 instead of saturating).
+Scheme (integer-safe by construction; no clamp kernel is needed):
+  1. per-channel symmetric scale with an exact world-size bound:
+        max_q    = 127 // world_size      (ws=2 -> 63, ws=4 -> 31, ws=8 -> 15)
+        scale[c] = global_amax(channel c) / max_q
+     |x| <= global_amax implies |x / scale| <= max_q, and rounding a value
+     that is already <= max_q can never exceed max_q, so every rank stays
+     within +/-max_q and the element-wise sum over `ws` ranks is bounded by
+     ws * max_q <= 127. The int8 reduce therefore cannot wrap (HCCL wraps
+     modulo 256 instead of saturating) for any input distribution, including
+     the same-sign worst case where every rank holds x == amax on every
+     channel.
+     Note: the headroom form scale = global_amax * ws / 127 does NOT give
+     this guarantee, because round(127/ws) can land above 127/ws (ws=4:
+     round(31.75) == 32, and 4 * 32 == 128 wraps to -128). That is why an
+     extra clamp was previously needed; the exact-bound scale above removes
+     the need for it entirely.
   2. quantize bf16 -> int8, all-reduce in int8 (half payload)
   3. dequantize the reduced sum back to bf16
 
@@ -32,10 +42,26 @@ The per-channel scale needs a tiny fp32 sync (numel == hidden_size, a few KB)
 before the payload all-reduce; it is an order of magnitude cheaper than the
 bandwidth saved on large messages.
 
-Measured on 4x Atlas 910B3 (TP=4, hidden=2048, 16k-token prefill batches):
-  - per-AR latency: ~1.9 ms (bf16) -> ~1.4 ms (int8), including quant/dequant
-  - e2e TTFT: -25%, throughput: +4.5%
-  - accuracy: GPQA-diamond 70.7% vs 69.7% baseline (within noise)
+Measured on 4x Atlas 910B3 (TP=4, hidden=2048, 16k-token prefill -> 64 MiB
+payload per collective, HCCL_OP_EXPANSION_MODE=AIV, HCCL_BUFFSIZE=1024):
+  - per-AR latency: 1.73 ms (bf16) -> 1.21 ms (int8, including the amax sync,
+    quantize, reduce and dequantize) => -30%
+  - e2e (16k in / 64 out, 32 prompts @ 2 qps): output throughput +3.2%,
+    mean TTFT -9%, mean TPOT -25%
+  - accuracy (64 MiB payload vs an exact bf16 reduce): rel-L2 3.9%,
+    cosine 0.9993; no int8 wrap on i.i.d., same-sign correlated or
+    worst-case (all elements == amax) data
+  - the win only materialises for large payloads: the pipeline has a fixed
+    per-call cost of ~0.75 ms, so the break-even payload is ~36 MiB and
+    smaller messages lose (see the min_numel note below)
+
+WARNING: do not bound the int8 payload with torch's clamp family here.
+On Ascend, int8 clamp_/clamp/hardtanh fall back to a very slow path
+(32 MiB int8: 14.2 ms for clamp_ vs 0.056 ms for minimum/maximum, i.e.
+~250x), which turns the -30% win into a +800% regression. This scheme is
+safe without any clamp; if a bound is ever required, use
+torch.minimum(torch.maximum(q, lo_i8), hi_i8) with preallocated int8
+scalars instead.
 
 Enable with VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1.
 
@@ -81,8 +107,8 @@ from vllm_ascend.device.hardware import AscendDeviceType
 # - A3 (910C): npu_quantize/npu_anti_quant support the SoC, but the int8
 #   reduce behavior is not yet measured there; use with care above TP=8.
 _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3)
-# Above this TP size the headroom eats too many bits (ws=16 -> max_q=7,
-# i.e. 3 effective bits) and accuracy degrades; fall back to bf16.
+# Above this TP size the integer-safe bound eats too many bits (ws=16 ->
+# max_q=7, i.e. 3 effective bits) and accuracy degrades; fall back to bf16.
 _MAX_VALID_WORLD_SIZE = 8
 
 
@@ -111,21 +137,20 @@ class QuantizedAllReduce:
                 f"but the current device family is {device_type.name}. "
                 "Unset the environment variable or use a supported device."
             )
-        # Above this TP size the headroom eats too many bits (ws=16 -> max_q=7,
-        # i.e. 3 effective levels) and accuracy degrades; refuse instead of
-        # silently degrading.
+        # Above this TP size the integer-safe bound eats too many bits (ws=16
+        # -> max_q=7, i.e. 3 effective levels) and accuracy degrades; refuse
+        # instead of silently degrading.
         if self.world_size > _MAX_VALID_WORLD_SIZE:
             raise RuntimeError(
                 f"VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1 supports TP size up to "
-                f"{_MAX_VALID_WORLD_SIZE} (the integer-safe headroom leaves "
+                f"{_MAX_VALID_WORLD_SIZE} (the integer-safe bound leaves "
                 f"too few int8 levels beyond that), but the current TP size "
                 f"is {self.world_size}."
             )
-        # Integer-safe per-rank bound. Rounding can push |q| above 127/ws
-        # (e.g. x == amax on every rank with ws=4: round(31.75) == 32, and
-        # 4 * 32 == 128 overflows int8, wrapping to -128). Clamping to
-        # +/-floor(127/ws) guarantees ws * max_q <= 127 for any input:
-        # ws=2 -> 126, ws=4 -> 124, ws=8 -> 120, ws=16 -> 112.
+        # Integer-safe per-rank bound. With scale = global_amax / max_q every
+        # rank's quantized magnitude is <= max_q, so the reduced sum is at
+        # most ws * max_q <= 127 and int8 cannot wrap: no clamp is needed.
+        # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size
         # Messages smaller than this stay on the bf16 path: they are
         # latency-bound, and the extra scale sync would cost more than the
@@ -149,13 +174,16 @@ class QuantizedAllReduce:
         # 1. per-channel global amax (tiny fp32 all-reduce, [C] elements).
         amax = flat.abs().amax(dim=0).float()
         dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=self.group)
-        scale = (amax * (self.world_size / 127.0)).clamp_min(1e-8)
+        # Exact-bound scale: |x| <= amax => |x/scale| <= max_q, and rounding
+        # never exceeds max_q, so ws * max_q <= 127 and no clamp is needed.
+        scale = (amax / float(self.max_q)).clamp_min(1e-8)
 
-        # 2. symmetric int8 quantization, then clamp to the integer-safe
-        # bound so the reduced sum cannot wrap, whatever the input
-        # distribution (same-sign worst case included).
+        # 2. symmetric int8 quantization, then the int8 payload all-reduce.
+        # Do NOT add a clamp here: int8 clamp_/clamp/hardtanh are ~250x
+        # slower than minimum/maximum on Ascend and would dominate this
+        # pipeline (see the module docstring). The scale above already
+        # guarantees the reduced sum cannot overflow int8.
         q = torch_npu.npu_quantize(flat, scale, None, torch.int8, 1, True)
-        q.clamp_(-self.max_q, self.max_q)
         dist.all_reduce(q, group=self.group)
 
         # 3. dequantize back to the original dtype/shape, in place, to keep

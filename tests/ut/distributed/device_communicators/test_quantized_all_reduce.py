@@ -15,10 +15,16 @@
 # This file is a part of the vllm-ascend project.
 """Unit tests for the quantized all-reduce wrapper (mocked, no NPU needed).
 
-Includes the same-sign maximum-value overflow regression reported in review:
-with ws=4 and all ranks holding x == amax, round(1/scale) == 32 and an
-unclamped 4-rank sum is 128, which overflows int8 (HCCL wraps modulo 256).
-The clamp to +/-floor(127/ws) makes the worst-case sum ws*max_q <= 127.
+Covers the same-sign maximum-value overflow regression reported in review:
+with ws=4 and all ranks holding x == amax, the headroom scale
+(global_amax * ws / 127) makes round(1/scale) == 32 and an unclamped 4-rank
+sum is 128, which overflows int8 (HCCL wraps modulo 256).
+
+The wrapper must therefore use the exact-bound scale
+global_amax / (127 // ws) instead: |x/scale| <= max_q by construction, so
+rounding can never exceed max_q and ws * max_q <= 127 holds for any input.
+This needs no clamp kernel at all (int8 clamp_/clamp/hardtanh are ~250x
+slower than minimum/maximum on Ascend).
 """
 
 import os
@@ -117,30 +123,25 @@ class TestQuantizedAllReduce(unittest.TestCase):
             second_call = mock_ar.call_args_list[1]
             self.assertEqual(second_call.args[0].dtype, torch.int8)
 
-    def test_clamp_bounds_quantized_values(self):
+    def test_exact_bound_scale_never_wraps(self):
         """Same-sign worst case: every element equals the per-channel amax.
 
-        With ws=4, scale = amax * 4/127 so x/scale == 31.75 and npu_quantize
-        rounds to 32. Without the clamp the 4-rank sum is 128 which overflows
-        int8. The clamp must bound every rank at max_q=31 (sum=124 <= 127).
+        With scale = amax / max_q and max_q = 127 // ws, x == amax quantizes
+        to exactly max_q on every rank, so the reduced sum is ws * max_q:
+        ws=2 -> 126, ws=4 -> 124, ws=8 -> 120. All <= 127, no clamp needed.
         """
         for ws in (2, 4, 8):
             wrapper = _make(world_size=ws)
             amax = torch.ones(8, dtype=torch.float32)
-            scale = amax * (ws / 127.0)
+            scale = (amax / float(wrapper.max_q)).clamp_min(1e-8)
             x = torch.ones(ws, 8, dtype=torch.bfloat16) * amax[0]
             q = (x.float() / scale).round().to(torch.int8)
-            # rounding always exceeds the integer-safe bound (ws=2: 63.5->64,
-            # ws=4: 31.75->32, ws=8: 15.875->16), hence the clamp is required
-            self.assertGreater(q.abs().max().item(), wrapper.max_q)
-            q.clamp_(-wrapper.max_q, wrapper.max_q)
             self.assertLessEqual(q.abs().max().item(), wrapper.max_q)
-            # x has 4 rows simulating 4 ranks; the reduced sum is per position
             total = q.sum(dim=0).abs().max().item()
             self.assertLessEqual(total, 127)
 
-    def test_clamp_applied_in_wrapper_path(self):
-        """The wrapper must clamp the int8 payload before the all-reduce."""
+    def test_wrapper_uses_exact_bound_scale_and_does_not_clamp(self):
+        """The wrapper must use scale = amax / max_q and skip the clamp."""
         wrapper = _make(min_numel=8)
         x = torch.full((4, 8), 1.0, dtype=torch.bfloat16)  # x == amax
         captured = {}
@@ -148,16 +149,23 @@ class TestQuantizedAllReduce(unittest.TestCase):
         def fake_ar(t, group=None, op=None):
             captured.setdefault("payload", []).append(t.clone())
 
+        q_fake = torch.full((4, 8), wrapper.max_q, dtype=torch.int8)
         with patch("torch.distributed.all_reduce", side_effect=fake_ar), patch(
-            "torch_npu.npu_quantize",
-            return_value=torch.full((4, 8), 32, dtype=torch.int8),
-        ), patch(
+            "torch_npu.npu_quantize", return_value=q_fake
+        ) as mock_q, patch(
             "torch_npu.npu_anti_quant",
             return_value=torch.randn_like(x),
         ) as mock_aq:
             wrapper.all_reduce(x)
-        payload = captured["payload"][1]  # [0]=amax fp32, [1]=int8 payload
-        self.assertEqual(payload.abs().max().item(), wrapper.max_q)
+        # scale handed to npu_quantize must be global_amax / max_q = 1 / 31
+        scale = mock_q.call_args.args[1]
+        self.assertTrue(
+            torch.allclose(scale, torch.full_like(scale, 1.0 / wrapper.max_q))
+        )
+        # [0] = amax fp32 sync, [1] = int8 payload; payload is exactly what
+        # npu_quantize produced, i.e. nothing clamped it afterwards
+        payload = captured["payload"][1]
+        self.assertTrue(torch.equal(payload, q_fake))
         mock_aq.assert_called_once()
 
 
