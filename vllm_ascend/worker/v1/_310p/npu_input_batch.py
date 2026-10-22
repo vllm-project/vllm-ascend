@@ -2,8 +2,8 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.sample.logits_processor import LogitsProcessors
 
-from vllm_ascend._310p.block_table import MultiGroupBlockTable
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.v1._310p.block_table import MultiGroupBlockTable
 
 
 class NPUInputBatch310(NPUInputBatch):
