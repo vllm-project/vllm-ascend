@@ -1,4 +1,4 @@
-model_name: "microsoft/Phi-4-mini-instruct"
+model_name: "LLM-Research/Phi-4-mini-instruct"
 model_type: "vllm"
 hardware: "Atlas A2 Series"
 
