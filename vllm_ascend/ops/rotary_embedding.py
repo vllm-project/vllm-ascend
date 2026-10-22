@@ -103,6 +103,12 @@ def get_cos_and_sin_mla(positions, use_cache=False):
     # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
     if _cos_mla is not None and _cos_mla.shape[-1] == 0:
         return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
+    # Layout dispatch, not a fast/slow fallback: the two registration paths
+    # produce mutually exclusive cache layouts. The flat base only exists for
+    # interleaved registration (row 2i / 2i+1 addressing); contiguous
+    # registration has no interleaved base, and its per-half tables are
+    # already contiguous. Each branch is the optimal gather for its own
+    # layout, so neither can be dropped.
     if _cos_sin_flat is not None:
         # Interleaved registration (AscendRotaryEmbedding, MLA/SFA models):
         # gather from the contiguous flat view of the interleaved base, where
