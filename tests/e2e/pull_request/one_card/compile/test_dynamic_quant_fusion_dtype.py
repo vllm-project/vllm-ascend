@@ -14,7 +14,7 @@ from vllm_ascend.compilation.passes.norm_quant_fusion_pass import (
     AddRMSNormDynamicQuantPattern,
     AddRMSNormDynamicQuantPatternWithBias,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 
 try:
     import npugraph_ex as nge
@@ -32,7 +32,8 @@ except ImportError:
 @pytest.mark.parametrize("use_bias", [False, True])
 def test_dynamic_quant_fusion_preserves_dtype(dtype, quant_kind, eps, use_bias):
     quant_dtype = torch.float8_e4m3fn if quant_kind == "fp8" else torch.int8
-    if quant_dtype == torch.float8_e4m3fn and get_ascend_device_type() != AscendDeviceType.A5:
+    profile = get_current_hardware_profile()
+    if quant_dtype == torch.float8_e4m3fn and profile.device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
         pytest.skip("FP8 dynamic quantization is unsupported on this NPU")
     if use_bias and not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
         pytest.skip("The custom add-RMSNorm-bias operator is unavailable")
