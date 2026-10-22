@@ -1,0 +1,6 @@
+pr: 19457
+entries:
+  - category: bugfix
+    text: Fixed GLM-5.3-Flash startup failures with Model Runner V1 caused by discounting the shared KV cache pool budget, allowing supported 1M-context configurations to retain their usable cache capacity.
+    model: glm-5.3-flash
+    hardware: [A3]
