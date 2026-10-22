@@ -11,12 +11,13 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu as cpu_npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu as npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
@@ -318,3 +319,62 @@ def test_split_attention_cache_is_zero_copy(
     assert all(ref.mapping is None for ref in canonical.group_data_refs[0])
     assert canonical.tensors[0].tensor.data_ptr() == key.data_ptr()
     assert canonical.tensors[1].tensor.data_ptr() == value.data_ptr()
+
+
+def test_shared_physical_pages_round_trip_all_components_and_padding(monkeypatch):
+    page_bytes, blocks = 64, 3
+    spec = AscendMLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        tokens_per_state=2,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        page_size_padded=page_bytes,
+        indexes_kv_by_block_stride=True,
+    )
+    state_spec = MambaSpec(
+        block_size=8, shapes=((2, 2), (2,)), dtypes=(torch.float32, torch.float32), page_size_padded=page_bytes
+    )
+    raw = torch.arange(page_bytes * blocks + 8, dtype=torch.int32).to(torch.int8)
+    key = raw.as_strided((blocks * 2, 2, 1, 4), (32, 4, 4, 1), 8)
+    scale = raw.view(torch.float32).as_strided((blocks * 2, 2, 1, 1), (8, 1, 1, 1), 4)
+    states = [
+        raw.view(torch.float32).as_strided((blocks, 2, 2), (16, 2, 1), 2),
+        raw.view(torch.float32).as_strided((blocks, 2), (16, 1), 6),
+    ]
+    worker, captured = _make_layout_worker(
+        SimpleNamespace(
+            num_blocks=blocks,
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["attention"], kv_cache_spec=spec),
+                SimpleNamespace(layer_names=["state"], kv_cache_spec=state_spec),
+            ],
+            kv_cache_tensors=[],
+        ),
+        monkeypatch,
+    )
+    worker.register_kv_caches({"attention": (key, scale), "state": states})
+    canonical = captured[0]
+    assert len(canonical.tensors) == 1
+    view = canonical.tensors[0].tensor
+    assert view.data_ptr() == key.data_ptr() and view.shape == (blocks, page_bytes)
+    assert all(refs[0].page_size_bytes == page_bytes for refs in canonical.group_data_refs)
+    original = raw.clone()
+    saved = view[[2, 0]].clone()
+    view[0].zero_()
+    view[2].zero_()
+    view[2].copy_(saved[0])
+    view[0].copy_(saved[1])
+    torch.testing.assert_close(raw, original, rtol=0, atol=0)
+
+
+def test_physical_page_contract_rejects_unrelated_component_storage():
+    with pytest.raises(ValueError, match="backing storage"):
+        connector_mod._canonicalize_split_cache(
+            (torch.empty(3, 8)[:, :4], torch.empty(3, 8)[:, :4]),
+            3,
+            32,
+            page_size_bytes=32,
+        )

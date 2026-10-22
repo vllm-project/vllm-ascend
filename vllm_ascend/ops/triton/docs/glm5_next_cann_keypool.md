@@ -8,7 +8,7 @@
 - **Algorithm flow**:
     1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. DSA-CP also builds rank-local cumulative query ends, visible pool counts and tail lengths in the same launch. Completed pools retain their compact output row even when their cache slot is evicted.
     2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
-    3. The shared `pool_key_indexer_nonempty` adapter appends one sentinel request and clamps empty pooled histories before CANN selection. FP8 query descales receive a matching unit-scale sentinel; key descales and quantization mode are forwarded unchanged. The adapter discards only the trailing sentinel output.
+    3. The shared `pool_key_indexer_nonempty` adapter prepares query quantization and native arguments, appends one sentinel request and clamps empty pooled histories before CANN selection. FP8 query descales receive a unit-scale sentinel; key descales remain unchanged. The adapter discards only the trailing sentinel output.
     4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
 

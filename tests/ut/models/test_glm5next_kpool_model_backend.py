@@ -169,6 +169,53 @@ def test_kpool_backend_rejects_context_parallelism(pcp_size: int, dcp_size: int)
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 
+def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch):
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=1,
+        head_dim=128,
+        topk_tokens=2048,
+        q_lora_rank=128,
+        index_kpool=4,
+        wq_b=nn.Identity(),
+        wk_weights_proj=nn.Identity(),
+        k_norm=nn.Identity(),
+        softmax_scale=1.0,
+        index_kpool_compress_ape=torch.zeros(4, 128),
+        index_kpool_compress_gate=torch.zeros(128, 128),
+        k_cache=SimpleNamespace(dtype=torch.float8_e4m3fn),
+        tail_cache=SimpleNamespace(),
+        topk_indices_buffer=None,
+    )
+    hardware = SimpleNamespace(
+        attention_backend_family=backend_module.AttentionBackendFamily.STANDARD, supports=MagicMock(return_value=False)
+    )
+    monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
+    init = MagicMock()
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
+    with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
+        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
+    init.assert_not_called()
+
+
+def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
+    key = torch.empty(2, 4, 1, 128, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 4, 1, 1)
+    layer = SimpleNamespace(prefix="indexer.cache", kv_cache=[(), (key, scale)])
+    monkeypatch.setattr(backend_module, "get_forward_context", lambda: SimpleNamespace(virtual_engine=1))
+    caches = Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    assert caches[0] is key and caches[1] is scale
+    layer.kv_cache[1] = (key,)
+    with pytest.raises(TypeError, match="one scale tensor"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    layer.kv_cache = []
+    with pytest.raises(IndexError, match="virtual engine"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
+
+
 @pytest.mark.parametrize("compute_topk", [False, True])
 def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute_topk):
     compress = MagicMock()
@@ -400,9 +447,6 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     state = torch.empty(5, 4, 4)
     query_rows = 4 if dsa_cp else 8
     packed = torch.empty(query_rows, 1, 7, dtype=torch.int32)
-    op._quantize_keypool_query = MagicMock(
-        return_value=(torch.empty(query_rows, 1, 2, dtype=torch.float8_e4m3fn), torch.ones(query_rows, 1))
-    )
     calls = MagicMock()
     for name, result in (
         ("prepare_keypool_state", state),
@@ -479,10 +523,11 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert op._pack_keypool_indices.call_args.args[1] is query_metadata
         assert op._pack_keypool_indices.call_args.args[0].shape[0] == query_rows
         if quantized:
-            assert op._quantize_keypool_query.call_args.args[0].shape == (query_rows, 1, 2)
-            assert op._pool_key_indexer.call_args.kwargs["quant_mode"] == 0
-            assert op._pool_key_indexer.call_args.kwargs["q_descale"] is op._quantize_keypool_query.return_value[1]
             assert op._pool_key_indexer.call_args.kwargs["k_descale"].data_ptr() == scale_cache.data_ptr()
+        else:
+            assert op._pool_key_indexer.call_args.kwargs["k_descale"] is None
+        assert op._pool_key_indexer.call_args.args[0].shape == (query_rows, 1, 2)
+        assert op._pool_key_indexer.call_args.args[0].dtype == torch.bfloat16
     else:
         assert result is None
         op._pool_key_indexer.assert_not_called()

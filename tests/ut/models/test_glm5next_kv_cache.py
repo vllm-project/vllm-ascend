@@ -263,12 +263,9 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype):
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     cache_config = SimpleNamespace(block_size=256)
-    with (
-        patch("vllm_ascend.models.glm5next.kv_cache.get_current_hardware_profile"),
-        patch(
-            "vllm_ascend.models.glm5next.kv_cache.get_current_vllm_config",
-            return_value=current_config,
-        ),
+    with patch(
+        "vllm_ascend.models.glm5next.kv_cache.get_current_vllm_config",
+        return_value=current_config,
     ):
         indexer = Glm5NextIndexerCache(
             head_dim=128,
@@ -312,15 +309,11 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype):
     }
 
 
-def test_fp8_indexer_cache_rejects_unsupported_hardware():
-    profile = SimpleNamespace(supports=lambda _capability: False)
-    with (
-        patch("vllm_ascend.models.glm5next.kv_cache.get_current_hardware_profile", return_value=profile),
-        pytest.raises(NotImplementedError, match="Ascend A5"),
-    ):
+def test_indexer_cache_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="BF16 or FP8"):
         Glm5NextIndexerCache(
             head_dim=128,
-            dtype=torch.float8_e4m3fn,
+            dtype=torch.float16,
             cache_role="indexer",
             cache_config=SimpleNamespace(block_size=128),
             prefix="indexer.k_cache",

@@ -157,12 +157,13 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
 @pytest.mark.parametrize("quantized", [False, True])
 def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monkeypatch, quantized):
     tokens, heads, dim = 3, 2, 4
-    query = torch.zeros(tokens, heads, dim, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)
+    query = torch.zeros(tokens, heads, dim, dtype=torch.bfloat16)
+    quantized_query = torch.zeros_like(query, dtype=torch.float8_e4m3fn)
     weights = torch.ones(tokens, heads, dtype=torch.bfloat16)
     ends, lengths, tails = torch.tensor([0, 2]), torch.tensor([0, 1]), torch.tensor([0, 2])
     table = torch.zeros(2, 1, dtype=torch.int32)
     padded = (
-        torch.zeros(tokens + 1, heads, dim, dtype=query.dtype),
+        torch.zeros(tokens + 1, heads, dim, dtype=quantized_query.dtype if quantized else query.dtype),
         torch.zeros(tokens + 1, heads, dtype=weights.dtype),
         torch.tensor([0, 2, tokens + 1]),
         torch.tensor([1, 1, 1]),
@@ -174,9 +175,11 @@ def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monke
     native_indices = torch.arange((tokens + 1) * 7, dtype=torch.int32).view(tokens + 1, 7)
     native = MagicMock(return_value=(native_indices, None))
     q_descale = torch.arange(1, tokens * heads * 2 + 1, dtype=torch.float32).view(tokens, heads * 2)[:, ::2]
+    q_descale[0].zero_()
+    quantize = MagicMock(return_value=(quantized_query, q_descale))
+    monkeypatch.setattr(cann_keypool.torch_npu, "npu_dynamic_quant", quantize, raising=False)
     k_descale = torch.ones(2, 4, 1)
-    cache = torch.empty(2, 4, 1, dim, dtype=query.dtype)
-    kwargs = dict(q_descale=q_descale, k_descale=k_descale, quant_mode=0) if quantized else {}
+    cache = torch.empty(2, 4, 1, dim, dtype=quantized_query.dtype if quantized else query.dtype)
 
     with pytest.MonkeyPatch.context() as sync_guard:
         sync_guard.setattr(torch.Tensor, "item", MagicMock(side_effect=AssertionError("unexpected synchronization")))
@@ -191,10 +194,10 @@ def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monke
             block_table=table,
             topk=4,
             pool_size=4,
-            **kwargs,
+            k_descale=k_descale if quantized else None,
         )
 
-    prepare.assert_called_once_with(query, weights, ends, lengths, tails, table)
+    prepare.assert_called_once_with(quantized_query if quantized else query, weights, ends, lengths, tails, table)
     assert native.call_count == 1
     assert native.call_args.args == (padded[0], cache, padded[1], padded[4])
     assert native.call_args.kwargs["actual_seq_q"] is padded[2]
@@ -203,11 +206,14 @@ def test_shared_nonempty_indexer_preserves_fp8_scales_and_real_output_rows(monke
     torch.testing.assert_close(indices, native_indices[:tokens])
     assert indices.data_ptr() == native_indices.data_ptr()
     if quantized:
+        quantize.assert_called_once_with(query, dst_type=torch.float8_e4m3fn)
         scales = native.call_args.kwargs["q_descale"]
         torch.testing.assert_close(scales[:tokens], q_descale)
+        torch.testing.assert_close(scales[0], torch.ones(heads))
         torch.testing.assert_close(scales[-1], torch.ones(heads))
         assert scales.shape == (tokens + 1, heads)
         assert native.call_args.kwargs["k_descale"] is k_descale
         assert native.call_args.kwargs["quant_mode"] == 0
     else:
+        quantize.assert_not_called()
         assert not {"q_descale", "k_descale", "quant_mode"} & native.call_args.kwargs.keys()

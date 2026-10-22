@@ -54,9 +54,7 @@ def pool_key_indexer_nonempty(
     layout_q="TND",
     layout_k="PA_BBND",
     mask_mode=3,
-    q_descale=None,
     k_descale=None,
-    quant_mode=0,
 ):
     """Keep CANN's TND indexer out of its unsafe zero-work paths.
 
@@ -69,19 +67,18 @@ def pool_key_indexer_nonempty(
     """
     if layout_q != "TND" or layout_k != "PA_BBND" or mask_mode != 3:
         raise ValueError("The KPool empty-work adapter requires causal TND/PA_BBND inputs.")
-    if (q_descale is None) != (k_descale is None):
-        raise ValueError("FP8 KPool indexing requires both query and key descales.")
+    if (pool_key.dtype == torch.float8_e4m3fn) != (k_descale is not None):
+        raise ValueError("FP8 KPool indexing requires key descales; BF16 indexing must not provide them.")
     quant_kwargs = {}
-    if q_descale is not None:
-        if q_descale.shape != query.shape[:2]:
-            raise ValueError("FP8 query descales must match the token and head dimensions.")
+    if k_descale is not None:
+        query, q_descale = quantize_keypool_query(query)
         # The trailing zero query has a unit scale; real query scales stay unchanged.
-        quant_kwargs = dict(
-            q_descale=F.pad(q_descale, (0, 0, 0, 1), value=1.0), k_descale=k_descale, quant_mode=quant_mode
-        )
+        quant_kwargs = dict(q_descale=F.pad(q_descale, (0, 0, 0, 1), value=1.0), k_descale=k_descale, quant_mode=0)
+    else:
+        query = query.to(pool_key.dtype)
     tokens = query.shape[0]
     query_padded, weights_padded, query_ends, key_lengths, tails, tables = prepare_nonempty_keypool_inputs(
-        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table
+        query, weights.to(torch.bfloat16), actual_seq_q, actual_seq_k, pool_tail_k, block_table
     )
     indices, values = op(
         query_padded,

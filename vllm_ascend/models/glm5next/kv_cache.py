@@ -19,7 +19,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
@@ -91,10 +90,9 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"and {compress_ratio}."
             )
         self.head_dim = head_dim
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"GLM KPool cache requires BF16 or FP8, got {dtype}.")
         self.dtype = dtype
-        if dtype == torch.float8_e4m3fn:
-            if not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_FP8):
-                raise NotImplementedError("GLM KPool FP8 LI requires CANN PoolKeyIndexer FP8 support on Ascend A5.")
         self.cache_role = cache_role
         self.cache_config = cache_config
         self.compress_ratio = compress_ratio

@@ -314,15 +314,11 @@ def test_cann_selection_replays_empty_short_and_live_requests(dtype):
     key_scales = torch.ones((2, 32, 1), device="npu") if dtype == torch.float8_e4m3fn else None
 
     def run():
-        from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty, quantize_keypool_query
+        from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
 
-        values, kwargs = query, {}
-        if key_scales is not None:
-            values, scales = quantize_keypool_query(values)
-            kwargs = dict(q_descale=scales, k_descale=key_scales, quant_mode=0)
         indices, _ = pool_key_indexer_nonempty(
             torch.ops.cann_ops_transformer.pool_key_indexer,
-            values,
+            query,
             cache,
             weights,
             metadata.pool_tail,
@@ -334,7 +330,7 @@ def test_cann_selection_replays_empty_short_and_live_requests(dtype):
             topk=topk,
             pool_size=4,
             mask_mode=3,
-            **kwargs,
+            k_descale=key_scales,
         )
         return adapters.pack_keypool_indices(indices, metadata, topk, 4)
 
