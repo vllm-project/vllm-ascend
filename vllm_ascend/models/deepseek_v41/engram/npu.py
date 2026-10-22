@@ -145,7 +145,7 @@ def _host_library() -> ctypes.CDLL:
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
-    def __init__(self, shape, dtype, device):
+    def __init__(self, shape, dtype, device, name, module):
         self.lib = _host_library()
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
@@ -170,6 +170,13 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{name}_ptrs", self.ptrs, persistent=False)
         except Exception:
             # A half-built buffer must not leave the host range registered: the
             # caller only sees the exception, so nothing else can release it.
@@ -265,7 +272,7 @@ class SharedUvaBuffer:
     mapping with CANN. The leader unlinks it after all ranks have attached.
     """
 
-    def __init__(self, shape, dtype, device, group):
+    def __init__(self, shape, dtype, device, group, name, module):
         self.lib = _host_library()
         self.group = group
         rows = int(shape[0])
@@ -322,6 +329,13 @@ class SharedUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{name}_ptrs", self.ptrs, persistent=False)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"
 
