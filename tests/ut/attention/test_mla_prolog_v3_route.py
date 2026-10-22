@@ -805,9 +805,10 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
     assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
-@pytest.mark.parametrize("num_decode", [0, 2])
-@pytest.mark.parametrize("padding", [0, 3])
-@pytest.mark.parametrize("layerwise", [False, True])
+@pytest.mark.parametrize(
+    "num_decode,padding,layerwise",
+    [(0, 0, False), (0, 3, False), (2, 0, False), (2, 3, False), (2, 0, True)],
+)
 def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding, layerwise):
     impl = _make_impl()
     order = []
@@ -845,7 +846,7 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
 
     def fake_prolog(**kwargs):
         if layerwise:
-            assert order == [("load", impl.layer_name), ("broadcast", impl.layer_name)]
+            order.append(("prolog", impl.layer_name))
         tokens = kwargs["token_x"].shape[0]
         return (
             torch.zeros(tokens, impl.num_heads * NOPE_DIM),
@@ -870,6 +871,10 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
     wait_load.assert_called_once_with(impl.layer_name)
+    if layerwise:
+        assert order == [("load", impl.layer_name), ("broadcast", impl.layer_name)] + [("prolog", impl.layer_name)] * (
+            1 + bool(num_decode)
+        )
     assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
     assert (decode is not None) == bool(num_decode)

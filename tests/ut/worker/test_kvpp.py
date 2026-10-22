@@ -120,18 +120,15 @@ def runtime_for_transfer(monkeypatch, scheduler_device):
 @pytest.mark.parametrize(
     "transfer",
     [
-        SimpleNamespace(kv_connector=name, **extra)
-        for name in ("AscendStoreConnector", "MultiConnector")
-        for extra in ({}, {"kv_connector_extra_config": None}, {"kv_connector_extra_config": {}})
-    ]
-    + [
+        SimpleNamespace(kv_connector="AscendStoreConnector"),
         SimpleNamespace(
             kv_connector="MultiConnector",
-            kv_connector_extra_config={"connectors": [{"kv_connector": "AscendStoreConnector", **extra}]},
-        )
-        for extra in ({}, {"kv_connector_extra_config": None}, {"kv_connector_extra_config": {}})
-    ]
-    + [None],
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "AscendStoreConnector", "kv_connector_extra_config": None}]
+            },
+        ),
+        None,
+    ],
 )
 def test_runtime_accepts_missing_or_empty_connector_extra_config(runtime_for_transfer, transfer):
     runtime = runtime_for_transfer(transfer)

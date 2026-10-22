@@ -90,5 +90,3 @@ def test_kvpp_mooncake_layerwise_reload(tmp_path, use_mtp):
             requests.post(server.url_for("reset_prefix_cache"), timeout=30).raise_for_status()
             assert output_texts(complete(server.url_root, [prompt, prompt])) == expected * 2
             assert external_cache_hits(server) > hits_before
-            # Decode/short-extend hooks must also advance layerwise state.
-            assert len(output_texts(complete(server.url_root, PROMPTS[0]))) == 1

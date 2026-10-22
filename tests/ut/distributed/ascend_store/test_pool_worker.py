@@ -453,52 +453,43 @@ class TestKVPPPoolWorker(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "receive failed"):
             worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
 
-    def test_load_observer_skips_layers_outside_pipeline_stage(self):
-        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
-        worker._global_to_local_layer = {9: 0, 10: 1}
-        worker.layer_load_tasks = [[MagicMock()], [MagicMock()]]
-        worker.kv_recv_thread = MagicMock()
-        worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("unexpected receive check")
-        for physical_layer in (0, 8, 11):
-            with self.subTest(physical_layer=physical_layer):
-                worker.wait_for_layer_load_ready(f"model.layers.{physical_layer}.self_attn.attn")
-        worker.kv_recv_thread.raise_if_failed.assert_not_called()
-
-    def test_load_observer_skips_out_of_range_local_indices(self):
-        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
-        worker.layer_load_tasks = [[], []]
-        worker.kv_recv_thread = None
-        for mapping, physical_layer in (({}, 2), ({9: 2}, 9), ({9: -1}, 9)):
+    def test_load_observer_resolves_local_layer(self):
+        cases = (
+            ({9: 0, 10: 1}, 0, False),
+            ({9: 0, 10: 1}, 8, False),
+            ({9: 0, 10: 1}, 11, False),
+            ({}, 2, False),
+            ({9: 2}, 9, False),
+            ({9: -1}, 9, False),
+            ({}, 1, True),
+        )
+        for mapping, physical_layer, local in cases:
             with self.subTest(mapping=mapping, physical_layer=physical_layer):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
                 worker._global_to_local_layer = mapping
+                worker.layer_load_tasks = [[MagicMock()], [MagicMock()]]
+                worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+                worker.layer_load_finished_events[1].set()
+                worker.kv_recv_thread = MagicMock()
+                if not local:
+                    worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("unexpected receive check")
                 worker.wait_for_layer_load_ready(f"model.layers.{physical_layer}.self_attn.attn")
+                if local:
+                    worker.kv_recv_thread.raise_if_failed.assert_called()
+                    self.assertTrue(worker.layer_load_finished_events[1].is_set())
+                else:
+                    worker.kv_recv_thread.raise_if_failed.assert_not_called()
 
-    def test_load_observer_uses_physical_index_without_mapping(self):
-        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
-        worker._global_to_local_layer = {}
-        worker.layer_load_tasks[1] = [MagicMock()]
-        event = threading.Event()
-        event.set()
-        worker.layer_load_finished_events = [threading.Event(), event]
-        worker.kv_recv_thread = MagicMock()
-        worker.wait_for_layer_load_ready("model.layers.1.self_attn.attn")
-        self.assertTrue(event.is_set())
-
-    def test_load_observer_requires_initialized_receive_thread(self):
-        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
-        worker._global_to_local_layer = {9: 0}
-        worker.kv_recv_thread = None
-        with self.assertRaisesRegex(RuntimeError, "kv_recv_thread is not initialized"):
-            worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
-
-    def test_load_observer_requires_initialized_completion_events(self):
-        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
-        worker._global_to_local_layer = {9: 0}
-        worker.layer_load_tasks[0] = [MagicMock()]
-        worker.kv_recv_thread = MagicMock()
-        worker.layer_load_finished_events = None
-        with self.assertRaisesRegex(RuntimeError, "layer_load_finished_events is not initialized"):
-            worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+    def test_load_observer_requires_initialized_dependencies(self):
+        for missing in ("kv_recv_thread", "layer_load_finished_events"):
+            with self.subTest(missing=missing):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+                worker._global_to_local_layer = {9: 0}
+                worker.layer_load_tasks[0] = [MagicMock()]
+                worker.kv_recv_thread = MagicMock()
+                setattr(worker, missing, None)
+                with self.assertRaisesRegex(RuntimeError, f"{missing} is not initialized"):
+                    worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
 
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
