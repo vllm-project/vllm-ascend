@@ -1,5 +1,8 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import store_backend as module
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
     AscendDeferredStoreBackend,
     PreparedStorePut,
@@ -35,7 +38,7 @@ def test_deferred_store_admission_and_exists_rejection_do_not_submit_put():
     client.exists.return_value = True
 
     backend.save_output("first", tensor)
-    assert backend.prepare_fallback("first") is None
+    assert backend.prepare_save("first") is None
 
     client.exists.assert_called_once()
     client.put_tensor.assert_not_called()
@@ -59,7 +62,7 @@ def test_prepared_store_put_runs_on_single_publisher_and_reaps_storage():
     backend, client = _backend()
     tensor = _tensor()
     backend.save_output("first", tensor)
-    ticket = backend.prepare_fallback("first")
+    ticket = backend.prepare_save("first")
     assert ticket is not None
 
     future = backend.submit_prepared(
@@ -84,6 +87,26 @@ def test_prepared_store_put_runs_on_single_publisher_and_reaps_storage():
     backend.shutdown()
 
 
+def test_pending_views_charge_storage_until_last_save_is_reaped():
+    backend, client = _backend(max_bytes=128)
+    first = _tensor(1000)
+    second = _tensor(1000)
+    second.untyped_storage.return_value = first.untyped_storage()
+    backend.save_output("first", first)
+    backend.save_output("second", second)
+    assert backend._pending_bytes == 128
+    assert len(backend._pending) == 2
+
+    for identifier in ("first", "second"):
+        ticket = backend.prepare_save(identifier)
+        future = backend.submit_prepared(PreparedStorePut(ticket, [10], [128], [ticket.tensor]))
+        future.result(timeout=1)
+        backend.reap()
+        assert backend._pending_bytes == (128 if identifier == "first" else 0)
+    assert backend._pending == {}
+    backend.shutdown()
+
+
 def test_shutdown_drains_unselected_deferred_save_through_original_path():
     backend, client = _backend()
     tensor = _tensor()
@@ -95,3 +118,31 @@ def test_shutdown_drains_unselected_deferred_save_through_original_path():
     pool_key = client.exists.call_args.args[0]
     client.put_tensor.assert_called_once_with(pool_key, tensor)
     client.close.assert_called_once_with()
+
+
+def test_admission_records_npu_event_and_publisher_waits_before_reading():
+    backend, client = _backend()
+    tensor = _tensor()
+    event = MagicMock()
+    with patch.object(module.torch.npu, "Event", return_value=event):
+        backend.save_output("first", tensor)
+    event.record.assert_called_once_with(module.torch.npu.current_stream(tensor.device))
+    client.put_tensor.side_effect = lambda *_: event.synchronize.assert_called_once_with()
+    backend.shutdown()
+    client.put_tensor.assert_called_once()
+
+
+def test_prepared_submission_failure_leaves_ticket_abortable():
+    backend, _ = _backend()
+    backend.save_output("first", _tensor())
+    ticket = backend.prepare_save("first")
+    put = PreparedStorePut(ticket, [10], [128], [ticket.tensor])
+    with (
+        patch.object(backend._executor, "submit", side_effect=RuntimeError("executor stopped")),
+        pytest.raises(RuntimeError, match="executor stopped"),
+    ):
+        backend.submit_prepared(put)
+    backend.abort_prepared(ticket)
+    assert backend._pending == {}
+    assert backend._pending_bytes == 0
+    backend.shutdown()

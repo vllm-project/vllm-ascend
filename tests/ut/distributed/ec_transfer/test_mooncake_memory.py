@@ -1,7 +1,5 @@
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,28 +8,12 @@ import torch
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
     memory as memory_module,
 )
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
-    _BounceLease,
-    _BounceLeaseManager,
-)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
 )
-
-_MIB = 1024 * 1024
-
-
-def _wait_for_waiters(manager: _BounceLeaseManager, count: int) -> None:
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        with manager._condition:
-            if len(manager._waiters) == count:
-                return
-        time.sleep(0.001)
-    raise AssertionError(f"expected {count} bounce waiters")
 
 
 def test_prepare_registers_2_mib_aligned_tensor():
@@ -95,476 +77,182 @@ def test_consumer_records_npu_release_event():
     assert result is event
 
 
-def test_producer_copies_to_staging_on_npu_stream():
-    pool = MagicMock()
-    pool.device.type = "npu"
-
-    source = MagicMock()
-    source.nbytes = 128
-    destination = MagicMock()
-
-    allocator = MagicMock()
-    allocator.tensor = pool
-    allocator.alignment = 256
-    allocator.allocate.return_value = (0, 256)
-    allocator.view.return_value = destination
-    producer = object.__new__(AscendProducerMemoryPool)
-    producer._allocator = allocator
-    producer._transfer = MagicMock()
-    producer._lock = threading.Lock()
-    producer._space_available = threading.Condition(producer._lock)
-    producer._producer_allocator = SimpleNamespace(staging_capacity=256)
-    producer._poisoned = False
-    producer._local = SimpleNamespace(stream=None)
-    producer._free_regions = MagicMock()
-
-    stream = MagicMock()
-    stream_context = MagicMock()
-
-    with (
-        patch.object(memory_module.torch.npu, "Stream", return_value=stream) as stream_class,
-        patch.object(memory_module.torch.npu, "stream", return_value=stream_context) as use_stream,
-    ):
-        result = producer.stage([source])
-
-    stream_class.assert_called_once_with(device=pool.device)
-    use_stream.assert_called_once_with(stream)
-    destination.copy_.assert_called_once_with(
-        source,
-        non_blocking=True,
-    )
-    stream.synchronize.assert_called_once_with()
-    assert producer._local.stream is stream
-    assert result is not None
-    assert result.tensors == [destination]
-    assert result.regions == [(0, 256)]
+def _make_pool(capacity=1024):
+    allocator = AscendProducerAllocator(capacity, 0)
+    allocator.tensor = torch.empty(capacity, dtype=torch.uint8)
+    pool = AscendProducerMemoryPool(capacity, MagicMock(), allocator)
+    pool._copy_staged = MagicMock(side_effect=lambda sources, targets: [d.copy_(s) for s, d in zip(sources, targets)])
+    return pool
 
 
-def test_stage_wait_reuses_region_only_after_previous_batch_releases():
-    allocator = AscendProducerAllocator(
-        staging_capacity=256,
-        bounce_capacity=0,
-    )
-    allocator.tensor = torch.empty(256, dtype=torch.uint8)
-    allocator._free = [(0, 256)]
-    producer = object.__new__(AscendProducerMemoryPool)
-    producer._allocator = allocator
-    producer._producer_allocator = allocator
-    producer._transfer = MagicMock()
-    producer._lock = threading.Lock()
-    producer._space_available = threading.Condition(producer._lock)
-    producer._local = threading.local()
-    producer._poisoned = False
-    producer._copy_staged = MagicMock()
-    source = torch.empty(256, dtype=torch.uint8)
-
-    first = producer.stage([source])
-    assert first is not None
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        waiting = executor.submit(producer.stage_wait, [source])
-        time.sleep(0.01)
-        assert not waiting.done()
-        producer.release(first)
-        second = waiting.result(timeout=1)
-
-    assert second is not None
-    assert second.regions == [(0, 256)]
-
-
-def test_stage_wait_rejects_batch_larger_than_entire_staging_pool():
-    allocator = AscendProducerAllocator(
-        staging_capacity=256,
-        bounce_capacity=0,
-    )
-    producer = object.__new__(AscendProducerMemoryPool)
-    producer._allocator = allocator
-    producer._producer_allocator = allocator
-
-    assert (
-        producer._allocate_staged(
-            [torch.empty(257, dtype=torch.uint8)],
-            wait=True,
-        )
-        is None
-    )
-
-
-def test_stage_wait_wakes_and_fails_when_pool_is_poisoned():
-    allocator = AscendProducerAllocator(
-        staging_capacity=256,
-        bounce_capacity=0,
-    )
-    allocator.tensor = torch.empty(256, dtype=torch.uint8)
-    allocator._free = []
-    producer = object.__new__(AscendProducerMemoryPool)
-    producer._allocator = allocator
-    producer._producer_allocator = allocator
-    producer._transfer = MagicMock()
-    producer._lock = threading.Lock()
-    producer._space_available = threading.Condition(producer._lock)
-    producer._local = threading.local()
-    producer._poisoned = False
-    source = torch.empty(256, dtype=torch.uint8)
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        waiting = executor.submit(producer.stage_wait, [source])
-        time.sleep(0.01)
-        producer.poison()
-        with pytest.raises(RuntimeError, match="poisoned"):
-            waiting.result(timeout=1)
-
-
-def test_producer_allocator_zero_bounce_has_no_arena_or_padding():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=0,
-    )
+def test_legacy_bounce_bytes_are_available_to_staging():
+    allocator = AscendProducerAllocator(256, 512)
     transfer = MagicMock()
     transfer.register_memory.return_value = 0
-
-    allocator.prepare(torch.device("cpu"), transfer)
-
-    assert allocator.bounce_offset == 3 * _MIB
-    assert allocator.padding == 0
-    assert allocator.registered_capacity == 3 * _MIB
-    assert allocator.tensor is not None
-    assert allocator.tensor.nbytes == 3 * _MIB
-    assert allocator.bounce_tensor is None
-    assert allocator._free == [(0, 3 * _MIB)]
-    transfer.register_memory.assert_called_once_with(allocator.tensor)
-
-
-def test_producer_allocator_prepares_partitioned_slab():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 0
-
-    allocator.prepare(torch.device("cpu"), transfer)
-
-    tensor = allocator.tensor
-    bounce = allocator.bounce_tensor
-    assert tensor is not None
-    assert bounce is not None
-
-    assert allocator.staging_capacity == 3 * _MIB
-    assert allocator.bounce_offset == 4 * _MIB
-    assert allocator.padding == 1 * _MIB
-    assert allocator.bounce_capacity == 2 * _MIB
-    assert allocator.registered_capacity == 6 * _MIB
-    assert allocator.raw_allocation_size == 8 * _MIB - 1
-    assert tensor.nbytes == 6 * _MIB
-    assert allocator._free == [(0, 3 * _MIB)]
-
-    assert bounce.data_ptr() == tensor.data_ptr() + 4 * _MIB
-    assert bounce.nbytes == 2 * _MIB
-
-    transfer.register_memory.assert_called_once_with(tensor)
-    assert allocator.allocate(3 * _MIB) == (0, 3 * _MIB)
-    assert allocator.allocate(1) is None
-
-
-def test_producer_allocator_prepare_is_idempotent():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 0
-
-    allocator.prepare(torch.device("cpu"), transfer)
-    region = allocator.allocate(256)
-    free_after_allocate = list(allocator._free)
-
-    allocator.prepare(torch.device("cpu"), transfer)
-
-    assert region == (0, 256)
-    assert allocator._free == free_after_allocate
-    transfer.register_memory.assert_called_once()
-
-
-def test_producer_allocator_retries_with_bounce_only_slab():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.side_effect = [7, 0]
-
-    allocator.prepare(torch.device("cpu"), transfer)
-
-    tensor = allocator.tensor
-    bounce = allocator.bounce_tensor
-    assert tensor is not None
-    assert bounce is not None
-    assert allocator.configured_staging_capacity == 3 * _MIB
-    assert allocator.staging_capacity == 0
-    assert allocator.fallback_only
-    assert allocator.bounce_offset == 0
-    assert allocator.padding == 0
-    assert allocator.registered_capacity == 2 * _MIB
-    assert allocator.raw_allocation_size == 4 * _MIB - 1
-    assert allocator._free == []
-    assert allocator.allocate(1) is None
-    assert tensor.nbytes == 2 * _MIB
-    assert bounce.data_ptr() == tensor.data_ptr()
-    assert bounce.nbytes == 2 * _MIB
-    assert [call.args[0].nbytes for call in transfer.register_memory.call_args_list] == [
-        6 * _MIB,
-        2 * _MIB,
-    ]
-
-
-def test_producer_allocator_retries_bounce_only_after_allocation_failure():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 0
-    real_empty = torch.empty
-    attempts = 0
-
-    def allocate(*args, **kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise torch.OutOfMemoryError("full producer slab")
-        return real_empty(*args, **kwargs)
-
-    with patch.object(memory_module.torch, "empty", side_effect=allocate):
-        allocator.prepare(torch.device("cpu"), transfer)
-
-    assert attempts == 2
-    assert allocator.fallback_only
-    assert allocator.staging_capacity == 0
-    assert allocator.tensor is not None
-    assert allocator.tensor.nbytes == 2 * _MIB
-    assert allocator.bounce_tensor is not None
-    transfer.register_memory.assert_called_once_with(allocator.tensor)
-
-
-def test_producer_pool_returns_none_after_bounce_only_degradation():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.side_effect = [7, 0]
-    pool = AscendProducerMemoryPool(3 * _MIB, transfer, allocator)
-    source = torch.empty(1, dtype=torch.uint8)
-
-    assert pool.stage([source]) is None
-    assert allocator.fallback_only
-    assert allocator.bounce_tensor is not None
-    assert allocator._free == []
-
-
-def test_producer_allocator_bounce_only_failure_is_fatal():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 7
-
-    with pytest.raises(
-        RuntimeError,
-        match=(
-            r"configured_staging=.*effective_staging=0.*padding=0.*"
-            r"bounce=.*registered=.*allocation="
-        ),
-    ):
-        allocator.prepare(torch.device("cpu"), transfer)
-
-    assert allocator.tensor is None
-    assert allocator.fallback_only
-    assert allocator.staging_capacity == 0
-    assert transfer.register_memory.call_count == 2
-
-
-def test_producer_allocator_zero_bounce_does_not_retry_failure():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=0,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 7
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"configured_staging=.*effective_staging=.*bounce=0",
-    ):
-        allocator.prepare(torch.device("cpu"), transfer)
-
-    assert allocator.tensor is None
-    assert not allocator.fallback_only
-    assert allocator.staging_capacity == 3 * _MIB
-    transfer.register_memory.assert_called_once()
-
-
-def test_producer_allocator_closes_bounce_only_slab():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    transfer = MagicMock()
-    transfer.register_memory.side_effect = [7, 0]
-    transfer.unregister_memory.return_value = True
-    allocator.prepare(torch.device("cpu"), transfer)
-    tensor = allocator.tensor
-    assert tensor is not None
-
-    assert allocator.close(transfer)
-    transfer.unregister_memory.assert_called_once_with(tensor)
-    assert allocator.tensor is None
-    assert allocator._free == []
-
-
-def test_copy_to_bounce_packs_bytes_within_lease():
-    allocator = AscendProducerAllocator(staging_capacity=0, bounce_capacity=16)
-    allocator.tensor = torch.zeros(16, dtype=torch.uint8)
-    pool = AscendProducerMemoryPool(0, MagicMock(), allocator)
-    lease = _BounceLease(offset=4, nbytes=5, allocated_nbytes=8)
-    source_a = torch.tensor([1, 2, 3], dtype=torch.uint8)
-    source_b = torch.tensor([4, 5, 6], dtype=torch.uint8)
-
-    with (
-        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce.torch.npu.Stream") as stream_cls,
-        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce.torch.npu.stream") as stream_context,
-    ):
-        stream = stream_cls.return_value
-        address = pool.bounce_arena.copy(
-            lease,
-            [(source_a, 0, 2), (source_b, 2, 3)],
-        )
-
-    bounce = pool.bounce_arena.tensor
-    assert bounce is not None
-    assert address == bounce.data_ptr() + lease.offset
-    assert bounce.tolist() == [0, 0, 0, 0, 1, 2, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0]
-    stream_cls.assert_called_once_with(device=bounce.device)
-    stream_context.assert_called_once_with(stream)
-    stream.synchronize.assert_called_once_with()
-
-
-def test_bounce_lease_manager_aligns_one_whole_wave_lease():
-    manager = _BounceLeaseManager(2048, alignment=256)
-
-    lease = manager.acquire(800)
-
+    pool = AscendProducerMemoryPool(256, transfer, allocator)
+    assert pool.capacity == 768
+    lease = pool.reserve_bytes([600], torch.device("cpu"))
     assert lease is not None
-    assert lease.offset == 0
-    assert lease.nbytes == 800
-    assert lease.allocated_nbytes == 1024
-
-    manager.release(lease)
-    assert manager._regions._free == [(0, 2048)]
+    assert lease.tensors[0].nbytes == 600
+    pool.release(lease)
+    assert allocator._free == [(0, 768)]
 
 
-def test_bounce_lease_manager_rejects_oversized_lease():
-    manager = _BounceLeaseManager(2 * _MIB)
+def test_headers_and_payload_are_one_atomic_allocation():
+    pool = _make_pool(512)
+    source = torch.arange(256, dtype=torch.uint8)
+    header = torch.full((24,), 7, dtype=torch.uint8)
+    staged = pool.stage_with_headers([source], [header])
+    assert staged.regions == [(0, 512)]
+    assert torch.equal(staged.tensors[0], source)
+    assert torch.equal(staged.headers[0], header)
+    assert staged.tensors[0].data_ptr() == staged.headers[0].data_ptr() + 24
+    pool.release(staged)
+    assert pool._allocator._free == [(0, 512)]
 
-    with pytest.raises(ValueError, match="arena capacity"):
-        manager.acquire(2 * _MIB + 1)
 
-
-def test_bounce_lease_manager_waiters_do_not_bypass_fifo_head():
-    manager = _BounceLeaseManager(8, alignment=1)
-    held = manager.acquire(6)
-    assert held is not None
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(manager.acquire, 4)
-        _wait_for_waiters(manager, 1)
-        second = executor.submit(manager.acquire, 2)
-        _wait_for_waiters(manager, 2)
-
+def test_waiting_stage_only_reuses_completed_lease():
+    pool = _make_pool(256)
+    source = torch.zeros(256, dtype=torch.uint8)
+    first = pool.stage_wait([source])
+    with ThreadPoolExecutor(1) as executor:
+        waiting = executor.submit(pool.stage_wait, [source])
         try:
-            assert not first.done()
-            assert not second.done()
+            assert not waiting.done()
         finally:
-            manager.release(held)
-
-        first_lease = first.result(timeout=1)
-        second_lease = second.result(timeout=1)
-
-    assert first_lease is not None
-    assert second_lease is not None
-    assert first_lease.offset == 0
-    assert second_lease.offset == 4
-
-    manager.release(first_lease)
-    manager.release(second_lease)
+            pool.release(first)
+        second = waiting.result(timeout=2)
+    assert second.regions == [(0, 256)]
+    pool.release(second)
 
 
-def test_bounce_lease_manager_released_batch_tail_rejoins_fifo():
-    manager = _BounceLeaseManager(8, alignment=1)
-    first_wave = manager.acquire(8)
-    assert first_wave is not None
+def test_poison_wakes_waiters_without_recycling_live_memory():
+    pool = _make_pool(256)
+    source = torch.zeros(256, dtype=torch.uint8)
+    first = pool.stage_wait([source])
+    with ThreadPoolExecutor(1) as executor:
+        waiting = executor.submit(pool.stage_wait, [source])
+        pool.poison()
+        with pytest.raises(RuntimeError, match="poisoned"):
+            waiting.result(timeout=2)
+    pool.release(first)
+    assert pool._allocator._free == []
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        other_batch = executor.submit(manager.acquire, 8)
-        _wait_for_waiters(manager, 1)
 
-        manager.release(first_wave)
-        next_wave = executor.submit(manager.acquire, 8)
+def test_oversized_batch_returns_without_waiting_or_partial_allocations():
+    pool = _make_pool(256)
+    assert pool.stage_wait([torch.zeros(257, dtype=torch.uint8)]) is None
+    assert pool._allocator._free == [(0, 256)]
+    pool._copy_staged.assert_not_called()
 
-        other_lease = other_batch.result(timeout=1)
-        assert other_lease is not None
-        _wait_for_waiters(manager, 1)
-        assert not next_wave.done()
 
-        manager.release(other_lease)
-        next_lease = next_wave.result(timeout=1)
+def _cache_get(pool):
+    lease = pool.reserve_bytes([152], torch.device("cpu"))
+    buffer = lease.tensors[0]
+    payload = buffer[24:].view(torch.float32)
+    payload.fill_(3)
+    output = payload.clone()
+    pool.cache_loaded(output, payload, buffer[:24], lease.regions[0])
+    return output, payload
 
+
+def test_get_to_p2p_transfers_lease_without_allocating_or_copying():
+    pool = _make_pool(256)
+    output, payload = _cache_get(pool)
+    staged = pool.stage_wait([output])
+    assert staged.tensors[0].data_ptr() == payload.data_ptr()
+    assert pool._loaded == {}
+    pool._copy_staged.assert_called_once_with([], [])
+    pool.release(staged)
+    assert pool._allocator._free == [(0, 256)]
+    assert torch.all(output == 3)
+
+
+def test_pressure_reclaims_completed_get_copy_without_changing_cache_tensor():
+    pool = _make_pool(256)
+    output, _ = _cache_get(pool)
+    next_lease = pool.reserve_bytes([256], torch.device("cpu"))
     assert next_lease is not None
-    manager.release(next_lease)
+    next_lease.tensors[0].zero_()
+    assert torch.all(output == 3)
+    pool.release(next_lease)
+    staged = pool.stage_wait([output])
+    assert torch.equal(staged.tensors[0], output)
+    pool.release(staged)
 
 
-def test_bounce_lease_manager_coalesces_released_variable_size_leases():
-    manager = _BounceLeaseManager(1024, alignment=1)
-    first = manager.acquire(256)
-    second = manager.acquire(256)
-    tail = manager.acquire(512)
-    assert first is not None
-    assert second is not None
-    assert tail is not None
+def test_cache_eviction_returns_optional_get_lease():
+    import gc
 
-    manager.release(second)
-    manager.release(first)
-
-    combined = manager.acquire(512)
-    assert combined is not None
-    assert combined.offset == 0
-
-    manager.release(combined)
-    manager.release(tail)
+    pool = _make_pool(256)
+    output, _ = _cache_get(pool)
+    del output
+    gc.collect()
+    assert pool._loaded == {}
+    assert pool._allocator._free == [(0, 256)]
 
 
-def test_producer_pool_shares_one_bounce_arena():
-    allocator = AscendProducerAllocator(
-        staging_capacity=3 * _MIB,
-        bounce_capacity=2 * _MIB,
-    )
-    pool = AscendProducerMemoryPool(
-        3 * _MIB,
-        MagicMock(),
-        allocator,
-    )
+def test_borrowed_get_lease_cannot_be_reclaimed_during_wait():
+    pool = _make_pool(512)
+    output, payload = _cache_get(pool)
+    active = pool.reserve_bytes([256], torch.device("cpu"))
+    other = torch.ones(64, dtype=torch.uint8)
+    entered = threading.Event()
+    original = pool._space_available.wait
 
-    assert pool.bounce_arena.tensor is None
+    def wait():
+        entered.set()
+        return original()
 
-    first = pool.bounce_arena.acquire(300)
-    second = pool.bounce_arena.acquire(500)
+    with patch.object(pool._space_available, "wait", side_effect=wait), ThreadPoolExecutor(1) as executor:
+        future = executor.submit(pool.stage_wait, [output, other])
+        try:
+            assert entered.wait(2)
+            assert pool.reserve_bytes([256], torch.device("cpu")) is None
+        finally:
+            pool.release(active)
+        staged = future.result(timeout=2)
+    assert staged.tensors[0].data_ptr() == payload.data_ptr()
+    pool.release(staged)
+    assert pool._allocator._free == [(0, 512)]
 
-    assert first is not None
-    assert second is not None
-    assert first.offset == 0
-    assert second.offset == 512
 
-    pool.bounce_arena.release(first)
-    pool.bounce_arena.release(second)
+def test_get_header_overhead_does_not_reject_payload_batch_that_fits():
+    pool = _make_pool(512)
+    lease = pool.reserve_bytes([280], torch.device("cpu"))
+    buffer = lease.tensors[0]
+    payload = buffer[24:]
+    output = payload.clone()
+    pool.cache_loaded(output, payload, buffer[:24], lease.regions[0])
+    other = torch.zeros(256, dtype=torch.uint8)
+    staged = pool.stage_wait([output, other])
+    assert staged is not None
+    assert len(staged.regions) == 2
+    pool.release(staged)
+    assert pool._allocator._free == [(0, 512)]
+
+
+def test_copy_exception_retains_sources_and_lease_without_reuse():
+    pool = _make_pool(256)
+    source = torch.zeros(128, dtype=torch.uint8)
+    pool._copy_staged.side_effect = RuntimeError("unknown copy completion")
+    with pytest.raises(RuntimeError, match="unknown copy"):
+        pool.stage_wait([source])
+    assert pool._poisoned
+    assert pool._allocator._free == []
+    retained = pool._transfer.retain_owners.call_args.args[0]
+    assert retained[0] is pool
+    assert retained[-1] is source
+
+
+def test_staging_copy_synchronizes_its_own_stream_before_return():
+    pool = _make_pool(256)
+    source, destination = MagicMock(), MagicMock()
+    stream = MagicMock()
+    ordered = MagicMock()
+    ordered.attach_mock(destination.copy_, "copy")
+    ordered.attach_mock(stream.synchronize, "synchronize")
+    with patch.object(memory_module.torch.npu, "Stream", return_value=stream):
+        AscendProducerMemoryPool._copy_staged(pool, [source], [destination])
+    assert [call[0] for call in ordered.mock_calls] == ["copy", "synchronize"]
+    destination.copy_.assert_called_once_with(source, non_blocking=True)

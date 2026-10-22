@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Deferred Store publication for the shared-engine Ascend fallback path."""
+"""Deferred Store publication for Ascend staging and joint fallback waves."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from typing import Any
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.backend import (
     MooncakeEmbeddingStoreBackend,
-    _record_tensor_ready_event,
     _StoreSave,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
@@ -29,6 +28,14 @@ from vllm.logger import logger
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import (
     AscendMooncakeEmbeddingStoreClient,
 )
+
+
+def _record_store_ready_event(tensor: torch.Tensor) -> torch.Event | None:
+    if tensor.device.type != "npu":
+        return None
+    event = torch.npu.Event()
+    event.record(torch.npu.current_stream(tensor.device))
+    return event
 
 
 class _SaveState(Enum):
@@ -95,7 +102,7 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
                 identifier=identifier,
                 pool_key=make_embedding_key(self.namespace, identifier),
                 tensor=tensor,
-                ready_event=_record_tensor_ready_event(tensor),
+                ready_event=_record_store_ready_event(tensor),
                 storage_ptr=storage_ptr,
             )
             self._pending[identifier] = (None, save)  # type: ignore[assignment]
@@ -106,20 +113,11 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
     def _submit_original_locked(self, save: _DeferredSave) -> None:
         if save.state is not _SaveState.DEFERRED:
             return
+        future = self._executor.submit(self._save, save.pool_key, save)
+        save.future = future
         save.state = _SaveState.SUBMITTED
-        save.future = self._executor.submit(self._save, save.pool_key, save)
 
-    def submit_original(self, identifier: str) -> bool:
-        with self._pending_lock:
-            item = self._pending.get(identifier)
-            if item is None:
-                return False
-            save = item[1]
-            assert isinstance(save, _DeferredSave)
-            self._submit_original_locked(save)
-            return save.state is _SaveState.SUBMITTED
-
-    def prepare_fallback(self, identifier: str) -> PreparedStoreSave | None:
+    def prepare_save(self, identifier: str) -> PreparedStoreSave | None:
         with self._pending_lock:
             item = self._pending.get(identifier)
             if item is None:
@@ -128,8 +126,9 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
             assert isinstance(save, _DeferredSave)
             if save.state is not _SaveState.DEFERRED:
                 return None
+            future = self._executor.submit(self.store_client.exists, save.pool_key)
             save.state = _SaveState.CHECKING
-            save.future = self._executor.submit(self.store_client.exists, save.pool_key)
+            save.future = future
             future = save.future
 
         assert future is not None
@@ -169,12 +168,12 @@ class AscendDeferredStoreBackend(MooncakeEmbeddingStoreBackend):
                 raise RuntimeError("prepared Store save is no longer pending")
             if ticket.save.state is not _SaveState.PREPARED:
                 raise RuntimeError("prepared Store save was already submitted")
-            ticket.save.state = _SaveState.SUBMITTED
             future = self._executor.submit(
                 self._put_prepared,
                 store_put,
             )
             ticket.save.future = future
+            ticket.save.state = _SaveState.SUBMITTED
             return future
 
     def _put_prepared(
