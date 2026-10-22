@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def load_function(path, name, namespace):
-    namespace.setdefault("is_950", lambda: False)
     source = ROOT / path
     tree = ast.parse(source.read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -43,6 +42,7 @@ def load_function(path, name, namespace):
 @pytest.mark.parametrize("budget", [None, 32, 48, 192, 512])
 @pytest.mark.parametrize("a5", [False, True])
 def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, scatter, supported, pcp, budget, a5):
+    # Device generation must not change the tensor/mode eligibility contract.
     calls = []
     group = object()
     output = torch.zeros(tokens, 64, 512, dtype=torch.bfloat16)
@@ -76,7 +76,7 @@ def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, s
     pcp_group = SimpleNamespace(all_gather=pcp_gather) if pcp else None
     result = run(output, lse, ranks, scatter, group, pcp_group, decode_token_budget=budget)
     assert result.dtype == output.dtype and result.shape == shape
-    if not a5 and ranks == 8 and scatter == 1 and supported and not pcp and (budget is None or tokens <= budget):
+    if ranks == 8 and scatter == 1 and supported and not pcp and (budget is None or tokens <= budget):
         assert calls == ["exchange"]
     else:
         assert calls == (["upstream_collective"] if ranks > 1 else []) + (["pcp_gather"] if pcp else [])

@@ -490,10 +490,8 @@ def dcp_a2a_fused_combine(
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
     # Keep PCP composition and token-scatter paths on the upstream implementation.
-    # This is the tested raw-bit All2All path, not the experimental VMM peer path.
     if (
-        not is_950()
-        and pcp_group is None
+        pcp_group is None
         and not return_lse
         and not defer_combine
         and scatter_size == 8
