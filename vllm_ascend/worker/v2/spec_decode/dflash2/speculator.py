@@ -122,6 +122,13 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     in an active outer draft capture.
     """
 
-    # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
-    # outside sample_draft; reject lmhead TP at construction (as DSpark).
-    _lmhead_tp_sample_draft_supported = False
+    # lmhead TP is supported: the draft head call is collective-free
+    # (compute_candidates applies the local vocab shard only, bypassing the
+    # AscendLogitsProcessor choke point), and the sole collective -- the
+    # per-shard candidate top-k merge -- gathers over the lmhead-TP group
+    # (qwen3_dflash2.compute_candidates) on rows from the uniformly padded
+    # DFlash draft batch, so every rank contributes the same shape. The
+    # shared target LM head object stays clean: AscendDFlashSpeculator
+    # decouples the draft onto a shallow copy that carries the draft-side
+    # capacity.
+    _lmhead_tp_sample_draft_supported = True
