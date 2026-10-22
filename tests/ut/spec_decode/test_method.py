@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from vllm_ascend.worker.v1.spec_decode.method import (
     SpecDecodeFamily,
     resolve_spec_decode_family,
+    uses_ascend_mtp_speculator,
 )
 
 
@@ -74,6 +77,40 @@ def test_resolve_spec_decode_family(config, expected):
 )
 def test_resolve_spec_decode_family_preserves_mtp_precedence(config, expected):
     assert resolve_spec_decode_family(config) is expected
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        (SpecDecodeFamily.MTP, True),
+        (SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP, True),
+        (SpecDecodeFamily.GEMMA4_MTP, False),
+        (SpecDecodeFamily.STEP3P5_MTP, False),
+        (SpecDecodeFamily.EAGLE, False),
+    ],
+)
+def test_uses_ascend_mtp_speculator(family, expected):
+    assert uses_ascend_mtp_speculator(family) is expected
+
+
+def test_mtp_speculator_routes_share_family_helper():
+    repo_root = Path(__file__).resolve().parents[3]
+    route_files = [
+        repo_root / "vllm_ascend/worker/v2/spec_decode/__init__.py",
+        repo_root / "vllm_ascend/patch/worker/patch_v2/patch_spec_decode_310.py",
+    ]
+
+    for route_file in route_files:
+        source = route_file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "uses_ascend_mtp_speculator"
+        ]
+        assert calls, f"{route_file} must route MTP families through the shared helper"
 
 
 def test_resolve_spec_decode_family_uses_dispatch_method_override():

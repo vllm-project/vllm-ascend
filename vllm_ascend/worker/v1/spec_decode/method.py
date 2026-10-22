@@ -76,6 +76,18 @@ def is_multi_kv_cache_group_mtp(vllm_config: Any) -> bool:
     )
 
 
+def uses_ascend_mtp_speculator(family: SpecDecodeFamily) -> bool:
+    """Return whether MRV2 should route the family through its generic MTP speculator.
+
+    MRV1 has a dedicated multi-KV-group proposer, while MRV2 currently shares
+    the generic Ascend MTP speculator for both MTP families.
+    """
+    return family in (
+        SpecDecodeFamily.MTP,
+        SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP,
+    )
+
+
 def resolve_spec_decode_family(vllm_config: Any, method: str | None = None) -> SpecDecodeFamily:
     """Resolve the execution family shared by MRV1 and MRV2 dispatch.
 
