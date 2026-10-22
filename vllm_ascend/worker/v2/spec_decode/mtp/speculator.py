@@ -128,6 +128,8 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
             cudagraph_runtime_mode,
             mm_inputs,
         )
+        if not lmhead_tp_enable():
+            return hidden_states
         mtp_model = getattr(self.model, "model", self.model)
         layers = getattr(mtp_model, "layers", None)
         if layers is None or not layers:

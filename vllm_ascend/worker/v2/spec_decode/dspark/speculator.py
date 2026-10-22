@@ -39,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -549,6 +549,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         ``_sample_sequential`` computes draft logits in this same step; without
         a sync value the static ``lmhead_tp_capacity`` stays authoritative.
         """
+        if not lmhead_tp_enable():
+            return
         if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
             max_query_rows = int(num_tokens_across_dp.max().item())
             if max_query_rows % self.num_query_per_req != 0:

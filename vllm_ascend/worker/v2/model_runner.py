@@ -1137,6 +1137,8 @@ class NPUModelRunner(GPUModelRunner):
         value is inherited; only when nothing was ever published is the static
         ``max_num_reqs * decode_query_len`` bound used as a fallback.
         """
+        if not lmhead_tp_enable():
+            return
         state = self.execute_model_state
         dp_sync = getattr(state, "dp_sync", None) if state is not None else None
         num_reqs = None

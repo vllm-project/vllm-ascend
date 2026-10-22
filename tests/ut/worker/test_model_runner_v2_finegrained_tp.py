@@ -463,7 +463,8 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
     assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is True
 
 
-def test_publish_lmhead_tp_step_capacity():
+@patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True)
+def test_publish_lmhead_tp_step_capacity(_lmhead_tp_enable):
     """``_publish_lmhead_tp_step_capacity`` must derive the per-step target
     capacity from ``execute_model_state.dp_sync.num_reqs`` (the group-agreed
     request count) times ``decode_query_len``, and refresh it every step."""
@@ -531,7 +532,8 @@ def _patch_super_method(spec_cls, method_name):
     raise AssertionError(f"no ancestor of {spec_cls.__name__} defines {method_name}")
 
 
-def test_dspark_run_model_publishes_draft_capacity():
+@patch("vllm_ascend.worker.v2.spec_decode.dspark.speculator.lmhead_tp_enable", return_value=True)
+def test_dspark_run_model_publishes_draft_capacity(_lmhead_tp_enable):
     """``AscendDSparkSpeculator._run_model`` must publish the draft-head
     capacity derived from the DP-synced query rows: query rows are
     ``max_reqs_across_dp * num_query_per_req``, and the draft head emits
