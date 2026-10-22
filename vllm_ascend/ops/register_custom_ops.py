@@ -135,7 +135,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
         # instead of rebuilding the full padded buffer.
         padded_length = _EXTRA_CTX.padded_length
         if x.shape[0] != padded_length:
-            x = torch.nn.functional.pad(x, (0, 0, 0, padded_length - x.shape[0]))
+            x = torch.nn.functional.pad(x, (0, 0) * (x.ndim - 1) + (0, padded_length - x.shape[0]))
         return ep_group.reduce_scatter(x, 0)
 
     padded_x = x.new_zeros((dp_size, _EXTRA_CTX.padded_length, *x.shape[1:]))
