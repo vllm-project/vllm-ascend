@@ -66,23 +66,55 @@ scalars instead.
 Enable with VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1.
 
 VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL (optional, unit: elements):
-  An all-reduce takes the quantized path only when its tensor holds at
-  least this many elements. The tensor is the hidden state of the whole
-  batch, so numel == num_tokens * hidden_size, and the default
-  (32 * 1024 * 1024 = 33,554,432 elements == 64 MiB of bf16 payload)
-  maps to the following token count:
+  Payload threshold for the int8 path, expressed in elements:
 
-      min_tokens = min_numel / hidden_size = 33,554,432 / hidden_size
+      payload at the threshold = MIN_NUMEL * 2 bytes          (bf16)
+      33,554,432 elements      = 64 MiB = 16,384 tokens at hidden_size 2048
+
+  The reduced tensor is the batch hidden state, so
+  numel == step_tokens * hidden_size, where step_tokens is:
+
+    - prefill: min(tokens scheduled in this step, max_num_batched_tokens).
+      Long prompts are chunked at that bound, so the payload of one
+      collective is capped by max_num_batched_tokens * hidden_size * 2.
+    - decode: the running batch size, i.e. the concurrency. That is orders
+      of magnitude below the threshold (e.g. 128 * 2048 * 2 = 512 KiB), so
+      decode stays on the bf16 path by design.
+
+  Concurrency therefore matters only through batching: 16 concurrent
+  1k-token requests pack into one 16k-token step and do trigger the int8
+  path, while a single 1k-token request does not. The arrival rate (e.g.
+  --request-rate) does not enter the formula; it only decides how quickly
+  a step can be filled.
+
+  Measured on 4x Atlas 910B3, per collective, versus a plain bf16
+  all-reduce (positive = slower):
+
+      bf16 payload   MIN_NUMEL    delta
+      4 MiB          2,097,152    +359%   (old default, always a loss)
+      8 MiB          4,194,304    +217%
+      16 MiB         8,388,608     +67%
+      32 MiB         16,777,216     +8%   (still a loss)
+      64 MiB         33,554,432    -23%   (default)
+      128 MiB        67,108,864    -23%
+
+  How to set it:
+    - keep the default (33,554,432 == 64 MiB) unless your collectives are
+      larger;
+    - do not go below 16,777,216 (32 MiB): the measured break-even is
+      ~36 MiB, below which the halved transfer cannot pay for the fixed
+      ~0.75 ms per-call cost;
+    - if max_num_batched_tokens * hidden_size * 2 < 64 MiB, the payload can
+      never reach the threshold: leave VLLM_ASCEND_QUANTIZED_ALL_REDUCE
+      disabled instead of tuning this variable.
+
+  Token counts that trigger the default, by hidden_size:
 
       hidden_size   tokens to trigger the int8 path
       1024          32768
       2048          16384   (e.g. Qwen3.6-35B-A3B: 16k-token prefill)
       4096           8192
       8192           4096
-
-  The default is sized from the measured break-even (~36 MiB of bf16
-  payload): below it the fixed per-call cost of the scheme outweighs the
-  halved transfer, so smaller messages are left on the bf16 path.
 
   Notes:
   - For a single-sequence prefill, num_tokens == sequence length; for
