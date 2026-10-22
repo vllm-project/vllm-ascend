@@ -94,6 +94,8 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--qwen38-no-ple-checkpoint", help="Local prepared four-layer no-PLE checkpoint")
+    parser.addoption("--qwen38-no-ple-manifest-sha256", help="Expected immutable no-PLE manifest SHA-256")
     parser.addoption(
         "--msa-m3-sparse-backend",
         action="store",
