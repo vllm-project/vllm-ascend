@@ -84,6 +84,7 @@ def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.final_prefill = None
     impl.kv_lora_rank = 8
     impl.kv_a_layernorm = lambda x: x * 2
     cache = torch.zeros(1, 4, 1, 8)
@@ -111,6 +112,7 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.final_prefill = None
     impl.q_lora_rank = impl.kv_lora_rank = 2
     impl.preprocess_type = PreprocessType.NATIVE
     impl.g_proj = impl.layerwise_kv_cache_hook = None
@@ -357,6 +359,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         enable_sparse_sfa_c8=enable_c8,
         enable_sparse_sfa_turboquant=False,
         enable_turboquant_rotation_fusion=False,
+        enable_turboquant_final_prefill=False,
         enable_turboquant_prefill_bf16_current=False,
         enable_mlapo=False,
         rl_config=SimpleNamespace(enabled=False),

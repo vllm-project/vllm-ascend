@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NPU numerical coverage for folded SFA projections around actual TQ4 attention."""
+"""NPU coverage that SFA preserves the original TurboQuant rotation order."""
 
 import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.attention.sfa_v1 import _fold_turboquant_projection_weights
+from types import SimpleNamespace
+
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 
 
-@pytest.mark.parametrize("query_tokens", [1, 83, 256])
+@pytest.mark.parametrize("query_tokens", [1, 83])
+@pytest.mark.parametrize("heads", [4, 16, 32, 64])
 @pytest.mark.parametrize("page", [128, 256])
 @torch.inference_mode()
-def test_folded_projections_with_tq4_attention(query_tokens, page):
+def test_original_projections_with_tq4_attention(query_tokens, page, heads):
     init_device_properties_triton()
     torch.manual_seed(103)
-    heads, context = 64, 2048
+    context = 2048
     transform = TurboQuantLatent()
     latent = torch.randn(context, 512, device="npu", dtype=torch.bfloat16)
     packed = transform.compress(latent).reshape(context, 258)
@@ -28,7 +31,6 @@ def test_folded_projections_with_tq4_attention(query_tokens, page):
     cache = cache.view(context // page, page, 1, 386).view(torch.int8)
     uk = (torch.randn(heads, 192, 512, device="npu") / 192**0.5).bfloat16()
     uv = (torch.randn(heads, 512, 256, device="npu") / 512**0.5).bfloat16()
-    folded_uk, folded_uv = _fold_turboquant_projection_weights(uk, uv, transform.rotation)
     q = torch.randn(query_tokens, heads, 192, device="npu", dtype=torch.bfloat16)
     qr = torch.randn(query_tokens, heads, 64, device="npu", dtype=torch.bfloat16)
     indices = torch.arange(context, dtype=torch.int32, device="npu").repeat(query_tokens, 1)
@@ -67,8 +69,9 @@ def test_folded_projections_with_tq4_attention(query_tokens, page):
         return result[0] if isinstance(result, tuple) else result
 
     expected = project(transform.inverse(attend(transform.forward(project(q, uk)))), uv)
-    actual = project(attend(project(q, folded_uk)), folded_uv)
+    impl = SimpleNamespace(turboquant=transform)
+    rotated_query = AscendSFAImpl._tq_rotate_query(impl, project(q, uk), qr)
+    actual = project(AscendSFAImpl._tq_inverse_output(impl, attend(rotated_query[:, :, :512])), uv)
     expected, actual = expected.float().cpu(), actual.float().cpu()
     assert torch.isfinite(actual).all()
-    # This bounds one-layer BF16 perturbation; it is not a model-quality gate.
-    assert ((actual - expected).norm() / expected.norm()).item() < 0.015
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -58,6 +58,13 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import (
+    ExportLayerMetadata,
+    FinalPrefillExporter,
+    describe_layout,
+    final_prefill_mode,
+    validate_remote_layout,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -89,6 +96,7 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+EXPORT_KV_MSG = b"export_kv_msg"
 
 
 # A busy peer can otherwise keep a global executor worker forever when the
@@ -115,6 +123,19 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    export_mode: str | None = None
+    export_layers: dict[str, ExportLayerMetadata] = msgspec.field(default_factory=dict)
+
+
+class ExportRequest(msgspec.Struct):
+    request_id: str
+    engine_id: str
+    destination: str
+    layers: dict[str, tuple[ExportLayerMetadata, list[int], list[int]]]
+
+
+class FinalPrefillTransferUncertain(RuntimeError):
+    """Destination pages must remain pinned until the worker is restarted."""
 
 
 @dataclass
@@ -186,6 +207,7 @@ class KVCacheTaskTracker:
         # be force-freed.
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.reqs_to_process: set[str] = set()
+        self.active_exports: set[str] = set()
 
     def add_req_to_process(self, request_id: str):
         self.reqs_to_process.add(request_id)
@@ -234,11 +256,11 @@ class KVCacheTaskTracker:
         expired_requests: set[str] = set()
         # Free delayed requests if they exceed the timeout
         current_time = time.time()
-        while self.delayed_free_requests:
-            request_id = next(iter(self.delayed_free_requests))
-            delay_start_time = self.delayed_free_requests[request_id]
+        for request_id, delay_start_time in list(self.delayed_free_requests.items()):
             if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
-                self.delayed_free_requests.popitem(last=False)
+                if request_id in self.active_exports:
+                    continue
+                self.delayed_free_requests.pop(request_id)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
                 logger.error(
@@ -284,6 +306,27 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        self.final_prefill_exporter = None
+        self.cache_ready = None
+
+    def export_kv(self, request: ExportRequest) -> None:
+        tracker = self.task_tracker
+        with tracker.done_task_lock:
+            if request.engine_id != self.local_engine_id or request.request_id not in tracker.reqs_to_process:
+                raise ValueError("Final-prefill source request has expired or belongs to another engine")
+            if self.final_prefill_exporter is None or self.cache_ready is None:
+                raise ValueError("Final-prefill source cache is not ready")
+            tracker.active_exports.add(request.request_id)
+            ready = self.cache_ready
+        try:
+            started = time.perf_counter()
+            ready.synchronize()
+            self.final_prefill_exporter.export_layers(request.layers, request.destination)
+            logger.info("Final-prefill export request=%s layers=%d elapsed_ms=%.2f",
+                        request.request_id, len(request.layers), (time.perf_counter() - started) * 1000)
+        finally:
+            with tracker.done_task_lock:
+                tracker.active_exports.discard(request.request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -302,6 +345,8 @@ class KVCacheSendingThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         try:
+            if self.final_prefill_exporter is not None:
+                torch.npu.set_device(self.final_prefill_exporter.device)
             # Listen for new requests for metadata. NOTE(rob): we need each rank
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
@@ -370,6 +415,15 @@ class KVCacheSendingThread(threading.Thread):
                 msg = decoder.decode(payload[0])
                 if msg[0] == GET_META_MSG:
                     sock.send_multipart((identity, b"", encoded_data))
+                elif msg[0] == EXPORT_KV_MSG:
+                    try:
+                        request = msgspec.msgpack.decode(msg[1], type=ExportRequest)
+                        self.export_kv(request)
+                        response = (True, "")
+                    except Exception as error:
+                        logger.exception("Final-prefill export failed")
+                        response = (False, str(error))
+                    sock.send_multipart((identity, b"", encoder.encode(response)))
                 elif msg[0] == DONE_RECVING_MSG:
                     logger.debug("Got DONE_RECVING_MSG for request %s", msg[1])
                     request_id = msg[1]
@@ -475,6 +529,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        self.export_metadata = None
+        self.remote_export_metadata: dict[tuple[str, int], MooncakeAgentMetadata] = {}
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
         # last TP-offset pull task for each shard; applied once all pull tasks finish.
         self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
@@ -548,6 +604,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.proc_not_transfer_request: dict[str, bool] = {}
         self.proc_not_transfer_request_lock = threading.Lock()
         self.failed_recv_requests: set[str] = set()
+        self.transfer_error: Exception | None = None
         self.invalid_block_ids: set[int] = set()
         self.failed_recv_requests_lock = threading.Lock()
 
@@ -582,6 +639,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        num_external_tokens: int | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -598,6 +656,7 @@ class KVCacheRecvingThread(threading.Thread):
             "remote_host": remote_host,
             "remote_handshake_port": remote_handshake_port,
             "num_computed_tokens": num_computed_tokens,
+            "num_external_tokens": num_external_tokens,
             "remote_port_send_num": remote_port_send_num,
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
@@ -612,10 +671,14 @@ class KVCacheRecvingThread(threading.Thread):
         Returns:
             A set of request IDs that have been completed.
         """
+        if self.transfer_error is not None:
+            raise self.transfer_error
         return self.task_tracker.get_and_clear_finished_requests()
 
     def get_and_clear_invalid_block_ids(self) -> set[int]:
         """Get and clear block ids that failed to load."""
+        if self.transfer_error is not None:
+            raise self.transfer_error
         with self.failed_recv_requests_lock:
             invalid_block_ids = self.invalid_block_ids
             self.invalid_block_ids = set()
@@ -725,6 +788,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
         transfer_failed = self._is_failed_recv_request(request_id)
+        transfer_uncertain = False
 
         try:
             if transfer_failed:
@@ -736,10 +800,22 @@ class KVCacheRecvingThread(threading.Thread):
                     self._transfer_kv_cache_all_groups(req_meta)
                     logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
                 except Exception as e:
+                    transfer_uncertain = isinstance(e, FinalPrefillTransferUncertain)
                     transfer_failed = True
-                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    if transfer_uncertain:
+                        self.transfer_error = e
+                    else:
+                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
+            if transfer_uncertain:
+                # An RPC disconnect cannot cancel a remote device write.
+                # Quarantine the request instead of returning its destination
+                # pages to the scheduler and risking a later overwrite.
+                logger.error("Final-prefill completion is unknown; request %s remains pinned. Restart this worker.",
+                             request_id)
+                self.request_queue.task_done()
+                return
             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
             if all_tasks_done:
                 if transfer_failed or self._is_failed_recv_request(request_id):
@@ -823,6 +899,10 @@ class KVCacheRecvingThread(threading.Thread):
             )
         remote_layer_name_to_idx = build_layer_name_to_metadata_idx(remote_kv_group2layeridx)
         session_id = f"{remote_host}:{remote_transfer_port}"
+
+        if self.export_metadata is not None:
+            self._export_kv_cache(req_meta)
+            return
 
         req_start_time = time.perf_counter()
         src_list: list[int] = []
@@ -1070,6 +1150,70 @@ class KVCacheRecvingThread(threading.Thread):
                 shard_idx,
                 ready_attention_group_reformat_block_ids,
             )
+
+    def _export_kv_cache(self, req_meta):
+        remote_host = req_meta["remote_host"]
+        remote_port = req_meta["remote_handshake_port"]
+        remote = self.remote_export_metadata[(req_meta["remote_engine_id"], remote_port)]
+        local = self.export_metadata
+        if remote.export_mode != local.export_mode:
+            raise ValueError("P/D final-prefill export modes differ")
+        layers = {}
+        for pull in req_meta["group_pulls"]:
+            if pull.num_group_pulls != 1:
+                raise ValueError("Final-prefill export requires complete shared-KV replicas")
+            spec, indices = self.kv_group2layeridx[pull.group_id]
+            first, end = self.pp_layer_indices[pull.prefill_pp_rank]
+            if pull.prefill_pp_rank == self._prefill_pp_size - 1:
+                end += self.num_draft_layers
+            for name, index in zip(spec["layer_names"], indices):
+                if spec.get("kv_cache_spec_type") == "AscendSFAIndexerCacheSpec":
+                    index -= self.index_cache_plane_base
+                if not first <= index < end:
+                    continue
+                # Actual registered names identify both the PP partition and
+                # its draft layers, including non-uniform PP partitions.
+                if name not in remote.export_layers:
+                    raise ValueError(f"Final-prefill producer is missing required cache layer: {name}")
+                source, destination = remote.export_layers[name], local.export_layers[name]
+                validate_remote_layout(source, destination, match_group=False)
+                src_ids = req_meta["remote_block_ids"][source.tensor_group_idx[0]]
+                dst_ids = req_meta["local_block_ids"][destination.tensor_group_idx[0]]
+                prefix = req_meta["num_computed_tokens"] // source.logical_block_size
+                external = req_meta.get("num_external_tokens")
+                pages = len(dst_ids) if external is None else (
+                    cdiv(req_meta["num_computed_tokens"] + external, source.logical_block_size) - prefix
+                )
+                # D may allocate additional MTP lookahead pages. They contain
+                # no prompt KV and must not be exported or marked initialized.
+                src_ids = src_ids[prefix:prefix + pages]
+                dst_ids = dst_ids[:pages]
+                if len(src_ids) != pages or len(dst_ids) != pages:
+                    raise ValueError("Final-prefill prompt pages do not cover destination pages")
+                layers[name] = (destination, src_ids, dst_ids)
+        if not layers:
+            return
+        request = ExportRequest(
+            req_meta["remote_request_id"], remote.engine_id,
+            f"{local.local_ip}:{local.te_rpc_port}", layers,
+        )
+        sock = self._get_remote_socket(remote_host, remote_port)
+        try:
+            # Once a write is accepted, D pages must stay owned until P has
+            # acknowledged completion/failure. A receive timeout must never
+            # return these pages to the allocator while P can still write.
+            sock.setsockopt(zmq.RCVTIMEO, max(int(self.timeout * 1000), get_transfer_timeout_value()))
+            ensure_zmq_send(sock, self.encoder.encode((EXPORT_KV_MSG, self.encoder.encode(request))),
+                            f"{remote_host}:{remote_port}")
+            success, error = msgspec.msgpack.decode(sock.recv())
+        except Exception as error:
+            sock.close()
+            raise FinalPrefillTransferUncertain("Final-prefill export acknowledgment was lost") from error
+        else:
+            sock.setsockopt(zmq.RCVTIMEO, int(self.timeout * 1000))
+            self._return_remote_socket(sock, remote_host, remote_port)
+        if not success:
+            raise RuntimeError(f"Final-prefill export failed: {error}")
 
     def _stash_pending_reformat(
         self,
@@ -1484,6 +1628,10 @@ class KVCacheRecvingThread(threading.Thread):
                     self.kv_group2layeridx,
                 )
             with self.remote_metadata_lock:
+                if bool(agent_meta.export_mode) != bool(self.export_metadata):
+                    raise ValueError("P/D must both enable final-prefill export")
+                if agent_meta.export_mode:
+                    self.remote_export_metadata[(engine_id, remote_handshake_port)] = agent_meta
                 self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
@@ -1695,8 +1843,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
     ) -> None:
-        """MooncakeConnector does not save explicitly."""
-        pass
+        worker = self.connector_worker
+        if worker is not None and worker.final_prefill_exporter is not None:
+            # Called after each actual target/draft cache write on its model
+            # stream. Replacing the event avoids re-recording an in-flight one.
+            event = torch.npu.Event()
+            event.record()
+            with worker.kv_send_thread.task_tracker.done_task_lock:
+                worker.kv_send_thread.cache_ready = event
 
     def wait_for_save(self):
         """MooncakeConnector does not save explicitly."""
@@ -2129,6 +2283,8 @@ class MooncakeConnectorWorker:
         # Metadata.
         self.vllm_config = vllm_config
         self.ascend_config = get_ascend_config()
+        self.final_prefill_export = final_prefill_mode(vllm_config)
+        self.final_prefill_exporter = None
         self.engine_id = engine_id
         self.use_sfa_sparse = model_uses_sfa_sparse(vllm_config.model_config)
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -2707,6 +2863,32 @@ class MooncakeConnectorWorker:
         )
         self.xfer_handshake_metadata = metadata
 
+        if self.final_prefill_export:
+            metadata.export_mode = self.final_prefill_export
+            caches = {name: self._as_kv_cache_tuple(cache) for name, cache in kv_caches.items()}
+            for name, tensors in caches.items():
+                index = layer_name_to_idx[name]
+                group_id = next(
+                    spec["kv_cache_group_id"] for spec, _ in self.kv_group2layeridx.values()
+                    if name in spec["layer_names"]
+                )
+                layout = ExportLayerMetadata(
+                    [group_id] * len(tensors), self.kv_caches_base_addr[index],
+                    self.block_len_per_addr[index], self.block_size_scale[index],
+                )
+                describe_layout(layout, tensors, self._get_layer_spec(name),
+                                self.final_prefill_export, self.kv_role == "kv_producer")
+                metadata.export_layers[name] = layout
+            if self.kv_role == "kv_producer":
+                self.final_prefill_exporter = FinalPrefillExporter(
+                    caches, metadata.export_layers, self.final_prefill_export,
+                    self.vllm_config.kv_transfer_config.get_from_extra_config("final_prefill_chunk_tokens", 4096),
+                    self.engine, fused_finalize=self.ascend_config.enable_turboquant_fused_finalize,
+                    incremental=True,
+                )
+            logger.info("Final-prefill export mode=%s role=%s PP rank=%d registered_layers=%d",
+                        self.final_prefill_export, self.kv_role, self.pp_rank, len(metadata.export_layers))
+
         ready_event = threading.Event()
         if self.kv_role == "kv_producer":
             self.kv_send_thread = KVCacheSendingThread(
@@ -2721,6 +2903,7 @@ class MooncakeConnectorWorker:
                 self.kv_caches,
                 self.pcp_rank,
             )
+            self.kv_send_thread.final_prefill_exporter = self.final_prefill_exporter
             self.kv_send_thread.start()
         else:
             self.kv_recv_thread = KVCacheRecvingThread(
@@ -2742,6 +2925,8 @@ class MooncakeConnectorWorker:
                 self.kv_group2layeridx,
                 self.block_size_scale,
             )
+            if self.final_prefill_export:
+                self.kv_recv_thread.export_metadata = metadata
             self.kv_recv_thread.start()
         start_wait_time = time.time()
         thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
@@ -3066,6 +3251,10 @@ class MooncakeConnectorWorker:
             # E.g. TP2/PP1, PCP rank 1, TP rank 1: offset = 2, port = base + 3.
             pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
             remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+            if self.final_prefill_export:
+                # Conversion maps each peer's own logical pages and groups by
+                # layer name; BF16 and TQ need not use the same kernel pages.
+                return remote_handshake_port_list, [meta.local_block_ids], [meta.remote_block_ids]
             # Complete KV replicas use the same logical-to-kernel block mapping
             # as the non-CP path.
             use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
@@ -3914,6 +4103,7 @@ class MooncakeConnectorWorker:
                         remote_handshake_port=remote_handshake_port,
                         remote_port_send_num=remote_port_send_num,
                         num_computed_tokens=meta.num_computed_tokens,
+                        num_external_tokens=meta.num_external_tokens,
                         all_task_done=(
                             shard_idx == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1

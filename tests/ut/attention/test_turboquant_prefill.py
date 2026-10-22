@@ -64,22 +64,21 @@ def test_decode_mixed_and_disabled_do_not_allocate(prefills, decodes, budget):
     manager.assert_not_called()
 
 
-@pytest.mark.parametrize("folded", [False, True])
-def test_workspace_uses_existing_bf16_attention_dispatch(folded):
+@pytest.mark.parametrize("heads,page,topk", [(16, 64, 1024), (32, 512, 1024), (64, 128, 2048)])
+def test_workspace_uses_existing_bf16_attention_dispatch(heads, page, topk):
     layer = object.__new__(AscendSFAImpl)
     layer.tq_prefill_workspace_bytes = 1024**2
-    layer._tq_rotations_folded = folded
     layer.scale = 576**-0.5
     layer.turboquant = MagicMock()
     layer.turboquant.forward.side_effect = lambda x: x + 1
     layer.turboquant.inverse.side_effect = lambda x: x + 2
     metadata = SimpleNamespace(num_prefills=1, num_decodes=0, max_seq_len=128)
-    query = torch.zeros(32, 64, 512, dtype=torch.bfloat16)
-    rope = torch.zeros(32, 64, 64, dtype=torch.bfloat16)
-    cache = torch.empty(1, 128, 1, 386, dtype=torch.int8)
-    indices = torch.zeros(32, 1, 2048, dtype=torch.int32)
+    query = torch.zeros(32, heads, 512, dtype=torch.bfloat16)
+    rope = torch.zeros(32, heads, 64, dtype=torch.bfloat16)
+    cache = torch.empty(max(1, 128 // page), page, 1, 386, dtype=torch.int8)
+    indices = torch.zeros(32, 1, topk, dtype=torch.int32)
     qlens, klens = torch.tensor([32]), torch.tensor([128])
-    table = torch.zeros(1, 1, dtype=torch.int32)
+    table = torch.zeros(1, cache.shape[0], dtype=torch.int32)
     output = torch.ones_like(query)
     manager = WorkspaceManager(torch.device("cpu"))
     with (
@@ -99,8 +98,8 @@ def test_workspace_uses_existing_bf16_attention_dispatch(folded):
     assert args["actual_seq_lengths_kv"] is klens
     assert args["sparse_mode"] == 3
     assert args["return_softmax_lse"] is False
-    torch.testing.assert_close(args["query"], query if folded else query + 1)
-    torch.testing.assert_close(result, output if folded else output + 2)
+    torch.testing.assert_close(args["query"], query + 1)
+    torch.testing.assert_close(result, output + 2)
 
 
 def test_current_workspace_budget_counts_send_and_receive_buffers():
@@ -155,8 +154,9 @@ def test_current_workspace_fallback_never_enters_collective(enabled, budget, pre
 def test_current_attention_uses_global_history_lengths_and_existing_storage():
     layer = object.__new__(AscendSFAImpl)
     layer.tq_prefill_workspace_bytes = 8 * 1024**2
-    layer._tq_rotations_folded = True
     layer.turboquant = MagicMock()
+    layer.turboquant.forward.side_effect = lambda x: x
+    layer.turboquant.inverse.side_effect = lambda x: x
     metadata = SimpleNamespace(
         num_prefills=1, num_decodes=0, max_seq_len=4096,
         cum_query_lens=torch.tensor([2048]), seq_lens=torch.tensor([4096]),

@@ -5121,3 +5121,119 @@ def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatc
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_export_lease_prevents_expiration_until_conversion_and_transfer_finish(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import ExportRequest
+
+    sender = KVCacheSendingThread.__new__(KVCacheSendingThread)
+    sender.local_engine_id = "producer"
+    sender.task_tracker = KVCacheTaskTracker()
+    sender.cache_ready = MagicMock()
+    sender.final_prefill_exporter = MagicMock()
+    tracker = sender.task_tracker
+    tracker.add_req_to_process("request")
+    tracker.add_delayed_request("request", 0)
+    request = ExportRequest("request", "producer", "destination:123", {})
+
+    def export(*args):
+        assert tracker.get_and_clear_finished_requests() == set()
+        assert "request" in tracker.reqs_to_process
+        raise RuntimeError("transfer failed after draining the stream")
+
+    sender.final_prefill_exporter.export_layers.side_effect = export
+    with pytest.raises(RuntimeError, match="transfer failed"):
+        sender.export_kv(request)
+    assert tracker.active_exports == set()
+    assert tracker.get_and_clear_finished_requests() == {"request"}
+    with pytest.raises(ValueError, match="expired"):
+        sender.export_kv(request)
+    assert sender.final_prefill_exporter.export_layers.call_count == 1
+
+
+@pytest.mark.parametrize("pp", [1, 2, 4])
+def test_export_routes_registered_layers_and_mtp_by_name(pp):
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import ExportLayerMetadata
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import ExportRequest
+
+    def layout(group):
+        return ExportLayerMetadata(
+            [group, group], [100, 200], [4096, 512], [1, 1],
+            "bf16_to_tq4", "sfa_bf16_v1", 4,
+            [[4, 1, 512], [4, 1, 64]], ["torch.bfloat16"] * 2,
+            [4096, 512], [20, 20],
+        )
+
+    names = [f"model.layers.{i}.attn" for i in range(8)] + ["model.mtp.0.attn"]
+    worker = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    worker.kv_group2layeridx = {0: ({"layer_names": names}, list(range(len(names))))}
+    worker.pp_layer_indices = {stage: (stage * 8 // pp, (stage + 1) * 8 // pp) for stage in range(pp)}
+    worker._prefill_pp_size = pp
+    worker.num_draft_layers = 1
+    local = make_agent_metadata(engine_id="D", local_ip="destination", te_rpc_port=88)
+    local.export_mode = "bf16_to_tq4"
+    local.export_layers = {name: layout(1) for name in names}
+    worker.export_metadata = local
+    worker.encoder = msgspec.msgpack.Encoder()
+    worker.timeout = 1
+    sock = MagicMock()
+    sock.recv.return_value = msgspec.msgpack.encode((True, ""))
+    worker._get_remote_socket = MagicMock(return_value=sock)
+    worker._return_remote_socket = MagicMock()
+    seen = []
+    for stage in range(pp):
+        stage_names = names[stage * 8 // pp:(stage + 1) * 8 // pp]
+        if stage == pp - 1:
+            stage_names += names[-1:]
+        remote = make_agent_metadata(engine_id="P")
+        remote.export_mode = "bf16_to_tq4"
+        remote.export_layers = {name: layout(0) for name in stage_names}
+        worker.remote_export_metadata = {("P", 100 + stage): remote}
+        worker._export_kv_cache({
+            "remote_host": "source", "remote_handshake_port": 100 + stage,
+            "remote_engine_id": "P", "remote_request_id": "request",
+            "group_pulls": [GroupPull(0, 0, 1, stage)],
+            "num_computed_tokens": 4, "num_external_tokens": 7,
+            "remote_block_ids": [[5, 7, 9]], "local_block_ids": [[], [3, 4, 11]],
+        })
+        payload = msgspec.msgpack.decode(sock.send.call_args.args[0])
+        request = msgspec.msgpack.decode(payload[1], type=ExportRequest)
+        assert request.destination == "destination:88"
+        for name, (_, source, target) in request.layers.items():
+            assert source == [7, 9] and target == [3, 4]
+            seen.append(name)
+    assert sorted(seen) == sorted(names)
+    del remote.export_layers[names[-1]]
+    with pytest.raises(ValueError, match="missing required cache layer"):
+        worker._export_kv_cache({
+            "remote_host": "source", "remote_handshake_port": 100 + pp - 1,
+            "remote_engine_id": "P", "remote_request_id": "request",
+            "group_pulls": [GroupPull(0, 0, 1, pp - 1)],
+            "num_computed_tokens": 4, "num_external_tokens": 7,
+            "remote_block_ids": [[5, 7, 9]], "local_block_ids": [[], [3, 4, 11]],
+        })
+
+
+def test_uncertain_export_never_completes_or_recycles_destination_pages():
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import FinalPrefillTransferUncertain
+
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.transfer_error = None
+    receiver._is_failed_recv_request = MagicMock(return_value=False)
+    receiver._transfer_kv_cache_all_groups = MagicMock(side_effect=FinalPrefillTransferUncertain("lost ACK"))
+    receiver._mark_failed_recv_request = MagicMock()
+    receiver._mark_request_task_done = MagicMock()
+    receiver._send_done_recv_signal = MagicMock()
+    receiver.request_queue = MagicMock()
+    receiver._handle_request({
+        "request_id": "D-request", "remote_request_id": "P-request",
+        "remote_host": "source", "remote_handshake_port": 100,
+        "remote_port_send_num": {}, "all_task_done": True, "local_block_ids": [[7]],
+    })
+    receiver._mark_request_task_done.assert_not_called()
+    receiver._send_done_recv_signal.assert_not_called()
+    receiver._mark_failed_recv_request.assert_not_called()
+    with pytest.raises(FinalPrefillTransferUncertain, match="lost ACK"):
+        receiver.get_and_clear_finished_requests()
+    with pytest.raises(FinalPrefillTransferUncertain, match="lost ACK"):
+        receiver.get_and_clear_invalid_block_ids()

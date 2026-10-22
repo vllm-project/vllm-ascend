@@ -118,3 +118,15 @@ def test_rotation_and_packing_compatibility(legacy_hadamard):
     torch.testing.assert_close(
         store.inverse(value), (value.flatten(0, 1) @ inverse_rotation).reshape_as(value), rtol=0, atol=0
     )
+
+
+def test_glm_legacy_fusion_flag_preserves_reference_packing():
+    store = TurboQuantLatent(fused_finalize=True)
+    assert not store._fused_finalize
+    assert TurboQuantLatent(legacy_hadamard=True)._fused_finalize
+    torch.manual_seed(37)
+    values = torch.randn(17, 512, dtype=torch.bfloat16)
+    with patch.object(latent_module, "_get_turbo_quant_op", return_value=_quantize_reference):
+        actual = store.compress(values)
+        expected = TurboQuantLatent(fused_finalize=False).compress(values)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

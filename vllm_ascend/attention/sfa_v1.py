@@ -59,6 +59,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.turboquant_prefill import (
+    LATENT_DIM,
+    TILE_ROWS,
     current_workspace_shapes,
     expand_turboquant_pages,
     workspace_shapes,
@@ -84,20 +86,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
     from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-
-
-def _fold_turboquant_projection_weights(
-    W_UK_T: torch.Tensor,
-    W_UV: torch.Tensor,
-    rotation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fold latent Q/O rotations into absorbed MLA projection weights."""
-    latent_dim = W_UK_T.shape[-1]
-    assert W_UV.shape[1] == latent_dim
-    assert rotation.shape == (latent_dim, latent_dim)
-    folded_uk = torch.matmul(W_UK_T.float(), rotation).to(W_UK_T.dtype)
-    folded_uv = torch.matmul(rotation.T, W_UV.float()).to(W_UV.dtype)
-    return folded_uk, folded_uv
 
 
 # NoPE sparse MLA operator helpers.
@@ -897,7 +885,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        self.enable_turboquant_rotation_fusion = ascend_config.enable_turboquant_rotation_fusion
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
@@ -920,7 +907,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.final_prefill = (
             ColocatedFinalPrefill(self.turboquant) if ascend_config.enable_turboquant_final_prefill else None
         )
-        self._tq_rotations_folded = False
         self.tq_prefill_bf16_current = ascend_config.enable_turboquant_prefill_bf16_current
         parallel = self.vllm_config.parallel_config
         self.tq_prefill_workspace_bytes = (
@@ -997,22 +983,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         W_UK_T = W_UK.permute(1, 2, 0).contiguous()
         W_UV = W_UV.transpose(0, 1).contiguous()
-        # The DCP path retains its explicit output inverse rotation. Keep its
-        # weights unfolded; the installed TQ operator lacks DCP softmax outputs.
-        self._tq_rotations_folded = (
-            self.enable_sparse_sfa_turboquant
-            and self.enable_turboquant_rotation_fusion
-            and self.vllm_config.parallel_config.decode_context_parallel_size == 1
-        )
-        if self._tq_rotations_folded:
-            # Fold Q/O rotations into absorbed weights without changing the
-            # source parameter, so RL reloads can safely repeat the operation.
-            assert self.turboquant is not None
-            self.turboquant._initialize(kv_b_proj_weight.device)
-            rotation = self.turboquant.rotation
-            assert rotation is not None
-            W_UK_T, W_UV = _fold_turboquant_projection_weights(W_UK_T, W_UV, rotation)
-
         # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
         # scenario the graph is captured once, so every later weight update
         # reload has to refresh the stored tensors in place instead of
@@ -1653,12 +1623,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _tq_rotate_query(self, ql_nope: torch.Tensor, q_pe: torch.Tensor) -> torch.Tensor:
         assert self.turboquant is not None
-        rotated = ql_nope if getattr(self, "_tq_rotations_folded", False) else self.turboquant.forward(ql_nope)
+        rotated = self.turboquant.forward(ql_nope)
         return torch.cat([rotated, q_pe], dim=-1).contiguous()
 
     def _tq_inverse_output(self, attn_out: torch.Tensor) -> torch.Tensor:
         assert self.turboquant is not None
-        return attn_out if getattr(self, "_tq_rotations_folded", False) else self.turboquant.inverse(attn_out)
+        return self.turboquant.inverse(attn_out)
 
     def _prepare_tq_current_workspace(self, hidden_states, cache, metadata):
         """Use rank-uniform metadata before deciding whether to enter a TP collective."""
@@ -1668,9 +1638,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             or not getattr(self, "tq_prefill_bf16_current", False)
             or metadata.num_prefills == 0
             or metadata.num_decodes != 0
-            or self.local_num_heads != 64
             or hidden_states.dtype != torch.bfloat16
-            or cache.shape[1] not in (128, 256)
+            or cache.shape[1] <= 0 or cache.shape[1] % TILE_ROWS
             or cache.shape[2:] != (1, 386)
             or not cache.is_contiguous()
             or metadata.block_table.stride(1) != 1
@@ -1702,10 +1671,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             or metadata.num_prefills == 0
             or metadata.num_decodes != 0
             or ql_nope.dtype != torch.bfloat16
-            or ql_nope.shape[1:] != (64, 512)
+            or ql_nope.shape[-1] != LATENT_DIM
+            or ql_nope.shape[:-1] != q_pe.shape[:-1]
             or q_pe.shape[-1] != 64
-            or topk_indices.shape[-1] != 2048
-            or cache.shape[1] not in (128, 256)
+            or cache.shape[1] <= 0 or cache.shape[1] % TILE_ROWS
             or cache.shape[2:] != (1, 386)
             or not cache.is_contiguous()
             or block_table.stride(1) != 1
@@ -1726,7 +1695,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 current_query_lens=metadata.cum_query_lens,
                 full_seq_lens=metadata.seq_lens,
             )
-        query = ql_nope if self._tq_rotations_folded else self.turboquant.forward(ql_nope)
+        query = self.turboquant.forward(ql_nope)
         result = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             query,

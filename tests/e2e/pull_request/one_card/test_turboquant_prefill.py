@@ -12,11 +12,13 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQua
 from vllm_ascend.utils import enable_custom_op
 
 
-@pytest.mark.parametrize("page", [128, 256])
+@pytest.mark.parametrize("page", [64, 128, 256, 512])
 @pytest.mark.parametrize("empty_request", [False, True])
 @pytest.mark.parametrize("invalid_topk", [False, True])
+@pytest.mark.parametrize("heads", [16, 32, 64])
+@pytest.mark.parametrize("topk", [1024, 2048])
 @torch.inference_mode()
-def test_shared_prefix_pages_tail_and_attention(page, empty_request, invalid_topk):
+def test_shared_prefix_pages_tail_and_attention(page, empty_request, invalid_topk, heads, topk):
     init_device_properties_triton()
     enable_custom_op()
     torch.manual_seed(81)
@@ -64,9 +66,9 @@ def test_shared_prefix_pages_tail_and_attention(page, empty_request, invalid_top
     torch.testing.assert_close(cache.cpu(), before, rtol=0, atol=0)
     if empty_request:
         return
-    q = torch.randn(64, 64, 512, device="npu", dtype=torch.bfloat16)
-    qr = torch.randn(64, 64, 64, device="npu", dtype=torch.bfloat16)
-    indices = torch.arange(2048, dtype=torch.int32, device="npu").repeat(64, 1).unsqueeze(1)
+    q = torch.randn(64, heads, 512, device="npu", dtype=torch.bfloat16)
+    qr = torch.randn(64, heads, 64, device="npu", dtype=torch.bfloat16)
+    indices = torch.arange(topk, dtype=torch.int32, device="npu").repeat(64, 1).unsqueeze(1)
     if invalid_topk:
         indices[:, :, -17:] = -1
     common = dict(

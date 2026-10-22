@@ -1543,7 +1543,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             enable_turboquant_fused_finalize="true",
             enable_turboquant_prefill_bf16_current="true",
         )
-        self.assertTrue(config.enable_turboquant_rotation_fusion)
+        self.assertFalse(config.enable_turboquant_rotation_fusion)
         self.assertTrue(config.enable_turboquant_fused_finalize)
         self.assertTrue(config.enable_turboquant_prefill_bf16_current)
 

@@ -8,6 +8,7 @@ can have different kernel page sizes and padded physical strides.
 """
 
 import math
+from dataclasses import dataclass, field
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
@@ -32,9 +33,11 @@ def final_prefill_mode(config):
     if value not in (BF16_TO_TQ4, BF16_TO_BF16):
         raise ValueError("final_prefill_export must be bf16_to_tq4 or bf16_to_bf16")
     parallel = config.parallel_config
-    if (parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1
-            or parallel.pipeline_parallel_size != 1 or config.speculative_config is not None):
-        raise ValueError("Final-prefill export requires PCP=DCP=PP=1 and no speculative decoding")
+    if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+        raise ValueError("Final-prefill export requires unsharded SFA KV pages (PCP=DCP=1)")
+    if config.kv_transfer_config.kv_connector != "MooncakeConnectorV1" and (
+            parallel.pipeline_parallel_size != 1 or config.speculative_config is not None):
+        raise ValueError("PP or speculative final-prefill export requires MooncakeConnectorV1")
     transfer = config.kv_transfer_config
     if transfer.is_kv_producer == transfer.is_kv_consumer:
         raise ValueError("Final-prefill export requires separate kv_producer and kv_consumer roles")
@@ -45,6 +48,21 @@ def final_prefill_mode(config):
         if transfer.is_kv_producer or config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise ValueError("Final-prefill export requires eager P; D supports eager or FULL_DECODE_ONLY")
     return value
+
+
+@dataclass
+class ExportLayerMetadata:
+    tensor_group_idx: list[int]
+    kv_caches_base_addr: list[int]
+    block_len: list[int]
+    block_size_scale: list[int]
+    export_mode: str | None = None
+    cache_format: str | None = None
+    logical_block_size: int = 0
+    component_shapes: list[list[int]] = field(default_factory=list)
+    component_dtypes: list[str] = field(default_factory=list)
+    block_stride: list[int] = field(default_factory=list)
+    num_blocks: list[int] = field(default_factory=list)
 
 
 def describe_layout(meta, tensors, spec, mode, is_producer):
@@ -78,7 +96,7 @@ def describe_layout(meta, tensors, spec, mode, is_producer):
             raise ValueError("Overlapping cache pages are not supported")
 
 
-def validate_remote_layout(local, remote):
+def validate_remote_layout(local, remote, *, match_group=True):
     components = len(remote.kv_caches_base_addr)
     fields = (remote.tensor_group_idx, remote.block_len, remote.block_size_scale, remote.component_shapes,
               remote.component_dtypes, remote.block_stride, remote.num_blocks)
@@ -90,9 +108,10 @@ def validate_remote_layout(local, remote):
         raise ValueError("Invalid destination page stride")
     if remote.export_mode != local.export_mode or remote.logical_block_size != local.logical_block_size:
         raise ValueError("P/D final-prefill mode and logical block sizes must match")
-    if local.tensor_group_idx[0] != remote.tensor_group_idx[0]:
+    if match_group and local.tensor_group_idx[0] != remote.tensor_group_idx[0]:
         raise ValueError("P/D cache group ordering must match")
-    if local.cache_format == "sfa_bf16_v1" and local.export_mode == BF16_TO_TQ4:
+    if (local.cache_format == "sfa_bf16_v1" and local.export_mode == BF16_TO_TQ4
+            and remote.cache_format != "sfa_bf16_v1"):
         shape = [remote.logical_block_size // remote.block_size_scale[0], 1, TQ_SLOT_BYTES]
         if (remote.cache_format != TQ_ABI or remote.component_shapes != [shape]
                 or remote.component_dtypes not in (["torch.int8"], ["torch.uint8"])
@@ -152,7 +171,14 @@ class FinalPrefillExporter:
             if engine.register_memory(second.data_ptr(), second.numel()) != 0:
                 raise RuntimeError("Final-prefill staging memory registration failed")
             self.staging_buffers.append(second)
-            self.staging_slots = torch.arange(chunk_tokens, dtype=torch.int64, device=self.device)
+        if mode == BF16_TO_TQ4:
+            # Load/compile the packer before serving requests. Doing this in
+            # the serial export thread can block other D workers' handshakes.
+            pack_bf16_kv(
+                torch.ones((largest_block, LATENT_DIM), dtype=torch.bfloat16, device=self.device),
+                torch.zeros((largest_block, ROPE_DIM), dtype=torch.bfloat16, device=self.device),
+                self.quantizer,
+            )
         # Transforms/staging are created on the model stream before worker use.
         self.ready = torch.npu.Event()
         self.ready.record()
@@ -187,7 +213,7 @@ class FinalPrefillExporter:
                 remote = request.remote_layer_metadata[name]
                 group = local.tensor_group_idx[0]
                 src_ids, dst_ids = request.local_block_ids[group], request.remote_block_ids[group]
-                if local.cache_format == "sfa_bf16_v1" and self.mode == BF16_TO_TQ4:
+                if remote.cache_format == TQ_ABI:
                     self._convert_and_write(name, local, remote, src_ids, dst_ids, session)
                 else:
                     src, dst, lengths = [], [], []
@@ -197,6 +223,40 @@ class FinalPrefillExporter:
                             dst.append(remote.kv_caches_base_addr[i] + destination * remote.block_stride[i])
                             lengths.append(local.block_len[i])
                     self._write(session, src, dst, lengths)
+
+    @torch.inference_mode()
+    def export_layers(self, layers, session):
+        """Export name-mapped logical pages supplied by a bulk connector.
+
+        The caller owns the request's source pages until this returns. Validate
+        the entire request first, including passthrough layers and MTP caches.
+        Cache manager group numbers need not agree across PP stages or formats.
+        """
+        self.ready.synchronize()
+        for name, (remote, source, destination) in layers.items():
+            local = self.metadata[name]
+            validate_remote_layout(local, remote, match_group=False)
+            if len(source) != len(destination):
+                raise ValueError("Source and destination page counts differ")
+            validate_block_ids(source, local)
+            validate_block_ids(destination, remote)
+        try:
+            for name, (remote, source, destination) in layers.items():
+                local = self.metadata[name]
+                if remote.cache_format == TQ_ABI:
+                    self._convert_and_write(name, local, remote, source, destination, session)
+                else:
+                    src, dst, lengths = [], [], []
+                    for i, scale in enumerate(local.block_size_scale):
+                        for s, d in zip(kernel_ids(source, scale), kernel_ids(destination, scale)):
+                            src.append(local.kv_caches_base_addr[i] + s * local.block_stride[i])
+                            dst.append(remote.kv_caches_base_addr[i] + d * remote.block_stride[i])
+                            lengths.append(local.block_len[i])
+                    self._write(session, src, dst, lengths)
+        finally:
+            # A failed transfer must also retire any queued conversion before
+            # the connector can release source pages or acknowledge failure.
+            self.stream.synchronize()
 
     def _convert_and_write(self, name, local, remote, src_ids, dst_ids, session):
         if getattr(self, "incremental", False):
@@ -256,7 +316,8 @@ class FinalPrefillExporter:
                 for tensor, scale in zip(self.caches[name], local.block_size_scale):
                     indices = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
                     parts.append(tensor.index_select(0, indices).reshape(-1, tensor.shape[-1]))
-                self.quantizer.compress_kv_into(*parts, self.staging_slots[:parts[0].shape[0]], buffer)
+                packed = pack_bf16_kv(*parts, self.quantizer)
+                buffer[:packed.shape[0]].copy_(packed)
                 event = torch.npu.Event()
                 event.record()
             if pending is not None:

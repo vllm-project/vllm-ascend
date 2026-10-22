@@ -89,4 +89,17 @@ def test_compress_fused_finalize_preserves_rotation_and_codes(rows, legacy_hadam
     torch.testing.assert_close(actual[:, :, :256], expected[:, :, :256], rtol=0, atol=0)
     actual_scale = actual[:, :, 256:].contiguous().view(torch.float16)
     expected_scale = expected[:, :, 256:].contiguous().view(torch.float16)
-    torch.testing.assert_close(actual_scale, expected_scale, rtol=0.001, atol=0)
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0.001 if legacy_hadamard else 0, atol=0)
+
+
+@pytest.mark.parametrize("rows", [257, 4096, 16384])
+def test_glm_packing_is_byte_identical_with_legacy_fusion_flag(rows):
+    from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import pack_bf16_kv
+
+    init_device_properties_triton()
+    torch.manual_seed(932)
+    nope = torch.randn(rows, 512, device="npu", dtype=torch.bfloat16)
+    rope = torch.randn(rows, 64, device="npu", dtype=torch.bfloat16)
+    original = pack_bf16_kv(nope, rope, TurboQuantLatent(fused_finalize=False))
+    actual = pack_bf16_kv(nope, rope, TurboQuantLatent(fused_finalize=True))
+    torch.testing.assert_close(actual, original, rtol=0, atol=0)

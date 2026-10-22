@@ -12,8 +12,8 @@ ROPE_DIM = 64
 BF16_PAGE = 128
 TILE_ROWS = 8
 MIN_QUERY_TOKENS = 32
-# Measured on A3 with 64 query heads and Top-K 2048. Do not expand a long
-# prefix for a few new queries; the original TQ operator is faster there.
+# Bound history expansion relative to useful query work, independently of
+# the device model or the number of query heads on a TP rank.
 MAX_EXPANDED_ROWS_PER_QUERY = 128
 WORKSPACE_ALIGNMENT = 256
 
@@ -86,7 +86,7 @@ def _expand_pages(
             current_start = tl.load(current_query_lens + request - 1, request > 0, other=0)
             current_end = tl.load(current_query_lens + request)
             history_length = tl.load(full_seq_lens + request) - (current_end - current_start)
-        # TILE divides both supported source page sizes and the output page.
+        # TILE divides the validated source page size and the output page.
         # No tile crosses a request or page boundary. Invalid tail pages must
         # never be read: prefix caches may leave these table entries stale.
         source_page = tl.load(

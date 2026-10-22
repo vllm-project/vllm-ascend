@@ -28,7 +28,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
-    _fold_turboquant_projection_weights,
     _int64_kv_slots,
     custom_kv_rmsnorm_rope,
     turboquant_kv_rmsnorm_rope,
@@ -1185,35 +1184,10 @@ class TestAscendSFAImpl(TestBase):
         self.impl.kv_b_proj = layer
         return layer
 
-    def test_turboquant_projection_folding_matches_rotation_order(self):
-        """Check FP32 algebra separately from the BF16 rounding budget."""
-        torch.manual_seed(19)
-        transform = TurboQuantLatent()
-        transform._initialize(torch.device("cpu"))
-        for dtype in (torch.float32, torch.bfloat16):
-            with self.subTest(dtype=dtype):
-                uk = torch.randn(2, 192, 512, dtype=dtype)
-                uv = torch.randn(2, 512, 256, dtype=dtype)
-                q = torch.randn(9, 2, 192, dtype=dtype)
-                latent = torch.randn(9, 2, 512, dtype=dtype)
-                folded_uk, folded_uv = _fold_turboquant_projection_weights(uk, uv, transform.rotation)
-                expected_q = transform.forward(torch.einsum("nhp,hpl->nhl", q, uk))
-                expected_v = torch.einsum("nhl,hlv->nhv", transform.inverse(latent), uv)
-                actual_q = torch.einsum("nhp,hpl->nhl", q, folded_uk)
-                actual_v = torch.einsum("nhl,hlv->nhv", latent, folded_uv)
-                for actual, expected in ((actual_q, expected_q), (actual_v, expected_v)):
-                    if dtype == torch.float32:
-                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
-                    else:
-                        # Relative L2 avoids unbounded pointwise relative errors
-                        # near zero, while bounding aggregate BF16 error to 0.6%.
-                        relative_l2 = (actual.float() - expected.float()).norm() / expected.float().norm()
-                        self.assertLess(relative_l2.item(), 0.006)
-
     @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz", side_effect=lambda x: x)
     @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
     @patch("torch_npu.npu_format_cast", side_effect=lambda x, _: x)
-    def test_tq_folded_weights_reload_from_source(self, _format, dispose, _nz):
+    def test_tq_weights_reload_preserves_unfolded_projections(self, _format, dispose, _nz):
         self.impl.num_heads = self.impl.local_num_heads = 2
         self.impl.kv_lora_rank = 512
         self.impl.enable_sparse_sfa_turboquant = True
@@ -1223,7 +1197,6 @@ class TestAscendSFAImpl(TestBase):
         layer = self._setup_kv_b_proj()
         original = layer.weight.clone()
         self.impl.process_weights_after_loading(torch.bfloat16)
-        self.assertTrue(self.impl._tq_rotations_folded)
         pointers = (self.impl.W_UK_T.data_ptr(), self.impl.W_UV.data_ptr())
         initial = (self.impl.W_UK_T.clone(), self.impl.W_UV.clone())
         self.impl.process_weights_after_loading(torch.bfloat16)
@@ -1238,7 +1211,6 @@ class TestAscendSFAImpl(TestBase):
         dispose.assert_not_called()
         self.impl.enable_turboquant_rotation_fusion = False
         self.impl.process_weights_after_loading(torch.bfloat16)
-        self.assertFalse(self.impl._tq_rotations_folded)
         raw = layer.weight.view(2, self.impl.qk_nope_head_dim + self.impl.v_head_dim, 512)
         torch.testing.assert_close(self.impl.W_UK_T, raw[:, : self.impl.qk_nope_head_dim], rtol=0, atol=0)
 
@@ -1247,7 +1219,6 @@ class TestAscendSFAImpl(TestBase):
         self.impl.enable_turboquant_rotation_fusion = True
         self.impl.vllm_config.parallel_config.decode_context_parallel_size = 2
         self.impl.process_weights_after_loading(torch.bfloat16)
-        self.assertFalse(self.impl._tq_rotations_folded)
         torch.testing.assert_close(self.impl.W_UK_T, raw[:, : self.impl.qk_nope_head_dim], rtol=0, atol=0)
         torch.testing.assert_close(
             self.impl.W_UV, raw[:, self.impl.qk_nope_head_dim :].transpose(1, 2), rtol=0, atol=0
@@ -1851,18 +1822,6 @@ class TestAscendSFATurboQuantLatentCache(TestBase):
 
         impl.turboquant.forward.assert_called_once_with(ql_nope)
         self.assertTrue(torch.equal(out, torch.cat([rotated, q_pe], dim=-1)))
-
-    def test_folded_tq_query_and_output_skip_runtime_rotations(self):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl._tq_rotations_folded = True
-        impl.turboquant = MagicMock()
-        q = torch.randn(3, 2, 512)
-        rope = torch.randn(3, 2, 64)
-        output = torch.randn_like(q)
-        torch.testing.assert_close(impl._tq_rotate_query(q, rope), torch.cat((q, rope), dim=-1))
-        self.assertIs(impl._tq_inverse_output(output), output)
-        impl.turboquant.forward.assert_not_called()
-        impl.turboquant.inverse.assert_not_called()
 
     @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_quant_sparse_flash_attention", create=True)
     def test_execute_sparse_flash_attention_rotates_output_back(self, mock_op):

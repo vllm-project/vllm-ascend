@@ -53,13 +53,14 @@ class TurboQuantLatent:
 
     ``legacy_hadamard`` selects the historical post-Lloyd-Max rotation sequence
     with shared transforms and fused NPU packing. The default retains the
-    GLM SFA rotation sequence and reference packing; either transform can
-    explicitly select fused packing for model-level validation.
+    GLM SFA rotation sequence and reference packing. Both retain their
+    historical packing arithmetic. The GLM fused flag is accepted
+    for configuration compatibility but cannot change scale reduction rounding.
     """
 
     def __init__(self, *, legacy_hadamard: bool = False, fused_finalize: bool | None = None):
         self._legacy_hadamard = legacy_hadamard
-        self._fused_finalize = legacy_hadamard if fused_finalize is None else fused_finalize
+        self._fused_finalize = legacy_hadamard and (fused_finalize is None or fused_finalize)
         self.inverse_rotation: torch.Tensor | None = None
         self.rotation: torch.Tensor | None = None
         self.centroids: torch.Tensor | None = None
@@ -119,8 +120,8 @@ class TurboQuantLatent:
         packed, norm = _get_turbo_quant_op()(rotated, centroids)
         # ops-nn returns the original norm. MixedQuantSparseFlashMla multiplies
         # centroids by scale directly; retain the old DS norm correction here.
-        # Both rotations use the same packing formula. Reduction order can
-        # differ from PyTorch, so compare decoded scales with FP16 tolerance.
+        # GLM must retain the reference reduction order: a fused reduction can
+        # cross FP16 rounding boundaries and alter both scale and RoPE bytes.
         if self._fused_finalize and packed.device.type == "npu":
             from vllm_ascend.ops.triton.turboquant_finalize import turboquant_finalize
 

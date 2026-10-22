@@ -32,6 +32,48 @@ from vllm_ascend.utils import (
 )
 
 
+@pytest.mark.parametrize("user_specified", [False, True])
+@pytest.mark.parametrize("backend_name", ["ASCEND_SFA", "ASCEND_SFA_INDEXER"])
+def test_turboquant_sfa_keeps_worker_block_size_with_checkpoint_skip_layers(user_specified, backend_name):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            cache_dtype="turboquant_4bit_nc",
+            block_size=128,
+            user_specified_block_size=user_specified,
+            kv_cache_dtype_skip_layers=["0", "1", "76", "77"],
+            skip_page_size_padded=None,
+            enable_prefix_caching=True,
+        ),
+        model_config=SimpleNamespace(is_hybrid=False),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        kv_transfer_config=SimpleNamespace(),
+    )
+    backend = MagicMock()
+    backend.get_name.return_value = backend_name
+    backend.get_preferred_block_size.return_value = 128
+    with (
+        patch.object(NPUPlatform, "_find_non_ssm_backend", return_value=backend),
+        patch("vllm.config.vllm.set_current_vllm_config"),
+    ):
+        NPUPlatform.update_block_size_for_backend(config)
+    assert config.cache_config.block_size == 128
+    assert config.cache_config.skip_page_size_padded is None
+    assert config.cache_config.kv_cache_dtype_skip_layers == ["0", "1", "76", "77"]
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,backend_name",
+    [("auto", "ASCEND_SFA"), ("int8", "ASCEND_SFA"), ("turboquant_4bit_nc", "OTHER")],
+)
+def test_non_turboquant_sfa_preserves_generic_kv_alignment(cache_dtype, backend_name):
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    backend = MagicMock()
+    backend.get_name.return_value = backend_name
+    with patch("vllm.platforms.interface.Platform._align_heterogeneous_kv_block_size") as align:
+        NPUPlatform._align_heterogeneous_kv_block_size(config, backend)
+    align.assert_called_once_with(config, backend)
+
+
 @pytest.mark.parametrize(
     "partition",
     ["20,23", "19,24", "28,15", "20,8,15", "23,20", "21,22", "17,26", "20,4,19"],

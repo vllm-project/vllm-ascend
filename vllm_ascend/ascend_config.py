@@ -579,11 +579,10 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
-    # SFA TQ4: weight folding changes BF16 rounding and remains opt-in until
-    # model-level accuracy is validated. Applies to both prefill and decode.
+    # Deprecated compatibility switch: preserve the original Q/O rounding.
     enable_turboquant_rotation_fusion: bool = False
-    # Opt in to fused norm correction/packing after model-level validation;
-    # reduction ordering can change FP16 scales and downstream token choices.
+    # Compatibility switch; GLM retains reference scale reduction/packing.
+    # The historical DeepSeek path keeps its original fused implementation.
     enable_turboquant_fused_finalize: bool = False
     # Opt-in BF16 layer workspace, shared across SFA layers; zero disables it.
     turboquant_prefill_workspace_mb: int = 0
@@ -668,6 +667,9 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.enable_turboquant_rotation_fusion:
+            logger.warning_once("TurboQuant rotation folding is disabled to preserve the original BF16 rounding.")
+            self.enable_turboquant_rotation_fusion = False
         if self.turboquant_prefill_workspace_mb < 0:
             raise ValueError("turboquant_prefill_workspace_mb must be non-negative")
         if self.weight_nz_mode not in (0, 1, 2):

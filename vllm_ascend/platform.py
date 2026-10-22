@@ -402,6 +402,19 @@ class NPUPlatform(Platform):
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
+    def _align_heterogeneous_kv_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        if (
+            vllm_config.cache_config.cache_dtype == "turboquant_4bit_nc"
+            and backend_cls.get_name() in ("ASCEND_SFA", "ASCEND_SFA_INDEXER")
+        ):
+            # SFA builds its packed TQ4 and indexer specs independently and does
+            # not apply the checkpoint's KV skip-layer list. Generic dense-page
+            # alignment would change the worker block size without changing
+            # those specs, breaking the P/D logical-to-physical block mapping.
+            return
+        super()._align_heterogeneous_kv_block_size(vllm_config, backend_cls)
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         super().update_block_size_for_backend(vllm_config)
 
