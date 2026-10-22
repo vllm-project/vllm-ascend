@@ -209,7 +209,7 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [4, 5, 6])
-@pytest.mark.parametrize("sliding_window", [None, 16])
+@pytest.mark.parametrize("sliding_window", [None, 1, 3, 16, 256])
 @pytest.mark.parametrize("causal", [False, True])
 def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, sliding_window, causal):
     impl = _make_impl()
@@ -220,26 +220,44 @@ def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, 
     metadata = _make_metadata(AscendAttentionState.SpecDecoding)
     metadata.causal = causal
     metadata.attn_mask = torch.zeros(2048, 2048, dtype=torch.bool) if causal else None
+    original_mask = metadata.attn_mask
     metadata.actual_seq_lengths_q = [query_len]
     metadata.num_actual_tokens = query_len
     metadata.seq_lens_list = [32]
     query = torch.zeros(query_len, 2, 4)
     output = torch.empty_like(query)
-    expected_mode = (4 if sliding_window else 3) if causal else 0
-    expected_pre = sliding_window if causal and sliding_window else attn_module.SWA_INT_MAX
-    expected_next = 0 if causal and sliding_window else attn_module.SWA_INT_MAX
+    band_mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
+    expected_mask = metadata.attn_mask if causal else band_mask if sliding_window else None
+    if sliding_window is not None:
+        expected_mode = 4
+        expected_pre = sliding_window if causal else sliding_window - 1
+        expected_next = 0 if causal else sliding_window - 1
+    else:
+        expected_mode = 3 if causal else 0
+        expected_pre = expected_next = attn_module.SWA_INT_MAX
 
     def check_fia_contract(**kwargs):
         # CANN rejects a nonzero sparse mode without an attention mask.
-        assert kwargs["atten_mask"] is not None or kwargs["sparse_mode"] == 0
+        assert kwargs.get("atten_mask") is not None or kwargs["sparse_mode"] == 0
+        assert kwargs.get("atten_mask") is expected_mask
         assert kwargs["sparse_mode"] == expected_mode
-        assert kwargs["pre_tokens"] == expected_pre
-        assert kwargs["next_tokens"] == expected_next
+        assert kwargs.get("pre_tokens", attn_module.SWA_INT_MAX) == expected_pre
+        assert kwargs.get("next_tokens", attn_module.SWA_INT_MAX) == expected_next
         return torch.empty(1)
 
     with (
-        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True)),
-        patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", create=True),
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True, capturing=False)),
+        patch.object(
+            attn_module,
+            "AttentionMaskBuilder",
+            return_value=SimpleNamespace(get_splitfuse_attn_mask=lambda: band_mask),
+        ),
+        patch.object(
+            attn_module.torch_npu,
+            "npu_fused_infer_attention_score",
+            return_value=(torch.zeros_like(query), None),
+            create=True,
+        ) as eager_fia,
         patch.object(
             attn_module.torch_npu,
             "_npu_fused_infer_attention_score_get_max_workspace",
@@ -250,12 +268,16 @@ def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, 
         patch.object(attn_module, "register_task") as register,
     ):
         result, num_tokens = impl.full_graph_fia(query, query, query, metadata, output)
+        if not causal:
+            impl.forward_fused_infer_attention(query, query, query, metadata, output)
+            eager_fia.assert_called_once()
+            check_fia_contract(**eager_fia.call_args.kwargs)
 
     workspace.assert_called_once()
     register.assert_called_once()
     task_kwargs = register.call_args.args[1]
     check_fia_contract(**task_kwargs)
-    assert task_kwargs["atten_mask"] is metadata.attn_mask
+    assert metadata.attn_mask is original_mask  # Do not mutate shared metadata.
     assert result is output
     assert num_tokens == query_len
 

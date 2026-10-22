@@ -224,10 +224,15 @@ into `ascend_compilation_config` in the existing `--additional-config` value;
 this only disables that fusion and does not require eager execution.
 
 If DFlash2 graph capture reports `When attnMask is not provided, sparseMode must
-be 0`, update to the non-causal FIA graph fix. Non-causal draft attention uses
-`sparse_mode=0` with unrestricted past/future visibility even when a sliding
-window is configured, matching the eager path. The focused one-card regression
-checks capture/replay against eager attention for draft lengths 4, 5, and 6:
+be 0`, update to the non-causal FIA sliding-window fix. Non-causal draft layers
+without a window use unmasked `sparse_mode=0`. Layers with window size `W` use
+FIA band mode (`sparse_mode=4`) with the cached 2048-by-2048 compressed mask and
+`pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
+window. Both eager execution and graph capture preserve this window; updating
+from the earlier full-window workaround changes eager attention as well.
+The mask is a band-mode template, not a causal restriction on draft tokens.
+The focused one-card regression compares capture/replay with eager attention
+and an independent numerical reference for draft lengths 4, 5, and 6:
 
 ```shell
 pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py

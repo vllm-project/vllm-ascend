@@ -11,4 +11,4 @@ entries:
   - category: bugfix
     text: Fixed QKNorm/RoPE fusion registration failing during compilation when a DFlash draft Attention head is smaller than the target model's inferred rotary dimension.
   - category: bugfix
-    text: Fixed DFlash2 ACL graph capture selecting a masked sliding-window FIA mode for non-causal attention. Capture now uses the same unmasked attention visibility as eager execution.
+    text: Fixed non-causal DFlash FIA attention in eager execution and ACL graphs to preserve configured symmetric sliding windows using band mode with a compressed mask. Layers without a window retain full attention.
