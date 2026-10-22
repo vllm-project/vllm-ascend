@@ -132,7 +132,7 @@ partition:
     runner_label: linux-aarch64-310p-4
     count: 1
   a2-1:
-    runner_label: linux-aarch64-a2b3-1
+    runner_label: linux-aarch64-a2b1b3-1-hk-001
     count: 7
   a3-2:
     runner_label: linux-aarch64-a3-2
