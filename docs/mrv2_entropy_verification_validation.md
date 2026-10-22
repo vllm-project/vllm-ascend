@@ -98,7 +98,7 @@ python -m pytest -q tests/e2e/pull_request/one_card/model_runner_v2/test_deepsee
 
 算子基准使用预分配输入、预热和计时区间前后的 NPU 同步，分别记录熵统计、拒绝判断、resample 和整个 verifier 耗时。端到端 benchmark 保持正常异步执行；profiler 另开短跑，不纳入正式性能统计。
 
-对本次优化另做相同 E 配置的前后对照，以 `6de9f2a24` 为优化前基线。阈值归约已合并到拒绝判断 kernel：alpha>0 时省去一次 launch 和一张 `[num_logits]` FP32 阈值张量；alpha=0 时使用常数阈值，省去全部熵扫描和熵临时张量。分别测量默认 alpha、alpha=0、小/大词表和低/高采信率；同时检查融合后拒绝判断 kernel 的耗时与完整 verifier 的净变化。核函数融合后的调度和舍入差异须通过 NPU oracle 用例验证，当前尚无实测加速结论。
+对本次优化另做相同 E 配置的前后对照，以 `7dc115270` 为优化前基线。阈值归约已合并到拒绝判断 kernel：alpha>0 时省去一次 launch 和一张 `[num_logits]` FP32 阈值张量；alpha=0 时使用常数阈值，省去全部熵扫描和熵临时张量。分别测量默认 alpha、alpha=0、小/大词表和低/高采信率；同时检查融合后拒绝判断 kernel 的耗时与完整 verifier 的净变化。核函数融合后的调度和舍入差异须通过 NPU oracle 用例验证，当前尚无实测加速结论。
 
 熵校验增加词表扫描和中间张量，只有新增接受 token 带来的收益超过这部分开销才会加速。关注关闭熵校验的 S 相比主线是否出现回归，以及大词表、低采信率负载下 E 的开销。
 
