@@ -93,9 +93,12 @@ def _assert_byte_identical(actual, expected):
     [
         pytest.param(128, 256, 128, 128, id="aligned"),
         pytest.param(129, 160, 128, 128, id="partial-row-and-column"),
-        pytest.param(1121, 96, 96, 128, id="odd-mx-groups-block-aligned-chunks"),
-        pytest.param(2049, 4160, 128, 128, id="multiple-chunks-and-tail"),
-        pytest.param(1537, 2048, 1536, 128, id="checkpoint-block-larger-than-chunk-target"),
+        pytest.param(2977, 96, 96, 128, id="odd-mx-groups-block-aligned-chunks"),
+        pytest.param(1025, 8192, 128, 128, id="small-weight-fallback-tail"),
+        pytest.param(2048, 8192, 128, 128, id="two-chunk-fallback-boundary"),
+        pytest.param(3072, 8192, 128, 128, id="three-chunk-fallback-boundary"),
+        pytest.param(3073, 4160, 128, 128, id="multiple-chunks-and-tail"),
+        pytest.param(4609, 2048, 1536, 128, id="checkpoint-block-larger-than-chunk-target"),
     ],
 )
 @torch.inference_mode()

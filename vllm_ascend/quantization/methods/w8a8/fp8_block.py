@@ -151,9 +151,10 @@ def requantize_block_scales(
     out_features, in_features = weight.shape
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
 
-    if out_features <= rows_per_step or in_features == 0:
-        # Avoid extra output buffers/copies for a single chunk, and retain the
-        # existing native operator behavior for empty matrices.
+    if out_features <= 3 * rows_per_step or in_features == 0:
+        # Small matrices save little dense staging while retaining the full
+        # FP8 destination and scales. Keep the existing path through three
+        # chunks, including native empty-input behavior, to avoid that overhead.
         resolved = resolve_block_scales(weight, scale_inv, block_n, block_k, out_dtype)
         quantized, mx_scale = _mx_quantize(resolved, scale_alg)
         return quantized, mx_scale.view(torch.uint8).reshape(out_features, -1)

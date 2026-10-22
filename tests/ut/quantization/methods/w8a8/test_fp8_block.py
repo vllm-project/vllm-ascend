@@ -114,6 +114,8 @@ class TestRequantizeBlockScales(TestBase):
         scale_before = scale_inv.clone()
         consumed_rows = 0
         chunk_rows = []
+        native_outputs = []
+        row_budget = max(block_n, 1024 // block_n * block_n)
 
         def native_quantize(resolved, *, dst_type, scale_alg):
             nonlocal consumed_rows
@@ -121,7 +123,12 @@ class TestRequantizeBlockScales(TestBase):
             self.assertEqual(resolved.dtype, out_dtype)
             self.assertEqual(dst_type, torch.float8_e4m3fn)
             self.assertEqual(scale_alg, expected_scale_alg)
-            self.assertLessEqual(count, max(1024, block_n))
+            # Small matrices retain the original one-shot MX conversion to
+            # avoid increasing peak memory with a separate assembled output.
+            if rows <= 3 * row_budget:
+                self.assertEqual(count, rows)
+            else:
+                self.assertLessEqual(count, row_budget)
             self.assertTrue(torch.equal(resolved, expected_resolved[consumed_rows : consumed_rows + count]))
             quantized = expected_quantized[consumed_rows : consumed_rows + count].clone()
             scale = expected_scale[consumed_rows : consumed_rows + count].clone()
@@ -129,7 +136,9 @@ class TestRequantizeBlockScales(TestBase):
             chunk_rows.append(count)
             # CANN exposes pairs of E8M0 scales, including a padding group when
             # the reduction dimension contains an odd number of groups of 32.
-            return quantized, scale.view(torch.float8_e8m0fnu).reshape(count, padded_groups // 2, 2)
+            native_scale = scale.view(torch.float8_e8m0fnu).reshape(count, padded_groups // 2, 2)
+            native_outputs.append((quantized, native_scale))
+            return quantized, native_scale
 
         expected_scale_alg = scale_alg
         with patch(f"{MODULE}.torch_npu.npu_dynamic_mx_quant", side_effect=native_quantize):
@@ -142,12 +151,17 @@ class TestRequantizeBlockScales(TestBase):
         self.assertTrue(torch.equal(scale, expected_scale))
         self.assertTrue(torch.equal(weight.view(torch.uint8), weight_before))
         self.assertTrue(torch.equal(scale_inv, scale_before))
+        if rows <= 3 * row_budget:
+            # Reuse the operator outputs on this path, rather than allocating
+            # full-size assembly buffers for an already complete matrix.
+            self.assertIs(quantized, native_outputs[0][0])
+            self.assertEqual(scale.data_ptr(), native_outputs[0][1].data_ptr())
         return chunk_rows
 
     def test_chunk_boundaries_preserve_rounded_input_and_native_output(self):
         # Cover a partial row block, a block size that does not divide the row
         # budget, a partial column block, and a block larger than the budget.
-        cases = ((1025, 64, 128, 32), (2051, 96, 384, 64), (2051, 32, 2048, 48))
+        cases = ((3073, 64, 128, 32), (3073, 96, 384, 64), (6145, 32, 2048, 48))
         for rows, cols, block_n, block_k in cases:
             for out_dtype in (torch.bfloat16, torch.float16):
                 with self.subTest(shape=(rows, cols), block=(block_n, block_k), out_dtype=out_dtype):
@@ -155,8 +169,18 @@ class TestRequantizeBlockScales(TestBase):
                     chunks = self._check_requantization(weight, scale_inv, block_n, block_k, out_dtype, scale_alg=1)
                     self.assertGreater(len(chunks), 1)
 
+    def test_small_matrix_cutoff_keeps_one_native_conversion(self):
+        for rows in (1024, 1025, 2048, 2049, 3072, 3073):
+            with self.subTest(rows=rows):
+                weight, scale_inv = make_block_weight(rows, 32, 128, 32, seed=6)
+                chunks = self._check_requantization(weight, scale_inv, 128, 32, torch.bfloat16)
+                if rows <= 3072:
+                    self.assertEqual(chunks, [rows])
+                else:
+                    self.assertGreater(len(chunks), 1)
+
     def test_noncontiguous_weight_and_scales(self):
-        rows, cols, block_n, block_k = 1031, 96, 128, 64
+        rows, cols, block_n, block_k = 3079, 96, 128, 64
         weight, scale_inv = make_block_weight(rows, cols, block_n, block_k, seed=5)
         weight = weight.t().contiguous().t()
         scale_inv = scale_inv.t().contiguous().t()
@@ -175,9 +199,9 @@ class TestRequantizeBlockScales(TestBase):
                 self._check_requantization(weight, scale_inv, 128, 128, out_dtype)
 
     def test_rejects_invalid_full_scale_shape_before_quantizing(self):
-        weight = torch.zeros(1025, 64).to(torch.float8_e4m3fn)
+        weight = torch.zeros(3073, 64).to(torch.float8_e4m3fn)
         # In particular, extra scale rows must not disappear when chunking.
-        for scale_shape in ((8, 2), (10, 2), (9, 3), (9, 2, 1)):
+        for scale_shape in ((24, 2), (26, 2), (25, 3), (25, 2, 1)):
             with self.subTest(scale_shape=scale_shape):
                 with (
                     patch(f"{MODULE}.torch_npu.npu_dynamic_mx_quant") as native_quantize,
@@ -195,7 +219,7 @@ class TestRequantizeBlockScales(TestBase):
         native_quantize.assert_not_called()
 
     def test_empty_weights_preserve_native_operator_error(self):
-        for rows, cols in ((0, 64), (2051, 0)):
+        for rows, cols in ((0, 64), (3073, 0)):
             with self.subTest(shape=(rows, cols)):
                 weight, scale_inv = make_block_weight(rows, cols, 128, 32)
                 with (
@@ -341,13 +365,14 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_multichunk_requantization_reaches_mxfp8_postprocessing(self):
-        scheme = self.build_scheme(is_950=True, block_size=(128, 64))
+        rows = 25
+        scheme = self.build_scheme(is_950=True, block_size=(4, 64))
         scheme.mxfp8_method.dynamic_mx_quant_scale_alg = 1
-        layer, weight, scale_inv = self._make_layer(out_features=1025, in_features=96, block=(128, 64))
-        expected_resolved = reference_resolve(weight, scale_inv, 128, 64, torch.bfloat16)
+        layer, weight, scale_inv = self._make_layer(out_features=rows, in_features=96, block=(4, 64))
+        expected_resolved = reference_resolve(weight, scale_inv, 4, 64, torch.bfloat16)
         expected_weight = expected_resolved.to(torch.float8_e4m3fn)
         # Three real MX groups occupy four native scale bytes per output row.
-        expected_scale = (torch.arange(1025 * 4) % 255).to(torch.uint8).reshape(1025, 4)
+        expected_scale = (torch.arange(rows * 4) % 255).to(torch.uint8).reshape(rows, 4)
         consumed_rows = 0
 
         def native_quantize(resolved, *, dst_type, scale_alg):
@@ -371,16 +396,17 @@ class TestAscendFp8BlockLinearMethod(TestBase):
 
         scheme.mxfp8_method.process_weights_after_loading.side_effect = check_postprocessing
         with (
+            patch(f"{MODULE}._ROWS_PER_DEQUANT_STEP", 8),
             patch(f"{MODULE}.torch_npu.npu_dynamic_mx_quant", side_effect=native_quantize) as mock_quantize,
             patch(f"{MODULE}.resolve_block_scales", wraps=resolve_block_scales) as mock_resolve,
         ):
             scheme.process_weights_after_loading(layer)
 
-        self.assertEqual(consumed_rows, 1025)
+        self.assertEqual(consumed_rows, rows)
         self.assertGreater(mock_quantize.call_count, 1)
         # The original all-rows BF16 intermediate would defeat this change.
         self.assertTrue(mock_resolve.call_args_list)
-        self.assertTrue(all(call.args[0].shape[0] <= 1024 for call in mock_resolve.call_args_list))
+        self.assertTrue(all(call.args[0].shape[0] <= 8 for call in mock_resolve.call_args_list))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_kv_b_proj_is_left_dense_for_the_attention_backend(self):
