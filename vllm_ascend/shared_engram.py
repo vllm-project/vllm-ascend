@@ -37,9 +37,10 @@ def load_tables(owner, model, stop):
         scale_key = f"layers.{layer}.engram.embed.scale"
         codes = owner.add(weight_key, rows, width, torch.int8)
         scales = owner.add(scale_key, rows, width // 32, torch.float32)
-        with safe_open(root / index[weight_key], framework="pt", device="cpu") as weights, safe_open(
-            root / index[scale_key], framework="pt", device="cpu"
-        ) as scale_file:
+        with (
+            safe_open(root / index[weight_key], framework="pt", device="cpu") as weights,
+            safe_open(root / index[scale_key], framework="pt", device="cpu") as scale_file,
+        ):
             weight = weights.get_slice(weight_key)
             scale = scale_file.get_slice(scale_key)
             for start in range(0, rows, 65536):

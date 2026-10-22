@@ -62,9 +62,10 @@ def _receive(wire):
 def owner_alive(root):
     try:
         manifest = json.loads((Path(root) / "manifest.json").read_text())
-        with socket.create_connection(tuple(manifest["endpoint"]), timeout=5) as conn, conn.makefile(
-            "rwb", buffering=0
-        ) as wire:
+        with (
+            socket.create_connection(tuple(manifest["endpoint"]), timeout=5) as conn,
+            conn.makefile("rwb", buffering=0) as wire,
+        ):
             _send(wire, dict(op="ping", token=manifest["token"]))
             return _receive(wire).get("alive", False)
     except (OSError, ValueError, KeyError):
@@ -109,7 +110,7 @@ class SharedPoolOwner:
         while not self.closed:
             try:
                 conn, _ = self._listener.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
