@@ -36,6 +36,36 @@ SMALL_QWEN3_OVERRIDES = {
     "num_hidden_layers": 2,
 }
 
+# Qwen3.5-35B-A3B is a hybrid MoE: its 40 layers repeat a 3:1 pattern, so 30 of
+# them are gated-delta-net linear-attention layers and 10 are full-attention
+# layers, and every layer routes to 256 experts with top-8. The published
+# checkpoint is multimodal and ~70 GB in BF16, so this case serves the language
+# tower alone (Qwen3_5MoeForCausalLM) and instantiates the first 4 of the 40
+# layers: three linear-attention layers plus one full-attention layer, which
+# keeps both attention kernels on the batch-invariance path. Weights are
+# random-initialized via dummy load, so no checkpoint is needed either.
+QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
+
+# gpu_memory_utilization for the Qwen3.5 case. The slice above keeps a single
+# full-attention layer, so that layer owns the whole paged cache and the
+# fused-attention kernel needs a contiguous copy of it; half of the device keeps
+# room for that copy. VLLM_GPU_MEMORY_UTILIZATION may lower the value further,
+# never raise it past this bound.
+QWEN35_GPU_MEMORY_UTILIZATION = 0.45
+
+SMALL_QWEN35_OVERRIDES = {
+    "architectures": ["Qwen3_5MoeForCausalLM"],
+    "text_config": {
+        "num_hidden_layers": 4,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+    },
+}
+
 
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
@@ -98,37 +128,13 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="batch_invariant,logprobs",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="BF16",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.model(
-    model_name=DEFAULT_MODEL,
-    max_num_seqs=144,
-    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
-    max_model_len=8192,
-    dtype="bfloat16",
-    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
-    enable_prefix_caching=False,
-    distributed_executor_backend="mp",
-    compilation_config={
-        "cudagraph_capture_sizes": [1, 32, 64],
-    },
-    extra_kwargs={
-        "load_format": "dummy",
-        "hf_overrides": SMALL_QWEN3_OVERRIDES,
-        "enable_chunked_prefill": False,
-        "block_size": 128,
-    },
-)
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
-    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+def _assert_bitwise_batch_invariance(vllm_runner) -> None:
+    """Compare a BS=1 and a BS=N run of the same prompt set, step by step.
+
+    Both runs share one engine instance, so any difference -- in the sampled
+    token ids or in the float32 logprobs of the sampled tokens -- means a
+    batch-size dependent reduction in the model or in one of the kernels.
+    """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "4"))
@@ -302,3 +308,81 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
             f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
         )
         pytest.fail(msg)
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_and_piecewise",
+)
+@pytest.mark.model(
+    model_name=DEFAULT_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
+    max_model_len=8192,
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    compilation_config={
+        "cudagraph_capture_sizes": [1, 32, 64],
+    },
+    extra_kwargs={
+        "load_format": "dummy",
+        "hf_overrides": SMALL_QWEN3_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
+    },
+)
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+    _assert_bitwise_batch_invariance(vllm_runner)
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3.5-35B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="eager",
+)
+@pytest.mark.model(
+    model_name=QWEN35_MODEL,
+    max_num_seqs=144,
+    gpu_memory_utilization=min(
+        float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", str(QWEN35_GPU_MEMORY_UTILIZATION))),
+        QWEN35_GPU_MEMORY_UTILIZATION,
+    ),
+    max_model_len=8192,
+    dtype="bfloat16",
+    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
+    enable_prefix_caching=False,
+    distributed_executor_backend="mp",
+    extra_kwargs={
+        "load_format": "dummy",
+        "hf_overrides": SMALL_QWEN35_OVERRIDES,
+        "enable_chunked_prefill": False,
+        "block_size": 128,
+        # ACL graph capture of the hybrid model reserves more memory than the
+        # device has left once the paged cache is allocated, so run this case
+        # without graphs.
+        "enforce_eager": True,
+    },
+)
+def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+    """Same bitwise check as above, for the hybrid linear/full attention MoE model."""
+    # Guard the shape of the served slice: if the nested hf_overrides stopped
+    # applying, the case would silently compare a different (40-layer) model and
+    # no longer exercise the 256-expert routing or the GDN kernels it is here for.
+    hf_config = vllm_runner.model.llm_engine.model_config.hf_text_config
+    assert hf_config.num_hidden_layers == 4, f"expected the 4-layer slice, got {hf_config.num_hidden_layers}"
+    assert hf_config.num_experts == 256, f"expected 256 experts, got {hf_config.num_experts}"
+    _assert_bitwise_batch_invariance(vllm_runner)
