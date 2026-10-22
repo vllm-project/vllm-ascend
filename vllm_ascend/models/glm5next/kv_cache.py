@@ -255,12 +255,15 @@ class KpoolTailManager(FullAttentionManager):
         return 0 if self.req_to_blocks.get(request_id) else 1
 
     def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        return self._allocate_tail_block(request_id)
+
+    def _allocate_tail_block(self, request_id: str, record_for_zeroing: bool = True) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
         if req_blocks:
             return []
         new_blocks = self.block_pool.get_new_blocks(1)
         req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
+        if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
 
@@ -274,6 +277,10 @@ class KpoolTailManager(FullAttentionManager):
         assert not new_computed_blocks, "Tail blocks cannot be shared through prefix caching."
 
     def allocate_external_computed_blocks(
-        self, request_id: str, num_local_computed_tokens: int, num_external_computed_tokens: int
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
-        self.allocate_new_blocks(request_id, num_local_computed_tokens + num_external_computed_tokens, 0)
+        self._allocate_tail_block(request_id, record_for_zeroing)

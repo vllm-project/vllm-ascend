@@ -4,8 +4,9 @@ Enable this experimental path with `--additional-config '{"kda_recoverssm": true
 alongside speculative decoding. The default remains the native AscendC KDA path.
 
 Service configuration initialization requires speculative decoding,
-PP/PCP/DCP=1, `--no-enable-prefix-caching`, Mamba cache mode `none`, and no KV
-transfer. `AscendConfig.derive_and_validate()` checks these constraints when
+PP/PCP/DCP=1, `--no-enable-prefix-caching`, and Mamba cache mode `none`.
+KV transfer uses `MooncakeConnectorV2` (also named `MooncakePullConnector`).
+`AscendConfig.derive_and_validate()` checks these constraints when
 initializing the service configuration. Model-state initialization only activates
 the shared cache contract before constructing the upstream state, after
 target/draft configuration construction can reset the upstream cache flag.
@@ -15,7 +16,28 @@ Boolean validation stays in `AscendConfig`; speculative-token validity stays
 in upstream configuration validation.
 
 The retained hardware evidence used MTP with five draft tokens and the settings above.
-Other execution combinations have not been validated.
+That evidence did not use PD separation. PD validation is tracked separately.
+
+## Prefill/decode separation
+
+Configure the pull connector with `kv_role=kv_producer` on P and
+`kv_role=kv_consumer` on D. Both services need the same model weights, TP size,
+speculative-window configuration, and `kda_recoverssm=true` cache layout.
+The initial integration targets one producer and one consumer with equal TP.
+
+The connector's existing stateful-model handoff leaves the last prompt token
+for D. P transfers its MLA KV pages and KDA state page covering the preceding
+prompt tokens. RecoverSSM has zero speculative checkpoint blocks, so the
+producer retains its single checkpoint page and the consumer loads into that
+page. Native Mamba still excludes its declared speculative scratch blocks.
+The Mamba transfer copies all four strided views: convolution history,
+checkpoint, correction records, and key/raw-gate records. The next verify
+overwrites temporary records before post-sampling commit consumes them.
+
+This connector transfers at request level; its per-layer wait/save hooks are
+no-ops. AscendStore's aligned-cache path and legacy Mooncake connectors are
+outside this integration. Successful configuration or CPU transfer planning
+alone does not establish NPU PD correctness or model accuracy.
 
 Existing end-to-end validation used Model Runner V2. Removing the runner-version
 configuration gate does not establish support for other runners' post-sampling
