@@ -23,9 +23,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |DeepSeek V4-Flash|✅|Native mixed MXFP8/MXFP4 weights||950DT Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)|
     |DeepSeek V4-Pro|✅|Native mixed MXFP8/MXFP4 weights||950DT Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)|
     |DeepSeek-V3.1|🔴|  |✅| 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-    | GLM-5.1 | ✅ |  | ✅ | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 200k |  | [GLM-5.1](../../tutorials/models/GLM5.md) |
-    | GLM-5.2 | ✅ | W8A8C8 MXFP8 / W4A4C8 MXFP4 | 🟡 | 950DT products | ✅ | 🟡 | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 |  | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
-    | GLM-5.3 | ✅ | W8A8C8 MXFP8 / W4A4C8 MXFP4 | 🟡 | 950DT products | ✅ | 🟡 | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M |  | [GLM-5.3](../../tutorials/models/GLM5.2.md) |
+    | GLM-5.1 | ✅ |  | ✅ | 950DT Products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 200k |  | [GLM-5.1](../../tutorials/models/GLM5.md) |
+    | GLM-5.2 | ✅ | W8A8C8 MXFP8 / W4A4C8 MXFP4 | 🟡 | 950DT Products | ✅ | 🟡 | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 |  | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
+    | GLM-5.3 | ✅ | W8A8C8 MXFP8 / W4A4C8 MXFP4 | 🟡 | 950DT Products | ✅ | 🟡 | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ | 1M |  | [GLM-5.3](../../tutorials/models/GLM5.2.md) |
 
 === "A2/A3"
 
@@ -134,7 +134,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
     | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
-    | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | 950DT products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 133120 |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
+    | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | 950DT Products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 133120 |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     |Qwen3.5-397B-A17B|✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     |Kimi-K3          |✅        |W4A8; DSpark; FULL_DECODE_ONLY; KV Cache Pool||950DT Products|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
