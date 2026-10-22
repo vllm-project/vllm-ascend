@@ -95,7 +95,6 @@ def test_gemma4_speculator_mro():
     indices = [mro.index(cls) for cls in order]
     assert indices == sorted(indices), f"MRO order broken: {mro}"
     assert AscendGemma4Speculator.advance_draft_positions is Gemma4Speculator.advance_draft_positions
-    assert AscendGemma4Speculator._setup_gemma4_kv_sharing is Gemma4Speculator._setup_gemma4_kv_sharing
     assert AscendGemma4Speculator._share_embeddings is Gemma4Speculator._share_embeddings
 
 

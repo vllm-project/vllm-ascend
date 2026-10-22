@@ -189,15 +189,13 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             ),
         )
 
-    def load_draft_model(
+    def _setup_gemma4_kv_sharing(
         self,
-        target_model: nn.Module,
+        model: nn.Module,
         target_attn_layer_names: set[str],
-    ) -> nn.Module:
-        # The Ascend base chains into Gemma4Speculator.load_draft_model.
-        draft_model = super().load_draft_model(target_model, target_attn_layer_names)
-        self._sync_kv_sharing_target_to_impl(draft_model)
-        return draft_model
+    ) -> None:
+        super()._setup_gemma4_kv_sharing(model, target_attn_layer_names)
+        self._sync_kv_sharing_target_to_impl(model)
 
     def _sync_kv_sharing_target_to_impl(self, draft_model: nn.Module) -> None:
         """Propagate the late-bound KV-sharing target onto the Ascend attention impls."""
