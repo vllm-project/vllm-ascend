@@ -31,7 +31,9 @@
 # each image under two tags: the stable
 # nightly-ci-<branch>-<target>[-openeuler] tag, which is overwritten by every
 # nightly and is what the test workflows reference, and a unique
-# nightly-ci-...-<date>-r<run_number> tag that preserves each historical build.
+# nightly-ci-...-cann<cann_version>-<date>-r<run_number> tag that preserves
+# each historical build. The CANN version is read from the root Dockerfile of
+# the branch that produced the runtime base image.
 name: 'Nightly image build'
 
 on:
@@ -99,8 +101,17 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-      tag_suffix: ${{ steps.set-tag.outputs.tag_suffix }}
+      tag_suffix_ubuntu: ${{ steps.set-tag.outputs.tag_suffix_ubuntu }}
+      tag_suffix_openeuler: ${{ steps.set-tag.outputs.tag_suffix_openeuler }}
     steps:
+      # The unique nightly tag follows the mainline format and needs the CANN
+      # version of the runtime base image, which is read from the root
+      # Dockerfile of the branch that produced it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+
       - id: set-matrix
         run: |
           if [ "${{ inputs.build_type }}" = "full" ]; then
@@ -127,13 +138,45 @@ jobs:
       - id: set-tag
         run: |
           # Full builds are published under the stable tag plus a unique history
-          # tag, so the suffix is computed once here and reused by the build and
-          # merge jobs. Release builds only keep the stable tag.
-          if [ "${{ inputs.build_type }}" = "full" ]; then
-            echo "tag_suffix=-$(date -u +%Y%m%d)-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag_suffix=" >> "$GITHUB_OUTPUT"
+          # tag whose suffix follows the mainline nightly rule:
+          #   -cann<cann_version>-<build_date>-r<run_number>
+          # The suffix is computed once here and reused by the build and merge
+          # jobs. Release builds only keep the stable tag.
+          if [ "${{ inputs.build_type }}" != "full" ]; then
+            echo "tag_suffix_ubuntu=" >> "$GITHUB_OUTPUT"
+            echo "tag_suffix_openeuler=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          case "${{ inputs.target }}" in
+            a2)   UBUNTU_DOCKERFILE=Dockerfile;      OPENEULER_DOCKERFILE=Dockerfile.openEuler ;;
+            a3)   UBUNTU_DOCKERFILE=Dockerfile.a3;   OPENEULER_DOCKERFILE=Dockerfile.a3.openEuler ;;
+            a5)   UBUNTU_DOCKERFILE=Dockerfile.a5;   OPENEULER_DOCKERFILE=Dockerfile.a5.openEuler ;;
+            310p) UBUNTU_DOCKERFILE=Dockerfile.310p; OPENEULER_DOCKERFILE=Dockerfile.310p.openEuler ;;
+            *)
+              echo "::error::Unsupported target '${{ inputs.target }}'"
+              exit 1
+              ;;
+          esac
+
+          read_cann_version() {
+            sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$1" | head -n 1 | tr '[:upper:]' '[:lower:]'
+          }
+
+          DATE=$(date -u +%Y%m%d)
+          for OS_NAME in ubuntu openeuler; do
+            if [ "$OS_NAME" = "ubuntu" ]; then
+              DOCKERFILE="$UBUNTU_DOCKERFILE"
+            else
+              DOCKERFILE="$OPENEULER_DOCKERFILE"
+            fi
+            CANN_VERSION=$(read_cann_version "$DOCKERFILE")
+            if [ -z "$CANN_VERSION" ]; then
+              echo "::error::Could not read the CANN version from ${DOCKERFILE}"
+              exit 1
+            fi
+            echo "tag_suffix_${OS_NAME}=-cann${CANN_VERSION}-${DATE}-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          done
 
   build:
     needs: generate-matrix
@@ -185,9 +228,13 @@ jobs:
           TAG_SUFFIX=""
           FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
-          # overwritten by each nightly, while a unique tag (build date + run
-          # number) keeps the history of nightly images.
-          UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix }}"
+          # overwritten by each nightly, while a unique tag (CANN version +
+          # build date + run number) keeps the history of nightly images.
+          if [ "${{ matrix.os }}" = "openeuler" ]; then
+            UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}"
+          else
+            UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}"
+          fi
           UNIQUE_TAG="${FULL_TAG}${UNIQUE_SUFFIX}"
 
           if [ "${{ inputs.build_type }}" = "full" ]; then
@@ -252,7 +299,8 @@ jobs:
           TARGET: ${{ inputs.target }}
           VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
           OS_FILTER: ${{ inputs.os_filter }}
-          TAG_SUFFIX: ${{ needs.generate-matrix.outputs.tag_suffix }}
+          TAG_SUFFIX_UBUNTU: ${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}
+          TAG_SUFFIX_OPENEULER: ${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}
         run: |
           set -euo pipefail
           BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
@@ -272,9 +320,11 @@ jobs:
             if [ "$OS_NAME" = "openeuler" ]; then
               OS_MARK="-openeuler"
               DEST="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
             else
               OS_MARK=""
               DEST="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend"
+              TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
             # The build step pushed the per-arch images under the unique tag.
