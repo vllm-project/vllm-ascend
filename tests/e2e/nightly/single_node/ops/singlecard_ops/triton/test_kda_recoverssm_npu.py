@@ -10,9 +10,11 @@ import torch
 pytest.importorskip("torch_npu")
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first  # noqa: E402
+from vllm.triton_utils import triton  # noqa: E402
 
 from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
+    _compact_conv_state_kernel,
     kda_recoverssm_verify,
 )
 
@@ -116,6 +118,66 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype
             torch.testing.assert_close(
                 backing[:, -padding:], torch.full_like(backing[:, -padding:], 11.0), atol=0, rtol=0
             )
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_conv_compaction_recorded_b11_l11_shape():
+    if not torch.npu.is_available():
+        pytest.skip("requires an Ascend NPU")
+    torch.manual_seed(73)
+    # Most common captured layout: B11/L11 (200 of384 commit records).
+    slots, channels, state_len, layers = 862, 12288, 8, 11
+    page_stride, history, block_d, plan_capacity = 1245184, 3, 256, 16
+    blocks = [4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54]
+    accepted = [4, 2, 6, 2, 2, 5, 3, 3, 1, 3, 5]
+    checked_blocks = [0, *blocks, slots - 1]
+    backings, views, expectations = [], [], []
+    for _ in range(layers):
+        backing = torch.full((slots, page_stride), 11.0, dtype=torch.bfloat16, device="npu")
+        conv = backing.as_strided((slots, channels, state_len), (page_stride, 1, channels))
+        conv.copy_(torch.randn_like(conv))
+        # Snapshot the complete touched pages, their padding, and two untouched pages.
+        expected_backing = backing[checked_blocks].clone()
+        expected = expected_backing.as_strided((len(checked_blocks), channels, state_len), (page_stride, 1, channels))
+        for row, (block, count) in enumerate(zip(blocks, accepted), start=1):
+            expected[row, :, :history] = conv[block, :, count - 1 : count - 1 + history]
+        backings.append(backing)
+        views.append(conv)
+        expectations.append(expected_backing)
+    metadata = [
+        torch.tensor(values, dtype=torch.int64, device="npu")
+        for values in (
+            [view.data_ptr() for view in views],
+            [page_stride] * layers,
+            [1] * layers,
+            [channels] * layers,
+        )
+    ]
+    indices = torch.tensor(blocks, dtype=torch.int32, device="npu")
+    counts = torch.tensor(accepted + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
+    finals = torch.tensor(blocks + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
+    boundary = torch.zeros(plan_capacity, dtype=torch.int32, device="npu")
+    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(blocks), layers)](
+        views[0],
+        *metadata,
+        indices,
+        counts,
+        finals,
+        boundary,
+        boundary,
+        0,
+        channels,
+        history,
+        1,
+        BLOCK_D=block_d,
+        BLOCK_HISTORY=4,
+        ALIGN_MODE=False,
+        DIM_STRIDE=1,
+        num_warps=4,
+    )
+    for backing, expected_backing in zip(backings, expectations):
+        torch.testing.assert_close(backing[checked_blocks], expected_backing, atol=0, rtol=0)
 
 
 def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts, blocks, accepted):
