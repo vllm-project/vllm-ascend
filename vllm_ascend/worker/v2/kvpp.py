@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
@@ -125,9 +124,7 @@ class KVPPScheduler:
             get_kv_transfer_group().wait_for_layer_load_ready(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
-    def wait_for_layer(self, layer_name: str, *, prepare_layer_load: Callable[[str], None] | None = None) -> None:
-        if prepare_layer_load is not None:
-            prepare_layer_load(layer_name)
+    def wait_for_layer(self, layer_name: str) -> None:
         if not self._has_history:
             return
         if self.layerwise and self._prefetch_future is None:

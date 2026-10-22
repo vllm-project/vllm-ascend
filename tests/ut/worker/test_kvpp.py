@@ -280,22 +280,3 @@ def test_layerwise_load_failure_prevents_broadcast(monkeypatch, scheduler_device
     with pytest.raises(RuntimeError, match="external load failed"):
         scheduler.run_layer_prefetch(layer_name(0), Mock())
     transport.prefetch.assert_not_called()
-
-
-def test_layerwise_wait_prepares_load_without_history(scheduler_device):
-    scheduler = kvpp.KVPPScheduler(Mock(), (layer_name(0),), layerwise=True)
-    prepare_load = Mock()
-    scheduler.schedule_forward(False)
-    scheduler.wait_for_layer(layer_name(0), prepare_layer_load=prepare_load)
-    prepare_load.assert_called_once_with(layer_name(0))
-    assert not scheduler._prefetch_executor.submitted
-
-
-def test_layerwise_prepare_failure_does_not_schedule_broadcast(scheduler_device):
-    scheduler = kvpp.KVPPScheduler(Mock(), (layer_name(0),), layerwise=True)
-    prepare_load = Mock(side_effect=RuntimeError("load submission failed"))
-    scheduler.schedule_forward(True)
-    with pytest.raises(RuntimeError, match="load submission failed"):
-        scheduler.wait_for_layer(layer_name(0), prepare_layer_load=prepare_load)
-    assert scheduler._prefetch_future is None
-    assert not scheduler._prefetch_executor.submitted

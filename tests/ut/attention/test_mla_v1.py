@@ -2962,7 +2962,7 @@ class TestAscendMLAImpl(TestBase):
                 )
                 metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=decodes, num_prefills=prefills)
                 with (
-                    patch("vllm_ascend.attention.utils.wait_for_kv_layer_from_connector"),
+                    patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
                     patch.object(mla_v1, "notify_kv_cache_written"),
                 ):
                     actual = self.impl._mla_preprocess("layer", hidden, kv_cache, metadata)

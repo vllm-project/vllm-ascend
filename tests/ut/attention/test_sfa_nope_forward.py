@@ -157,7 +157,7 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
         patch.object(
             sparse_mla, "get_forward_context", return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
         ),
-        patch("vllm_ascend.attention.utils.wait_for_kv_layer_from_connector"),
+        patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "attention_transfer_window"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
@@ -431,7 +431,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             create=True,
         ) as quantized_sparse_attention,
         patch.object(sparse_mla, "attention_transfer_window"),
-        patch("vllm_ascend.attention.utils.wait_for_kv_layer_from_connector"),
+        patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
         patch.object(
