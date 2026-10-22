@@ -416,102 +416,23 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         num_actual_reqs: int | None = None,
         **kwargs: Any,
     ) -> AscendDSAV41Metadata:
-        assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
-        assert pcp_cache_group_idx is not None
-
-        if (
-            self._use_specialized_metadata()
-            and kwargs.get("allow_v41_pcp_shared_metadata", False)
-            and kwargs.get("common_v41_batch_metadata") is not None
-            and common_attn_metadata.causal is True
-            and getattr(common_attn_metadata, "replay_start", None) is None
-            and kwargs.get("replay_start") is None
-        ):
-            return self.build_shared(
-                common_prefix_len,
-                common_attn_metadata,
-                fast_build=fast_build,
-                pcp_context=pcp_context,
-                pcp_cache_group_idx=pcp_cache_group_idx,
-                num_actual_reqs=num_actual_reqs,
-                **kwargs,
-            )
-
-        # Use the global batch so all ranks choose the same prefill/decode path.
-        has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
-        # Sharded decodes have distinct queries but still need complete caches.
-        needs_global_metadata = has_prefill or self._is_decode_sharded
-        self._global_builder.take_device_metadata_tasks()
-
-        if needs_global_metadata:
-            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
-                self, pcp_context, full_graph_mode=kwargs.get("full_graph_mode", False)
-            )
-            global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
-                pcp_context, pcp_cache_group_idx, common_attn_metadata
-            )
-        local_common = AscendDSAPCPMetadataBuilder._build_local_common_attn_metadata(
-            self, pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
-        )
-
-        # Match graph capture shapes; dummy batches must not advance the C2 ring.
-        if kwargs.get("full_graph_mode", False):
-            local_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(local_common, num_actual_reqs)
-            if needs_global_metadata:
-                global_common = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
-                    global_common, pcp_context.global_batch.num_reqs
-                )
-        kwargs["skip_ring_state_update"] = (
-            bool(kwargs.get("skip_ring_state_update", False)) or pcp_context.global_batch.is_dummy
-        )
-
-        # Keep global KV RoPE separate from rank-local Q positions.
-        if needs_global_metadata:
-            global_kwargs = dict(kwargs)
-            global_kwargs["num_actual_reqs"] = pcp_context.global_batch.num_reqs
-            global_rope = self._build_pcp_rope_views(global_common, global_cache=True)
-            if global_rope is not None:
-                global_kwargs["rope_views"] = global_rope
-            global_metadata = self._build_global_metadata(common_prefix_len, global_common, fast_build, global_kwargs)
-
-        # Empty Query ranks skip query metadata ops but still retain the global cache view.
-        if needs_global_metadata and local_common.num_actual_tokens == 0:
-            local_metadata = self._build_empty_local_metadata(local_common)
-        else:
-            local_kwargs = dict(kwargs)
-            local_kwargs["num_actual_reqs"] = local_common.num_reqs if num_actual_reqs is None else num_actual_reqs
-            # C2 state updates belong to the cache metadata owner.
-            local_kwargs["build_compressor_metadata"] = not needs_global_metadata
-            for name in ("common_v41_metadata", "common_v41_batch_metadata"):
-                shared = kwargs.get(name)
-                if shared is not None:
-                    local_kwargs[name] = shared.setdefault("pcp_local", {})
-            local_rope = self._build_pcp_rope_views(local_common, global_cache=False)
-            if local_rope is not None:
-                local_kwargs["rope_views"] = local_rope
-            local_metadata = super().build(common_prefix_len, local_common, fast_build, **local_kwargs)
-
-        # Replicated decode needs no hidden gather or separate cache metadata.
-        if not needs_global_metadata:
-            return local_metadata
-        return AscendDSAV41PCPMetadata.from_local_metadata(
-            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx
-        )
-
-    def build_shared(
-        self,
-        common_prefix_len,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build=False,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
-        num_actual_reqs: int | None = None,
-        **kwargs: Any,
-    ) -> AscendDSAV41Metadata:
         """Share batch coordinates while keeping each cache group's addressing."""
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
-        shared = kwargs["common_v41_batch_metadata"].setdefault(("v41_pcp_specialized", id(self.vllm_config)), {})
+        batch_shared = kwargs.get("common_v41_batch_metadata")
+        if batch_shared is None:
+            batch_shared = {}
+        # Query variants may carry group-dependent windows or replay bounds.
+        # They still use the optimized builder, with a separate sharing scope.
+        variant = (
+            pcp_cache_group_idx
+            if common_attn_metadata.causal is not True
+            or getattr(common_attn_metadata, "replay_start", None) is not None
+            or kwargs.get("replay_start") is not None
+            or kwargs.get("ori_sparse_indices") is not None
+            else None
+        )
+        shared = batch_shared.setdefault(("v41_pcp_specialized", id(self.vllm_config), variant), {})
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
         signature = (
             common_attn_metadata.num_reqs,
@@ -573,7 +494,6 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         kwargs["skip_ring_state_update"] = (
             bool(kwargs.get("skip_ring_state_update", False)) or pcp_context.global_batch.is_dummy
         )
-        kwargs["specialize_metadata"] = True
         kwargs["common_v41_batch_metadata"] = shared
         if needs_global_metadata:
             global_kwargs = dict(kwargs)

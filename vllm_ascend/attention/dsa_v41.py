@@ -780,14 +780,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
     _needs_smla: bool = False
     _needs_qli: bool = False
 
-    def _use_specialized_metadata(self) -> bool:
-        return (
-            self._specialized_metadata
-            and self.vllm_config.use_v2_model_runner
-            and not self._device_metadata_enabled
-            and not getattr(self.vllm_config.model_config.hf_text_config, "vision_n_layers", 0)
-        )
-
     def __init__(
         self,
         kv_cache_spec,
@@ -1045,9 +1037,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         is_compressor_state = cache_kind == "compressor_state"
         ratio = get_kv_cache_compression_ratio(spec)
 
-        # Only the shared PCP path opts in; replay/vision/deferred fallbacks
-        # retain the complete metadata contract of the original builder.
-        specialized = self._use_specialized_metadata() and kwargs.get("specialize_metadata", False)
+        # Consumer-specific PCP builders always honor query/cache ownership.
+        # Generic builders retain their contract for non-PCP and legacy CP.
+        specialized = self._specialized_metadata
         build_query = self._build_query_metadata
         update_cache = True
 

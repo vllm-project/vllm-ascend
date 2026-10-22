@@ -391,7 +391,7 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
     )
 
 
-def _build_planes(builders, batch, *, shared=False):
+def _build_planes(builders, batch):
     # Like the runner: batch metadata spans cache groups, physical mappings do
     # not. Global and local namespaces must stay separate within both scopes.
     shared_batch: dict[str, Any] = {}
@@ -410,7 +410,6 @@ def _build_planes(builders, batch, *, shared=False):
             full_graph_mode=batch.graph,
             common_v41_metadata={},
             common_v41_batch_metadata=shared_batch,
-            allow_v41_pcp_shared_metadata=shared,
         )
     # The target adapter must ignore independent draft cache metadata.
     result["draft.attn"] = object()
@@ -1426,7 +1425,7 @@ class TestSharedPCPMetadata:
             _batch(2, rank, scenario, decode_sharded=decode_sharded),
         )
         owners = builders(rank=rank, decode_sharded=decode_sharded, specialized=True, ratio=ratio)
-        actual = _build_planes(owners, _batch(2, rank, scenario, decode_sharded=decode_sharded), shared=True)
+        actual = _build_planes(owners, _batch(2, rank, scenario, decode_sharded=decode_sharded))
         for kind, prefix in PREFIXES.items():
             expected, result = reference[prefix], actual[prefix]
             for name in ("block_table", "query_start_loc", "seq_lens", "positions"):
@@ -1485,7 +1484,6 @@ class TestSharedPCPMetadata:
                     num_actual_reqs=batch.local.num_reqs,
                     common_v41_metadata={},
                     common_v41_batch_metadata=shared,
-                    allow_v41_pcp_shared_metadata=True,
                 )
                 for builder in ordered
             ]
@@ -1498,38 +1496,26 @@ class TestSharedPCPMetadata:
         assert prepare.call_count == 2  # Once per batch, independent of group count.
         assert gather.call_count == 8  # Two tables (cos/sin), two views, two batches.
 
-    @pytest.mark.parametrize("reason", ["deferred", "vision", "runner", "disabled", "replay", "noncausal"])
-    def test_unsupported_paths_do_not_dispatch_shared(self, builders, monkeypatch, reason):
+    @pytest.mark.parametrize("vision_layers", [0, 24])
+    def test_build_always_specializes_without_opt_in(self, builders, vision_layers):
+        owners = builders(specialized=True)
+        owners["swa"].vllm_config.model_config.hf_text_config.vision_n_layers = vision_layers
+        batch = _batch(2, 0, "prefill")
+        result = _build_planes(owners, batch)
+        assert not hasattr(owners["swa"], "build_shared")
+        for kind in ("swa", "long_kv", "index_k"):
+            metadata = result[PREFIXES[kind]]
+            assert metadata.slot_mapping.numel() == 0
+            assert metadata.global_metadata.slot_mapping.numel() > 0
+        assert result[PREFIXES["compressor_state"]].c2_ring_metadata is None
+        assert result[PREFIXES["compressor_state"]].global_metadata.c2_ring_metadata is not None
+
+    def test_direct_build_without_batch_cache(self, builders):
         builder = builders(specialized=True)["swa"]
         batch = _batch(2, 0, "prefill")
-        kwargs = dict(allow_v41_pcp_shared_metadata=True, common_v41_batch_metadata={})
-        if reason == "deferred":
-            builder.enable_device_metadata()
-        elif reason == "vision":
-            builder.vllm_config.model_config.hf_text_config.vision_n_layers = 1
-        elif reason == "runner":
-            builder.vllm_config.use_v2_model_runner = False
-        elif reason == "disabled":
-            kwargs["allow_v41_pcp_shared_metadata"] = False
-        elif reason == "replay":
-            kwargs.update(replay_start=0, replay_max_seq_len=16)
-        else:
-            batch.local = batch.local.replace(causal=False)
-        dispatch = Mock(side_effect=AssertionError("Unexpected shared dispatch"))
-        monkeypatch.setattr(builder, "build_shared", dispatch)
-
-        # Stop at the first fallback helper: noncausal/replay kernels are tested separately.
-        class FallbackReached(Exception):
-            pass
-
-        monkeypatch.setattr(
-            dsa_cp.AscendDSAPCPMetadataBuilder,
-            "_prepare_graph_pcp_context",
-            Mock(side_effect=FallbackReached),
-        )
-        with pytest.raises(FallbackReached):
-            builder.build(0, batch.local, pcp_context=batch.context, pcp_cache_group_idx=0, **kwargs)
-        dispatch.assert_not_called()
+        metadata = builder.build(0, batch.local, pcp_context=batch.context, pcp_cache_group_idx=0)
+        assert metadata.slot_mapping.numel() == 0
+        assert metadata.global_metadata.slot_mapping.numel() > 0
 
     @pytest.mark.parametrize("ratio", [1, 2])
     def test_query_operators_only_run_on_local_consumers(self, builders, monkeypatch, ratio):
@@ -1548,7 +1534,7 @@ class TestSharedPCPMetadata:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla_metadata", smla, raising=False)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata", qli, raising=False)
         monkeypatch.setattr(dsa_v41, "compressed_slot_mapping", slots)
-        result = _build_planes(owners, _batch(2, 0, "prefill"), shared=True)
+        result = _build_planes(owners, _batch(2, 0, "prefill"))
         assert smla.call_count == 2  # SWA and long-context attention.
         assert qli.call_count == 1  # Only the indexer.
         assert slots.call_count == (2 if ratio == 2 else 0)  # Global writes only.
@@ -1568,3 +1554,17 @@ class TestSharedPCPMetadata:
         draft_rope = draft["swa"]._pcp_rope_buffers[LAYER]
         for target_buffer, draft_buffer in zip(target_rope[2:], draft_rope[2:]):
             assert target_buffer.data_ptr() != draft_buffer.data_ptr()
+
+    def test_deferred_c2_task_has_one_global_owner(self, builders):
+        owners = builders(specialized=True)
+        for builder in owners.values():
+            builder.enable_device_metadata()
+        metadata = _build_planes(owners, _batch(2, 0, "prefill"))
+        tasks = [task for builder in owners.values() for task in builder.take_device_metadata_tasks()]
+        assert len(tasks) == 1
+        assert tasks[0].stage == dsa_v41.DeviceMetadataStage.COMPRESSOR
+        tasks[0].run()
+        state = metadata[PREFIXES["compressor_state"]]
+        assert state.c2_ring_metadata is None
+        assert state.global_metadata.c2_ring_metadata[1].tolist() == [8, 8]
+        assert all(not builder.take_device_metadata_tasks() for builder in owners.values())

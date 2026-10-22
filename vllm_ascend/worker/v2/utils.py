@@ -227,7 +227,7 @@ def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
             for builder in attn_group.metadata_builders:
                 if isinstance(builder, AscendDSAV41MetadataBuilder):
                     builder.prepare_source_rope()
-                if isinstance(builder, AscendDSAV41PCPMetadataBuilder) and builder._use_specialized_metadata():
+                if isinstance(builder, AscendDSAV41PCPMetadataBuilder):
                     pcp_builders.append(builder)
     AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(pcp_builders)
 

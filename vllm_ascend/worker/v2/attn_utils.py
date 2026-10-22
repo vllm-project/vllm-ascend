@@ -585,9 +585,12 @@ def build_attn_metadata(
                     num_actual_reqs=num_actual_reqs,
                     skip_ring_state_update=skip_ring_state_update,
                     common_v41_metadata=common_v41_metadata,
-                    common_v41_batch_metadata=common_v41_batch_metadata,
-                    allow_v41_pcp_shared_metadata=(
-                        model_specific_attn_metadata is None and group_causal is True and pcp_context is not None
+                    # Model-specific overrides can differ between cache groups.
+                    # Keep optimized construction, but isolate their batch caches.
+                    common_v41_batch_metadata=(
+                        common_v41_batch_metadata
+                        if model_specific_attn_metadata is None
+                        else common_v41_batch_metadata.setdefault(("model_specific", i), {})
                     ),
                     # Upstream capture prepares metadata with runtime mode
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
