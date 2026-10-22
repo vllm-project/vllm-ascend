@@ -70,6 +70,8 @@ def _make_builder(
 
 def _make_common_metadata() -> SimpleNamespace:
     metadata = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=2,
         num_actual_tokens=4,
         num_input_tokens=4,

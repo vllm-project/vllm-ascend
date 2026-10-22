@@ -534,7 +534,7 @@ def test_sfa_pcp_dcp_compact_kv_requires_global_block_counts():
 
 def test_sfa_pcp_dcp_builder_allows_decode_graph_metadata_without_pcp_context() -> None:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
-    common_attn_metadata = SimpleNamespace()
+    common_attn_metadata = SimpleNamespace(pcp_context=None, pcp_cache_group_idx=None)
     expected = object()
 
     with patch.object(
@@ -1441,6 +1441,8 @@ def _make_sfa_split_common(query_lens, flags, actual, threshold, capture=False, 
     slots[actual:] = -1
     return SimpleNamespace(
         context_parallel_metadata=None,
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=num_reqs,
         num_actual_tokens=actual,
         num_input_tokens=num_tokens,
