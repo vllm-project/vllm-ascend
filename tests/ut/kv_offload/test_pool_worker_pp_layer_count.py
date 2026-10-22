@@ -170,9 +170,7 @@ def test_pp_stage_maps_multiple_cache_groups_to_local_layers(
         worker._attention_saved_layers = set()
         worker.block_key_hybrid = False
         worker._wait_for_final_layer_save = Mock()
-        monkeypatch.setattr(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._LW_DEFER_LAST_SAVE", False
-        )
+        monkeypatch.setitem(KVPoolWorker.save_kv_layer.__globals__, "_LW_DEFER_LAST_SAVE", False)
 
         worker.save_kv_layer(None)
 
