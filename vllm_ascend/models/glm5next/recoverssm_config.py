@@ -20,5 +20,6 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
         raise ValueError("GLM RecoverSSM currently requires PP=1 and PCP=1")
     if parallel.decode_context_parallel_size != 1:
         raise ValueError("GLM RecoverSSM currently requires DCP=1")
-    if vllm_config.kv_transfer_config is not None:
-        raise ValueError("GLM RecoverSSM does not yet support KV transfer")
+    transfer = vllm_config.kv_transfer_config
+    if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        raise ValueError("GLM RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
