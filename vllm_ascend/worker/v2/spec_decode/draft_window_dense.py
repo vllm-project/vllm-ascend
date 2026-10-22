@@ -119,17 +119,37 @@ def prepare_dense_draft_read(
 def gather_dense_draft_kv(
     read: DenseDraftRead, key_cache: torch.Tensor, value_cache: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Read ND [blocks,B,KV-heads,D] caches into independently owned scratch."""
+    """Gather ND token rows, including interleaved/padded physical KV pages."""
     if key_cache.ndim != 4 or key_cache.shape != value_cache.shape:
         raise ValueError("Dense Draft KV requires matching four-dimensional caches")
-    if not key_cache.is_contiguous() or not value_cache.is_contiguous():
-        raise ValueError("Dense Draft KV requires the ordinary contiguous cache layout")
     if key_cache.dtype not in (torch.float16, torch.bfloat16) or value_cache.dtype != key_cache.dtype:
         raise ValueError("Dense Draft KV requires unquantized float16/bfloat16 storage")
     shape = (read.num_reqs, read.capacity, *key_cache.shape[2:])
-    indices = read.slots.reshape(-1)
-    keys = key_cache.flatten(0, 1).index_select(0, indices).reshape(shape)
-    values = value_cache.flatten(0, 1).index_select(0, indices).reshape(shape)
+    slots = read.slots.reshape(-1)
+    indices_by_stride = {}
+    gathered = []
+    for cache in (key_cache, value_cache):
+        blocks, block_size, heads, dim = cache.shape
+        token_size = heads * dim
+        page_stride = cache.stride(0)
+        if (
+            cache.stride()[1:] != (token_size, dim, 1)
+            or page_stride < block_size * token_size
+            or page_stride % token_size
+        ):
+            raise ValueError("Dense Draft KV requires contiguous ND token rows and aligned physical pages")
+        stride_rows = page_stride // token_size
+        # Preserve the original storage offset, including the V offset in a
+        # combined K/V page. This is a view, never a full-cache flatten/copy.
+        rows = cache.as_strided(((blocks - 1) * stride_rows + block_size, heads, dim), (token_size, dim, 1))
+        if stride_rows not in indices_by_stride:
+            indices_by_stride[stride_rows] = (
+                slots
+                if stride_rows == block_size
+                else slots + torch.div(slots, block_size, rounding_mode="floor") * (stride_rows - block_size)
+            )
+        gathered.append(rows.index_select(0, indices_by_stride[stride_rows]).reshape(shape))
+    keys, values = gathered
     read.retain(keys, values)
     return keys, values
 

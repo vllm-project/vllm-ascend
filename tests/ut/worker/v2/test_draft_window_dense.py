@@ -10,9 +10,10 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_dense import gather_dense_dr
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource
 
 
+@pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("query_width", [8, 9])
-def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_width):
+def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_width, page_layers):
     block = 128
     table = torch.tensor(
         [[3, 1, 8, 0, 11, 4, 2, 10, 9, 5, 6, 7], [16, 12, 20, 15, 13, 22, 14, 21, 23, 18, 17, 19]], dtype=torch.int32
@@ -35,6 +36,11 @@ def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_widt
     assert read.starts.tolist() == [0, 128]  # U1152 must not move row0's start.
     assert read.seq_lens.tolist() == [1151, 1024]
     cache = torch.full((24, block, 2, 16), torch.nan, dtype=torch.bfloat16)
+    backing = None
+    if page_layers:
+        backing = torch.full((24, page_layers, 2, block, 2, 16), torch.nan, dtype=torch.bfloat16)
+        cache = backing[:, 2, 1]  # Nonzero storage offset and gaps between pages.
+        assert not cache.is_contiguous()
     reference = []
     for row, (physical_row, end) in enumerate(zip((1, 0), ends.tolist())):
         start = max(end - 1024, 0) // block * block
@@ -49,6 +55,7 @@ def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_widt
         assert actual[len(expected) :] == [expected[-1]] * (read.capacity - len(expected))
         assert set(actual) == set(expected)
         reference.append(cache.flatten(0, 1)[expected].clone())
+    backing_before = backing.clone() if backing is not None else None
     keys, values = gather_dense_draft_kv(read, cache, cache)
     assert torch.isfinite(keys).all() and torch.isfinite(values).all()
     for row, expected in enumerate(reference):
@@ -58,6 +65,8 @@ def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_widt
             allowed = min(visible, visible - query_width + q + 1) if causal else visible
             assert not read.mask[row, 0, q, :allowed].any()
             assert read.mask[row, 0, q, allowed:].all()
+    if backing is not None:
+        torch.testing.assert_close(backing, backing_before, atol=0, rtol=0, equal_nan=True)
     ends.fill_(1)
     table.fill_(0)
     assert read.seq_lens.tolist() == [1151, 1024]

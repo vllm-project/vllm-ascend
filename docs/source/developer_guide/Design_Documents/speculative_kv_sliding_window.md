@@ -314,7 +314,7 @@ context regressions, and separately compare candidate OFF to the clean base.
 
 ## Parallel GQA device exact reader (candidate)
 
-For ordinary contiguous FP16/BF16 GQA caches, DFlash and DSpark can prepare
+For ordinary ND FP16/BF16 GQA caches, DFlash and DSpark can prepare
 the read set from the current device exact lengths. The owned read contains
 physical token indices and a device exact attention mask. Each layer gathers
 only valid tokens into private KV scratch; padding repeats the last valid
@@ -325,6 +325,9 @@ can contaminate the result despite zero attention weights.
 
 This path requires uniform parallel query width, ordinary unquantized cache
 layout, and scheduling uppers covered by initialized Full block-table columns.
+Combined K/V pages may have gaps between blocks and nonzero storage offsets;
+the reader maps token indices through the actual page stride without copying
+the full cache or reading the gaps.
 The preparation contract supplies current-generation `0 < E <= U`; the CPU
 upper checks address capacity for that contract, without reconstructing E.
 Continuing prefill, ragged queries and other consumers retain the existing

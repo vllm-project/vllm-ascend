@@ -16,13 +16,16 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_dense import (  # noqa: E402
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
-ATOL, RTOL = 2**-7, 2**-6  # Prespecified BF16 vs independent FP32 oracle.
+TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
+# Prespecified dtype tolerances vs an independent FP32 oracle.
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("geometry", [(192, 4, 4), (128, 32, 8)])
 @pytest.mark.parametrize("query_width", [8, 9])
 @pytest.mark.parametrize("causal", [False, True])
-def test_dense_device_exact_reader(geometry, query_width, causal):
+def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, dtype):
     D, NQ, NK = geometry
     B, W = 128, 1024
     ends = (1151, 1152 if query_width == 8 else 1281)
@@ -30,14 +33,14 @@ def test_dense_device_exact_reader(geometry, query_width, causal):
     canonical = (torch.randperm(48, generator=generator) + 1).reshape(4, 12).to(torch.int32)
     canonical[3, 0] = canonical[1, 0]  # Actual shared prefix page, then reorder.
     rows = (3, 1)
-    keys_cpu = (torch.randn(49, B, NK, D, generator=generator) * 0.2).to(torch.bfloat16)
-    values_cpu = (torch.randn(49, B, NK, D, generator=generator) * 0.2).to(torch.bfloat16)
+    keys_cpu = (torch.randn(49, B, NK, D, generator=generator) * 0.2).to(dtype)
+    values_cpu = (torch.randn(49, B, NK, D, generator=generator) * 0.2).to(dtype)
     for row, end in zip(rows, ends):
         for logical in range(end, 12 * B):
             physical = int(canonical[row, logical // B])
             keys_cpu[physical, logical % B] = torch.nan
             values_cpu[physical, logical % B] = torch.nan
-    query_cpu = (torch.randn(2 * query_width, NQ, D, generator=generator) * 0.2).to(torch.bfloat16)
+    query_cpu = (torch.randn(2 * query_width, NQ, D, generator=generator) * 0.2).to(dtype)
     reference, slots_reference = [], []
     for index, (row, end) in enumerate(zip(rows, ends)):
         start = max(end - W, 0) // B * B
@@ -54,6 +57,14 @@ def test_dense_device_exact_reader(geometry, query_width, causal):
             [int(canonical[row, position // B]) * B + position % B for position in range(start, end)]
         )
     keys, values, query = keys_cpu.npu(), values_cpu.npu(), query_cpu.npu()
+    if page_layers:
+        # Match MRV2 combined, page-strided K/V with a nonzero layer offset.
+        backing = torch.full((49, page_layers, 2, B, NK, D), torch.nan, dtype=dtype, device="npu")
+        keys, values = backing[:, 2, 0], backing[:, 2, 1]
+        keys.copy_(keys_cpu)
+        values.copy_(values_cpu)
+        assert not keys.is_contiguous() and values.storage_offset() > 0
+        backing_before = backing.clone()
     source_table = canonical.npu()
     source = DirectPrefixSource(source_table, rows, (12, 12), B)
     upper_cpu = torch.tensor(ends, dtype=torch.int32) + 1
@@ -77,7 +88,9 @@ def test_dense_device_exact_reader(geometry, query_width, causal):
 
     read, output = execute()
     torch.npu.synchronize()
-    torch.testing.assert_close(output.cpu().float(), torch.cat(reference), atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(
+        output.cpu().float(), torch.cat(reference), atol=TOLERANCES[dtype][0], rtol=TOLERANCES[dtype][1]
+    )
     for index, expected in enumerate(slots_reference):
         actual = read.slots[index].cpu().tolist()
         assert actual[: len(expected)] == expected
@@ -85,3 +98,6 @@ def test_dense_device_exact_reader(geometry, query_width, causal):
         assert set(actual) == set(expected)
     for device, original in ((keys, keys_cpu), (values, values_cpu), (query, query_cpu), (source_table, canonical)):
         torch.testing.assert_close(device.cpu(), original, atol=0, rtol=0, equal_nan=True)
+
+    if page_layers:
+        torch.testing.assert_close(backing, backing_before, atol=0, rtol=0, equal_nan=True)
