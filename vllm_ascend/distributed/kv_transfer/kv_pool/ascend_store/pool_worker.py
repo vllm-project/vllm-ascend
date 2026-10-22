@@ -3141,14 +3141,21 @@ class KVPoolWorker:
             submit_layer_load(layer_id)
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
-        """Observe completion without consuming the attention hook's signal."""
         physical_layer = self._extract_physical_layer_index(layer_name)
-        layer_id = self._global_to_local_layer.get(physical_layer, physical_layer)
-        assert self.kv_recv_thread is not None
+        layer_id = self._global_to_local_layer.get(physical_layer)
+        if layer_id is None:
+            if self._global_to_local_layer:
+                return
+            layer_id = physical_layer
+        if not 0 <= layer_id < len(self.layer_load_tasks):
+            return
+        if self.kv_recv_thread is None:
+            raise RuntimeError("kv_recv_thread is not initialized")
         self.kv_recv_thread.raise_if_failed()
         if not self.layer_load_tasks[layer_id] and layer_id not in self.prefetch_layer_map:
             return
-        assert self.layer_load_finished_events is not None
+        if self.layer_load_finished_events is None:
+            raise RuntimeError("layer_load_finished_events is not initialized")
         while not self.layer_load_finished_events[layer_id].wait(timeout=1):
             self.kv_recv_thread.raise_if_failed()
             if self._layer_load_aborted.is_set():
