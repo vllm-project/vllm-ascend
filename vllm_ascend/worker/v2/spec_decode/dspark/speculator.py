@@ -398,7 +398,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # step's head call so the DSpark LM-head collectives use the
         # group-agreed dynamic row bound. The PCP replica broadcast moved to
         # the propose tail (upstream PCPManager.sync_drafts).
-        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp)
+        self._lmhead_tp_publish_dspark_draft_capacity(num_tokens_across_dp)
         return hidden_states
 
     def propose(
@@ -490,7 +490,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.draft_logits[input_batch.idx_mapping] = logits
         return draft_tokens
 
-    def _lmhead_tp_publish_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
+    def _lmhead_tp_publish_dspark_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
         """Publish the per-step DSpark draft LM-head capacity.
 
         ``num_tokens_across_dp`` is the group-agreed per-rank query token count

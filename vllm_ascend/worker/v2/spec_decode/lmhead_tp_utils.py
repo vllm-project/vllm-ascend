@@ -26,6 +26,7 @@ class LmheadTPDraftSamplingMixin:
 
     # Attributes injected by the hosting speculator; annotated for standalone
     # mypy analysis.
+    model: Any
     max_num_reqs: int
     num_speculative_steps: int
     speculative_config: Any
