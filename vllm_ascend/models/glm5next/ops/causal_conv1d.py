@@ -55,6 +55,7 @@ def causal_conv1d(
             null_block_id=null_block_id,
         )
     else:
+        output = torch.zeros_like(x)
         result = causal_conv1d_update(
             x,
             kernel_state,
@@ -65,6 +66,7 @@ def causal_conv1d(
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc=query_start_loc,
             null_block_id=null_block_id,
+            out=output,
         )
     if needs_state_copy:
         copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
