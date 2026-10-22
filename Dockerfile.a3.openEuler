@@ -57,7 +57,6 @@ ENV SOC_VERSION=$SOC_VERSION \
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-ARG TRITON_ASCEND_VERSION="3.2.2"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
@@ -65,7 +64,6 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==${TRITON_ASCEND_VERSION} --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
@@ -94,9 +92,13 @@ ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
 ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 ARG HYBRID_OBS_BASE="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com"
 ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
+ARG TRITON_ASCEND_URL_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/triton-ascend"
+ARG TRITON_ASCEND_VERSION="20261019175332"
+ARG TRITON_ASCEND_PACKAGE_VERSION="3.6.0"
 RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         "linux/amd64"|"x86_64") \
             ARCH_SUFFIX="x86_64"; \
+            TRITON_ASCEND_URL="${TRITON_ASCEND_URL_BASE}/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
             MEMFABRIC_URL="${HYBRID_OBS_BASE}/mf/release/1.3/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
             MEMCACHE_URL="${HYBRID_OBS_BASE}/memcache/release/1.3/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"; \
             MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_x86_64.whl"; \
@@ -104,6 +106,7 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
             FLA_SHA256="a21fcb404405bfe44aef1a05beaa04c4e543f05749abf8cedde091dc409ccf1f" ;; \
         "linux/arm64"|"aarch64") \
             ARCH_SUFFIX="aarch64"; \
+            TRITON_ASCEND_URL="${TRITON_ASCEND_URL_BASE}/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"; \
             MEMFABRIC_URL="${HYBRID_OBS_BASE}/mf/release/1.3/${MEMFABRIC_DATE}/memfabric_hybrid-${MEMFABRIC_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"; \
             MEMCACHE_URL="${HYBRID_OBS_BASE}/memcache/release/1.3/${MEMCACHE_DATE}/memcache_hybrid-${MEMCACHE_VERSION}-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl"; \
             MOONCAKE_WHL="mooncake_transfer_engine-0.3.13-cp312-cp312-manylinux_2_35_aarch64.whl"; \
@@ -112,6 +115,9 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         *) echo "Unsupported platform: ${TARGETPLATFORM:-$(uname -m)}" && exit 1 ;; \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+# Install triton-ascend
+    echo "Install triton-ascend..." && \
+    python3 -m pip install "$TRITON_ASCEND_URL" && \
 # Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
