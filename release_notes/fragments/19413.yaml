@@ -1,0 +1,4 @@
+pr: 19413
+entries:
+  - category: performance
+    text: Updated shared-expert multistream scheduling for latent MoE with sequence parallelism, including input AllGather overlap with the Kimi K3 router gate and complete shared-expert submission. Reused GMM2 readiness events and removed duplicate waits on an already-consumed shared-input event.
