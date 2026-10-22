@@ -73,6 +73,8 @@ if enable_bifrost:
     from vllm_ascend.device_allocator.camem_bifrost import CaMemAllocator
     import vllm_ascend.vllm_ascend_C # this is to ensure the custom ops in 
                     # vllm_ascend_C are registered when Bifrost is enabled
+    import concurrent.futures
+    gc_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="GC-Worker")
 else:
     from vllm_ascend.device_allocator.camem import CaMemAllocator
 
@@ -185,6 +187,8 @@ class NPUWorker(WorkerBase):
                 "Sleep mode freed %.2f GiB memory, "
                 "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
                 used_bytes / GiB_bytes)
+        else:
+            gc_executor.submit(NPUPlatform.clear_npu_memory)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         if not sleep_mode_enabled():
