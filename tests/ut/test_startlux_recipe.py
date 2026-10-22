@@ -86,9 +86,7 @@ def test_instant_launcher_preserves_mode_and_raw_logits(tmp_path, execution):
     # Bidirectional pooling must see the complete prompt, even in graph mode.
     assert "--no-enable-chunked-prefill" in args
     assert "--enable-chunked-prefill" not in args
-    assert args[args.index("--max-num-batched-tokens") + 1] == args[
-        args.index("--max-model-len") + 1
-    ]
+    assert args[args.index("--max-num-batched-tokens") + 1] == args[args.index("--max-model-len") + 1]
     assert args[-6 - len(execution) : -6] == execution
 
 

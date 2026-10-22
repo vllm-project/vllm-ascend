@@ -70,7 +70,6 @@ unchanged. UT and device regression cases cover both incoming causal flags.
 
 ## Historical v1 recipe (separate version pins)
 
-
 This recipe uses native vLLM classification models for the dense 4B and MoE
 35B-A3B checkpoints. The models inherit the Qwen3.5 implementations in vLLM;
 Ascend supplies its existing attention and MoE operators. No model class is
