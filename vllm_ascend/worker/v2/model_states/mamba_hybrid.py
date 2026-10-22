@@ -429,4 +429,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             model_specific_attn_metadata=model_specific_metadata,
             for_cudagraph_capture=for_capture,
         )
+        if self.recoverssm is not None:
+            self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
         return self.attn_metadata
