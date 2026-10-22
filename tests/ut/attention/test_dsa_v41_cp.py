@@ -1467,8 +1467,9 @@ class TestSharedPCPMetadata:
         duplicate.prepare_source_rope()
         owners["second_swa"] = duplicate
         dsa_v41_cp.AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(owners.values())
-        prepare = Mock(wraps=dsa_cp.AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context)
-        monkeypatch.setattr(dsa_cp.AscendDSAPCPMetadataBuilder, "_prepare_graph_pcp_context", prepare)
+        context_owner = original._pcp_context_owner
+        prepare = Mock(wraps=context_owner._prepare_graph_pcp_context)
+        monkeypatch.setattr(context_owner, "_prepare_graph_pcp_context", prepare)
         gather = Mock(wraps=torch.gather)
         monkeypatch.setattr(torch, "gather", gather)
         addresses = []
@@ -1568,3 +1569,35 @@ class TestSharedPCPMetadata:
         assert state.c2_ring_metadata is None
         assert state.global_metadata.c2_ring_metadata[1].tolist() == [8, 8]
         assert all(not builder.take_device_metadata_tasks() for builder in owners.values())
+
+    def test_shared_batch_signature_is_recorded_and_checked(self, builders):
+        builder = builders(specialized=True)["swa"]
+        batch = _batch(2, 0, "prefill")
+        shared = {}
+        kwargs = dict(
+            pcp_context=batch.context,
+            pcp_cache_group_idx=0,
+            common_v41_batch_metadata=shared,
+            num_actual_reqs=batch.local.num_reqs,
+        )
+        builder.build(0, batch.local, **kwargs)
+        cache = shared[("v41_pcp_specialized", id(builder.vllm_config), None)]
+        # Explicit checks also execute when this regression is run with python -O.
+        if "signature" not in cache:
+            raise AssertionError("Batch signature was not recorded")
+        try:
+            builder.build(0, batch.local, skip_ring_state_update=True, **kwargs)
+        except ValueError as exc:
+            if "matching batch signatures" not in str(exc):
+                raise
+        else:
+            raise AssertionError("Mismatched batch signature was accepted")
+
+    def test_v41_build_does_not_call_v4_instance_helpers(self, builders, monkeypatch):
+        forbidden = Mock(side_effect=AssertionError("V4 instance helper called by V4.1"))
+        for name in ("_prepare_graph_pcp_context", "_build_local_common_attn_metadata"):
+            monkeypatch.setattr(dsa_cp.AscendDSAPCPMetadataBuilder, name, forbidden)
+        owners = builders(specialized=True)
+        for scenario in ("prefill", "decode", "dummy", "empty"):
+            _build_planes(owners, _batch(2, 0, scenario))
+        forbidden.assert_not_called()

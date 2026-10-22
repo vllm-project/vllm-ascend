@@ -406,6 +406,64 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             causal=common.causal,
         )
 
+    def _prepare_graph_pcp_context(
+        self,
+        pcp_context: "AscendPCPAttentionContext",
+        full_graph_mode: bool,
+    ) -> "AscendPCPAttentionContext":
+        """Prepare graph-stable V4.1 tensors without changing the PCP batch layout."""
+        global_batch = pcp_context.global_batch
+        num_actual_tokens = global_batch.num_tokens
+
+        # FULL graphs replay the fixed padded batch, so the restore indices
+        # must cover every padded row. Other modes run the DSA cache update
+        # with the actual token extent, and compact indices avoid restoring
+        # placeholder rows that would be trimmed before the cache write anyway.
+        num_restore_tokens = global_batch.num_tokens_after_padding if full_graph_mode else num_actual_tokens
+        # Use the preallocated buffer to keep the address fixed for graph replay.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[:num_restore_tokens]
+        hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
+        hidden_restore_idx[num_actual_tokens:].zero_()
+
+        # The upstream dummy path only invalidates gathered slot mappings.
+        # DSA also consumes the scheduler-global mapping, so clear it here.
+        if global_batch.is_dummy:
+            pcp_context.global_slot_mappings.fill_(-1)
+
+        return replace(
+            pcp_context,
+            hidden_restore_idx=hidden_restore_idx,
+        )
+
+    def _build_local_common_attn_metadata(
+        self,
+        pcp_context: "AscendPCPAttentionContext",
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        cache_group_idx: int,
+        has_prefill: bool,
+    ) -> AscendCommonAttentionMetadata:
+        num_local_padded_tokens = common_attn_metadata.num_input_tokens
+        # Sharded decode owns different requests per rank, so it uses the same
+        # rank-local slot slice as prefill. Replicated decode writes every rank.
+        if has_prefill or self._is_decode_sharded:
+            gathered_slot_mapping = common_attn_metadata.slot_mapping
+            if pcp_context.global_batch.is_dummy:
+                gathered_slot_mapping.fill_(-1)
+            local_slot_mapping = gathered_slot_mapping.view(
+                self._pcp_world_size,
+                num_local_padded_tokens,
+            )[self._pcp_rank]
+        else:
+            # Decode tokens are replicated, so every rank must write its own
+            # SWA cache. The gathered mapping masks these writes off rank 0.
+            local_slot_mapping = pcp_context.global_slot_mappings[cache_group_idx]
+            if pcp_context.global_batch.is_dummy:
+                local_slot_mapping.fill_(-1)
+            assert local_slot_mapping.shape[0] == num_local_padded_tokens
+        return common_attn_metadata.replace(
+            slot_mapping=local_slot_mapping,
+        )
+
     def build(
         self,
         common_prefix_len,
@@ -442,7 +500,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             full_graph_mode,
             bool(kwargs.get("skip_ring_state_update", False)),
         )
-        assert shared.setdefault("signature", signature) == signature
+        cached_signature = shared.setdefault("signature", signature)
+        if cached_signature != signature:
+            raise ValueError("V4.1 PCP metadata sharing requires matching batch signatures")
         mode = shared.get("mode")
         if mode is None:
             has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
@@ -454,8 +514,8 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         if needs_global_metadata:
             prepared_context = shared.get("pcp_context")
             if prepared_context is None:
-                prepared_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
-                    self._pcp_context_owner, pcp_context, full_graph_mode=full_graph_mode
+                prepared_context = self._pcp_context_owner._prepare_graph_pcp_context(
+                    pcp_context, full_graph_mode=full_graph_mode
                 )
                 shared["pcp_context"] = prepared_context
             pcp_context = prepared_context
@@ -477,8 +537,8 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                     causal=common_attn_metadata.causal,
                 )
 
-        local_common = AscendDSAPCPMetadataBuilder._build_local_common_attn_metadata(
-            self, pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
+        local_common = self._build_local_common_attn_metadata(
+            pcp_context, common_attn_metadata, pcp_cache_group_idx, has_prefill
         )
         if full_graph_mode:
             offsets = shared.get("local_graph_offsets")
