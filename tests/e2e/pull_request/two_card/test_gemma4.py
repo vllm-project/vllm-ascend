@@ -39,6 +39,12 @@ _MTP_NUM_SPECULATIVE_TOKENS = 3
 _MTP_MIN_ACCEPTANCE_PER_POS = (0.85, 0.75, 0.60)
 
 
+def _draft_model_cached() -> bool:
+    from huggingface_hub import try_to_load_from_cache
+
+    return try_to_load_from_cache(_MTP_DRAFT_MODEL, "config.json") is not None
+
+
 def _run_full_decode_graph_smoke(model: str, *, enable_expert_parallel: bool) -> None:
     with VllmRunner(
         model,
@@ -92,6 +98,12 @@ def test_gemma4_26b_a4b_moe_full_decode_graph() -> None:
 @wait_until_npu_memory_free()
 def test_gemma4_mtp_spec_decode_model_runner_v2() -> None:
     """Gemma4 MTP keeps its acceptance on Model Runner V2."""
+    if not _draft_model_cached():
+        pytest.skip(
+            f"{_MTP_DRAFT_MODEL} is not in the offline HF cache of this runner; "
+            "add the draft repo to the runner's model cache to enable this test"
+        )
+
     from vllm import SamplingParams
 
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
