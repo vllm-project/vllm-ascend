@@ -1,0 +1,8 @@
+pr: 19495
+entries:
+  - category: bugfix
+    text: >-
+      Fixed top-p sampling to apply the cutoff to the distribution truncated by
+      top-k instead of the full-vocabulary one. Requests setting both top_k and
+      top_p now retain the same token set as vLLM instead of a strictly larger
+      one, and top-p no longer silently degrades into a no-op.

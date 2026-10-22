@@ -2,17 +2,18 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
-from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, apply_top_k_top_p_pytorch
 from vllm.v1.sample.sampler import Sampler
 
 from tests.ut.base import TestBase
 from vllm_ascend.sample.sampler import (
     AscendSampler,
     AscendTopKTopPSampler,
-    _apply_top_k_top_p_pytorch,
     random_sample,
 )
+from vllm_ascend.worker.v2.sample.apply_top_k_top_p import _apply_top_k_top_p_pytorch
 
 
 @contextmanager
@@ -112,3 +113,66 @@ def test_topk_topp_forward_and_apply_helpers():
     assert torch.isfinite(filtered).any()
     top_k_only = _apply_top_k_top_p_pytorch(logits.clone(), torch.tensor([1, 1]), None)
     assert top_k_only.shape == logits.shape
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("k_value", [1, 10, 1024, 2000])
+@pytest.mark.parametrize("p_value", [0.5, 0.9, 0.99, 1.0, None])
+def test_apply_top_k_top_p_matches_upstream(dtype, k_value, p_value):
+    """top-p must be applied to the distribution truncated by top-k.
+
+    A pre-cut (full-vocabulary) distribution keeps extra tokens and, when the
+    mass retained by top-k is <= p, collapses top-p into a no-op.
+    """
+    torch.manual_seed(0)
+    vocab_size = 2000
+    logits = torch.randn(4, vocab_size, dtype=torch.float32).to(dtype)
+    k = torch.full((4,), k_value, dtype=torch.int64)
+    p = None if p_value is None else torch.full((4,), p_value)
+
+    expected = apply_top_k_top_p_pytorch(logits.clone(), k, p)
+    actual = _apply_top_k_top_p_pytorch(logits.clone(), k, p)
+
+    assert torch.equal(actual, expected)
+
+
+def test_apply_top_k_top_p_mixed_and_tied_rows():
+    """Per-row k/p and tied logits must match upstream row by row."""
+    vocab_size = 2000
+    torch.manual_seed(0)
+    logits = torch.randn(4, vocab_size)
+    k = torch.tensor([1, 10, 1024, vocab_size], dtype=torch.int64)
+    p = torch.tensor([0.5, 0.9, 0.99, 1.0])
+
+    assert torch.equal(
+        _apply_top_k_top_p_pytorch(logits.clone(), k, p),
+        apply_top_k_top_p_pytorch(logits.clone(), k, p),
+    )
+
+    # Every 20 tokens share one logit, so top-k alone cannot separate them and
+    # only a re-normalized top-p can cut inside the tie group.
+    tied = torch.floor(torch.arange(vocab_size, dtype=torch.float32) / 20.0).repeat(2, 1)
+    tied_k = torch.tensor([10, 10], dtype=torch.int64)
+    tied_p = torch.tensor([0.5, 0.9])
+    assert torch.equal(
+        _apply_top_k_top_p_pytorch(tied.clone(), tied_k, tied_p),
+        apply_top_k_top_p_pytorch(tied.clone(), tied_k, tied_p),
+    )
+
+
+def test_apply_top_k_top_p_skips_softmax_without_top_p():
+    """The pure top-k path must not pay for a full-vocabulary softmax."""
+    logits = torch.randn(2, 128)
+    k = torch.tensor([5, 50], dtype=torch.int64)
+
+    calls = []
+    original_softmax = torch.Tensor.softmax
+
+    def counting_softmax(self, *args, **kwargs):
+        calls.append(1)
+        return original_softmax(self, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "softmax", counting_softmax):
+        _apply_top_k_top_p_pytorch(logits.clone(), k, None)
+
+    assert calls == []
