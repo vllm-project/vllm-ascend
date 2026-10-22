@@ -45,6 +45,7 @@ curated_tests:
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/one_card/test_fp8_mx_loading_a5.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
 
 # === Skipped Tests ===

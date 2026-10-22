@@ -64,19 +64,12 @@ BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 _ROWS_PER_DEQUANT_STEP = 1024
 
 
-def resolve_block_scales(
+def _validate_block_scales(
     weight: torch.Tensor,
     scale_inv: torch.Tensor,
     block_n: int,
     block_k: int,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Expand a block-wise FP8 matrix into a dense ``out_dtype`` matrix.
-
-    ``weight`` is ``[out_features, in_features]`` and ``scale_inv`` carries one
-    scale per ``block_n x block_k`` tile. The scales stay in float32 during the
-    multiply so a block's shared scale is not itself rounded to bfloat16.
-    """
+) -> None:
     if weight.dim() != 2:
         raise ValueError(f"Expected a 2D block-quantized weight, got shape {tuple(weight.shape)}.")
 
@@ -90,6 +83,22 @@ def resolve_block_scales(
             "`weight_scale_inv` are mismatched or unpaired."
         )
 
+
+def resolve_block_scales(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_n: int,
+    block_k: int,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Expand a block-wise FP8 matrix into a dense ``out_dtype`` matrix.
+
+    ``weight`` is ``[out_features, in_features]`` and ``scale_inv`` carries one
+    scale per ``block_n x block_k`` tile. The scales stay in float32 during the
+    multiply so a block's shared scale is not itself rounded to bfloat16.
+    """
+    _validate_block_scales(weight, scale_inv, block_n, block_k)
+    out_features, in_features = weight.shape
     resolved = torch.empty((out_features, in_features), dtype=out_dtype, device=weight.device)
     rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
     for row_start in range(0, out_features, rows_per_step):
@@ -119,6 +128,61 @@ def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, 
         scale_alg=scale_alg,
     )
     return quantized, scale.flatten(-2)
+
+
+def requantize_block_scales(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_n: int,
+    block_k: int,
+    out_dtype: torch.dtype,
+    scale_alg: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve and quantize row chunks without a full model-dtype intermediate.
+
+    MX groups run along the last dimension, so splitting rows preserves each
+    group. Reuse the dense resolver to retain its float32 scale multiplication
+    and rounding to ``out_dtype`` before MX quantization. The checkpoint weight
+    stays intact, and only the final FP8 weight and byte scales span all rows.
+    """
+    # Validate the whole checkpoint before slicing: otherwise extra scale rows
+    # could be silently discarded by the chunks.
+    _validate_block_scales(weight, scale_inv, block_n, block_k)
+    out_features, in_features = weight.shape
+    rows_per_step = max(block_n, _ROWS_PER_DEQUANT_STEP // block_n * block_n)
+
+    if out_features <= rows_per_step or in_features == 0:
+        # Avoid extra output buffers/copies for a single chunk, and retain the
+        # existing native operator behavior for empty matrices.
+        resolved = resolve_block_scales(weight, scale_inv, block_n, block_k, out_dtype)
+        quantized, mx_scale = _mx_quantize(resolved, scale_alg)
+        return quantized, mx_scale.view(torch.uint8).reshape(out_features, -1)
+
+    quantized = torch.empty(weight.shape, dtype=BLOCK_FP8_WEIGHT_DTYPE, device=weight.device)
+    mx_scale = None
+    for row_start in range(0, out_features, rows_per_step):
+        row_end = min(row_start + rows_per_step, out_features)
+        resolved = resolve_block_scales(
+            weight[row_start:row_end],
+            scale_inv[row_start // block_n : cdiv(row_end, block_n)],
+            block_n,
+            block_k,
+            out_dtype,
+        )
+        chunk_weight, chunk_scale = _mx_quantize(resolved, scale_alg)
+        chunk_scale = chunk_scale.view(torch.uint8).reshape(row_end - row_start, -1)
+        if mx_scale is None:
+            # The native operator pads odd group counts into pairs. Preserve
+            # that byte layout instead of assuming in_features // 32 scales.
+            mx_scale = torch.empty((out_features, chunk_scale.shape[1]), dtype=torch.uint8, device=weight.device)
+        quantized[row_start:row_end].copy_(chunk_weight)
+        mx_scale[row_start:row_end].copy_(chunk_scale)
+        # Release the chunk before allocating the next one. NPU operations are
+        # ordered on the current stream; no host synchronization is needed.
+        del resolved, chunk_weight, chunk_scale
+
+    assert mx_scale is not None
+    return quantized, mx_scale
 
 
 def _supports_mx_regroup(in_features: int, group_size: int) -> bool:
@@ -197,43 +261,45 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         }
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        resolved = resolve_block_scales(
-            layer.weight.data,
-            layer.weight_scale_inv.data,
-            self.block_n,
-            self.block_k,
-            self.model_dtype,
-        )
-        del layer.weight_scale_inv
-
-        if _is_absorbed_by_attention(layer):
-            # Decided locally rather than on the scheme: the attention backend
-            # splits this layer and disposes of it, so apply() is never reached
-            # and nothing about this layer should speak for any other.
-            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
-            return
-
-        if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
+        absorbed_by_attention = _is_absorbed_by_attention(layer)
+        if (
+            not absorbed_by_attention
+            and self.mxfp8_method is not None
+            and not _supports_mx_regroup(layer.weight.shape[1], self.mxfp8_method.group_size)
+        ):
             logger.warning_once(
                 "Reduction dim %d of %s is not a multiple of the MXFP8 group size %d; serving this "
                 "layer in %s instead of MXFP8.",
-                resolved.shape[1],
+                layer.weight.shape[1],
                 getattr(layer, "prefix", "the linear layer"),
                 self.mxfp8_method.group_size,
                 self.model_dtype,
             )
             self.mxfp8_method = None
 
-        if self.mxfp8_method is None:
+        if absorbed_by_attention or self.mxfp8_method is None:
+            # Attention absorbs kv_b_proj as a dense matrix; this choice must
+            # remain local to the layer rather than disabling the MX scheme.
+            resolved = resolve_block_scales(
+                layer.weight.data,
+                layer.weight_scale_inv.data,
+                self.block_n,
+                self.block_k,
+                self.model_dtype,
+            )
+            del layer.weight_scale_inv
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 
-        quantized, mx_scale = _mx_quantize(resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg)
-        # mx_scale_pairs: CANN 9.1 npu_dynamic_mx_quant packs two E8M0 scales
-        # per entry on a 2D weight, so the native result is [out, in // 64, 2]
-        # while the MXFP8 method unpacks [out, in // 32]. view() keeps the
-        # bytes; reshape() restores the layout the method expects.
-        mx_scale = mx_scale.view(torch.uint8).reshape(resolved.shape[0], -1)
+        quantized, mx_scale = requantize_block_scales(
+            layer.weight.data,
+            layer.weight_scale_inv.data,
+            self.block_n,
+            self.block_k,
+            self.model_dtype,
+            self.mxfp8_method.dynamic_mx_quant_scale_alg,
+        )
+        del layer.weight_scale_inv
         layer.weight = torch.nn.Parameter(quantized, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
