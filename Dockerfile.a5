@@ -71,7 +71,7 @@ ENV SOC_VERSION=$SOC_VERSION \
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-ARG TRITON_ASCEND_VERSION="3.2.2"
+ARG TRITON_ASCEND_VERSION="3.6.0"
 ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL} ${PYTORCH_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
