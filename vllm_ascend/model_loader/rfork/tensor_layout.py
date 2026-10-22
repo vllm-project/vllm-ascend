@@ -271,7 +271,7 @@ def _format_tensor_key(key: Any) -> str | None:
         # Plain members are unique by canonical name (aliases resolve to it); values such as NaN may collide.
         return f"enum({enum_type}.{key.name})" if key.name is not None else None
     if isinstance(key, str):
-        return json.dumps(str(key), ensure_ascii=True)
+        return json.dumps(key, ensure_ascii=True)
     if isinstance(key, int):
         return str(int(key))
     if isinstance(key, float):
@@ -348,11 +348,11 @@ def _tensor_child_key(
     value: Any,
     scan_objects: bool,
     tensor_metadata: dict[int, tuple[torch.Tensor, tuple[Any, ...] | None]],
-    parent_path: str = "",
+    parent_path: str,
 ) -> tuple[Any, ...] | None:
     if isinstance(value, torch.Tensor):
         # Reject this alias edge only; another alias may still collect the tensor.
-        if _is_runtime_only_tensor(f"{name}"):
+        if _is_runtime_only_tensor(str(name)):
             return None
         metadata = tensor_metadata.get(id(value))
         if metadata is not None:

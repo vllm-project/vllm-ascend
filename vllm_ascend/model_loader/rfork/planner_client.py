@@ -53,7 +53,7 @@ class RForkPlannerClient:
         self.last_advertisement: SeedAdvertisement | None = None
         self._advertisement_lock = threading.Lock()
         # None requires evidence from this endpoint before a 404 can acknowledge withdrawal.
-        self._seed_removal_supported: bool | None = getattr(config, "seed_removal_supported", False)
+        self._seed_removal_supported: bool | None = config.seed_removal_supported
         self._rejected_seed_lease: SeedLease | None = None
         compatibility_fingerprint = identity.compatibility_fingerprint
         if compatibility_fingerprint is None:

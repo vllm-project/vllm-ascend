@@ -235,6 +235,7 @@ def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_
         for path in files:
             try:
                 with safe_open(path, framework="pt", device="cpu") as checkpoint:
+                    # safe_open is not a dict, so SIM118's iteration advice does not apply.
                     names = checkpoint.keys()
                     weight_names.update(source.prefix + name for name in names)
             except SafetensorError as exc:

@@ -307,7 +307,9 @@ class RForkTransferBackend:
         try:
             with self._lifecycle_lock:
                 tensors = list(collect_transferable_tensors(model, processed_layout))
-                structural_digest = build_structural_digest(tensors)
+                # Read each NPU format once and share it with the digest and the log summary.
+                formats = {name: fmt for name, tensor in tensors if (fmt := read_npu_format(tensor)) is not None}
+                structural_digest = build_structural_digest(tensors, known_formats=formats)
                 tensors, _ = _split_tensors_by_excluded_blocks(tensors, self.excluded_weight_blocks)
                 log_tensor_layout_summary(
                     tensors,
@@ -315,6 +317,7 @@ class RForkTransferBackend:
                     session_id=self.transfer_session_id,
                     peer_session_id=peer_session_id,
                     processed_layout=processed_layout,
+                    known_formats=formats,
                 )
                 return structural_digest
         except Exception as exc:

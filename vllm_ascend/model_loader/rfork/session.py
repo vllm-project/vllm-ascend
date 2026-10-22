@@ -197,8 +197,6 @@ class RForkSession:
         return True
 
     def _renew_seed_lease(self, lease: SeedLease, stop_event: threading.Event) -> None:
-        if lease.lease_ttl_sec is None:
-            return
         interval = min(
             max(float(lease.lease_ttl_sec) / 3, LEASE_RENEW_MIN_INTERVAL_SEC),
             LEASE_RENEW_MAX_INTERVAL_SEC,
@@ -319,22 +317,10 @@ class RForkSession:
                     self._lease_release_attempts += 1
                     self._lease_release_in_flight = True
                 # Perform release HTTP outside _lock, then reacquire it to update state.
-                result = None
-                finished = False
-                lease_changed = False
-                try:
-                    try:
-                        result = self.planner.release_seed_once(lease)
-                    except Exception:
-                        logger.exception("RFork background lease release raised; retaining unresolved lease.")
-                        result = LeaseReleaseResult.REJECTED
-                finally:
-                    with self._lock:
-                        self._lease_release_in_flight = False
-                        lease_changed = self.seed_lease is not lease
-                        if not lease_changed and result is not None:
-                            finished = self._record_lease_release_locked(lease, result)
-                if lease_changed:
+                finished = self._release_lease_once(
+                    lease, "RFork background lease release raised; retaining unresolved lease."
+                )
+                if finished is None:
                     return
                 if finished:
                     self._promote_deferred_seed()
@@ -344,6 +330,21 @@ class RForkSession:
             with self._lock:
                 if self.lease_release_thread is threading.current_thread():
                     self.lease_release_thread = None
+
+    def _release_lease_once(self, lease: SeedLease, exception_log: str) -> bool | None:
+        """Release outside _lock; None means the tracked lease was replaced."""
+        result = LeaseReleaseResult.REJECTED
+        try:
+            result = self.planner.release_seed_once(lease)
+        except Exception:
+            logger.exception(exception_log)
+        finally:
+            with self._lock:
+                self._lease_release_in_flight = False
+        with self._lock:
+            if self.seed_lease is not lease:
+                return None
+            return self._record_lease_release_locked(lease, result)
 
     def _record_lease_release_locked(self, lease: SeedLease, result: LeaseReleaseResult) -> bool:
         """Apply one release response; True stops retries."""
@@ -751,8 +752,8 @@ class RForkSession:
                     "RFork planner cannot confirm seed withdrawal; metadata service is stopping, "
                     "but published memory remains registered until safe cleanup or process exit."
                 )
-                return False
-            logger.warning("RFork planner seed removal failed; keeping the local seed service available for retry.")
+            else:
+                logger.warning("RFork planner seed removal failed; keeping the local seed service available for retry.")
             return False
         if server is not None:
             try:
@@ -776,18 +777,7 @@ class RForkSession:
                 return
             self._lease_release_attempts += 1
             self._lease_release_in_flight = True
-        result = None
-        try:
-            try:
-                result = self.planner.release_seed_once(lease)
-            except Exception:
-                logger.exception("RFork legacy lease release raised during shutdown.")
-                result = LeaseReleaseResult.REJECTED
-        finally:
-            with self._lock:
-                self._lease_release_in_flight = False
-                if self.seed_lease is lease and result is not None:
-                    self._record_lease_release_locked(lease, result)
+        self._release_lease_once(lease, "RFork legacy lease release raised during shutdown.")
 
     def shutdown(self) -> bool:
         # Stop background retries and promotion; an existing release request may still acknowledge.
