@@ -728,7 +728,7 @@ class KDARecoverSSMCommitContext:
         checkpoints = [layer.kv_cache[1] for layer in layers]
         correction_caches = [layer.kv_cache[2] for layer in layers]
         kg_caches = [layer.kv_cache[3] for layer in layers]
-        A_log = [layer.A_log for layer in layers]
+        A_log = [layer.A_log.reshape(-1) for layer in layers]
         dt_bias = [layer.dt_bias.view(layer.local_num_heads, layer.head_dim) for layer in layers]
         lower_bounds = {layer.gate_lower_bound for layer in layers}
         if len(lower_bounds) != 1:

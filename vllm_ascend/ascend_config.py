@@ -23,7 +23,7 @@ import os
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, StrictBool, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -427,6 +427,7 @@ class AscendConfig:
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "kv_pool_range_debug": false,
+            "kda_recoverssm": false,
             "enable_mc2_hierarchy_comm": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
@@ -577,6 +578,8 @@ class AscendConfig:
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     kv_pool_range_debug: bool = False
+    # Experimental GLM KDA state recovery; disabled by default.
+    kda_recoverssm: StrictBool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
@@ -684,6 +687,12 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.kda_recoverssm:
+            # Config modules also load during platform discovery, before
+            # vllm.config is fully imported. Load model validation at init time.
+            from vllm_ascend.models.glm5next.recoverssm_config import validate_glm_recoverssm
+
+            validate_glm_recoverssm(vc)
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
