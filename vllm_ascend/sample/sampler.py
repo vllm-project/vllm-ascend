@@ -119,32 +119,32 @@ def _apply_top_k_top_p_pytorch(
     if p is None and k is None:
         return logits
 
-    probs = logits.softmax(dim=-1)
-    probs_sort, _ = probs.sort(dim=-1, descending=False)
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
-        top_k_count = probs_sort.size(1) - k.to(torch.long)  # shape: (batch, )
+        top_k_count = logits_sort.size(1) - k.to(torch.long)  # shape: (batch, )
         top_k_count = top_k_count.unsqueeze(dim=1)
-        top_k_cutoff = probs_sort.gather(-1, top_k_count)
+        top_k_cutoff = logits_sort.gather(1, top_k_count)
 
         # Make sure the no top-k rows are no-op.
         no_top_k_mask = (k == logits.shape[1]).unsqueeze(dim=1)
         top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
 
-        elements_to_discard = probs < top_k_cutoff
-        logits.masked_fill_(elements_to_discard, -float("inf"))
+        logits_sort.masked_fill_(logits_sort < top_k_cutoff, -float("inf"))
 
     if p is not None:
+        # Re-normalize after the top-k cut: top-p must be applied to the
+        # distribution truncated by top-k, not to the full-vocabulary one.
+        # Reusing the pre-cut distribution silently keeps extra tokens, and
+        # degrades to top-k only whenever the retained mass is <= p.
+        probs_sort = logits_sort.softmax(dim=-1)
         cumprob = torch.cumsum(probs_sort, dim=-1)
         top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
         top_p_mask[:, -1] = False  # at least one
 
-        top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
-        top_p_cutoff = probs_sort.gather(-1, top_p_count)
-        elements_to_discard = probs < top_p_cutoff
-        logits.masked_fill_(elements_to_discard, -float("inf"))
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
-    return logits
+    return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
 
 def _apply_top_k_top_p_torch_npu(
