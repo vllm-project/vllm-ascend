@@ -1129,6 +1129,8 @@ def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_
     assert output.total_num_scheduled_tokens == expected
     assert (request in scheduler.running) == bool(expected)
     assert (request in scheduler.waiting) == (not expected)
+
+
 # Regression coverage for admission-time prefix-cache statistics.
 def test_balance_prefix_stats_records_miss_once():
     scheduler = _make_balance_scheduler()
