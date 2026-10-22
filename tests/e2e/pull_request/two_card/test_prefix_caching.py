@@ -7,6 +7,7 @@ import time
 import pytest
 import requests
 from prometheus_client.parser import text_string_to_metric_families
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
@@ -121,7 +122,10 @@ def test_balance_prefix_cache_metrics_dp2():
     model = "Qwen/Qwen3-0.6B"
     dp_size = 2
     block_size = 16
+    port = get_open_port()
     args = [
+        "--port",
+        str(port),
         "--data-parallel-size",
         str(dp_size),
         "--max-model-len",
@@ -141,7 +145,13 @@ def test_balance_prefix_cache_metrics_dp2():
         "--additional-config",
         '{"scheduler_config":{"enable_balance_scheduling":true}}',
     ]
-    with RemoteOpenAIServer(model, args, server_host="127.0.0.1") as server:
+    with RemoteOpenAIServer(
+        model,
+        args,
+        server_host="127.0.0.1",
+        server_port=port,
+        auto_port=False,
+    ) as server:
         before_queries, before_hits = _prefix_cache_counts(server.url_for("metrics"))
         usages = []
         outputs = []
