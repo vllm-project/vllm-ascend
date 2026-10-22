@@ -76,9 +76,9 @@ def init_speculator(
 
         return AscendEagleSpeculator(vllm_config, device)
     if speculative_config.uses_draft_model():
-        from vllm_ascend.worker.v2.spec_decode.plain_draft.speculator import (
-            AscendPlainDraftModelSpeculator,
+        from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
+            AscendStandaloneARSpeculator,
         )
 
-        return AscendPlainDraftModelSpeculator(vllm_config, device)
+        return AscendStandaloneARSpeculator(vllm_config, device)
     raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
