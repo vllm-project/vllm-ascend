@@ -30,15 +30,6 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
-      - name: Checkout release resolver from the default branch
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          path: workflow-src
-          fetch-depth: 1
-          sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
-          sparse-checkout-cone-mode: false
-
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
@@ -48,8 +39,6 @@ jobs:
         id: target
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HELPER_SCRIPT: ${{ github.workspace }}/workflow-src/.github/workflows/scripts/resolve_latest_release_branch.py
         run: |
           set -euo pipefail
           if [ "${BASE_REF}" = "main" ]; then
@@ -60,41 +49,62 @@ jobs:
             exit 0
           fi
 
-          git ls-remote --heads origin 'refs/heads/releases/v*' \
-            | awk '{sub("refs/heads/", "", $2); print $2}' \
-            > release_branches.txt
-          python3 -m pip install regex --quiet
-          python3 - <<'PY'
-          import importlib.util
+          # The coverage upload overwrites this single object with the release
+          # branch whose package is current. Supplement only that branch.
+          POINTER_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage_release_branch.txt"
+          http_code=$(curl -sSL --retry 3 -o coverage_release_branch.txt -w "%{http_code}" "${POINTER_URL}" || true)
+          HTTP_CODE="${http_code}" python3 - <<'PY'
           import os
+          import sys
 
-          helper_path = os.environ["HELPER_SCRIPT"]
-          spec = importlib.util.spec_from_file_location("resolve_latest_release_branch", helper_path)
-          if spec is None or spec.loader is None:
-              raise RuntimeError(f"unable to load {helper_path}")
-          helper = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(helper)
+          def is_release_branch(name: str) -> bool:
+              prefix = "releases/v"
+              if not name.startswith(prefix):
+                  return False
+              version = name[len(prefix):]
+              if not version or not version[0].isdigit():
+                  return False
+              allowed = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-")
+              return all(char in allowed for char in version)
 
-          with open("release_branches.txt", encoding="utf-8") as handle:
-              branches = [line.strip() for line in handle if line.strip()]
-          latest = helper.resolve_latest_release_branch(
-              os.environ["GITHUB_REPOSITORY"],
-              branches,
-              os.environ["GITHUB_TOKEN"],
-          )
+          http_code = os.environ["HTTP_CODE"].strip()
           base_ref = os.environ["BASE_REF"]
-          supported = base_ref == latest
-          suffix = helper.coverage_file_suffix(base_ref)
-          obs_object = (
-              f"ci/precision-test/{helper.coverage_object_name('extra_recommended_tests.yaml', suffix)}"
+          pointer_path = "coverage_release_branch.txt"
+          pointer_missing = http_code == "404" or (
+              http_code == "200" and os.path.getsize(pointer_path) == 0
           )
+          if pointer_missing:
+              print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt is absent")
+              supported = False
+          elif http_code != "200":
+              print(
+                  "::error::Failed to download ci/precision-test/coverage_release_branch.txt "
+                  f"(HTTP {http_code})",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          else:
+              recorded = open(pointer_path, encoding="utf-8").read().strip()
+              if not is_release_branch(recorded):
+                  print(
+                      "::error::coverage_release_branch.txt does not name a releases/v* branch: "
+                      f"{recorded!r}",
+                      file=sys.stderr,
+                  )
+                  raise SystemExit(1)
+              supported = base_ref == recorded
+              if supported:
+                  print(f"PR targets the release branch recorded by coverage: {recorded}")
+              else:
+                  print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt records {recorded}")
+
+          obs_object = ""
+          if supported:
+              version = base_ref.split("/", 1)[1]
+              obs_object = f"ci/precision-test/extra_recommended_tests-{version}.yaml"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"supported={str(supported).lower()}", file=output)
               print(f"obs_object={obs_object}", file=output)
-          if supported:
-              print(f"PR targets latest release branch {latest}")
-          else:
-              print(f"Skip PR targeting {base_ref}; latest release branch is {latest}")
           PY
 
       - name: Collect new or moved tests
