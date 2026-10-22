@@ -67,7 +67,7 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_BUFFSIZE: "1024"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_USE_V2_MODEL_RUNNER: "0"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
   ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
@@ -138,7 +138,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"
@@ -197,7 +197,7 @@ templates:
       - "--attention_config.indexer_kv_dtype"
       - "int8"
       - "--additional-config"
-      - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--kv-transfer-config"

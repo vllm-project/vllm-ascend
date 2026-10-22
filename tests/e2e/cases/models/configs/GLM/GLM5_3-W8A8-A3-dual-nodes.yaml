@@ -4,6 +4,7 @@ num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
 env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_TRANSFER_TIMEOUT: "600"
   HCCL_EXEC_TIMEOUT: "3600"
@@ -44,7 +45,7 @@ deployment:
       --gpu-memory-utilization 0.90
       --quantization ascend
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      --additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
   - envs:
       <<: *env_common
@@ -74,7 +75,7 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+      --additional-config '{"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 
 # https://github.com/vllm-project/vllm-ascend/actions/runs/35073504457/job/104721840433
