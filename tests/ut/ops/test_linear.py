@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,45 @@ from vllm_ascend.ops.linear import (
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
 )
+from vllm_ascend.ops.linear_op import SequenceColumnParallelOp
+
+
+class TestSequenceColumnParallelOp(unittest.TestCase):
+    def test_first_attention_gathers_text_tokens_but_preserves_multimodal_embeddings(self):
+        global_tokens = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        for language_model_only, layer_index, is_vl, expected_gather in [
+            (True, 0, True, True),
+            (False, 0, True, False),
+            (False, 1, True, True),
+            (None, 0, False, True),
+        ]:
+            with self.subTest(language_model_only=language_model_only, layer_index=layer_index):
+                multimodal = (
+                    None if language_model_only is None else SimpleNamespace(language_model_only=language_model_only)
+                )
+                config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=multimodal))
+                layer = SimpleNamespace(
+                    prefix=f"model.layers.{layer_index}.linear_attn.in_proj_qkvz",
+                    bias=None,
+                    skip_bias_add=False,
+                    return_bias=True,
+                    gather_output=False,
+                    quant_method=SimpleNamespace(apply=lambda layer, x, bias: x),
+                )
+                inputs = global_tokens[:2] if expected_gather else global_tokens
+
+                def gather(tensor, label):
+                    return global_tokens if label else tensor
+
+                with (
+                    patch("vllm_ascend.ops.linear_op.get_current_vllm_config", return_value=config),
+                    patch("vllm_ascend.ops.linear_op.is_vl_model", return_value=is_vl),
+                    patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", side_effect=gather, create=True),
+                ):
+                    op = SequenceColumnParallelOp(layer)
+                    op.update_attrs()
+                    output, _ = op.apply_impl(inputs)
+                torch.testing.assert_close(output, global_tokens)
 
 
 class BaseLinearTest(unittest.TestCase):

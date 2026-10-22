@@ -127,6 +127,14 @@ def cache_graph_workspace(
 @lru_cache(maxsize=1)
 def needs_layer_aware_fia_graph_replay() -> bool:
     vllm_config = get_current_vllm_config()
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is not None:
+        draft_tp_size = speculative_config.draft_tensor_parallel_size
+        target_tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # Different cache specs can place draft metadata before target layers.
+        # Replay must bind each captured operation to its original layer.
+        if draft_tp_size is not None and draft_tp_size != target_tp_size:
+            return True
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)

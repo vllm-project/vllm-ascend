@@ -643,6 +643,39 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    def test_mixed_tp_replay_uses_captured_layer_with_draft_metadata_first(
+        self, _mock_paged, context, graph_params, fia, _mock_end, _mock_begin, _mock_stream
+    ):
+        self.mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        self.mock_vllm_config.speculative_config = MagicMock(draft_tensor_parallel_size=1)
+        needs_layer_aware_fia_graph_replay.cache_clear()
+        self.assertTrue(needs_layer_aware_fia_graph_replay())
+        context.sinks = False
+        context.is_draft_model = False
+        target_key = "model.layers.3.self_attn.attn"
+        draft_key = "mtp.layers.0.self_attn.attn"
+        params = [MagicMock()] * 21
+        params[16] = None
+        params[20] = target_key
+        graph_params.return_value.attn_params = {10: [tuple(params)]}
+        graph_params.return_value.handles = {10: [MagicMock()]}
+        graph_params.return_value.events = {10: [MagicMock()]}
+        draft_metadata = MagicMock(seq_lens_list=[999], actual_seq_lengths_q=[1])
+        target_metadata = MagicMock(seq_lens_list=[29], actual_seq_lengths_q=[5])
+        forward_context = MagicMock(attn_metadata={draft_key: draft_metadata, target_key: target_metadata})
+
+        self.impl.update_graph_params(self.mock_stream, forward_context, 10, self.mock_vllm_config)
+
+        self.assertEqual(fia.out.call_args.kwargs["actual_seq_lengths_kv"], [29])
+        self.assertEqual(fia.out.call_args.kwargs["actual_seq_lengths"], [5])
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
     @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
     @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
     def test_update_graph_params(

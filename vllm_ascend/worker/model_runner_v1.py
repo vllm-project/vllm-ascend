@@ -5018,15 +5018,17 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
-            mamba_page_size_padded = 0
             for layer_name, mamba_module in mamba_layers.items():
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-                    mamba_page_size_padded = spec.page_size_bytes
-            # align attn_page_size to mamba_page_size_padded
-            for layer_name in attn_layer_names:
-                if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
-                    object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+            # A TP1 draft attention page can exceed the TP2 target's Mamba page.
+            hybrid_layer_names = attn_layer_names | (mamba_layers.keys() & kv_cache_spec.keys())
+            common_page_size = max(
+                (kv_cache_spec[name].page_size_bytes for name in hybrid_layer_names), default=0
+            )
+            for layer_name in hybrid_layer_names:
+                if kv_cache_spec[layer_name].page_size_bytes < common_page_size:
+                    object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", common_page_size)
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
