@@ -294,6 +294,8 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    o_proj_weight: torch.Tensor | None = None,
+    o_proj_ratio: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
@@ -362,6 +364,16 @@ def triton_split_qkv_rmsnorm_mrope(
         IS_PARTIAL_ROPE,
         gate_size,
     )
+    if o_proj_weight is not None and o_proj_ratio > 0:
+        # Fork o_proj's prefetch here, inside this mutating op, so compilation
+        # cannot discard it or move it past the attention core -- the same
+        # reason GDN launches out_proj's fetch inside its own core op. The
+        # window from here to o_proj's MatMul (FIAS + gate) measured 43.4us at
+        # only 33% MTE2 occupancy on decode, so unlike the MLP MatMuls it has
+        # real spare bandwidth. attention_gate_with_prefetch() joins it.
+        from vllm_ascend.ops.mlp_weight_prefetch import _start_prefetch
+
+        _start_prefetch(o_proj_weight, qkv, o_proj_ratio, num_tokens=num_tokens)
 
     return q_output, k_output, v_output, gate_output
 
@@ -381,6 +393,8 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    o_proj_weight: torch.Tensor | None = None,
+    o_proj_ratio: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size

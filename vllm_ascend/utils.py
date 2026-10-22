@@ -46,6 +46,8 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
+from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
+
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -65,6 +67,8 @@ ACL_FORMAT_FRACTAL_NZ = 29
 _CUSTOM_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
+_PREFETCH_STREAM = None
+_WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
@@ -639,6 +643,28 @@ def current_stream() -> torch.npu.Stream:
         # we return the default stream.
         _CURRENT_STREAM = torch.npu.current_stream()
     return _CURRENT_STREAM
+
+
+def prefetch_stream() -> torch.npu.Stream:
+    global _PREFETCH_STREAM
+    if _PREFETCH_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _PREFETCH_STREAM = torch_npu.npu.Stream()
+    return _PREFETCH_STREAM
+
+
+def set_weight_prefetch_method(weight_prefetch_config: WeightPrefetchConfig):
+    global _WEIGHT_PREFETCH_METHOD
+    if _WEIGHT_PREFETCH_METHOD is None:
+        from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+
+        _WEIGHT_PREFETCH_METHOD = WeightPrefetchMethod(weight_prefetch_config)
+    return _WEIGHT_PREFETCH_METHOD
+
+
+def get_weight_prefetch_method():
+    return _WEIGHT_PREFETCH_METHOD
 
 
 def global_stream() -> torch.npu.Stream:
@@ -1361,10 +1387,32 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     return decode_can_skip and (chunked_prefill_can_skip or ascend_config.scheduler_config.recompute_scheduler_enable)
 
 
+def get_inner_model(model_instance: torch.nn.Module) -> torch.nn.Module | None:
+    """Return the module that owns ``.layers`` / ``.start_layer``.
+
+    Text-only models expose it as ``model_instance.model``. Multimodal wrappers
+    (``*ForConditionalGeneration``) nest it one level deeper under
+    ``language_model``, same as xlite already handles.
+    """
+    if model_instance is None:
+        return None
+
+    inner = getattr(model_instance, "model", None)
+    if inner is not None and hasattr(inner, "start_layer"):
+        return inner
+
+    lang = getattr(model_instance, "language_model", None)
+    if lang is not None:
+        inner = getattr(lang, "model", None)
+        if inner is not None and hasattr(inner, "start_layer"):
+            return inner
+    return None
+
+
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
+    return get_inner_model(model_instance) is not None
 
 
 # C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token kernel blocks for

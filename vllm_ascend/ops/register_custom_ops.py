@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
+from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
@@ -131,6 +132,38 @@ def _routed_output_is_reduced(layer_name: str) -> bool:
     } or (comm == MoECommType.ALLGATHER and is_sequence_parallel)
 
 
+# Both prefetch ops return a tensor rather than None on purpose. With no return
+# value and mutates_args=[], Dynamo sees a pure side-effect-free node with no
+# consumer and is free to DCE it or reorder it across the collective it is meant
+# to overlap with -- which silently disables prefetch under torch.compile.
+# Returning the flag lets the caller thread it into the graph as a real data
+# dependency. start_flag stays optional because the MoE gating path issues a
+# prefetch with no dependency tensor.
+def _prefetch_preprocess_impl(
+    weight: torch.Tensor, start_flag: torch.Tensor | None, max_weight_size: int
+) -> torch.Tensor:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    weight_prefetch_stream.wait_stream(calculation_stream)
+    with npu_stream_switch(weight_prefetch_stream):
+        maybe_npu_prefetch(inputs=weight, dependency=start_flag, max_size=max_weight_size)
+    return weight if start_flag is None else start_flag
+
+
+def _prefetch_preprocess_impl_fake(
+    weight: torch.Tensor, start_flag: torch.Tensor | None, max_weight_size: int
+) -> torch.Tensor:
+    return weight if start_flag is None else start_flag
+
+def _prefetch_postprocess_impl(stop_flag: torch.Tensor) -> torch.Tensor:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    calculation_stream.wait_stream(weight_prefetch_stream)
+    return stop_flag
+
+def _prefetch_postprocess_impl_fake(stop_flag: torch.Tensor) -> torch.Tensor:
+    return stop_flag
+
 def _maybe_all_reduce_tensor_model_parallel_impl(
     states: torch.Tensor,
     layer_name: str,
@@ -231,6 +264,22 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=_maybe_pad_and_reduce_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="prefetch_preprocess",
+    op_func=_prefetch_preprocess_impl,
+    fake_impl=_prefetch_preprocess_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="prefetch_postprocess",
+    op_func=_prefetch_postprocess_impl,
+    fake_impl=_prefetch_postprocess_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

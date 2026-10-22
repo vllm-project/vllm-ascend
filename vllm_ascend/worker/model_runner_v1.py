@@ -222,6 +222,7 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     model_uses_kpool_indexer,
     set_potential_max_tokens,
+    set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
     weak_ref_tensor,
     weak_ref_tensors,
@@ -424,6 +425,7 @@ class NPUModelRunner(GPUModelRunner):
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         self.kvpp = KVPPRuntime()
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path

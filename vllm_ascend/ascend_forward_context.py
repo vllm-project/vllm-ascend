@@ -19,6 +19,7 @@ from vllm_ascend.device.hardware_profile import (
 )
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
+    get_inner_model,
     has_layer_idx,
     is_moe_model,
 )
@@ -191,7 +192,7 @@ def set_ascend_forward_context(
         # This is only applicable to models that contain these necessary attributes.
         forward_context.layer_idx = None
         if has_layer_idx(model_instance):
-            forward_context.layer_idx = model_instance.model.start_layer
+            forward_context.layer_idx = get_inner_model(model_instance).start_layer
 
         forward_context.prefetch_mlp_gate_up_proj = False
         forward_context.prefetch_mlp_down_proj = False

@@ -42,6 +42,7 @@ import regex as re
 import torch
 import torch.distributed as dist
 import torch_npu
+from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
@@ -50,12 +51,14 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
     get_otp_group,
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
+    get_weight_prefetch_method,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -85,6 +88,7 @@ class CustomLinearOp:
 
     # Update the attributes required by apply(), obtaining them from the layer.
     # Call this after the layer completes its initialization, specifically at the end of layer.init().
+    
     def update_attrs(self):
         if hasattr(self.layer, "bias"):
             self.bias = self.layer.bias
@@ -102,6 +106,117 @@ class CustomLinearOp:
         if not self.return_bias:
             return output
         return output, output_bias
+
+
+class CustomRowParallelOp(CustomLinearOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.reduce_results = None
+        self.input_is_parallel = None
+        self.input_size_per_partition = None
+
+    def update_attrs(self):
+        super().update_attrs()
+        self.input_is_parallel = self.layer.input_is_parallel
+        self.reduce_results = self.layer.reduce_results
+        self.input_size_per_partition = self.layer.input_size_per_partition
+
+    def apply(self, input_):
+        output, output_bias = self.apply_impl(input_)
+
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    def get_input_parallel(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.input_is_parallel:
+            return input_
+
+        split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+        return split_input[self.tp_rank].contiguous()
+
+
+class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.matmul_comm_mode = None
+        group = self.comm_group
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.tp_size > 1:
+            group = get_matmul_allreduce_group()
+            assert group.ranks == self.comm_group.ranks, "MC2 and TP rank ordering must match"
+            self.matmul_comm_mode = "ai_cpu"
+        self.hcomm_info = self.get_hcomm_info(group.device_group)
+
+    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        """Calculate the output tensor of forward by considering
+        fusing communication and computation."""
+        # Dispatch through the custom op so the row-count decision in
+        # matmul_and_reduce() below stays opaque to torch.compile. Calling
+        # npu_mm_all_reduce_base() inline instead bakes whichever branch trace time
+        # happened to take -- profile_run traces at max_num_batched_tokens, so decode
+        # would replay a captured graph containing the fused op regardless of its own
+        # row count, and the op's internal rtMemcpy aborts a capturing stream.
+        output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.unique_prefix)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    def matmul_and_reduce(self, input_parallel: torch.Tensor, bias_: Parameter | None) -> torch.Tensor:
+        """Fuse matmul with its AllReduce once M is large enough to be worth it.
+
+        aclnnMatmulAllReduce pipelines communication against compute along M, so it
+        needs enough rows to tile. Measured on A5, tp2, bf16, [*,3072]x[3072,5120]:
+        0.32x at M=4, 0.35x at 8, 0.66x at 64, 0.92x at 256, 1.18x at 512, 1.35x at
+        1024, 1.47x at 1536, 1.20-1.29x from 2048 up to 16384. Fusing unconditionally
+        therefore cost ~3x on decode-sized batches, so reuse the same 512 threshold the
+        AddRMSNorm fusion pass uses. Staying unfused below it also keeps the fused op
+        out of decode aclgraph capture, which would otherwise abort on its rtMemcpy
+        (acl_graph.py captures with capture_error_mode="global").
+
+        Needs HCCL_BUFFSIZE >= 2048: the 200MB default aborts with 50701 past M~1536.
+        """
+        from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import (
+            ALLREDUCE_NORM_FUSE_THRESHOLD,
+        )
+
+        if self.reduce_results and self.tp_size > 1 and input_parallel.shape[0] >= ALLREDUCE_NORM_FUSE_THRESHOLD:
+            return DeviceOperator.npu_mm_all_reduce_base(
+                input_parallel,
+                self.layer.weight.t(),
+                self.hcomm_info,
+                bias=bias_,
+                comm_mode=self.matmul_comm_mode,
+            )
+
+        assert self.quant_method is not None
+        output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        if self.reduce_results and self.tp_size > 1:
+            # Fork the gate_up weight prefetch here, between this MatMul and the
+            # collective, so it overlaps the AllReduce instead of only the
+            # AddRmsNorm that prefetch_gemma_rms_norm can reach. That fallback
+            # stands down whenever _attention_gate_up_target() is eligible, so
+            # without this call gate_up is never prefetched at all.
+            # Pass self.prefix, not self.unique_prefix: the latter gains a
+            # .unique_prefixN suffix on collision and would fail the target lookup.
+            from vllm_ascend.ops.mlp_weight_prefetch import attention_all_reduce_with_prefetch
+
+            output = attention_all_reduce_with_prefetch(output, self.prefix)
+        return output
+
+    def update_attrs(self):
+        # torch.ops.vllm.matmul_and_reduce resolves the layer by this prefix.
+        super().update_attrs()
+        self.unique_prefix = self.layer.unique_prefix
+
+    @staticmethod
+    def get_hcomm_info(group: ProcessGroup) -> str:
+        # A class-wide cache can return a handle from a different domain or
+        # a destroyed process group. The backend already caches its handle.
+        rank = torch.distributed.get_rank(group)
+        if torch.__version__ > "2.0":
+            global_rank = torch.distributed.get_global_rank(group, rank)
+            return group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+        return group.get_hccl_comm_name(rank)
 
 
 class CustomColumnParallelOp(CustomLinearOp):
@@ -129,6 +244,10 @@ class CustomRowParallelOp(CustomLinearOp):
 
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(
+            weight_prefetch_method.MLP_GATE_UP, output, self.prefix
+        )
 
         if not self.return_bias:
             return output

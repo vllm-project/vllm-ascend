@@ -29,6 +29,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+#from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
+from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -69,6 +71,8 @@ from vllm_ascend.utils import (
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
+    get_ascend_device_type,
+    get_weight_prefetch_method,
     maybe_trans_nz,
 )
 
@@ -1989,6 +1993,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
+            weight_prefetch_method = get_weight_prefetch_method()
+            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
+            )
+            if self.enable_sp and not self.enable_dsa_cp:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states.contiguous(), need_gather_q_kv
+                )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -2118,6 +2130,32 @@ class AscendSFAImpl(MLAAttentionImpl):
             output[:num_input_tokens],
             parallel_context.gather_full_o_proj,
         )
+
+        attn_output = self._v_up_proj(attn_output)
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
+            inputs=self.o_proj.weight,
+            dependency=attn_output,
+            max_size=MAX_O_PROJ_PREFETCH_SIZE,
+            linear_layer=self.o_proj,
+        )
+
+        if self.enable_dsa_cp_with_o_proj_tp:
+            # SFA DSA-CP mixed mode keeps o_proj weight sharded in the TP domain:
+            # 1. prefill/mixed: gather TP shards into a temporary full weight.
+            # 2. decode-only: all-to-all hidden states, then run TP o_proj.
+            result, require_o_proj_forward = self._handle_o_proj_weight_switch_and_forward(
+                attn_output=attn_output,
+                output=output,
+                o_proj_full_handle=o_proj_full_handle,
+                o_proj_full_param_handles=o_proj_full_param_handles,
+                should_shard_weight=full_gather_o_proj_enabled,
+            )
+            if not require_o_proj_forward:
+                return result
+            attn_output = result
+
+        output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

@@ -24,7 +24,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
 
 # Scanning quant_description is O(number of quantized tensors) and every
 # RMSNorm used to redo it. The answer is a property of the checkpoint, so
@@ -100,6 +100,8 @@ class AscendRMSNorm(RMSNorm):
         if self.bias_loaded:
             x.add_(self.bias)
 
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
         return x
 
 

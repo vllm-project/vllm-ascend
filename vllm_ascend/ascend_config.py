@@ -631,9 +631,13 @@ class AscendConfig:
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
     dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
+    weight_prefetch_config: Any = dataclasses.field(
+        default_factory=lambda: WeightPrefetchConfig({})
+    )
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    # weight_prefetch_config: Any = None
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -711,7 +715,6 @@ class AscendConfig:
             )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
-        # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
@@ -1460,6 +1463,18 @@ class XliteGraphConfig:
                 vllm_config.cache_config.block_size,
             )
 
+class WeightPrefetchConfig:
+    """Configuration Object for weight_prefetch_config from additional_config"""
+
+    prefetch_ratio: dict = {
+        "attn": {"qkv": 1.0, "o": 1.0},
+        "moe": {"gate_up": 0.8},
+        "mlp": {"gate_up": 1.0, "down": 1.0},
+    }
+
+    def __init__(self, weight_prefetch_config: dict):
+        self.enabled = weight_prefetch_config.get("enabled", False)
+        self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
 
 @config
 class ProfilingChunkConfig:
@@ -1851,6 +1866,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        "weight_prefetch_config",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
         "kvpp_config",
@@ -1895,10 +1911,21 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         )
         kwargs = {k: v for k, v in kwargs.items() if k not in unknown_keys}
 
+    raw_weight_prefetch = additional_config.get("weight_prefetch_config")
+    if raw_weight_prefetch is None:
+        raw_weight_prefetch = {}
+    elif not isinstance(raw_weight_prefetch, dict):
+        raise ValueError(
+            f"additional_config.weight_prefetch_config must be a dict, "
+            f"got {type(raw_weight_prefetch).__name__}."
+        )
+    weight_prefetch_config = WeightPrefetchConfig(raw_weight_prefetch)
+    
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
         kvpp_config=kvpp_config,
+        weight_prefetch_config=weight_prefetch_config,
         dump_config_path=dump_config_path,
         runtime_config_path=runtime_boot.path,
         runtime_config_hot_reload=runtime_boot.hot_reload,
