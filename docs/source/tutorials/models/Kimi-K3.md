@@ -30,7 +30,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `Kimi-K3-w4a8` (W4A8) | Mixed deployment: 4 × 950DT products (8 devices per node), 4 × Atlas 800I A3 (64GB × 16 per node), or 8 × Atlas 800I A2 (64GB × 8 per node).<br>PD deployment: 8 × 950DT products or 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
+| `Kimi-K3-w4a8` (W4A8) | • Mixed deployment: 4 × 950DT products (8 devices per node), 4 × Atlas 800I A3 (64GB × 16 per node), or 8 × Atlas 800I A2 (64GB × 8 per node).<br>• PD deployment: 8 × 950DT products or 8 × Atlas 800I A3. | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Target model quantized with ModelSlim W4A8. See [Section 5](#5-online-service-deployment) for deployment topologies and configurations. |
 | `Kimi-K3-DSpark-MLA-NPU` | Atlas 800I A3 | [ModelScope](https://modelscope.cn/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU) | Draft model for DSpark speculative decoding; further trained by Ant Group. Download in addition to the target model. |
 | `Kimi-K3-DSpark-Block5` | 950DT products | [ModelScope](https://modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) | Draft model for DSpark speculative decoding. Download in addition to the target model. |
 
@@ -116,7 +116,7 @@ Select an image based on your host operating system and start it on every node. 
 
 === "A3 series"
 
-    Kimi K3 is validated on Atlas 800I A3 (64G × 16).
+    Kimi K3 is validated on Atlas 800I A3 (64GB × 16).
 
     === "Ubuntu"
 
@@ -198,7 +198,7 @@ Select an image based on your host operating system and start it on every node. 
 
 === "A2 series"
 
-    Kimi K3 is validated on Atlas 800I A2 (64G × 8).
+    Kimi K3 is validated on Atlas 800I A2 (64GB × 8).
 
     === "Ubuntu"
 
@@ -467,7 +467,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
 === "A3 series"
 
-    The validated mixed deployment uses four Atlas 800I A3 (64G × 16) nodes. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all 16 NPUs in the node. The resulting topology is DP4/TP16/EP64.
+    The validated mixed deployment uses four Atlas 800I A3 (64GB × 16) nodes. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all 16 NPUs in the node. The resulting topology is DP4/TP16/EP64.
 
     On Atlas 800I A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
@@ -622,7 +622,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
     | `HCCL_IF_IP` and socket interface variables | Bind HCCL and Gloo communication to the selected interface.      |
 
     !!! note
-        Serving a 1M-token context requires at least eight Atlas 800I A3 (64G × 16) nodes. Change the following parameters on every node:
+        Serving a 1M-token context requires at least eight Atlas 800I A3 (64GB × 16) nodes. Change the following parameters on every node:
 
         | Parameter                  | Four-node default | Eight-node (1M context) |
         | -------------------------- | ----------------- | ----------------------- |
@@ -807,7 +807,7 @@ The validated PD separation topology uses eight nodes: four Prefill nodes and fo
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
-Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html) for the KV Cache Pool startup method and the Mooncake configuration file.
+Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html) for the KV Cache Pool startup method and the Mooncake configuration file.
 
 On 950DT products, use CCU communication on both Prefill and Decode by setting `HCCL_OP_EXPANSION_MODE="CCU_SCHED"`, with `HCCL_BUFFSIZE=800`. On A3, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command; Decode uses `HCCL_OP_EXPANSION_MODE=AIV`. Both A3 roles use `HCCL_BUFFSIZE=1024`.
 
