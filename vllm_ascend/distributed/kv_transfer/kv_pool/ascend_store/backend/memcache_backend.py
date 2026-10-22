@@ -75,8 +75,8 @@ class MmcDirect(Enum):
 # The generic layers (worker / scheduler / layout) resolve these functions
 # through backend/__init__.py:get_layerwise_protocol -- a module-convention
 # lookup, they never import this module by name. The key strings are wire
-# formats shared with deployed clusters: a single character of drift turns
-# hits into misses after an upgrade.
+# formats shared with deployed clusters. PP GVA layout v2 intentionally uses
+# a new namespace because legacy objects contain a global stage byte offset.
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
 
@@ -129,7 +129,7 @@ def make_full_key(
     backward compatibility. Multi-group models include group_id
     (model@group_id@hash@rank) to distinguish groups.
     """
-    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
+    pp_tag = f"@pp{pp_rank}@gva2" if pp_size > 1 else ""
     if num_groups > 1:
         return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
     return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
@@ -145,7 +145,7 @@ def make_partial_key(
     pp_rank: int = 0,
     pp_size: int = 1,
 ) -> str:
-    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
+    pp_tag = f"@pp{pp_rank}@gva2" if pp_size > 1 else ""
     return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
 
 

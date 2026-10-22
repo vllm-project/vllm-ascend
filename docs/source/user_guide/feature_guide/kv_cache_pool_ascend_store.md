@@ -922,6 +922,8 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
+    With Memcache, `use_layerwise=true`, and PP size greater than one, each PP stage stores its actual local cache bytes in a separate object. DCP shards sharing a key retain separate 2 MiB-aligned regions. PP full-block and partial-block keys include `@gva2` to distinguish this layout from older objects with global layer offsets. Upgrade every participating worker and scheduler together and warm the cache again; old PP objects are not reused. Non-PP key formats are unchanged.
+
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
     Expected output: Same as Mooncake scenario, returns OpenAI Completions API JSON response.
