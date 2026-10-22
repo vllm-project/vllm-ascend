@@ -223,6 +223,16 @@ capture. As a workaround for older revisions, merge `"fuse_qknorm_rope":false`
 into `ascend_compilation_config` in the existing `--additional-config` value;
 this only disables that fusion and does not require eager execution.
 
+If DFlash2 graph capture reports `When attnMask is not provided, sparseMode must
+be 0`, update to the non-causal FIA graph fix. Non-causal draft attention uses
+`sparse_mode=0` with unrestricted past/future visibility even when a sliding
+window is configured, matching the eager path. The focused one-card regression
+checks capture/replay against eager attention for draft lengths 4, 5, and 6:
+
+```shell
+pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py
+```
+
 Before deployment, compare greedy token IDs against a target-only baseline
 under eager execution, then repeat with target graph replay and asynchronous
 scheduling. Include chunked prefill, mixed request lengths, padded decode

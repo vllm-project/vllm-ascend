@@ -10,3 +10,5 @@ entries:
     text: Enabled full ACL graph capture for DFlash2 drafting on Model Runner V2, including candidate selection and proposal-cache updates. Set enforce_eager to true to retain eager drafting.
   - category: bugfix
     text: Fixed QKNorm/RoPE fusion registration failing during compilation when a DFlash draft Attention head is smaller than the target model's inferred rotary dimension.
+  - category: bugfix
+    text: Fixed DFlash2 ACL graph capture selecting a masked sliding-window FIA mode for non-causal attention. Capture now uses the same unmasked attention visibility as eager execution.
