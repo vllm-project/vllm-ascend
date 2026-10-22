@@ -1729,17 +1729,47 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sparse_backend_uses_separate_contiguous_kv_cache(self):
         self._check_gqa_cache_layout(xlite_enabled=False, backend=SparseAttentionBackend)
 
-    def _check_gqa_cache_layout(self, xlite_enabled, backend=AscendAttentionBackend, pa_enabled=False, dcp_size=1):
+    def test_model_architecture_selects_contiguous_kv_cache_without_pa(self):
+        for architecture, expect_contiguous in (
+            ("MiniMaxM3SparseForCausalLM", True),
+            ("MiniMaxM3SparseForConditionalGeneration", True),
+            ("Qwen2ForCausalLM", False),
+        ):
+            with self.subTest(architecture=architecture):
+                key, value = self._check_gqa_cache_layout(
+                    xlite_enabled=False,
+                    model_architecture=architecture,
+                    expect_contiguous=expect_contiguous,
+                )
+                key[0].fill_(3)
+                value[1].fill_(5)
+                assert torch.all(key[0] == 3)
+                assert torch.count_nonzero(key[1]) == 0
+                assert torch.all(value[1] == 5)
+                assert torch.count_nonzero(value[0]) == 0
+
+    def _check_gqa_cache_layout(
+        self,
+        xlite_enabled,
+        backend=AscendAttentionBackend,
+        pa_enabled=False,
+        dcp_size=1,
+        model_architecture=None,
+        expect_contiguous=False,
+    ):
         runner = self._build_runner()
         runner.dcp_size = dcp_size
         runner.ascend_config.xlite_graph_config.enabled = xlite_enabled
         runner.model_config.use_mla = False
+        if model_architecture is not None:
+            runner.vllm_config.model_config = runner.model_config
+            runner.model_config.hf_config.architectures = [model_architecture]
         layer_name = "model.layers.0.self_attn.attn"
         spec = FullAttentionSpec(
             block_size=8,
             num_kv_heads=2,
             head_size=2,
-            dtype=torch.float16,
+            dtype=torch.bfloat16 if model_architecture is not None else torch.float16,
         )
         group = SimpleNamespace(
             kv_cache_group_id=0,
@@ -1765,10 +1795,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
 
-        with patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled):
+        cache_policy = (
+            nullcontext()
+            if model_architecture is not None
+            else patch("vllm_ascend.worker.model_runner_v1.requires_contiguous_pa_kv_cache", return_value=pa_enabled)
+        )
+        with cache_policy, patch("vllm_ascend.attention.utils.using_paged_attention", return_value=pa_enabled):
             raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1
+        uses_contiguous_cache = xlite_enabled or backend.is_sparse() or pa_enabled or dcp_size > 1 or expect_contiguous
         assert isinstance(raw_caches[layer_name], tuple if uses_contiguous_cache else torch.Tensor)
         cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
@@ -1781,7 +1816,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             for tensor in cache:
                 assert tensor.shape == (2, 8, 2, 2)
                 assert tensor.is_contiguous()
-            return
+            assert cache[0].untyped_storage().data_ptr() != cache[1].untyped_storage().data_ptr()
+            return cache
         assert isinstance(cache, tuple)
         assert len(cache) == 2
         key, value = cache
@@ -1799,6 +1835,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert torch.all(value[1] == 5)
         assert torch.count_nonzero(value[0]) == 0
         assert torch.count_nonzero(key[1]) == 0
+        return cache
 
     def test_full_attention_allocator_selects_layout_per_backend(self):
         self._check_full_attention_allocator_selects_layout_per_backend(

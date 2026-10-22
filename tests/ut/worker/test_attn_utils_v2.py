@@ -129,20 +129,24 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
         for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True), ("dcp", True)],
+    + [("c8", True), ("dcp", True), ("m3_causal", False), ("m3_conditional", False)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
 ):
     layer_name = "model.layers.0.self_attn.attn"
     second_layer_name = "model.layers.1.self_attn.attn"
+    model_architecture = {
+        "m3_causal": "MiniMaxM3SparseForCausalLM",
+        "m3_conditional": "MiniMaxM3SparseForConditionalGeneration",
+    }.get(cache_kind, "Qwen2ForCausalLM")
     spec_type = SlidingWindowSpec if cache_kind == "sliding_window" else FullAttentionSpec
     extra_args = {"sliding_window": 4096} if cache_kind == "sliding_window" else {}
     spec = spec_type(
         block_size=block_size,
         num_kv_heads=2,
         head_size=64,
-        dtype=torch.float16,
+        dtype=torch.bfloat16 if cache_kind.startswith("m3_") else torch.float16,
         **extra_args,
     )
     num_blocks = 3
@@ -181,7 +185,7 @@ def test_main_allocator_attention_layout(
         additional_config={},
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[model_architecture])),
         parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
         quant_config=None,
     )
