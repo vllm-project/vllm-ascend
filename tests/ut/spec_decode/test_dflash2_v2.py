@@ -25,6 +25,7 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as upstream_dflash2
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.utils import vllm_version_is
@@ -97,25 +98,119 @@ def test_init_speculator_routes_dflash2_draft_model():
         d2.assert_not_called()
 
 
-def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
+@pytest.mark.parametrize("enforce_eager", [False, None, True])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE])
+def test_init_cudagraph_manager_preserves_graph_mode_and_manager_references(monkeypatch, enforce_eager, mode):
     calls: list[CUDAGraphMode] = []
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
-        lambda self, mode: calls.append(mode),
-    )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
+    speculator.update_stream = object()
 
-    # Eager drafting forces the draft aclgraph manager to NONE.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=True)
-    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    def initialize_parent(self, mode):
+        calls.append(mode)
+        self.query_cudagraph_manager = SimpleNamespace()
 
-    # Graph mode is rejected until the Ascend walk kernel is capturable, and
-    # must fail before delegating to the parent manager.
-    speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    with pytest.raises(NotImplementedError, match="graph mode"):
-        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE]
+    # Keep AscendDFlashSpeculator's real delegation and graph-update wiring.
+    monkeypatch.setattr(DFlashSpeculator, "init_cudagraph_manager", initialize_parent)
+
+    speculator.init_cudagraph_manager(mode)
+
+    assert calls == [CUDAGraphMode.NONE if enforce_eager else mode]
+    assert speculator.query_cudagraph_manager.speculator is speculator
+    assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only context-KV capture callback")
+def test_capture_resets_sampling_state_and_captures_dflash2_pipeline():
+    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.sample_indices = torch.full((12,), 11, dtype=torch.int64)
+    speculator.sample_pos = torch.full((12,), 41, dtype=torch.int64)
+    speculator.sample_idx_mapping = torch.full((12,), 2, dtype=torch.int64)
+    speculator._context_slot_mappings = torch.full((2, 16), 123, dtype=torch.int32)
+    speculator.query_cudagraph_manager = SimpleNamespace(capture=MagicMock())
+    speculator.input_buffers = object()
+    speculator.block_tables = object()
+    speculator.attn_groups = object()
+    speculator.kv_cache_config = object()
+    speculator.max_model_len = 2048
+    speculator.max_num_tokens = 16
+    speculator.num_speculative_steps = 3
+    speculator._group_causal = {0: False, 1: True}
+    speculator._precompute_context_kv = MagicMock()
+
+    speculator.capture()
+
+    torch.testing.assert_close(speculator.sample_indices, torch.zeros(12, dtype=torch.int64))
+    torch.testing.assert_close(speculator.sample_pos, torch.zeros(12, dtype=torch.int64))
+    torch.testing.assert_close(speculator.sample_idx_mapping, torch.full((12,), -1, dtype=torch.int64))
+    torch.testing.assert_close(speculator._context_slot_mappings, torch.full((2, 16), -1, dtype=torch.int32))
+    call = speculator.query_cudagraph_manager.capture.call_args
+    forward = call.args[0]
+    assert forward.__self__ is speculator
+    assert forward.__func__ is upstream_dflash2.DFlash2Speculator._generate_draft
+    assert call.args[1:] == (
+        speculator.input_buffers,
+        speculator.block_tables,
+        speculator.attn_groups,
+        speculator.kv_cache_config,
+        2048,
+    )
+    assert call.kwargs["causal"] is speculator._group_causal
+    call.kwargs["precompute_context_kv"](2)
+    speculator._precompute_context_kv.assert_called_once_with(0, 8)
+
+
+@pytest.mark.parametrize("probabilistic", [False, True])
+def test_candidate_sampler_uses_ascend_walk_and_proposal_cache(monkeypatch, probabilistic):
+    sampler_cls = getattr(upstream_dflash2, "CandidateSampler", None)
+    if sampler_cls is None:
+        pytest.skip("The shared candidate sampler is available on vLLM main")
+    sampler = sampler_cls(max_num_reqs=4, num_steps=3, top_k=3, device=torch.device("cpu"))
+    candidate_ids = torch.arange(36, dtype=torch.int64).view(2, 3, 6)[..., ::2]
+    scores = torch.arange(54, dtype=torch.float32).view(2, 3, 3, 3).transpose(-1, -2)
+    sample_pos = torch.arange(24, dtype=torch.int64)[::2]
+    idx_mapping = torch.tensor([2, 2, 2, -1, -1, -1], dtype=torch.int64).repeat_interleave(2)[::2]
+    temperatures = torch.tensor([0.0, 0.5, 1.0, 0.0])
+    seeds = torch.arange(4, dtype=torch.int64)
+    draft_tokens = torch.full((4, 3), -123, dtype=torch.int64)
+    draft_logits = torch.full((4, 3, 64), -float("inf")) if probabilistic else None
+    walk = MagicMock()
+    cache = MagicMock()
+    monkeypatch.setattr(upstream_dflash2, "_selector_walk_kernel", walk)
+    monkeypatch.setattr(upstream_dflash2, "_cache_draft_logits_kernel", cache)
+
+    sampler.sample(
+        candidate_ids, scores, 2, sample_pos, idx_mapping, temperatures, seeds, draft_tokens, draft_logits, False
+    )
+
+    walk.__getitem__.assert_called_once_with((2,))
+    launch = walk.__getitem__.return_value.call_args
+    for actual, expected in zip(launch.args[:4], (scores, candidate_ids, sample_pos, idx_mapping)):
+        assert actual.is_contiguous()
+        torch.testing.assert_close(actual, expected)
+    assert launch.args[4] is temperatures
+    assert launch.args[5] is seeds
+    assert launch.args[6] is draft_tokens
+    assert launch.args[7] is sampler.scores
+    assert launch.kwargs == {
+        "num_steps": 3,
+        "top_k": 3,
+        "BLOCK_K": 4,
+        "SAMPLE_PROBABILISTIC": probabilistic,
+        "USE_FP64": False,
+        "num_warps": 1,
+    }
+    if probabilistic:
+        cache.__getitem__.assert_called_once_with((6,))
+        cache_launch = cache.__getitem__.return_value.call_args
+        assert cache_launch.args[0] is draft_logits
+        assert cache_launch.args[1] is sampler.cached_candidate_ids
+        torch.testing.assert_close(cache_launch.args[2], candidate_ids)
+        assert cache_launch.args[3] is sampler.scores
+        torch.testing.assert_close(cache_launch.args[4], idx_mapping)
+        assert cache_launch.args[5:] == (draft_logits.stride(0), draft_logits.stride(1))
+    else:
+        cache.__getitem__.assert_not_called()
 
 
 def test_greedy_walk_contract_reference():

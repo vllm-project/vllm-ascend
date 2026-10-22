@@ -1,8 +1,10 @@
 pr: 17249
 entries:
   - category: feature
-    text: Added DFlash target-feature capture and separate draft attention caches for Qwen3.8-Flash-Next on Model Runner V2. DFlash2 uses an eager draft while the target can use decode graphs.
+    text: Added DFlash target-feature capture and separate draft attention caches for Qwen3.8-Flash-Next on Model Runner V2.
     model: Qwen3.8-Flash-Next
     hardware: [A3]
   - category: bugfix
     text: Fixed Qwen3.8-Flash-Next rejecting DFlash during Model Runner V2 startup configuration validation.
+  - category: feature
+    text: Enabled full ACL graph capture for DFlash2 drafting on Model Runner V2, including candidate selection and proposal-cache updates. Set enforce_eager to true to retain eager drafting.

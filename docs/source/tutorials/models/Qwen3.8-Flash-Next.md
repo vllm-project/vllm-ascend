@@ -198,14 +198,19 @@ vllm serve "$MODEL_PATH" \
     --no-enable-prefix-caching \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32]}' \
-    --speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT_MODEL_PATH\",\"num_speculative_tokens\":3,\"enforce_eager\":true}" \
+    --speculative-config "{\"method\":\"dflash\",\"model\":\"$DRAFT_MODEL_PATH\",\"num_speculative_tokens\":3}" \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
 ```
 
 Download the draft checkpoint separately into `DRAFT_MODEL_PATH`. It must match
 the target's vocabulary, embeddings, and LM head. DFlash2 requires an
-unquantized target LM head and an eager draft (`enforce_eager=true`); the target
-can retain `FULL_DECODE_ONLY`. Capture sizes must be multiples of
+unquantized target LM head. With `FULL_DECODE_ONLY`, omitting `enforce_eager`
+lets both the target and draft use ACL graphs. The draft backbone and candidate
+selector skip Dynamo compilation; their NPU operations are captured by the
+draft's full ACL graph, including candidate TopK, selection and sampling.
+Set `enforce_eager=true` to run the draft eagerly when comparing results.
+This graph path still requires validation on the intended NPU workload.
+Capture sizes must be multiples of
 `num_speculative_tokens + 1`. Pipeline parallelism with auxiliary features is
 not supported by this adaptation. This recipe uses a single serving instance
 without a KV-transfer connector; disaggregated prefill/decode is outside its
@@ -219,8 +224,9 @@ workload; do not assume that a working draft improves performance. Validate
 image inputs separately when using the multimodal target.
 
 The opt-in eight-card regression compares greedy token IDs with a target-only
-baseline in both target graph modes, exercises chunked prefill and request
-reuse, and checks that drafting actually ran:
+baseline with eager execution, target graphs plus an eager draft, and graphs
+for both models. It exercises chunked prefill and request reuse, and checks
+that every TP rank actually captured and replayed the draft graph:
 
 ```shell
 QWEN38_DFLASH_TARGET_MODEL="$MODEL_PATH" \
