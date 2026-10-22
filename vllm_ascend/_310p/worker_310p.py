@@ -26,7 +26,6 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
@@ -54,6 +53,8 @@ class NPUWorker310(NPUWorker):
             model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
             logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
             return model_runner
+
+        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 
         model_runner = NPUModelRunner310(self.vllm_config, self.device)
         logger.info_once("Using NPUWorker310 and NPUModelRunner310.")

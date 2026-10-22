@@ -1124,8 +1124,13 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(builder_cls
         builder_cls=builder_cls,
     )
     if builder_cls is AscendGDNHostMetadataBuilder:
+        builder.vllm_config.model_config.dtype = torch.bfloat16
         builder.compilation_config.static_forward_context = {
-            "layer0": SimpleNamespace(use_contiguous_conv_indices=True),
+            "layer0": SimpleNamespace(
+                use_contiguous_conv_indices=True,
+                use_shared_conv_output=True,
+                local_projection_size=8,
+            ),
         }
     captured_metadata = builder.build(
         0,
@@ -1139,6 +1144,9 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(builder_cls
     if builder_cls is AscendGDNHostMetadataBuilder:
         assert captured_conv1d_metadata.cache_indices.is_contiguous()
         assert captured_conv1d_metadata.cache_indices.tolist() == [10, 20, NULL_BLOCK_ID, NULL_BLOCK_ID]
+        captured_output = captured_conv1d_metadata.output_buffer
+        assert captured_output is not None
+        captured_output.fill_(float("nan"))
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) > 0
     assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) > 0
 
@@ -1168,6 +1176,9 @@ def test_full_graph_without_runtime_spec_resets_captured_spec_inputs(builder_cls
     assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) == 0
     assert torch.count_nonzero(captured_conv1d_metadata.num_accepted_tokens) == 0
     assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) == 0
+    if builder_cls is AscendGDNHostMetadataBuilder:
+        assert torch.count_nonzero(captured_output) == 0
+        assert replay_metadata.non_spec_decode_metadata.causal_conv1d.output_buffer is captured_output
 
 
 def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
