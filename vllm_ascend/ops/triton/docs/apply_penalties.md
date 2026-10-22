@@ -2,6 +2,8 @@
 
 ## Description
 
+This operator serves the legacy model runner. Model Runner V2 uses the separate implementation in `vllm_ascend/worker/v2/sample/penalties.py`; the benchmark below does not measure that path. The optimization applies when the legacy runner is selected and sampling penalties are active.
+
 - **Function**: Applies the three vLLM sampling penalties — repetition, frequency and presence — to the sampling logits **in place**, on NPU. It replaces the `bincount` + `scatter` + elementwise torch chain of `vllm.model_executor.layers.utils.apply_penalties` with two Triton-Ascend kernels: `token_bin_counts_and_mask_kernel` (per-sequence token histogram and occurrence mask) and `apply_all_penalties_kernel` (the penalty update itself).
 - **Formula**: For sequence `i` and vocabulary id `v`, with `prompt_mask` / `output_mask` marking whether `v` appeared in the prompt / in the generated output, and `output_bin_counts[i, v]` counting its occurrences in the generated output:
     - `repeated = prompt_mask[i, v] | output_mask[i, v]`

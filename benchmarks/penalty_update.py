@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the sampling penalty update with precomputed occurrence masks/counts.
+"""Benchmark the legacy sampler's penalty update with precomputed masks/counts.
 
 Run this script against the base and candidate revisions on the same idle NPU:
     python benchmarks/penalty_update.py --batches 1 4 16 64 --vocab-sizes 32000 151936 248320
@@ -8,6 +8,7 @@ Run this script against the base and candidate revisions on the same idle NPU:
 Neutral runtime penalty tensors keep repeated in-place updates finite. Histogram
 construction and model inference are excluded. Reported times include eager
 dispatch; this sampling operation normally runs outside the captured model graph.
+Model Runner V2 uses a separate penalty implementation and is not measured here.
 """
 
 import argparse
