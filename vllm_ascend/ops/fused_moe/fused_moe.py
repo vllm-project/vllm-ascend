@@ -156,21 +156,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        prepared_shared_expert_input: PreparedSharedExpertInput | None = None,
     ) -> torch.Tensor:
         """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
         through the OOT PluggableLayer dispatch of ``MoERunner``).
 
-        Upstream inlines the shared+routed output combine, which is not
-        exposed as an overridable hook. On NPU the combine goes through the
-        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
-        launch count is independent of the tensor-list length and which is
-        the NPU-validated fast path for the MoE combine. Every other step,
-        including the runtime-aware reduction hooks (#16550), is inherited
-        unchanged.
+        The latent/SP overlap path uses ordinary tensor Add for its
+        single pair of outputs. Other paths retain the foreach combine.
+        Runtime-aware reduction hooks are unchanged.
 
-        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
-        the superkernel integration, upstream's plain add becomes the fast
-        path and this override can be dropped.
+        ``prepared_shared_expert_input`` carries an AG launched before an
+        external gate. Unlike ``shared_experts_input``, it does not mean that
+        the caller has already applied the routed input transform.
         """
         # Apply transform for routed experts (e.g., latent projection for
         # latent MoE). When the caller pre-applies the routed input transform
@@ -178,7 +175,28 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # passes the already-transformed routed input as ``hidden_states`` and
         # the original hidden states as ``shared_experts_input``; skip the
         # transform in that case so shared experts still see the original input.
-        if shared_experts_input is None:
+        if prepared_shared_expert_input is not None:
+            if shared_experts_input is not None:
+                raise ValueError("Prepared shared input cannot be combined with pretransformed routed input")
+            if not self._defer_shared_submission:
+                raise ValueError("Prepared shared input requires latent SP shared-expert overlap")
+            if not prepared_shared_expert_input.is_gathered or prepared_shared_expert_input.ready_event is None:
+                raise ValueError("Prepared shared input must contain a gathered tensor and its completion event")
+        if self._defer_shared_submission and self.is_internal_router:
+            if shared_experts_input is None:
+                if prepared_shared_expert_input is None:
+                    prepared_shared_expert_input = self.prepare_shared_input(hidden_states)
+                router_logits = self._compute_router_logits(hidden_states, router_logits)
+            else:
+                # Internal-gate callers pass the original gate input through
+                # router_logits, even when routed activations were transformed.
+                router_logits = self._compute_router_logits(router_logits, router_logits)
+
+        if prepared_shared_expert_input is not None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                hidden_states, prepared_shared_expert_input
+            )
+        elif shared_experts_input is None:
             hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
@@ -233,7 +251,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            if self._defer_shared_submission:
+                result = shared_output + fused_output
+            else:
+                result = torch._foreach_add([shared_output], [fused_output])[0]
         else:
             result = fused_output
 
@@ -257,9 +278,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def _can_overlap_sp_shared_with(self, routed_transform: object | None) -> bool:
         """Limit SP shared-expert overlap changes to routed transforms.
 
-        Kimi-K3 is currently the only Ascend model that supplies these latent
-        transforms. Keep the guard capability-based so every model without
-        them stays on the original single-stream synchronization path.
+        Check the transforms and shared weight/activation layout, independently
+        of model identity or quantization. Other layouts keep their existing
+        synchronization path.
         """
         shared_experts = getattr(self, "ascend_shared_experts", None)
         return (
@@ -268,6 +289,25 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             and shared_experts.multistream_overlap
             and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
         )
+
+    @property
+    def _defer_shared_submission(self) -> bool:
+        """Use complete shared submission when latent transforms hide AG/RS."""
+        return self._can_overlap_sp_shared_with(
+            getattr(self, "routed_input_transform", None)
+        ) and self._can_overlap_sp_shared_with(getattr(self, "routed_output_transform", None))
+
+    def prepare_shared_input(self, hidden_states: torch.Tensor) -> PreparedSharedExpertInput | None:
+        """Let an external-gate caller launch AG before computing its logits.
+
+        Internal gates use the same hook in forward. Unsupported layouts return
+        None, preserving the normal forward contract. No per-call state is kept
+        on the runner, and the gathered tensor remains an explicit op input.
+        """
+        if not self._defer_shared_submission:
+            return None
+        assert self.ascend_shared_experts is not None
+        return self.ascend_shared_experts.prepare_input_async(hidden_states)
 
     @property
     def _fused_output_is_reduced(self) -> bool:
@@ -360,15 +400,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def apply_routed_input_transform(
         self,
         hidden_states: torch.Tensor,
+        prepared_input: PreparedSharedExpertInput | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Start the SP shared-input gather before the latent down projection."""
-        prepared_input = PreparedSharedExpertInput(hidden_states)
-        shared_experts = self.ascend_shared_experts
-        if self._can_overlap_sp_shared_with(self.routed_input_transform):
-            assert shared_experts is not None
-            prepared_input = shared_experts.prepare_input_async(hidden_states)
+        """Gather before Down, or consume an AG already launched before gate."""
+        if prepared_input is None:
+            prepared_input = PreparedSharedExpertInput(hidden_states)
+            shared_experts = self.ascend_shared_experts
+            if self._can_overlap_sp_shared_with(self.routed_input_transform):
+                assert shared_experts is not None
+                prepared_input = shared_experts.prepare_input_async(hidden_states)
         routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
         if prepared_input.ready_event is not None:
+            # Keep TP AG completion before any routed EP communication. The
+            # early AG overlaps Gate/Down but this wait stays immediately after Down.
             torch.npu.current_stream().wait_event(prepared_input.ready_event)
             shared_input = prepared_input.hidden_states
         return routed_input, shared_input
@@ -453,6 +497,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         torch.npu.Event | None,
         SubmittedSharedExpertGateUp | None,
     ]:
+        if self._defer_shared_submission:
+            # The caller/forward computed the gate and waited for AG after Down.
+            # Do not enqueue shared preparation/Gate-Up here: _forward_impl
+            # submits the complete shared executor after routed forward.
+            shared_input_ready = maybe_record_event()
+            return router_logits, shared_input_ready, shared_input_ready, None
         # The milestones are consumed only by the shared-expert side stream,
         # which runs only when multistream overlap is enabled; skip the record
         # (notably slow host-side) when it is off.
