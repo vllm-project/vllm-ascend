@@ -487,8 +487,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         direct_output = (
             not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
         )
-        if not direct_output:
-            core_attn_out.zero_()
+        # Prefill copies its output and speculative dispatch scatters both token
+        # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
             spec_output = recurrent_kda(
                 rearrange(q_spec),
