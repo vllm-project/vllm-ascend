@@ -1,0 +1,29 @@
+model_name: "IQuestLab/IQuest-Coder-V1-40B-Instruct"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.85
+  trust_remote_code: true
+  enforce_eager: true
+  hf_overrides:
+    architectures:
+      - "LlamaForCausalLM"
+
+tasks:
+- name: "humaneval"
+  metrics:
+  - name: "pass@1"
+    value: 0.84
+- name: "mbpp"
+  metrics:
+  - name: "pass_at_1"
+    value: 0.89
+
+num_fewshot: 0
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: "auto"
