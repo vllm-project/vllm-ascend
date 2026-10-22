@@ -857,7 +857,7 @@ class XliteWrapper:
         xlite_attn_metadata.lens = query_lens[:num_reqs].tolist()
         xlite_attn_metadata.cached_lens = cached_lens[:num_reqs].tolist()
         xlite_attn_metadata.block_tables_cpu = block_tables[:num_reqs].tolist()
-        pos: torch.Tensor = torch.atleast_2d(positions)[:, :num_actual_tokens]
+        pos: torch.Tensor = torch.atleast_2d(positions)[:, :num_actual_tokens].contiguous()
         xlite_attn_metadata.positions = pos.reshape(-1).reshape(pos.shape)  # rematerialize with correct stride
 
         # under DP, `num_tokens` is the max number of tokens across all DP ranks for data alignment
