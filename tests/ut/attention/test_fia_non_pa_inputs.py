@@ -208,6 +208,68 @@ def test_graph_workspace_and_task_preserve_fia_layout_contract(v2, use_pa):
     assert num_tokens == 3
 
 
+@pytest.mark.parametrize("num_speculative_tokens", [4, 5, 6])
+@pytest.mark.parametrize("sliding_window", [None, 16])
+@pytest.mark.parametrize("causal", [False, True])
+def test_draft_graph_fia_preserves_attention_visibility(num_speculative_tokens, sliding_window, causal):
+    impl = _make_impl()
+    impl.sliding_window = sliding_window
+    impl.key_cache = torch.zeros(2, 128, 1, 4)
+    impl.value_cache = torch.zeros_like(impl.key_cache)
+    query_len = num_speculative_tokens + 1
+    metadata = _make_metadata(AscendAttentionState.SpecDecoding)
+    metadata.causal = causal
+    metadata.attn_mask = torch.zeros(2048, 2048, dtype=torch.bool) if causal else None
+    metadata.actual_seq_lengths_q = [query_len]
+    metadata.num_actual_tokens = query_len
+    metadata.seq_lens_list = [32]
+    query = torch.zeros(query_len, 2, 4)
+    output = torch.empty_like(query)
+    expected_mode = (4 if sliding_window else 3) if causal else 0
+    expected_pre = sliding_window if causal and sliding_window else attn_module.SWA_INT_MAX
+    expected_next = 0 if causal and sliding_window else attn_module.SWA_INT_MAX
+
+    def check_fia_contract(**kwargs):
+        # CANN rejects a nonzero sparse mode without an attention mask.
+        assert kwargs["atten_mask"] is not None or kwargs["sparse_mode"] == 0
+        assert kwargs["sparse_mode"] == expected_mode
+        assert kwargs["pre_tokens"] == expected_pre
+        assert kwargs["next_tokens"] == expected_next
+        return torch.empty(1)
+
+    with (
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True)),
+        patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", create=True),
+        patch.object(
+            attn_module.torch_npu,
+            "_npu_fused_infer_attention_score_get_max_workspace",
+            side_effect=check_fia_contract,
+            create=True,
+        ) as workspace,
+        patch.object(attn_module, "get_capture_resource", side_effect=lambda _, factory, *args: factory()),
+        patch.object(attn_module, "register_task") as register,
+    ):
+        result, num_tokens = impl.full_graph_fia(query, query, query, metadata, output)
+
+    workspace.assert_called_once()
+    register.assert_called_once()
+    task_kwargs = register.call_args.args[1]
+    check_fia_contract(**task_kwargs)
+    assert task_kwargs["atten_mask"] is metadata.attn_mask
+    assert result is output
+    assert num_tokens == query_len
+
+    # Replay changes request lengths and block tables, retaining the captured
+    # attention visibility, including non-causal access to later query tokens.
+    metadata.seq_lens_list = [48]
+    metadata.block_tables = torch.tensor([[1]], dtype=torch.int32)
+    provider = register.call_args.args[2]
+    replay_kwargs = {**task_kwargs, **provider.resolve({"layer": metadata})}
+    check_fia_contract(**replay_kwargs)
+    assert replay_kwargs["actual_seq_lengths_kv"] == [48]
+    assert replay_kwargs["block_table"] is metadata.block_tables
+
+
 @pytest.mark.parametrize("continuing_prefill", [False, True])
 def test_c8_chunked_non_pa_prefill_receives_contiguous_kv(continuing_prefill):
     impl = _make_impl(AscendC8AttentionBackendImpl)
