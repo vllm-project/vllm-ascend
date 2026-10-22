@@ -23,7 +23,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
-from vllm_ascend.utils import enable_dsa_cp, should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -112,8 +112,6 @@ class DecoderReplayState:
         trims = bool((kept_lens < query_lens).any())
         self.num_actual_tokens = int(kept_lens.sum())
         self.num_tokens = self.num_actual_tokens
-        if enable_dsa_cp():
-            self.num_tokens = round_up(self.num_tokens, parallel.tensor_parallel_size)
         self.dp_tokens = None
         if parallel.data_parallel_size > 1:
             agreed = torch.zeros((2, parallel.data_parallel_size), dtype=torch.int32)

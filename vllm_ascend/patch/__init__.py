@@ -782,7 +782,7 @@
 #    Why:
 #       Ascend uses the NPU v2 runner by default. Features that are not
 #       V2-ready (pooling KV, VL encoder disaggregation,
-#       draft_window_size, enable_dsa_cp, suffix
+#       draft_window_size, suffix
 #       speculative decoding, ngram speculative decoding, draft_model
 #       speculative decoding, dflash2 graph, and p-eagle)
 #       default to v1.

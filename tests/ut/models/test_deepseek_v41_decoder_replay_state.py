@@ -17,7 +17,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 @pytest.fixture
 def state(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=32),
@@ -135,14 +134,6 @@ def test_unsynchronized_dp_does_not_trim(state, monkeypatch):
     state.prepare(inputs(), CUDAGraphMode.NONE)
     assert state.layers.rows is None
     state._gather.assert_not_called()
-
-
-def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: True)
-    state.config.parallel_config.tensor_parallel_size = 4
-    state.prepare(inputs(), CUDAGraphMode.NONE)
-    assert state.layers.num_actual_rows == 5
-    assert state.layers.rows.numel() == 8
 
 
 @pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])

@@ -42,8 +42,7 @@ class WeightSwitchRepeatSpec:
 class WeightSwitchConfig:
     """Parallel domain used to reconstruct a switched full weight.
 
-    The caller chooses the domain.  DSA-CP currently supplies the TP group;
-    PCP can supply its PCP group without introducing a second switching API.
+    The caller supplies the parallel group used to switch the weights.
     """
 
     group: Any
@@ -168,7 +167,7 @@ class WeightSwitchMixin:
        that becomes sharded in each layout.
     5. Set ``supports_weight_switch = True`` only after validating every
        declared layout. Callers use this as the common opt-in gate; it carries
-       no SFA- or DSA-CP-specific meaning.
+       no attention-backend-specific meaning.
 
     ``attr_name`` must name a direct tensor attribute on the layer. The mixin
     owns only reusable local/full state and collective handles; subclasses retain

@@ -7,7 +7,6 @@ import pytest
 import torch
 from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 
 
@@ -15,7 +14,6 @@ from vllm_ascend.models.deepseek_v4.compressor import Compressor
     ("owner_cls", "method_name", "compress_ratio"),
     [
         (Compressor, "_compute_metadata", 4),
-        (AscendDSACPImpl, "_compute_compressor_metadata", 128),
     ],
 )
 def test_compressor_metadata_uses_physical_storage_geometry(
