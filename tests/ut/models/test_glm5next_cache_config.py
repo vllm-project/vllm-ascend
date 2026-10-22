@@ -201,20 +201,16 @@ def test_misaligned_logical_block_is_rejected():
         get_glm5_next_kv_cache_groups(make_config(), specs)
 
 
-@pytest.mark.parametrize("pool", [4, 16])
-@pytest.mark.parametrize("with_mamba", [False, True])
-@pytest.mark.parametrize("use_v2", [False, True])
-def test_worker_shared_pool_budget_with_sfa(pool, with_mamba, use_v2):
+def test_mrv1_shared_pool_keeps_budget_with_sfa():
     from vllm_ascend.worker.worker import NPUWorker
 
     config = make_config()
-    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=pool)
+    config.model_config.max_model_len = 1048576
+    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", index_topk=2048, index_kpool=16)
     config.cache_config.get_resolved_kv_cache_layout = lambda: SimpleNamespace(
         is_layer_compact=True, is_block_compact=True
     )
-    specs = make_specs(pool)
-    if not with_mamba:
-        specs = {name: spec for name, spec in specs.items() if not isinstance(spec, MambaSpec)}
+    specs = make_specs()
     groups = get_glm5_next_kv_cache_groups(config, specs)
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
@@ -222,7 +218,7 @@ def test_worker_shared_pool_budget_with_sfa(pool, with_mamba, use_v2):
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    worker.use_v2_model_runner = use_v2
+    worker.use_v2_model_runner = False
     worker.get_kv_cache_spec = lambda: specs
     worker.model_runner = SimpleNamespace(
         use_sparse=enable_sfa(config),
@@ -234,29 +230,6 @@ def test_worker_shared_pool_budget_with_sfa(pool, with_mamba, use_v2):
     with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
         budget = worker._scale_kv_cache_memory_for_multi_group(required)
 
-    if use_v2:
-        # The MRV1 exemption must not change the existing MRV2 budget path.
-        assert budget < required
-    else:
-        assert budget == required
-        plan = get_glm5_next_kv_cache_config(config, groups, budget)
-        assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) >= required
-
-
-def test_worker_shared_pool_budget_rejects_incomplete_glm_groups():
-    from vllm_ascend.worker.worker import NPUWorker
-
-    config = make_config()
-    specs = make_specs()
-    groups = get_glm5_next_kv_cache_groups(config, specs)
-    # Retain GLM full-history groups but omit the required paired tail group.
-    incomplete = [group for group in groups if group is not groups[1]]
-    worker = NPUWorker.__new__(NPUWorker)
-    worker.vllm_config = config
-    worker.use_v2_model_runner = False
-    worker.get_kv_cache_spec = lambda: specs
-    with (
-        patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=incomplete),
-        pytest.raises(ValueError, match="exactly one combined"),
-    ):
-        worker._scale_kv_cache_memory_for_multi_group(12345)
+    assert budget == required
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) >= required

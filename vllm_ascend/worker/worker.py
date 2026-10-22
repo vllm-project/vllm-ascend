@@ -764,7 +764,7 @@ class NPUWorker(WorkerBase):
         # model-specific planner. A per-layer discount counts sharing twice.
         from vllm_ascend.models.glm5next.cache_config import _get_glm5_next_cache_layout
 
-        if not self.use_v2_model_runner and _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+        if not getattr(self, "use_v2_model_runner", False) and _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return available_memory
 
         # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores

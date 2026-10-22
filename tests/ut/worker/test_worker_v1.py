@@ -348,7 +348,6 @@ class TestNPUWorker(TestBase):
         ]
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace()
-        worker.use_v2_model_runner = False
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
 
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
@@ -383,7 +382,6 @@ class TestNPUWorker(TestBase):
             kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
         worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
-        worker.use_v2_model_runner = False
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
         for supports_standardized_backing, expected_budget in (
@@ -432,7 +430,6 @@ class TestNPUWorker(TestBase):
             kv_transfer_config=None,
         )
         worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
-        worker.use_v2_model_runner = False
         worker.get_kv_cache_spec = MagicMock(
             return_value={
                 "encoder_attn": spec,
