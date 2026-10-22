@@ -3,7 +3,6 @@
 """Tests for GLM-Next cache grouping, physical layout, and capacity accounting."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -17,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -25,7 +24,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import enable_sfa, get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -201,7 +200,9 @@ def test_misaligned_logical_block_is_rejected():
         get_glm5_next_kv_cache_groups(make_config(), specs)
 
 
-def test_mrv1_shared_pool_keeps_budget_with_sfa():
+@pytest.mark.parametrize("use_sparse", [False, True])
+@pytest.mark.parametrize("packed_main", [False, True])
+def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse, packed_main):
     from vllm_ascend.worker.worker import NPUWorker
 
     config = make_config()
@@ -211,6 +212,16 @@ def test_mrv1_shared_pool_keeps_budget_with_sfa():
         is_layer_compact=True, is_block_compact=True
     )
     specs = make_specs()
+    if packed_main:
+        specs["model.layers.3.attn"] = AscendMLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=528,
+            dtype=torch.int8,
+            cache_sparse_sfa_c8=True,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
     groups = get_glm5_next_kv_cache_groups(config, specs)
     # Supply exactly enough physical memory for the configured context. The
     # generic discount incorrectly makes this valid shared pool fail admission.
@@ -218,18 +229,16 @@ def test_mrv1_shared_pool_keeps_budget_with_sfa():
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    worker.use_v2_model_runner = False
     worker.get_kv_cache_spec = lambda: specs
     worker.model_runner = SimpleNamespace(
-        use_sparse=enable_sfa(config),
+        use_sparse=use_sparse,
         use_compress=False,
         supports_standardized_shared_kv_backing=True,
     )
-    assert worker.model_runner.use_sparse
-
-    with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
-        budget = worker._scale_kv_cache_memory_for_multi_group(required)
+    monkeypatch.setattr("vllm_ascend.worker.worker.get_kv_cache_groups", lambda *_args: groups)
+    budget = worker._scale_kv_cache_memory_for_multi_group(required)
 
     assert budget == required
     plan = get_glm5_next_kv_cache_config(config, groups, budget)
-    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) >= required
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == required
+    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == required
