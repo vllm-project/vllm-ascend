@@ -9,7 +9,7 @@ pytest.importorskip("torch_npu")
 from vllm_ascend.ops.triton.sfa_dcp_merge import fused_merge  # noqa: E402
 
 
-@pytest.mark.parametrize("ranks", [2, 8])
+@pytest.mark.parametrize("ranks", [2, 4, 8])
 @pytest.mark.parametrize("token_dim", [1, 2])
 @pytest.mark.parametrize("head_dim", [127, 496, 512, 513])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

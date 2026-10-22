@@ -494,9 +494,9 @@ def dcp_a2a_fused_combine(
         pcp_group is None
         and not return_lse
         and not defer_combine
-        and scatter_size == 8
+        and scatter_size in (2, 4, 8)
         and scatter_dim == 1
-        and can_exchange(partial_output, softmax_lse)
+        and can_exchange(partial_output, softmax_lse, scatter_size)
         and (decode_token_budget is None or partial_output.shape[0] <= decode_token_budget)
     ):
         if scatter_group is None:

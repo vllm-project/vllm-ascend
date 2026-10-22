@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Direct gather-input packing and final SFA query unpacking for DCP8 decode."""
+"""Direct gather-input packing and final SFA query unpacking for DCP decode."""
 
 import torch
 
@@ -13,8 +13,6 @@ except ImportError:
     tl = None
 
 
-_LOCAL_HEADS = 8
-_TOTAL_HEADS = 64
 _NOPE_DIM = 512
 _ROPE_DIM = 64
 _PACKED_DIM = _NOPE_DIM + _ROPE_DIM
@@ -78,8 +76,9 @@ def can_prepare_query(qn: torch.Tensor, qr: torch.Tensor) -> bool:
         and qr.device == qn.device
         and qn.dtype == qr.dtype == torch.bfloat16
         and qn.ndim == qr.ndim == 3
-        and tuple(qn.shape[1:]) == (_LOCAL_HEADS, _NOPE_DIM)
-        and tuple(qr.shape) == (qn.shape[0], _LOCAL_HEADS, _ROPE_DIM)
+        and qn.shape[1] > 0
+        and qn.shape[2] == _NOPE_DIM
+        and tuple(qr.shape) == (qn.shape[0], qn.shape[1], _ROPE_DIM)
         and 1 < qn.shape[0] <= _MAX_DECODE_TOKENS
         and all(stride >= 0 for stride in (*qn.stride(), *qr.stride()))
     )
@@ -87,12 +86,13 @@ def can_prepare_query(qn: torch.Tensor, qr: torch.Tensor) -> bool:
 
 def prepare_query_head_major(qn: torch.Tensor, qr: torch.Tensor) -> torch.Tensor:
     if not can_prepare_query(qn, qr):
-        raise ValueError("Unsupported native-DCP8 query preparation")
+        raise ValueError("Unsupported native-DCP query preparation")
     tokens = qn.shape[0]
-    result = torch.empty((_LOCAL_HEADS, tokens, _PACKED_DIM), dtype=qn.dtype, device=qn.device)
+    local_heads = qn.shape[1]
+    result = torch.empty((local_heads, tokens, _PACKED_DIM), dtype=qn.dtype, device=qn.device)
     init_device_properties_triton()
     cores = get_vectorcore_num()
-    programs = min(_LOCAL_HEADS * tokens, cores)
+    programs = min(local_heads * tokens, cores)
     _prepare_query_head_major[(programs,)](
         qn,
         qr,
@@ -101,7 +101,7 @@ def prepare_query_head_major(qn: torch.Tensor, qr: torch.Tensor) -> torch.Tensor
         *qr.stride(),
         tokens,
         programs,
-        _LOCAL_HEADS,
+        local_heads,
         _NOPE_DIM,
         _ROPE_DIM,
     )
@@ -114,25 +114,26 @@ def unpack_query(gathered: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         or gathered.device.type != "npu"
         or gathered.dtype != torch.bfloat16
         or gathered.ndim != 3
-        or gathered.shape[0] != _TOTAL_HEADS
+        or gathered.shape[0] <= 0
         or gathered.shape[2] != _PACKED_DIM
         or not 1 < gathered.shape[1] <= _MAX_DECODE_TOKENS
         or not gathered.is_contiguous()
     ):
-        raise ValueError("Unsupported native-DCP8 gathered query")
+        raise ValueError("Unsupported native-DCP gathered query")
     tokens = gathered.shape[1]
-    qn = torch.empty((tokens, _TOTAL_HEADS, _NOPE_DIM), dtype=gathered.dtype, device=gathered.device)
-    qr = torch.empty((tokens, _TOTAL_HEADS, _ROPE_DIM), dtype=gathered.dtype, device=gathered.device)
+    heads = gathered.shape[0]
+    qn = torch.empty((tokens, heads, _NOPE_DIM), dtype=gathered.dtype, device=gathered.device)
+    qr = torch.empty((tokens, heads, _ROPE_DIM), dtype=gathered.dtype, device=gathered.device)
     init_device_properties_triton()
     cores = get_vectorcore_num()
-    programs = min(tokens * _TOTAL_HEADS, cores)
+    programs = min(tokens * heads, cores)
     _unpack_query_fragments[(programs,)](
         gathered,
         qn,
         qr,
         tokens,
         programs,
-        _TOTAL_HEADS,
+        heads,
         _NOPE_DIM,
         _ROPE_DIM,
     )

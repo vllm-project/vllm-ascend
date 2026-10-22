@@ -20,21 +20,25 @@ def oracle(indices, rank, ranks=8, interleave=128):
 
 
 @pytest.mark.parametrize("rows", [1, 6, 12])
-@pytest.mark.parametrize("rank", range(8))
-def test_exact_integer_boundaries_and_changed_graph_inputs(rows, rank):
+@pytest.mark.parametrize("ranks,rank", [(ranks, rank) for ranks in (2, 4, 8) for rank in range(ranks)])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_exact_integer_boundaries_and_changed_graph_inputs(rows, ranks, rank, dtype):
     torch.npu.set_device(0)
     rng = torch.Generator().manual_seed(20260911 + rows + rank)
-    base = torch.randint(0, 2**31 - 1, (rows, 2048), generator=rng, dtype=torch.int32)
+    base = torch.randint(0, 2**31 - 1, (rows, 2048), generator=rng, dtype=dtype)
     boundaries = torch.tensor(
         [-1, 0, 127, 128, 1023, 1024, 2**24 - 1, 2**24, 2**24 + 127, 2**31 - 1],
-        dtype=torch.int32,
+        dtype=dtype,
     )
+    if dtype == torch.int64:
+        base[:, ::3] += 2**40
+        boundaries = torch.cat((boundaries, torch.tensor([2**31, 2**40, 2**62 - 1], dtype=dtype)))
     device_input = base.npu()
     for _ in range(5):
-        remap_sparse_indices_triton(device_input, 8, rank, 128)
+        remap_sparse_indices_triton(device_input, ranks, rank, 128)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
-        output = remap_sparse_indices_triton(device_input, 8, rank, 128)
+        output = remap_sparse_indices_triton(device_input, ranks, rank, 128)
     for step in range(8):
         current = torch.roll(base, step, dims=-1)
         current[:, : boundaries.numel()] = boundaries
@@ -42,7 +46,7 @@ def test_exact_integer_boundaries_and_changed_graph_inputs(rows, rank):
             current.fill_(-1)
         device_input.copy_(current)
         graph.replay()
-        assert torch.equal(output.cpu(), oracle(current, rank))
+        assert torch.equal(output.cpu(), oracle(current, rank, ranks))
     torch.npu.synchronize()
 
 

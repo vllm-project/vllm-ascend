@@ -19,7 +19,7 @@ def test_empty_remap_preserves_shape_dtype_and_avoids_launch(shape):
     assert namespace["remap_sparse_indices_triton"](value, 8, 0, 128) is value
 
 
-@pytest.mark.parametrize("ranks,interleave", [(1, 1), (4, 128), (8, 64), (2, 1), (3, 127), (5, 129)])
+@pytest.mark.parametrize("ranks,interleave", [(1, 1), (3, 128), (8, 64), (2, 1), (3, 127), (5, 129)])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_generic_wrapper_routes_to_exact_integer_fallback(ranks, interleave, dtype):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/sparse_index_remap.py"

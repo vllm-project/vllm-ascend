@@ -25,7 +25,10 @@ ROOT = Path(__file__).resolve().parents[3]
         (6, True, False, False, 8),
     ],
 )
-def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, decode, dsa, prepared, pcp_size):
+@pytest.mark.parametrize("ranks", [2, 4, 8])
+def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, decode, dsa, prepared, pcp_size, ranks):
+    if pcp_size > ranks:
+        pytest.skip("PCP must divide the DCP group")
     source = ROOT / "vllm_ascend/attention/context_parallel/sfa_cp.py"
     tree = ast.parse(source.read_text())
     context_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DCPGatherContext")
@@ -41,7 +44,7 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, d
     events = []
     group = object()
     tp_group = object()
-    replicas = 8 // pcp_size
+    replicas = ranks // pcp_size
     handle = SimpleNamespace(wait=lambda: events.append("wait"))
 
     def gather(value, selected_group):
@@ -81,7 +84,7 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, d
 
     state = SimpleNamespace(
         enable_dsa_cp=dsa,
-        dcp_size=8,
+        dcp_size=ranks,
         dcp_group=group,
         _start_dcp_gather=legacy,
         _parallel_query_gather_dim=lambda: 0 if dsa else 1,
@@ -102,21 +105,21 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, d
     dim = 0 if dsa else 1
     assert torch.equal(result[0], torch.cat([qn] * replicas, dim=dim))
     assert torch.equal(result[1], torch.cat([qr] * replicas, dim=dim))
-    assert events.count("gather") == events.count("wait") == (0 if pcp_size == 8 else 1)
+    assert events.count("gather") == events.count("wait") == (0 if pcp_size == ranks else 1)
     assert ("unpack" in events) is prepared
     if prepared:
         assert all(part.is_contiguous() for part in result)
 
 
 @pytest.mark.parametrize("tokens,expected", [(0, False), (1, False), (2, True), (6, True), (12, True), (13, False)])
-def test_query_shape_gate_keeps_single_token_and_large_batch_paths(tokens, expected):
+@pytest.mark.parametrize("local_heads", [1, 3, 8, 16, 32])
+def test_query_shape_gate_keeps_single_token_and_large_batch_paths(tokens, expected, local_heads):
     source = ROOT / "vllm_ascend/ops/triton/sfa_dcp_query.py"
     tree = ast.parse(source.read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "can_prepare_query")
     namespace = {
         "torch": torch,
         "triton": object(),
-        "_LOCAL_HEADS": 8,
         "_NOPE_DIM": 512,
         "_ROPE_DIM": 64,
         "_MAX_DECODE_TOKENS": 12,
@@ -124,9 +127,13 @@ def test_query_shape_gate_keeps_single_token_and_large_batch_paths(tokens, expec
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     device = SimpleNamespace(type="npu")
     qn = SimpleNamespace(
-        device=device, dtype=torch.bfloat16, ndim=3, shape=(tokens, 8, 512), stride=lambda: (512, tokens * 512, 1)
+        device=device,
+        dtype=torch.bfloat16,
+        ndim=3,
+        shape=(tokens, local_heads, 512),
+        stride=lambda: (512, tokens * 512, 1),
     )
     qr = SimpleNamespace(
-        device=device, dtype=torch.bfloat16, ndim=3, shape=(tokens, 8, 64), stride=lambda: (512, 64, 1)
+        device=device, dtype=torch.bfloat16, ndim=3, shape=(tokens, local_heads, 64), stride=lambda: (512, 64, 1)
     )
     assert namespace["can_prepare_query"](qn, qr) is expected

@@ -31,6 +31,7 @@ def remap_sparse_indices_fused_kernel(
     out_ptr,  # [rows, topk_count] int32 (output): tail pre-filled with -1 here
     topk_count,
     dcp_rank,
+    DCP_BITS: tl.constexpr,
     BLOCK: tl.constexpr,
     NUM_CHUNKS: tl.constexpr,
 ):
@@ -51,9 +52,9 @@ def remap_sparse_indices_fused_kernel(
 
     idx = tl.load(indices_ptr + row * topk_count + offsets, mask=in_bounds, other=-1)
     # This backend's vector divsi loses integer boundaries above 2**24.
-    # Keep the native DCP8/interleave128 path entirely in bit operations.
-    owner = (idx >> 7) & 7
-    remapped = ((idx >> 10) << 7) + (idx & 127)
+    # Power-of-two DCP/interleave128 stays entirely in exact bit operations.
+    owner = (idx >> 7) & ((1 << DCP_BITS) - 1)
+    remapped = ((idx >> (7 + DCP_BITS)) << 7) + (idx & 127)
     valid = (idx >= 0) & (owner == dcp_rank)
 
     valid_i32 = valid.to(tl.int32)
@@ -100,7 +101,7 @@ def _remap_sparse_indices_integer(
     """Exact fallback; do not reintroduce FP32 index arithmetic above 2**24.
 
     Integer sorting may use AICPU on Ascend. This fallback favors correctness
-    outside the verified native DCP8/interleave128 two-kernel fast path.
+    outside the native DCP2/4/8/interleave128 two-kernel fast path.
     """
     integer = indices.to(torch.int64)
     blocks = torch.div(integer, interleave_size, rounding_mode="floor")
@@ -146,13 +147,13 @@ def remap_sparse_indices_triton(
     """
     if topk_indices.numel() == 0:
         return topk_indices
-    if dcp_size != 8 or interleave_size != 128:
+    if dcp_size not in (2, 4, 8) or interleave_size != 128:
         return _remap_sparse_indices_integer(topk_indices, dcp_size, dcp_rank, interleave_size)
     orig_dtype = topk_indices.dtype
     orig_shape = topk_indices.shape
     if not topk_indices.is_contiguous():
         topk_indices = topk_indices.contiguous()
-    indices = topk_indices if topk_indices.dtype == torch.int32 else topk_indices.to(torch.int32)
+    indices = topk_indices if topk_indices.dtype in (torch.int32, torch.int64) else topk_indices.to(torch.int32)
     topk_count = indices.shape[-1]
     rows = indices.numel() // topk_count
     # The torch implementation operates per-row on the last dim, so arbitrary
@@ -173,6 +174,7 @@ def remap_sparse_indices_triton(
         out,
         topk_count,
         dcp_rank,
+        DCP_BITS=dcp_size.bit_length() - 1,
         BLOCK=block,
         NUM_CHUNKS=num_chunks,
         multibuffer=False,

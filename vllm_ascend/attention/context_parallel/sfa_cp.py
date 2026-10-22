@@ -1626,7 +1626,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
         # Decode-only callers reach this method; PCP+DCP keeps
         # its separate TP-group override and DSA-CP gathers tokens on dim 0.
-        if query_gather_dim == 1 and self.dcp_size == 8 and can_prepare_query(ql_nope, q_pe):
+        if query_gather_dim == 1 and self.dcp_size in (2, 4, 8) and can_prepare_query(ql_nope, q_pe):
             prepared = prepare_query_head_major(ql_nope, q_pe)
             gathered, handle = all_gather_async(prepared, self.dcp_group)
             return DCPGatherContext(

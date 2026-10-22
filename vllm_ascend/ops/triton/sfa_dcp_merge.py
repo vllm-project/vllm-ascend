@@ -21,7 +21,7 @@ except ImportError:  # CPU-only test environments retain exact torch semantics.
     get_element = None
 
 
-_SUPPORTED_RANKS = (2, 8)
+_SUPPORTED_RANKS = (2, 4, 8)
 _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
 

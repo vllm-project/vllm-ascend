@@ -33,6 +33,8 @@ def load_function(path, name, namespace):
         (192, 8, 1, True, False),
         (193, 8, 1, False, False),
         (6, 2, 1, True, False),
+        (6, 4, 1, True, False),
+        (6, 16, 1, True, False),
         (8, 8, 0, True, False),
         (6, 8, 1, True, True),
         (6, 1, 1, True, True),
@@ -76,7 +78,7 @@ def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, s
     pcp_group = SimpleNamespace(all_gather=pcp_gather) if pcp else None
     result = run(output, lse, ranks, scatter, group, pcp_group, decode_token_budget=budget)
     assert result.dtype == output.dtype and result.shape == shape
-    if ranks == 8 and scatter == 1 and supported and not pcp and (budget is None or tokens <= budget):
+    if ranks in (2, 4, 8) and scatter == 1 and supported and not pcp and (budget is None or tokens <= budget):
         assert calls == ["exchange"]
     else:
         assert calls == (["upstream_collective"] if ranks > 1 else []) + (["pcp_gather"] if pcp else [])
@@ -92,7 +94,7 @@ def test_exchange_gate(tokens, expected):
         for node in ast.parse(source.read_text()).body
         if isinstance(node, ast.Assign)
         and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id in ("_MAX_DECODE_TOKENS", "_HEADS", "_HEAD_DIM")
+        and node.targets[0].id in ("_MAX_DECODE_TOKENS", "_SUPPORTED_RANKS", "_HEAD_DIM", "_MAX_LOCAL_HEADS")
     }
     namespace = {"torch": torch, "triton": object(), **constants}
     run = load_function("vllm_ascend/ops/triton/sfa_dcp_exchange.py", "can_exchange", namespace)
@@ -100,6 +102,27 @@ def test_exchange_gate(tokens, expected):
     output = SimpleNamespace(device=device, dtype=torch.bfloat16, ndim=3, shape=(tokens, 64, 512))
     lse = SimpleNamespace(device=device, dtype=torch.float32, shape=(tokens, 64, 1))
     assert run(output, lse) is expected
+
+
+@pytest.mark.parametrize("ranks", [2, 4, 8])
+@pytest.mark.parametrize("local_heads", [1, 3, 8, 16, 32, 33])
+def test_exchange_gate_derives_head_shards_from_group(ranks, local_heads):
+    namespace = dict(
+        torch=torch,
+        triton=object(),
+        _SUPPORTED_RANKS=(2, 4, 8),
+        _HEAD_DIM=512,
+        _MAX_LOCAL_HEADS=32,
+        _MAX_DECODE_TOKENS=192,
+    )
+    run = load_function("vllm_ascend/ops/triton/sfa_dcp_exchange.py", "can_exchange", namespace)
+    device = SimpleNamespace(type="npu")
+    heads = ranks * local_heads
+    output = SimpleNamespace(device=device, dtype=torch.bfloat16, ndim=3, shape=(13, heads, 512))
+    lse = SimpleNamespace(device=device, dtype=torch.float32, shape=(13, heads, 1))
+    assert run(output, lse, ranks) is (local_heads <= 32 and local_heads & (local_heads - 1) == 0)
+    output.shape = (13, heads + 1, 512)
+    assert not run(output, lse, ranks)
 
 
 @pytest.mark.parametrize("token_dim", [1, 2])
