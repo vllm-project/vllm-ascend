@@ -267,8 +267,14 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        previous_model = getattr(self, "model", None)
+        if previous_model is not None and getattr(previous_model, "uses_elastic_engram", False):
+            previous_model.destroy_engram()
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
         super().load_model(load_dummy_weights, *args, **kwargs)
+        initialize_engram = getattr(self.model, "initialize_engram", None)
+        if initialize_engram is not None and getattr(self.model, "has_engram", True):
+            initialize_engram()
         self.pd_dspark_aux_layer_ids = aux_layers
 
     def _restore_replicated_draft_target_states(self) -> None:

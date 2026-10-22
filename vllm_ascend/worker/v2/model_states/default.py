@@ -144,7 +144,7 @@ class AscendModelState(DefaultModelState):
     def prepare_engram_inputs(self, input_batch, req_states) -> dict[str, Any]:
         """Model-specific history providers override this single preparation hook."""
         prepare_engram_inputs = getattr(self.model, "prepare_engram_inputs", None)
-        if prepare_engram_inputs is None:
+        if prepare_engram_inputs is None or not getattr(self.model, "has_engram", True):
             return {}
         num_tokens = input_batch.num_tokens_after_padding
         return prepare_engram_inputs(
@@ -161,7 +161,7 @@ class AscendModelState(DefaultModelState):
 
     def prepare_engram_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         prepare_engram_graph_inputs = getattr(self.model, "prepare_engram_graph_inputs", None)
-        if prepare_engram_graph_inputs is not None:
+        if prepare_engram_graph_inputs is not None and getattr(self.model, "has_engram", True):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 

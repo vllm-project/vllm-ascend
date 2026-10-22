@@ -358,7 +358,8 @@ class EplbConfig:
 
         logger.info(
             "Dynamic EPLB is %s and convert moe's weights to list is %s",
-            self.dynamic_eplb, self.convert_weight_to_list,
+            self.dynamic_eplb,
+            self.convert_weight_to_list,
         )
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
         return self
@@ -452,6 +453,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
+            "enable_engram": false,
             "multistream_engram_overlap": true,
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
@@ -595,13 +597,19 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
+    # Master opt-in for Engram layers, checkpoint loading and execution.
+    enable_engram: bool = False
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
+    # Explicit offload backend; UVA preserves the existing head-sharded path.
+    engram_offload_backend: Literal["uva", "elastic"] = "uva"
+    engram_tp_size: int | None = None
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
@@ -711,9 +719,17 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if not self.enable_engram:
+            # Also disable upstream Engram groups and runner preparation.
+            vc.engram_config = None
+        if self.enable_engram and self.engram_offload_backend == "elastic":
+            from vllm_ascend.models.deepseek_v41.engram.config import validate_elastic_config
+
+            validate_elastic_config(self, vc)
         engram_config = getattr(vc, "engram_config", None)
         if (
-            engram_config is not None
+            self.engram_offload_backend != "elastic"
+            and engram_config is not None
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)

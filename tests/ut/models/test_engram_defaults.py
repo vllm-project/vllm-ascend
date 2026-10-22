@@ -18,3 +18,10 @@ def test_engram_overlap_hardware_default_and_explicit_override(monkeypatch, devi
     config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), **kwargs)
     expected = device == AscendDeviceType.A5 if explicit is None else explicit
     assert config.multistream_engram_overlap is expected
+    assert config.enable_engram is False
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_engram_requires_explicit_master_opt_in(enabled):
+    config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), enable_engram=enabled)
+    assert config.enable_engram is enabled

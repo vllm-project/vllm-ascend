@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from pydantic import TypeAdapter
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -1684,6 +1685,11 @@ def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
 
 
 def _validate_engram_config(vllm_config: VllmConfig) -> None:
+    # This runs before AscendConfig initialization; use the same bool parsing.
+    enabled = TypeAdapter(bool).validate_python((vllm_config.additional_config or {}).get("enable_engram", False))
+    if not enabled:
+        vllm_config.engram_config = None
+        return
     engram_config = getattr(vllm_config, "engram_config", None)
     model_config = vllm_config.model_config
     spec = vllm_config.speculative_config
