@@ -377,6 +377,23 @@ A few important things to consider when using DFlash2 draft models:
    to compare against eager drafting. Validate graph/eager equivalence and
    request reuse on the intended NPU configuration before deployment.
 
+   Non-causal draft layers with sliding-window size `W` use FIA band mode
+   (`sparse_mode=4`) with a cached compressed mask and
+   `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric
+   window. Both eager execution and graph capture preserve this window;
+   layers without a window retain full attention. This replaces the earlier
+   workaround that ignored non-causal sliding windows, including in eager
+   execution. The compressed mask is a band-mode template, not a causal
+   restriction on draft tokens.
+
+   The focused NPU test covers draft lengths 4, 5, and 6, window boundaries,
+   and replay with changed KV lengths and block tables. It compares against
+   eager execution and an independent dense reference:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py
+   ```
+
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size
