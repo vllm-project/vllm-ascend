@@ -39,6 +39,7 @@ from vllm.distributed import get_dcp_group, get_tensor_model_parallel_rank
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -578,6 +579,16 @@ def build_attn_metadata(
             is_dsa_builder = isinstance(attn_metadata_builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder))
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            if isinstance(attn_metadata_builder, QSAMetadataBuilder) and num_reqs > num_actual_reqs:
+                # FULL graph padding appends dummy request boundaries to the
+                # shared query_start_loc, while QSA reads the CPU tail as its
+                # mapped-token count. Expose only the live request boundaries.
+                common_attn_metadata = replace(
+                    common_attn_metadata,
+                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[
+                        : num_actual_reqs + 1
+                    ],
+                )
             metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
             if is_sfa_builder and draft_layer_names:
                 target_names = [name for name in attn_group.layer_names if name not in draft_layer_names]
