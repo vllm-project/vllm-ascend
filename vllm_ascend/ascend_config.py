@@ -125,6 +125,10 @@ class AscendCompilationConfig:
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+    fuse_matmul_reduce_scatter: bool = False
+    fuse_all_gather_matmul: bool = False
+    fuse_matmul_all_reduce: bool = False
+    matmul_comm_fusion_min_tokens: int = 4096
 
     @model_validator(mode="before")
     @classmethod
@@ -452,7 +456,11 @@ class AscendConfig:
                 "enable_static_kernel": false,
                 "fuse_norm_quant": true,
                 "fuse_qknorm_rope": true,
-                "fuse_muls_add": true
+                "fuse_muls_add": true,
+                "fuse_matmul_reduce_scatter": false,
+                "fuse_all_gather_matmul": false,
+                "fuse_matmul_all_reduce": false,
+                "matmul_comm_fusion_min_tokens": 4096
             },
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": true
@@ -947,6 +955,7 @@ class AscendConfig:
         )
 
         self._validate_mc2_comm_alg(vc)
+        self._derive_matmul_comm_fusion(vc)
 
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
@@ -1007,6 +1016,28 @@ class AscendConfig:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication. "
                 "Please set additional_config.enable_fused_mc2 to 0."
+            )
+
+    def _derive_matmul_comm_fusion(self, vllm_config: VllmConfig) -> None:
+        acc = self.ascend_compilation_config
+        if not (acc.fuse_matmul_reduce_scatter or acc.fuse_all_gather_matmul or acc.fuse_matmul_all_reduce):
+            return
+
+        if acc.matmul_comm_fusion_min_tokens <= 0:
+            raise ValueError(
+                "additional_config.ascend_compilation_config.matmul_comm_fusion_min_tokens must be "
+                f"positive, got {acc.matmul_comm_fusion_min_tokens}. The fused matmul-comm kernels only "
+                "pay off on large token counts; set a positive threshold or disable the fusions."
+            )
+
+        # Endpoints are exclusive upper bounds, so splitting at min_tokens - 1 makes the next
+        # compile range start exactly at min_tokens, matching is_applicable_for_range().
+        split_point = acc.matmul_comm_fusion_min_tokens - 1
+        if split_point > 0:
+            compile_ranges = self._get_compile_ranges(vllm_config.compilation_config)
+            self._set_compile_ranges(
+                vllm_config.compilation_config,
+                sorted(set(compile_ranges) | {split_point}),
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
