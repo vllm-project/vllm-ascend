@@ -2460,8 +2460,10 @@ class KVPoolWorker:
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
-        # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
-        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
+        # Under KVPP, address tables only contain this rank's registered layers.
+        # An absent layer must not fall back to a stage-local address-table index.
+        default_groups = [] if getattr(self, "use_kvpp", False) else [(0, local_layer)]
+        return self.physical_layer_to_group_layers.get(local_layer, default_groups)
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))

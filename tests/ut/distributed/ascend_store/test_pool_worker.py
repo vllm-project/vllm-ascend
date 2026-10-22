@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, Mamb
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
+    LayerBatchBuilder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -416,6 +417,81 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    def test_memcache_layerwise_only_transfers_registered_owner_layers(self):
+        for pp_rank in (0, 1):
+            for tp_rank in (0, 1):
+                with self.subTest(pp_rank=pp_rank, tp_rank=tp_rank):
+                    offset = pp_rank * 8
+                    names = [f"model.layers.{offset + layer}.self_attn.attn" for layer in range(9)]
+                    cache_config = SimpleNamespace(
+                        num_blocks=4,
+                        kv_cache_groups=[
+                            KVCacheGroupSpec(
+                                layer_names=names,
+                                kv_cache_spec=FullAttentionSpec(
+                                    block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+                                ),
+                            )
+                        ],
+                    )
+                    worker = make_worker(
+                        self,
+                        tp_rank=tp_rank,
+                        tp_size=2,
+                        pp_size=2,
+                        pp_rank=pp_rank,
+                        layer_offset=offset,
+                        num_layers=9,
+                        use_mla=True,
+                        use_kvpp=True,
+                        use_layerwise=True,
+                        extra_config={"backend": "memcache"},
+                        kv_cache_config=cache_config,
+                    )
+                    # Four target layers per owner, plus one replicated MTP layer.
+                    owners = {name: layer // 4 if layer < 8 else None for layer, name in enumerate(names)}
+                    caches = {name: torch.zeros((4, 16, 8)) for name in names}
+                    worker._transfer_threads_started = True
+                    with patch(
+                        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.map_kvpp_layers_to_owners",
+                        return_value=owners,
+                    ):
+                        worker.register_kv_caches(caches)
+                    self.assertTrue(worker.use_layerwise_transfer)
+                    self.assertFalse(worker.use_block_key_layerwise)
+                    owned_layers = list(range(tp_rank * 4, tp_rank * 4 + 4)) + [8]
+                    expected = [(layer, 0, index) for index, layer in enumerate(owned_layers)]
+                    builder = LayerBatchBuilder(
+                        worker.token_database, worker.page_size_bytes, worker.group_num_layers[0]
+                    )
+                    for layer in range(9):
+                        groups = worker._groups_for_layerwise_transfer(layer)
+                        if layer not in owned_layers:
+                            self.assertEqual(groups, [])
+                        for group, index in groups:
+                            addresses, _, _ = builder._build_transfer_arrays(np.asarray([0]), np.asarray([4096]), index)
+                            np.testing.assert_array_equal(addresses, [caches[names[layer]].data_ptr()])
+                    # Exercise both task-generation loops without backend RPCs.
+                    for method in (
+                        "_process_save_for_layer_batch",
+                        "_process_load_for_layer_batch",
+                        "_prepare_load_gvas",
+                        "_alloc_gvas_for_save",
+                        "_build_shared_save_data",
+                        "_build_shared_load_data",
+                    ):
+                        setattr(worker, method, MagicMock())
+                    worker.process_layer_data([MagicMock()])
+                    for method in (worker._process_save_for_layer_batch, worker._process_load_for_layer_batch):
+                        self.assertEqual([call.args[1:] for call in method.call_args_list], expected)
+                    self.doCleanups()
+
+    def test_memcache_non_kvpp_preserves_layer_index_fallback(self):
+        worker = make_worker(self, use_layerwise=True, extra_config={"backend": "memcache"})
+        worker.physical_layer_to_group_layers = {3: [(0, 1)]}
+        self.assertEqual(worker._groups_for_layerwise_transfer(3), [(0, 1)])
+        self.assertEqual(worker._groups_for_layerwise_transfer(0), [(0, 0)])
+
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
 
