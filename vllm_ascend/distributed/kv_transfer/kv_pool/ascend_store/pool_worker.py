@@ -3193,6 +3193,28 @@ class KVPoolWorker:
         if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
             self.current_layer += 1
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Non-consuming completion signal shared by attention and KVPP.
+
+        ``wait_for_layer_load`` advances the per-step layer schedule, so it
+        cannot be used to gate a broadcast of an arbitrary layer. This only
+        observes that the layer's pool load has landed.
+        """
+        physical_layer = self._extract_physical_layer_index(layer_name)
+        layer_id = self._global_to_local_layer.get(physical_layer, physical_layer)
+        if layer_id < 0 or layer_id >= len(self.layer_load_tasks):
+            return
+        assert self.kv_recv_thread is not None
+        self.kv_recv_thread.raise_if_failed()
+        if not self.layer_load_tasks[layer_id] and layer_id not in self.prefetch_layer_map:
+            return
+        assert self.layer_load_finished_events is not None
+        while not self.layer_load_finished_events[layer_id].wait(timeout=1):
+            self.kv_recv_thread.raise_if_failed()
+            if self._layer_load_aborted.is_set():
+                raise RuntimeError("Layerwise load aborted before KVPP broadcast")
+        self.kv_recv_thread.raise_if_failed()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         with self._invalid_block_ids_lock:
             invalid_blocks = self._invalid_block_ids.copy()

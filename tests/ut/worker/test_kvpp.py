@@ -153,3 +153,79 @@ def test_hook_propagates_failed_future_without_scheduling_next(scheduler_device)
         scheduler.wait_for_layer(layer_name(0))
     assert raised.value is error
     assert len(scheduler._prefetch_executor.submitted) == 1
+
+
+class _ImmediateExecutor(ManualExecutor):
+    """Run every submission eagerly so a waiting scheduler never blocks."""
+
+    def submit(self, fn, *args):
+        future = super().submit(fn, *args)
+        self.run_next()
+        return future
+
+
+@pytest.mark.parametrize(
+    ("transfer_config", "expected"),
+    [
+        (None, False),
+        (SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_connector_extra_config={"use_layerwise": True}), False),
+        (SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config=None), False),
+        (
+            SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config={"use_layerwise": False}),
+            False,
+        ),
+        (
+            SimpleNamespace(kv_connector="AscendStoreConnector", kv_connector_extra_config={"use_layerwise": True}),
+            True,
+        ),
+    ],
+)
+def test_layerwise_kv_transfer_enabled(transfer_config, expected):
+    assert kvpp._layerwise_kv_transfer_enabled(SimpleNamespace(kv_transfer_config=transfer_config)) is expected
+
+
+def test_layerwise_defers_and_waits_for_load_before_broadcast(scheduler_device, monkeypatch):
+    events, _compute, _transfer = scheduler_device
+    group = Mock()
+    group.wait_for_layer_load_ready.side_effect = lambda name: events.append(("ready_load", name))
+    monkeypatch.setattr(kvpp, "get_kv_transfer_group", lambda: group)
+    monkeypatch.setattr(kvpp, "ThreadPoolExecutor", _ImmediateExecutor)
+    transport = Mock()
+    transport.prefetch.side_effect = lambda name, _ready, _stream: events.append(("prefetch", name))
+    names = tuple(layer_name(index) for index in range(3))
+    scheduler = kvpp.KVPPScheduler(transport, names, layerwise=True)
+
+    scheduler.schedule_forward(True)
+    # The first broadcast is deferred until the attention hook has submitted
+    # this step's layer loads.
+    assert scheduler._prefetch_executor.submitted == []
+    assert events == []
+
+    for name in names:
+        scheduler.wait_for_layer(name)
+    scheduler.complete_forward()
+
+    assert [value for tag, value in events if tag == "prefetch"] == list(names)
+    assert [value for tag, value in events if tag == "ready_load"] == list(names)
+    for name in names:
+        position = events.index(("prefetch", name))
+        assert events[position - 1] == ("ready_load", name)
+    assert group.wait_for_layer_load_ready.call_count == len(names)
+
+
+def test_non_layerwise_broadcast_does_not_wait_for_loads(scheduler_device, monkeypatch):
+    events, _compute, _transfer = scheduler_device
+    group = Mock()
+    monkeypatch.setattr(kvpp, "get_kv_transfer_group", lambda: group)
+    monkeypatch.setattr(kvpp, "ThreadPoolExecutor", _ImmediateExecutor)
+    transport = Mock()
+    transport.prefetch.side_effect = lambda name, _ready, _stream: events.append(("prefetch", name))
+    names = tuple(layer_name(index) for index in range(2))
+    scheduler = kvpp.KVPPScheduler(transport, names)
+
+    scheduler.schedule_forward(True)
+    assert events == [("device", 3), ("prefetch", names[0])]
+    scheduler.wait_for_layer(names[0])
+    assert events[-2:] == [("device", 3), ("prefetch", names[1])]
+    scheduler.complete_forward()
+    group.wait_for_layer_load_ready.assert_not_called()
