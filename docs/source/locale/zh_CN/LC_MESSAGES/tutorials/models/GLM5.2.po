@@ -2168,9 +2168,8 @@ msgid ""
 "After all six APIs become healthy, start the proxy on its separate host:"
 msgstr "全部 6 个 API 就绪后，在独立主机上启动代理："
 
-msgid ""
-"Send requests to `http://<PROXY_IP>:8000` using the served model name `glm`."
-msgstr "使用模型服务名 `glm` 向 `http://<PROXY_IP>:8000` 发送请求。"
+msgid "Send requests to `<PROXY_IP>:8000` using the served model name `glm`."
+msgstr "使用模型服务名 `glm` 向 `<PROXY_IP>:8000` 发送请求。"
 
 msgid ""
 "- The launcher passes `$1` = visible devices, `$2` = API port, `$3` = global\n"

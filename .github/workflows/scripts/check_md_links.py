@@ -17,7 +17,7 @@ import regex as re
 import requests
 
 URL_RE = re.compile(r'https?://[^\s\)"\'`\]>]+')
-FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})", re.MULTILINE)
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})", re.MULTILINE)
 INLINE_CODE_RE = re.compile(r"`[^`]+`")
 
 TIMEOUT = 20

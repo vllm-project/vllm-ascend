@@ -1,42 +1,10 @@
 (function () {
-  function filterTabbedToc() {
-    const content = document.querySelector('.md-content')
-    if (!content || !content.querySelector('[id^="glm52-53-"], [id^="glm53-flash-"]')) {
-      return
-    }
-
-    // Keep tab contents in the page without repeating them in the navigation.
-    document.querySelectorAll('.md-nav--secondary a[href]').forEach(link => {
-      const hash = link.hash.slice(1)
-      if (!hash) {
-        return
-      }
-
-      let id
-      try {
-        id = decodeURIComponent(hash)
-      } catch (error) {
-        return
-      }
-      const target = document.getElementById(id)
-      if (target && target.closest('.tabbed-block')) {
-        link.closest('.md-nav__item')?.remove()
-      }
-    })
-
-  }
-
   function revealTabbedTarget() {
     if (!window.location.hash) {
       return
     }
 
-    let id
-    try {
-      id = decodeURIComponent(window.location.hash.slice(1))
-    } catch (error) {
-      return
-    }
+    const id = decodeURIComponent(window.location.hash.slice(1))
     const target = document.getElementById(id)
     if (!target) {
       return
@@ -67,9 +35,6 @@
     })
   }
 
-  document$.subscribe(() => {
-    filterTabbedToc()
-    revealTabbedTarget()
-  })
+  document$.subscribe(revealTabbedTarget)
   window.addEventListener('hashchange', revealTabbedTarget)
 })()
