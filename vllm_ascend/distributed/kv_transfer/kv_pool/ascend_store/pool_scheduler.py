@@ -165,10 +165,9 @@ class KVPoolScheduler:
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
-        # request_id -> authoritative block table (based at the request's
-        # block 0), recorded for every request, not only for pool hits.
-        # Kept separate from _unfinished_requests so the historic
-        # load-spec / async-load semantics stay untouched.
+        # request_id -> block-table reference for the async-load path.
+        # NewRequestData supplies the full table for new requests; allocation
+        # snapshots are not an independent authority for that path.
         self._full_block_ids: dict[str, list[list[int]]] = {}
         self._loading_req_ids: set[str] = set()
 
@@ -723,15 +722,14 @@ class KVPoolScheduler:
         return need_to_allocate, self.load_async and not self.use_layerwise
 
     def _resolve_base_state_by_group(self, req_id: str, ids_by_group) -> list[str] | None:
-        """Per-group save base state: "ZERO" | "WINDOW" | "UNPROVABLE".
+        """Resolve async-load save base state against the recorded reference.
 
         "ZERO" means the request's block table *is* the authoritative table,
         i.e. it starts at the request's block 0 -- the only state in which the
         legacy table-indexed save arrays are valid. Any other state means the
         table is a suffix window (or cannot be identified), so saving it with
         the legacy arrays would index it as if it started at block 0; such a
-        request must not be saved. None means the authoritative table was never
-        recorded, which every production path does in update_state_after_alloc.
+        request must not be saved. None means no reference was recorded.
         """
         full = self._full_block_ids.get(req_id)
         if not full or ids_by_group is None:
@@ -772,11 +770,9 @@ class KVPoolScheduler:
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
-        # Record the authoritative block table unconditionally (refreshed on
-        # every allocation). The save path needs it to prove that a table
-        # starts at the request's block 0; with the historic guard
-        # (num_external_tokens > 0) there was no table at all for requests that
-        # missed the pool, which would leave them unprovable forever.
+        # Retain the allocation snapshot as an async-load reference. It may
+        # differ from NewRequestData.block_ids, so new requests replace it
+        # with their full table instead of comparing against it.
         self._full_block_ids[request.request_id] = (
             local_block_ids if num_external_tokens > 0 else normalize_block_ids_by_group(blocks.get_block_ids())
         )
@@ -874,7 +870,11 @@ class KVPoolScheduler:
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
         previous_tracker = self._request_trackers.get(request.req_id)
         prefill_tokens = _new_req_prefill_tokens(request)
-        _stop_state = self._resolve_base_state_by_group(request.req_id, block_ids_by_group)
+        # NewRequestData.block_ids starts at request block 0, including any
+        # cached prefix. Comparing it to the allocation snapshot can wrongly
+        # mark every group UNPROVABLE and suppress all subsequent saves.
+        _stop_state = ["ZERO"] * len(block_ids_by_group)
+        self._full_block_ids[request.req_id] = block_ids_by_group
         request_tracker = RequestTracker(
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
