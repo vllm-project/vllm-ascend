@@ -287,6 +287,11 @@ class OProjRowParallelOp(CustomRowParallelOp):
 
 
 class SequenceColumnParallelOp(CustomColumnParallelOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        multimodal_config = get_current_vllm_config().model_config.multimodal_config
+        self.uses_precomputed_embeddings = multimodal_config is not None and not multimodal_config.language_model_only
+
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
 
@@ -298,7 +303,12 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
+        need_all_gather = not (
+            extract_layer_index(self.layer.prefix) == 0
+            and is_vl_model()
+            and self.uses_precomputed_embeddings
+            and "attn" in self.prefix
+        )
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 

@@ -8,12 +8,14 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -22,6 +24,38 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestHybridKVCachePageAlignment(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mixed_tp_attention_and_mamba_use_the_largest_page(self, mock_layers, _mock_ec_transfer):
+        for state_elements in (1024, 8192):
+            with self.subTest(state_elements=state_elements):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.vllm_config = MagicMock()
+                runner.shared_kv_cache_layers = {}
+                runner.use_compress = False
+                runner.use_sparse = False
+                runner.sparse_kv_offload_enabled = False
+                specs = {
+                    "target_attn": FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=32, dtype=torch.float16),
+                    "draft_attn": FullAttentionSpec(block_size=16, num_kv_heads=4, head_size=32, dtype=torch.float16),
+                    "large_mamba": MambaSpec(block_size=16, shapes=((state_elements,),), dtypes=(torch.float16,)),
+                    "small_mamba": MambaSpec(block_size=16, shapes=((512,),), dtypes=(torch.float16,)),
+                }
+                layers = {}
+                for name, spec in specs.items():
+                    module = MagicMock(spec=MambaBase if "mamba" in name else AttentionLayerBase)
+                    module.get_kv_cache_spec.return_value = spec
+                    layers[name] = module
+                mock_layers.return_value = layers
+                expected_size = max(spec.page_size_bytes for spec in specs.values())
+
+                actual = runner.get_kv_cache_spec()
+
+                self.assertEqual(set(actual), set(specs))
+                self.assertEqual({spec.page_size_bytes for spec in actual.values()}, {expected_size})
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
