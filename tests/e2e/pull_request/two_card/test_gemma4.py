@@ -29,8 +29,8 @@ _GRAPH_ENV = {
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
 
-_MTP_MODEL = "google/gemma-4-26B-A4B-it"
-_MTP_DRAFT_MODEL = "google/gemma-4-26B-A4B-it-assistant"
+_MTP_MODEL = "google/gemma-4-31B-it"
+_MTP_DRAFT_MODEL = "google/gemma-4-31B-it-assistant"
 _MTP_NUM_SPECULATIVE_TOKENS = 3
 # Loose floor: catches a draft that reads its own empty cache (~0 acceptance)
 # without pinning a profile that depends on the checkpoint and the hardware.
@@ -61,7 +61,7 @@ def _run_full_decode_graph_smoke(model: str, *, enable_expert_parallel: bool) ->
 
 @pytest.mark.e2e_model("google/gemma-4-26B-A4B-it")
 @pytest.mark.e2e_coverage(
-    arch="moe",
+    arch="dense",
     feature="",
     parallel="TP,EP",
     deploy="pd_mix",
@@ -78,7 +78,7 @@ def test_gemma4_26b_a4b_moe_full_decode_graph() -> None:
 
 @pytest.mark.e2e_model(_MTP_MODEL)
 @pytest.mark.e2e_coverage(
-    arch="moe",
+    arch="dense",
     feature="mtp",
     parallel="TP",
     deploy="pd_mix",
