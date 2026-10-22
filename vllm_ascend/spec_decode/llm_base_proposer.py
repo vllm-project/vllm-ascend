@@ -40,6 +40,7 @@ from vllm.v1.spec_decode.utils import (
     compute_new_slot_mapping,
     extend_all_queries_by_N,
 )
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend import utils as ascend_utils
@@ -774,6 +775,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _get_attn_metadata_layer_names(self, attn_group):
         return self.attn_layer_names
 
+    def _get_in_graph_draft_token_capacity(self, num_input_tokens, runtime_mode, uniform_decode=True):
+        """Family-specific opt-in for device-only, one-token draft metadata."""
+        return None
+
+    def _build_in_graph_draft_metadata(self, draft_index, num_tokens, positions, exceeds_max_model_len):
+        raise NotImplementedError("This drafter does not support in-graph metadata preparation.")
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -797,6 +805,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
+        in_graph_tokens = self._get_in_graph_draft_token_capacity(
+            num_tokens,
+            aclgraph_runtime_mode,
+            uniform_decode=not with_prefill and (batch_descriptor is None or batch_descriptor.uniform),
+        )
+        if in_graph_tokens is not None:
+            self._mtp_num_actual_reqs.zero_()
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
         if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
@@ -883,6 +898,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 assert len(self.draft_attn_groups) > 0
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
+                    if draft_index > 0 and in_graph_tokens is not None:
+                        # Warm every builder/buffer before capture; the same
+                        # device operations are subsequently recorded in the graph.
+                        multi_steps_attn_metadata.append(
+                            self._build_in_graph_draft_metadata(
+                                draft_index, in_graph_tokens, self._get_positions(in_graph_tokens), None
+                            )
+                        )
+                        continue
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
                     common_attn_metadata.copy_sfa_draft_index = draft_index
                     common_attn_metadata.copy_sfa_restore_tails = False
@@ -902,6 +926,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.query_start_loc_group[draft_index][: num_reqs + 1].copy_(common_attn_metadata.query_start_loc)
                     self.query_start_loc_group[draft_index][num_reqs + 1 :].fill_(0)
                     common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_index][: num_reqs + 1]
+                    if draft_index == 0 and in_graph_tokens is not None:
+                        self._mtp_graph_common_metadata = common_attn_metadata
                     self._prepare_dcp_draft_dummy_metadata(common_attn_metadata, draft_index)
                     if self.dcp_size > 1 and draft_index > 0:
                         num_reqs = common_attn_metadata.num_reqs
@@ -939,6 +965,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_positions = self._get_positions(num_tokens)
 
         batch_size = max(num_tokens // (self.num_speculative_tokens + 1), 1)
+        if in_graph_tokens is not None:
+            batch_size = in_graph_tokens
         # TODO: temporarily hack here, we should find out batch_size for profile_run
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
@@ -1065,19 +1093,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
-            target_token_ids=target_token_ids,
-            next_token_ids=next_token_ids,
-            target_positions=target_positions,
-            target_hidden_states=target_hidden_states,
-            token_indices_to_sample=token_indices_to_sample,
-            cad=common_attn_metadata,
-            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-            req_scheduled_tokens=req_scheduled_tokens,
-            long_seq_metadata=long_seq_metadata,
-            num_prefill_reqs=num_prefill_reqs,
-            num_decode_reqs=num_decode_reqs,
-        )
+        with record_function_or_nullcontext("mtp_set_inputs_first_pass"):
+            num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
+                target_token_ids=target_token_ids,
+                next_token_ids=next_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                cad=common_attn_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                req_scheduled_tokens=req_scheduled_tokens,
+                long_seq_metadata=long_seq_metadata,
+                num_prefill_reqs=num_prefill_reqs,
+                num_decode_reqs=num_decode_reqs,
+            )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
         if dcp_manager is not None and not self.parallel_drafting:
@@ -1109,6 +1138,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
+        in_graph_tokens = self._get_in_graph_draft_token_capacity(
+            num_input_tokens, aclgraph_runtime_mode, uniform_decode=uniform_decode
+        )
+        if in_graph_tokens is not None:
+            self._mtp_num_actual_reqs.fill_(batch_size)
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
@@ -1220,9 +1254,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.num_input_tokens = num_input_tokens
 
         self._pad_draft_buffers(num_tokens, num_input_tokens)
-        multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
-            common_attn_metadata, num_input_tokens, num_tokens
-        )
+        with record_function_or_nullcontext("mtp_first_pass_metadata"):
+            multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
+                common_attn_metadata, num_input_tokens, num_tokens
+            )
+        if in_graph_tokens is not None:
+            self._mtp_graph_common_metadata = common_attn_metadata
 
         # Merged step 0 is the draft model's first-pass/prefill forward, not a
         # one-token draft decode step. It reuses the target-model layout and
@@ -1253,7 +1290,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
                 : common_attn_metadata.block_table_tensor.shape[0]
             ]
-        else:
+        elif in_graph_tokens is None:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
         metadata_has_prefill = bool(getattr(attn_metadata_i, "num_prefills", 0))
@@ -1284,7 +1321,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
         should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
-        if should_update_next_steps:
+        if should_update_next_steps and in_graph_tokens is None:
             cache_only_groups = (
                 [group for group in self.draft_attn_groups if self._is_cache_only_draft_attn_group(group)]
                 if self.method == "mtp"
@@ -1384,12 +1421,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
-            if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-                draft_token_ids = run_draft()
-            else:
-                draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+            with record_function_or_nullcontext("mtp_graph_execute"):
+                if self.enable_enpu:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_input_tokens, multi_steps_attn_metadata
+                    )
+                    draft_token_ids = run_draft()
+                else:
+                    draft_token_ids = run_draft()
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_input_tokens, multi_steps_attn_metadata
+                    )
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
         return draft_token_ids
@@ -1663,11 +1705,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_states = hidden_states[token_indices_to_sample]
         token_indices_to_sample = self.arange[:batch_size]
 
-        input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
-
         forward_context = get_forward_context()
+        in_graph_tokens = self._get_in_graph_draft_token_capacity(
+            num_input_tokens,
+            forward_context.cudagraph_runtime_mode,
+            uniform_decode=getattr(getattr(forward_context, "batch_descriptor", None), "uniform", True),
+        )
+        input_batch_size = (
+            in_graph_tokens
+            if in_graph_tokens is not None
+            else num_input_tokens
+            if (self.method == "mtp" or self.use_cuda_graph)
+            else batch_size
+        )
         _EXTRA_CTX.num_tokens = input_batch_size
         _EXTRA_CTX.num_accept_tokens = batch_size
+        if in_graph_tokens is not None:
+            # MC2 prepare must not pad one-token decode rows back to the
+            # first-pass verification bucket. This path uses dynamic global_bs.
+            _EXTRA_CTX.padded_num_tokens = input_batch_size
 
         for draft_index in range(self.num_speculative_tokens - 1):
             # Reset MOE layer index for each draft step iteration
@@ -1721,9 +1777,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
 
-            forward_context.attn_metadata = (
-                multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
-            )
+            if in_graph_tokens is not None:
+                forward_context.attn_metadata = self._build_in_graph_draft_metadata(
+                    draft_index + 1, input_batch_size, clamped_positions, exceeds_max_model_len
+                )
+            else:
+                forward_context.attn_metadata = (
+                    multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
+                )
 
             if self.use_compress:
                 # The compressor metadata cached for the previous draft substep
