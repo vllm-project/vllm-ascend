@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Prepare nonempty inputs for the CANN pooled key indexer."""
 
+import torch
 from vllm.triton_utils import tl, triton
 
 
@@ -75,14 +76,20 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
     block = 8192
     size = max(padded_query.numel(), padded_weights.numel(), requests + 1, padded_table.numel())
     grid = max(triton.cdiv(size, block), triton.cdiv(requests + 1, 16))
+    query_copy = query.contiguous()
+    padded_query_copy = padded_query
+    if query.dtype == torch.float8_e4m3fn:
+        # Copy FP8 bytes without numeric casts in masked sentinel loads.
+        query_copy = query_copy.view(torch.uint8)
+        padded_query_copy = padded_query.view(torch.uint8)
     _prepare_nonempty_keypool_inputs_kernel[(grid,)](
-        query.contiguous(),
+        query_copy,
         weights.contiguous(),
         ends.contiguous(),
         lengths.contiguous(),
         tails.contiguous(),
         table.contiguous(),
-        padded_query,
+        padded_query_copy,
         padded_weights,
         padded_ends,
         padded_lengths,

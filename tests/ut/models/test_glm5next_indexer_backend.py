@@ -2,11 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 import torch
+import transformers
 from torch import nn
 
 from vllm_ascend.ops.mla import IndexerWrapper
+
+
+def test_glm_indexer_rejects_unsupported_cache_dtype_before_constructing_layers():
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="int8"))
+    # The config class is only an annotation here and is absent in older test images.
+    with patch.object(transformers, "Glm5NextConfig", transformers.PretrainedConfig, create=True):
+        from vllm_ascend.models.glm5next.attention import Indexer
+
+        with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16 or fp8"):
+            Indexer(config, None, 8, 8, None, None, None)
 
 
 class _FakeKPoolBackend(nn.Module):

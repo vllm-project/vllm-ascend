@@ -7,9 +7,6 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-    OffloadingConnector,
-)
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
@@ -117,7 +114,7 @@ def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> N
     assert create_calls == 1
 
 
-def test_ascend_connector_replaces_worker_with_current_vllm_config(
+def test_ascend_connector_creates_worker_with_normalized_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vllm_config = object()
@@ -136,9 +133,12 @@ def test_ascend_connector_replaces_worker_with_current_vllm_config(
         assert init_vllm_config is vllm_config
         assert role == KVConnectorRole.WORKER
         assert init_kv_cache_config is kv_cache_config
-        self.connector_worker = SimpleNamespace(spec=spec)
+        return None
 
-    monkeypatch.setattr(OffloadingConnector, "__init__", fake_upstream_init)
+    normalized = _make_config({"cpu_bytes_to_use": 1024})
+    monkeypatch.setattr(connector_mod.KVConnectorBase_V1, "__init__", fake_upstream_init)
+    monkeypatch.setattr(connector_mod, "_build_offloading_config", lambda *args: normalized)
+    monkeypatch.setattr(connector_mod.OffloadingSpecFactory, "create_spec", lambda config: spec)
 
     connector = AscendOffloadingConnector(
         vllm_config,
@@ -242,8 +242,11 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(config=_make_config({}))
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []
@@ -286,8 +289,11 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         num_blocks=4,
         kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
+        hisparse_host_num_blocks=None,
+        prefix_cacheable_group_ids=(0,),
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(config=_make_config({}))
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []

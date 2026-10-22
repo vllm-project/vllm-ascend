@@ -239,7 +239,14 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
 
 def _make_layout_worker(kv_cache_config, monkeypatch: pytest.MonkeyPatch):
+    kv_cache_config.hisparse_host_num_blocks = None
+    kv_cache_config.prefix_cacheable_group_ids = tuple(range(len(kv_cache_config.kv_cache_groups)))
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.spec = SimpleNamespace(
+        config=SimpleNamespace(
+            groups=tuple(SimpleNamespace(group_id=i) for i in kv_cache_config.prefix_cacheable_group_ids)
+        )
+    )
     worker.kv_cache_config = kv_cache_config
     worker.vllm_config = object()
     captured: list[Any] = []
@@ -304,7 +311,7 @@ def test_split_attention_cache_is_zero_copy(
     key = torch.empty((4, 2, 1, 3), dtype=torch.bfloat16)
     value = torch.empty((4, 2, 1, 3), dtype=torch.bfloat16)
 
-    worker.register_kv_caches({layer_name: (key, value)})
+    worker.register_kv_caches({layer_name: (key, torch.empty(4, 2, 1, 0), value)})
 
     canonical = captured[0]
     assert [tensor.tensor.shape for tensor in canonical.tensors] == [
@@ -318,3 +325,71 @@ def test_split_attention_cache_is_zero_copy(
     assert all(ref.mapping is None for ref in canonical.group_data_refs[0])
     assert canonical.tensors[0].tensor.data_ptr() == key.data_ptr()
     assert canonical.tensors[1].tensor.data_ptr() == value.data_ptr()
+
+
+def test_shared_physical_pages_round_trip_all_components_and_padding(monkeypatch, glm_shared_physical_pages):
+    layout = glm_shared_physical_pages
+    worker, captured = _make_layout_worker(layout.kv_config, monkeypatch)
+    worker.register_kv_caches(layout.caches)
+    canonical = captured[0]
+    assert len(canonical.tensors) == 2
+    views = {tensor.tensor.data_ptr(): tensor.tensor for tensor in canonical.tensors}
+    for group, refs in zip(layout.kv_config.kv_cache_groups, canonical.group_data_refs):
+        assert len(refs) == 1 and refs[0].page_size_bytes == group.kv_cache_spec.page_size_bytes
+    for backing, raw, page_bytes in layout.backings:
+        view = views[raw.data_ptr()]
+        assert view.shape == (3, page_bytes) and view.stride() == (page_bytes, 1)
+        before = backing.clone()
+        saved = view[[2, 0]].clone()
+        view[0].zero_()
+        view[2].zero_()
+        view[0].copy_(saved[0])
+        view[2].copy_(saved[1])
+        expected = before.clone()
+        for dst, src in ((0, 2), (2, 0)):
+            expected[layout.offset + dst * page_bytes : layout.offset + (dst + 1) * page_bytes] = before[
+                layout.offset + src * page_bytes : layout.offset + (src + 1) * page_bytes
+            ]
+        torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+
+
+def test_layout_worker_preserves_normalized_group_selection_and_order(monkeypatch, glm_shared_physical_pages):
+    layout = glm_shared_physical_pages
+    worker, captured = _make_layout_worker(layout.kv_config, monkeypatch)
+    worker.spec.config.groups = (SimpleNamespace(group_id=3), SimpleNamespace(group_id=1))
+    worker.register_kv_caches({name: layout.caches[name] for name in ("indexer", "mamba")})
+    canonical = captured[0]
+    assert [tensor.tensor.data_ptr() for tensor in canonical.tensors] == [
+        layout.backings[0][1].data_ptr(),
+        layout.backings[1][1].data_ptr(),
+    ]
+    assert [[ref.tensor_idx for ref in group] for group in canonical.group_data_refs] == [[0], [1]]
+
+
+def test_physical_page_contract_rejects_unrelated_component_storage():
+    with pytest.raises(ValueError, match="backing storage"):
+        connector_mod._canonicalize_physical_pages(
+            (torch.empty(3, 8)[:, :4], torch.empty(3, 8)[:, :4]),
+            3,
+            32,
+        )
+
+
+@pytest.mark.parametrize("page_bytes", [40, 48])
+def test_physical_pages_validate_the_last_kernel_block(page_bytes):
+    backing = torch.empty(208, dtype=torch.int8)
+    key = backing.as_strided((6, 16), (32, 1), 8)
+    if page_bytes == 40:
+        with pytest.raises(ValueError, match="page layout"):
+            connector_mod._canonicalize_physical_pages((key,), 3, page_bytes)
+    else:
+        view = connector_mod._canonicalize_physical_pages((key,), 3, page_bytes)
+        assert view.shape == (3, page_bytes) and view.stride() == (64, 1)
+        assert view.data_ptr() == key.data_ptr()
+
+
+@pytest.mark.parametrize("physical", [False, True])
+def test_empty_cache_components_are_rejected(physical):
+    canonicalize = connector_mod._canonicalize_physical_pages if physical else connector_mod._canonicalize_split_cache
+    with pytest.raises(ValueError, match="non-empty tensor"):
+        canonicalize((torch.empty(3, 0),), 3, 32)

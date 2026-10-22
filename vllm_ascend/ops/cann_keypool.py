@@ -3,6 +3,8 @@
 """State gathering and nonempty input adaptation for CANN KeyPool."""
 
 import torch
+import torch_npu
+from torch.nn import functional as F
 
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 
@@ -31,6 +33,12 @@ def gather_retained_hidden(hidden, indices):
     return torch.index_select(hidden, 0, indices.flatten())
 
 
+def quantize_keypool_query(query):
+    result, scale = torch_npu.npu_dynamic_quant(query, dst_type=torch.float8_e4m3fn)
+    scale.masked_fill_(scale == 0, 1.0)
+    return result, scale
+
+
 def pool_key_indexer_nonempty(
     op,
     query,
@@ -46,6 +54,7 @@ def pool_key_indexer_nonempty(
     layout_q="TND",
     layout_k="PA_BBND",
     mask_mode=3,
+    k_descale=None,
 ):
     """Keep CANN's TND indexer out of its unsafe zero-work paths.
 
@@ -58,9 +67,18 @@ def pool_key_indexer_nonempty(
     """
     if layout_q != "TND" or layout_k != "PA_BBND" or mask_mode != 3:
         raise ValueError("The KPool empty-work adapter requires causal TND/PA_BBND inputs.")
+    if (pool_key.dtype == torch.float8_e4m3fn) != (k_descale is not None):
+        raise ValueError("FP8 KPool indexing requires key descales; BF16 indexing must not provide them.")
+    quant_kwargs = {}
+    if k_descale is not None:
+        query, q_descale = quantize_keypool_query(query)
+        # The trailing zero query has a unit scale; real query scales stay unchanged.
+        quant_kwargs = dict(q_descale=F.pad(q_descale, (0, 0, 0, 1), value=1.0), k_descale=k_descale, quant_mode=0)
+    else:
+        query = query.to(pool_key.dtype)
     tokens = query.shape[0]
     query_padded, weights_padded, query_ends, key_lengths, tails, tables = prepare_nonempty_keypool_inputs(
-        query, weights, actual_seq_q, actual_seq_k, pool_tail_k, block_table
+        query, weights.to(torch.bfloat16), actual_seq_q, actual_seq_k, pool_tail_k, block_table
     )
     indices, values = op(
         query_padded,
@@ -75,5 +93,6 @@ def pool_key_indexer_nonempty(
         topk=topk,
         pool_size=pool_size,
         mask_mode=mask_mode,
+        **quant_kwargs,
     )
     return indices[:tokens], values

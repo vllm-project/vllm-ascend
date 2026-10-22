@@ -169,6 +169,53 @@ def test_kpool_backend_rejects_context_parallelism(pcp_size: int, dcp_size: int)
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 
+def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch):
+    source = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+        ),
+        n_head=1,
+        head_dim=128,
+        topk_tokens=2048,
+        q_lora_rank=128,
+        index_kpool=4,
+        wq_b=nn.Identity(),
+        wk_weights_proj=nn.Identity(),
+        k_norm=nn.Identity(),
+        softmax_scale=1.0,
+        index_kpool_compress_ape=torch.zeros(4, 128),
+        index_kpool_compress_gate=torch.zeros(128, 128),
+        k_cache=SimpleNamespace(dtype=torch.float8_e4m3fn),
+        tail_cache=SimpleNamespace(),
+        topk_indices_buffer=None,
+    )
+    hardware = SimpleNamespace(
+        attention_backend_family=backend_module.AttentionBackendFamily.STANDARD, supports=MagicMock(return_value=False)
+    )
+    monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
+    init = MagicMock()
+    monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
+    with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
+        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
+    init.assert_not_called()
+
+
+def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
+    key = torch.empty(2, 4, 1, 128, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 4, 1, 1)
+    layer = SimpleNamespace(prefix="indexer.cache", kv_cache=[(), (key, scale)])
+    monkeypatch.setattr(backend_module, "get_forward_context", lambda: SimpleNamespace(virtual_engine=1))
+    caches = Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    assert caches[0] is key and caches[1] is scale
+    layer.kv_cache[1] = (key,)
+    with pytest.raises(TypeError, match="one scale tensor"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
+    layer.kv_cache = []
+    with pytest.raises(IndexError, match="virtual engine"):
+        Glm5NextKPoolIndexerBackend._bound_caches(layer)
+
+
 @pytest.mark.parametrize("compute_topk", [False, True])
 def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute_topk):
     compress = MagicMock()
@@ -367,19 +414,21 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 
 @pytest.mark.parametrize("compute_topk", [False, True])
 @pytest.mark.parametrize(
-    "dsa_cp,actual_query_tokens,runtime_mode",
+    "dsa_cp,actual_query_tokens,runtime_mode,quantized",
     [
-        (False, 8, CUDAGraphMode.NONE),
-        (True, 4, CUDAGraphMode.NONE),
-        (True, 3, CUDAGraphMode.NONE),
-        (True, 0, CUDAGraphMode.NONE),
-        (True, 0, CUDAGraphMode.PIECEWISE),
-        (True, 0, CUDAGraphMode.FULL),
+        (False, 8, CUDAGraphMode.NONE, False),
+        (True, 4, CUDAGraphMode.NONE, False),
+        (True, 3, CUDAGraphMode.NONE, False),
+        (True, 0, CUDAGraphMode.NONE, False),
+        (True, 0, CUDAGraphMode.PIECEWISE, False),
+        (True, 0, CUDAGraphMode.FULL, False),
+        (True, 4, CUDAGraphMode.NONE, True),
+        (True, 0, CUDAGraphMode.FULL, True),
     ],
 )
 @pytest.mark.parametrize("reuse_output", [False, True])
 def test_cann_indexer_writes_caches_before_optional_selection(
-    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output
+    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, quantized, reuse_output
 ):
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
@@ -427,7 +476,8 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     query_metadata = metadata.query_metadata or metadata
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
-    cache = torch.empty(2, 2, 1, 2, dtype=torch.bfloat16)
+    cache = torch.empty(2, 2, 1, 2, dtype=torch.float8_e4m3fn if quantized else torch.bfloat16)
+    scale_cache = torch.empty(2, 2, 1, 1) if quantized else None
     tail = torch.empty(2, 4, 4)
     with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
         result = op._forward_cann(
@@ -439,6 +489,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             metadata,
             tail_metadata,
             compute_topk=compute_topk,
+            indexer_scale_cache=scale_cache,
         )
     names = [call[0] for call in calls.mock_calls]
     assert names[:3] == ["prepare_keypool_state", "key_pool", "write_keypool_caches"]
@@ -446,6 +497,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     assert op._key_pool.call_args.kwargs["cu_seqlens"] is metadata.query_start_loc
     assert op._write_keypool_caches.call_args.args[:2] == (tail, cache)
     assert op._write_keypool_caches.call_args.args[4] is pooled
+    assert op._write_keypool_caches.call_args.kwargs["scale_cache"] is scale_cache
     skip_empty_query = actual_query_tokens == 0 and runtime_mode != CUDAGraphMode.FULL
     if compute_topk and skip_empty_query:
         assert result.shape == (query_rows, 1, 7)
@@ -469,6 +521,13 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
         assert op._pool_key_indexer.call_args.args[3] is query_metadata.pool_tail
         assert op._pack_keypool_indices.call_args.args[1] is query_metadata
+        assert op._pack_keypool_indices.call_args.args[0].shape[0] == query_rows
+        if quantized:
+            assert op._pool_key_indexer.call_args.kwargs["k_descale"].data_ptr() == scale_cache.data_ptr()
+        else:
+            assert op._pool_key_indexer.call_args.kwargs["k_descale"] is None
+        assert op._pool_key_indexer.call_args.args[0].shape == (query_rows, 1, 2)
+        assert op._pool_key_indexer.call_args.args[0].dtype == torch.bfloat16
     else:
         assert result is None
         op._pool_key_indexer.assert_not_called()
