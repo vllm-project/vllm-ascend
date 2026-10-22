@@ -38,9 +38,7 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
             # Draft prefill appends the target's correction token to the
             # expanded query, so the upstream builder must receive target
             # length + 1. Keep the input batch's bounds unchanged.
-            draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(
-                max=self.max_model_len
-            )
+            draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(max=self.max_model_len)
 
         num_tokens = int(query_start_loc_np[-1])
         positions = self.expanded_positions if step == 0 else self.input_buffers.positions
