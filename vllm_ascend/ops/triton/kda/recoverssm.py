@@ -328,6 +328,7 @@ def _compact_conv_state_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    DIM_STRIDE: tl.constexpr = None,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -348,7 +349,10 @@ def _compact_conv_state_kernel(
 
     base_addr = tl.load(conv_state_base_addrs_ptr + pid_l)
     block_stride = tl.load(conv_state_block_strides_ptr + pid_l)
-    dim_stride = tl.load(conv_state_dim_strides_ptr + pid_l)
+    if DIM_STRIDE is None:
+        dim_stride = tl.load(conv_state_dim_strides_ptr + pid_l)
+    else:
+        dim_stride = DIM_STRIDE
     token_stride = tl.load(conv_state_token_strides_ptr + pid_l)
     conv_state_ptr = base_addr.to(tl.pointer_type(conv_state_ref_ptr.dtype.element_ty))
     source_ptr = conv_state_ptr + source_state_idx * block_stride
@@ -707,6 +711,7 @@ class KDARecoverSSMCommitContext:
     dt_bias: torch.Tensor
     lower_bound: float | None
     spec_query_len: int
+    conv_dim_stride: int | None
 
     @classmethod
     def create(
@@ -840,6 +845,9 @@ class KDARecoverSSMCommitContext:
             dt_bias=torch.stack(tuple(dt_bias)).contiguous(),
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
+            conv_dim_stride=(
+                conv_ref.stride(1) if all(state.stride(1) == conv_ref.stride(1) for state in conv_states) else None
+            ),
         )
 
     def commit(
@@ -934,6 +942,7 @@ class KDARecoverSSMCommitContext:
             BLOCK_D=256,
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,
+            DIM_STRIDE=self.conv_dim_stride,
             num_warps=4,
         )
 
