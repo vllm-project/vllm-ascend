@@ -611,16 +611,56 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
     assert copies_arg is copies
 
 
-def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
+def test_sampler_accepts_temperature_min_p_and_rejects_penalties() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     _add_request(sampler, 0, 4, SamplingParams(temperature=0))
     _add_request(sampler, 1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    _add_request(sampler, 2, 4, SamplingParams(temperature=0.9, min_p=0.1, seed=3))
     sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
+    assert sampler.sampling_states.min_p.gpu[2].item() == pytest.approx(0.1)
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        _add_request(sampler, 2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+        _add_request(sampler, 3, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+
+
+def test_sampler_min_p_masks_low_probability_tokens() -> None:
+    """Align with MRV1 MinPLogitsProcessor: keep tokens with p >= min_p * max_p."""
+    from vllm_ascend._310p.worker.v2.sampler import _apply_min_p_pytorch
+
+    # Softmax([5, 1, 0]) ≈ [0.96, 0.018, 0.006]; min_p=0.1 keeps only idx0.
+    logits = torch.tensor([[5.0, 1.0, 0.0]], dtype=torch.float32)
+    expanded = torch.tensor([0], dtype=torch.int64)
+    min_p = torch.tensor([0.1], dtype=torch.float32)
+    _apply_min_p_pytorch(logits, expanded, min_p)
+    assert torch.isfinite(logits[0, 0])
+    assert not torch.isfinite(logits[0, 1])
+    assert not torch.isfinite(logits[0, 2])
+
+
+def test_sampler_min_p_restricts_softmax_mass() -> None:
+    """With temp>0, min_p must zero discarded tokens before inverse-CDF."""
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
+    _add_request(sampler, 0, 2, SamplingParams(temperature=0.8, min_p=0.1, seed=7))
+    sampler.apply_staged_writes()
+    logits = torch.tensor([[5.0, 1.0, 0.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_and_argmax(probs: torch.Tensor, generators):
+        del generators
+        captured["probs"] = probs.detach().cpu().clone()
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+        out = sampler(logits, _make_sampler_batch())
+
+    probs = captured["probs"][0]
+    assert probs[0].item() == pytest.approx(1.0, abs=1e-5)
+    assert probs[1:].sum().item() == pytest.approx(0.0, abs=1e-6)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
 def test_sampler_temperature_scales_logits_before_argmax() -> None:
