@@ -628,15 +628,6 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-<details markdown="1">
-<summary>MemCache DP Initialization Synchronization</summary>
-
-For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
-
-Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
-
-</details>
-
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
