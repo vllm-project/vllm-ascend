@@ -86,14 +86,20 @@ That connector fix does not replace scheduler admission checks.
 
 ## Validation status
 
-This revision's tests were written under a user-requested baseline freeze.
-No tests, lint, compilation, server restarts or benchmarks may run until the
-`issule-fix` session completes its baseline and explicitly hands off the
-validation environment. Passing historical Plan B benchmarks are not evidence
-that these new admission changes have been verified.
+Validated on the current `main` base (`a9958712`, pinned vLLM `a98247ab`)
+in the Ascend container:
 
-After handoff, the required checks include full/sliding exhaustion below 75%
-aggregate usage, exact fits, reservations, watermark conditions, reclaimed-window
-capacity, prefix touch, external KV, CoW, shared-pool compatibility, prefix-cache
-disabled mode and replay-patch installation order. Run the regression against
-the old implementation before asserting that it detects the original defect.
+- RED: the old implementation with the new backpressure cases fails 3/3 —
+  both group shortfalls raise
+  `ValueError: Cannot get 2 free blocks from the pool` mid-allocation, and
+  the customer-incident case shows aggregate usage 0.667 against full-group
+  usage 0.933.
+- GREEN: pools + admission + backpressure suites 48/48.
+- Regressions: `tests/ut/patch/platform` 438 passed; `tests/ut/core` +
+  `kv_transfer` + `patch/worker` 510 passed; the full `tests/ut` failure and
+  error set is identical to the baseline tree (zero new failures).
+- Lint: ruff 0.14.0 (pre-commit pinned) check + format clean.
+- NPU (4-card TP, gemma-4-31B, per-group pools `[1460×5, 2560]`, primary =
+  full group): a 32×24K long-dwell wave drove the full pool to 97.5% usage
+  with `waiting_by_reason{capacity}` draining 27 → 0; 32/32 requests
+  completed with zero allocation errors, zero 5xx and zero preemptions.
