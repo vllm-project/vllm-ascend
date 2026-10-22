@@ -80,5 +80,26 @@ CPU protocol tests are in `tests/ut/models/test_engram_shared_pool.py`. They
 exercise real control sockets with a fake allocator; they do not establish
 hardware correctness. A3 validation has exercised remote native lookup,
 independent detach/reattach, actual checkpoint rows, and embedding graph replay.
-Full-model matched P/D performance and lifecycle validation are still in
-progress. No end-to-end throughput or SLO improvement is claimed here.
+Full-model P/D was tested on four A3 nodes in one physical supernode, with
+CANN9.2 and torch-npu2.10. The pinned deployment used three DP4/TP4 prefills
+and one DP8/TP2 decoder, native INT8 lookup and the same KV connector for both
+placements. Both runs completed1440/1440 requests without errors. Physical
+table backing fell from approximately824GiB to208GiB. This is table storage,
+not total system memory or HBM usage.
+
+| Prompt bucket | Concurrency | Native QPS | Shared QPS | Shared TTFT P50 (s) | Shared TPOT P50/P90 (ms) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0–10K | 96 | 3.819 | 4.381 | 1.357 | 28.527 / 34.950 |
+| 10–20K | 108 | 3.756 | 4.144 | 2.966 | 28.260 / 38.143 |
+| 20–40K | 120 | 3.581 | 3.847 | 8.238 | 26.042 / 35.879 |
+| 40–80K | 64 | 1.969 | 2.027 | 9.272 | 24.616 / 32.580 |
+| Cache-hit dataset | 92 | 3.981 | 4.154 | 1.398 | 29.538 / 36.130 |
+
+Each case used three closed-loop waves, a700-token cap,24 warmup requests and
+backend prefix-cache reset. Paired request hashes and prompt-token counts
+matched. The cache-hit label identifies the dataset, not a measured hit rate.
+This single sequential A/B shows no observed QPS regression; it does not prove
+a stable speedup. The20–40K TTFT target of7s was missed by both baseline7.640s
+and shared8.238s. Full SLO acceptance and owner-failure validation remain open.
+The private request corpus is not distributed with this change; reproduce
+performance using a representative corpus and report workload differences.
