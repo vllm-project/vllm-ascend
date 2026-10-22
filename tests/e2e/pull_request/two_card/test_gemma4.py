@@ -32,9 +32,11 @@ _GRAPH_ENV = {
 _MTP_MODEL = "google/gemma-4-31B-it"
 _MTP_DRAFT_MODEL = "google/gemma-4-31B-it-assistant"
 _MTP_NUM_SPECULATIVE_TOKENS = 3
-# Loose floor: catches a draft that reads its own empty cache (~0 acceptance)
-# without pinning a profile that depends on the checkpoint and the hardware.
-_MTP_MIN_ACCEPTANCE_PER_POS = 0.3
+# Floors keep ~10-20pp of headroom over the measured profile (TP2,
+# FULL_DECODE_ONLY: 0.96/0.90/0.80) to absorb the small-sample noise of the
+# 4-prompt run and cross-hardware drift, while catching double-digit
+# regressions such as a broken in-graph window path.
+_MTP_MIN_ACCEPTANCE_PER_POS = (0.85, 0.75, 0.60)
 
 
 def _run_full_decode_graph_smoke(model: str, *, enable_expert_parallel: bool) -> None:
@@ -127,7 +129,8 @@ def test_gemma4_mtp_spec_decode_model_runner_v2() -> None:
         Counter,
         Vector,
     )
-    assert all(rate >= _MTP_MIN_ACCEPTANCE_PER_POS for rate in acceptance_per_pos), (
-        f"per-position acceptance {acceptance_per_pos} collapsed; the Gemma4 draft "
-        "is most likely not sharing the target model's KV cache"
+    assert all(rate >= floor for rate, floor in zip(acceptance_per_pos, _MTP_MIN_ACCEPTANCE_PER_POS, strict=True)), (
+        f"per-position acceptance {acceptance_per_pos} fell below the floors "
+        f"{_MTP_MIN_ACCEPTANCE_PER_POS}; the Gemma4 draft may not be sharing "
+        "the target model's KV cache or the in-graph window path regressed"
     )
