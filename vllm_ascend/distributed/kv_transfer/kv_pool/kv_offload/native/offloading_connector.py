@@ -10,10 +10,15 @@ from dataclasses import replace
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1, KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+    get_offloading_group_ids,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import OffloadingConnectorScheduler
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -32,10 +37,42 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     CanonicalPageMapping,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 from vllm_ascend.core.kv_cache_interface import requires_padded_page_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.layout import _canonicalize_physical_pages
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+def _build_offloading_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> OffloadingConfig:
+    config = build_offloading_config(vllm_config, kv_cache_config)
+    specs = (
+        group.kv_cache_spec.kv_cache_specs.values()
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else (group.kv_cache_spec,)
+        for group in kv_cache_config.kv_cache_groups
+    )
+    selected_layers = {name for group in config.groups for name in group.layer_names}
+    tensors = [
+        tensor
+        for tensor in kv_cache_config.kv_cache_tensors
+        if selected_layers.intersection(get_kv_cache_tensor_layers(tensor))
+    ]
+    if (
+        kv_cache_config.num_blocks > 0
+        and kv_cache_config.hisparse_host_num_blocks is None
+        and requires_padded_page_layout(spec for group_specs in specs for spec in group_specs)
+        and tensors
+        and all(
+            t.offset == 0 and t.layer_stride == 0 and t.size == t.block_stride * kv_cache_config.num_blocks
+            for t in tensors
+        )
+    ):
+        # Each independent descriptor is one allocation; aliased layers share its budget.
+        worker_bytes = sum(t.size for t in tensors)
+        config = replace(config, worker_kv_bytes_per_block=worker_bytes // kv_cache_config.num_blocks)
+    return config
 
 
 def _make_int8_block_view(
@@ -162,6 +199,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
+        )
         layer_specs = {
             name: group.kv_cache_spec.kv_cache_specs[name]
             if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -172,7 +212,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         padded_state_layout = requires_padded_page_layout(layer_specs.values())
 
         requires_layout_adaptation = False
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             for layer_name in group.layer_names:
                 layer_spec = layer_specs[layer_name]
                 layer_cache = kv_caches[layer_name]
@@ -233,7 +273,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                 )
             )
 
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             for layer_name in group.layer_names:
                 if layer_name in refs_by_layer:
                     continue
@@ -316,7 +356,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
@@ -343,11 +383,18 @@ class AscendOffloadingConnector(OffloadingConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        super().__init__(vllm_config, role, kv_cache_config)
-        connector_worker = self.connector_worker
-        if connector_worker is not None:
+        KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
+        # Resolve the physical allocation budget before constructing either side's spec.
+        config = _build_offloading_config(vllm_config, kv_cache_config)
+        self._canonical_layout = config.canonical_layout
+        spec = OffloadingSpecFactory.create_spec(config)
+        self.connector_scheduler = None
+        self.connector_worker = None
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+        elif role == KVConnectorRole.WORKER:
             self.connector_worker = AscendOffloadingConnectorWorker(
-                connector_worker.spec,
+                spec,
                 vllm_config,
                 kv_cache_config,
             )

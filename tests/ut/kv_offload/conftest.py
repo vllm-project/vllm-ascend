@@ -89,4 +89,6 @@ def glm_shared_physical_pages():
         kv_cache_tensors=descriptors,
         kv_cache_groups=[SimpleNamespace(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
     )
-    return SimpleNamespace(config=config, kv_config=kv_config, caches=caches, backings=backings, offset=offset)
+    return SimpleNamespace(
+        config=config, kv_config=kv_config, specs=specs, caches=caches, backings=backings, offset=offset
+    )
