@@ -349,6 +349,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     def make_layer(*args, **kwargs):
         layer = torch.nn.Module()
         layer.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        layer.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=object())))
         return layer
 
     factory = MagicMock(side_effect=make_layer)

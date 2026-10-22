@@ -1002,7 +1002,7 @@ def embedding_tp_enable() -> bool:
 
 
 def oproj_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
+    return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
 def mlp_tp_enable() -> bool:
@@ -1873,13 +1873,12 @@ def is_rot_weight_used(vllm_config: VllmConfig = None):
 
 
 def enable_sfa(vllm_config) -> bool:
+    """Whether the model uses SFA for its main attention cache."""
     model_config = getattr(vllm_config, "model_config", None)
     if model_config is None:
         return False
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
-        return False
-    if model_uses_kpool_indexer(model_config):
         return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
 
