@@ -114,11 +114,13 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
         assert scheduler._query_layerwise_block_hits([keys]) == [False]
 
 
-@pytest.mark.parametrize("cached_hit", [False, True])
 @pytest.mark.parametrize("mode", ["dspark", "reuse"])
-def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl(cached_hit, mode):
+def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
-    scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target"]))
+    # A fresh key list per call: _make_layerwise_hit_check_keys extends the
+    # returned list in place when dspark joint keys are active, so a shared
+    # return_value would accumulate draft keys across lookups.
+    scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(side_effect=lambda *args: ["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
     scheduler.dspark_prefix_keys = (
@@ -130,10 +132,6 @@ def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl
     scheduler.hash_block_size = 16
     scheduler.grouped_block_size = [16, 16]
     scheduler.use_layerwise = True
-    scheduler._lw_block_hit_cache = {(group_id, "block-hash"): (cached_hit, float("inf")) for group_id in (0, 1)}
-    original_cache = scheduler._lw_block_hit_cache.copy()
-    scheduler._lw_hit_cache_ttl, scheduler._lw_hit_cache_hit_ttl = 30.0, 0.5
-    scheduler._lw_hit_cache_max = 200_000
     request = SimpleNamespace(request_id="request", block_hashes=["block-hash"])
     readable_keys: set[str] = set()
     scheduler.store_scheduler = SimpleNamespace(
@@ -147,11 +145,12 @@ def test_prefix_lookup_rechecks_after_save_and_eviction_instead_of_using_hit_ttl
     readable_keys.remove(draft_keys[-1] if draft_keys else "target")
     assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == 0
     assert scheduler.store_scheduler.batch_is_readable.call_count == 6
-    assert scheduler._lw_block_hit_cache == original_cache
     scheduler.dspark_prefix_keys = None
     scheduler.layerwise_offload = False
-    assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == (16 if cached_hit else 0)
-    assert scheduler.store_scheduler.batch_is_readable.call_count == 6
+    # Without dspark/reuse key expansion the plain target key alone decides
+    # the hit, and the store is re-probed on every lookup.
+    assert scheduler._lookup_layerwise_contiguous(request, 16, 0) == (16 if mode == "dspark" else 0)
+    assert scheduler.store_scheduler.batch_is_readable.call_count == 8
 
 
 @pytest.mark.parametrize("draft_first", [False, True])
