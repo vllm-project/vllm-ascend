@@ -17,12 +17,14 @@ import json
 import math
 from dataclasses import asdict, replace
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from tests.e2e.nightly.feature.test_spec_decode_refactor_parity import (
     DSPARK_CASE,
     EAGLE3_CASE,
     MTP_CASE,
+    RunResult,
     SpecDecodeCase,
     _run,
 )
@@ -71,7 +73,8 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
             "model": args.draft_model,
         }
     case = replace(case, **updates)
-    result = _run(case, graph_mode=args.mode, speculative=True)
+    results = [_run(case, graph_mode=args.mode, speculative=True) for _ in range(args.repeats)]
+    result = _aggregate_results(results)
     payload = asdict(result)
     payload.update(
         {
@@ -79,10 +82,36 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
             "model": case.model,
             "speculative_config": case.speculative_config,
             "graph_mode": args.mode,
+            "repeat_count": len(results),
             "serving": _serving_metrics(args.serving_json),
         }
     )
     return payload
+
+
+def _aggregate_results(results: list[RunResult]) -> RunResult:
+    """Use medians for short-run timing while requiring deterministic outputs."""
+    baseline = results[0]
+    for result in results[1:]:
+        assert result.token_ids == baseline.token_ids, "repeated greedy token IDs differ"
+        assert result.cache_signature == baseline.cache_signature, "repeated cache signature differs"
+        assert result.family == baseline.family, "repeated speculation family differs"
+        assert len(result.acceptance_per_pos) == len(baseline.acceptance_per_pos)
+
+    elapsed_seconds = float(median(result.elapsed_seconds for result in results))
+    output_token_count = sum(len(tokens) for tokens in baseline.token_ids)
+    acceptance_per_pos = tuple(
+        float(median(result.acceptance_per_pos[pos] for result in results))
+        for pos in range(len(baseline.acceptance_per_pos))
+    )
+    return replace(
+        baseline,
+        acceptance_length=float(median(result.acceptance_length for result in results)),
+        acceptance_per_pos=acceptance_per_pos,
+        elapsed_seconds=elapsed_seconds,
+        output_tokens_per_second=output_token_count / elapsed_seconds,
+        hbm_in_use_bytes=int(median(result.hbm_in_use_bytes for result in results)),
+    )
 
 
 def _assert_performance_not_worse(
@@ -178,6 +207,7 @@ def main() -> None:
     record.add_argument("--model")
     record.add_argument("--draft-model")
     record.add_argument("--serving-json", help="Output JSON from `vllm bench serve --save-result`.")
+    record.add_argument("--repeats", type=int, default=3)
     record.add_argument("--output", required=True)
 
     compare = subparsers.add_parser("compare")
@@ -185,6 +215,8 @@ def main() -> None:
     compare.add_argument("candidate")
 
     args = parser.parse_args()
+    if args.command == "record" and args.repeats < 1:
+        parser.error("--repeats must be at least 1")
     if args.command == "compare":
         _compare(args.baseline, args.candidate)
         return

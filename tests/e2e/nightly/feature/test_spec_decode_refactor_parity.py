@@ -26,6 +26,12 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
+try:
+    from vllm_ascend.spec_decode.method import resolve_spec_decode_family
+except ImportError:
+    # The benchmark harness is also imported from the pre-refactor checkout.
+    resolve_spec_decode_family = None
+
 PROMPTS = [
     "Hello, my name is",
     "The president of the United States is",
@@ -44,6 +50,7 @@ class SpecDecodeCase:
     speculative_config: dict[str, Any]
     runner_kwargs: dict[str, Any]
     e2e_models: tuple[str, ...]
+    expected_family: str
 
 
 def _model_from_env(env_name: str, default: str) -> str:
@@ -62,6 +69,7 @@ MTP_CASE = SpecDecodeCase(
         "gpu_memory_utilization": 0.8,
     },
     e2e_models=(_model_from_env("SPEC_DECODE_MTP_MODEL", "Qwen/Qwen3.5-4B"),),
+    expected_family="mtp",
 )
 
 EAGLE3_CASE = SpecDecodeCase(
@@ -90,28 +98,30 @@ EAGLE3_CASE = SpecDecodeCase(
             "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge",
         ),
     ),
+    expected_family="eagle",
 )
 
 DSPARK_CASE = SpecDecodeCase(
     name="dspark",
-    model=_model_from_env("SPEC_DECODE_DSPARK_MODEL", "Qwen/Qwen3.6-27B"),
+    model=_model_from_env("SPEC_DECODE_DSPARK_MODEL", "Qwen/Qwen3-0.6B"),
     speculative_config={
         "method": "dspark",
-        "model": _model_from_env("SPEC_DECODE_DSPARK_DRAFT_MODEL", "satgeze/Qwen3.6-27B-DSpark"),
-        "num_speculative_tokens": 7,
+        "model": _model_from_env("SPEC_DECODE_DSPARK_DRAFT_MODEL", "yosefw/Qwen3-0.6B-DSpark"),
+        "num_speculative_tokens": 4,
     },
     runner_kwargs={
         "dtype": "bfloat16",
-        "tensor_parallel_size": 2,
+        "tensor_parallel_size": 1,
         "max_model_len": 2048,
         "max_num_batched_tokens": 4096,
         "max_num_seqs": len(PROMPTS),
-        "gpu_memory_utilization": 0.9,
+        "gpu_memory_utilization": 0.8,
     },
     e2e_models=(
-        _model_from_env("SPEC_DECODE_DSPARK_MODEL", "Qwen/Qwen3.6-27B"),
-        _model_from_env("SPEC_DECODE_DSPARK_DRAFT_MODEL", "satgeze/Qwen3.6-27B-DSpark"),
+        _model_from_env("SPEC_DECODE_DSPARK_MODEL", "Qwen/Qwen3-0.6B"),
+        _model_from_env("SPEC_DECODE_DSPARK_DRAFT_MODEL", "yosefw/Qwen3-0.6B-DSpark"),
     ),
+    expected_family="dspark",
 )
 
 
@@ -124,6 +134,7 @@ class RunResult:
     elapsed_seconds: float
     output_tokens_per_second: float
     hbm_in_use_bytes: int
+    family: str
 
 
 def _cache_signature(vllm_config: Any) -> tuple[tuple[str, object], ...]:
@@ -166,7 +177,13 @@ def _read_spec_metrics(vllm_model: Any, num_speculative_tokens: int) -> tuple[fl
     return acceptance_length, rates
 
 
-def _run(case: SpecDecodeCase, *, graph_mode: str, speculative: bool) -> RunResult:
+def _run(
+    case: SpecDecodeCase,
+    *,
+    graph_mode: str,
+    speculative: bool,
+    verify_family: bool = False,
+) -> RunResult:
     compilation_config = None
     enforce_eager = True
     if graph_mode == "full_decode_only":
@@ -212,6 +229,10 @@ def _run(case: SpecDecodeCase, *, graph_mode: str, speculative: bool) -> RunResu
         free_hbm_bytes, total_hbm_bytes = torch.npu.mem_get_info()
         hbm_in_use_bytes = int(total_hbm_bytes - free_hbm_bytes)
         cache_signature = _cache_signature(vllm_model.model.llm_engine.vllm_config)
+        family = case.expected_family
+        if verify_family:
+            assert resolve_spec_decode_family is not None
+            family = resolve_spec_decode_family(vllm_model.model.llm_engine.vllm_config).value
 
         if speculative:
             acceptance_length, acceptance_per_pos = _read_spec_metrics(
@@ -231,14 +252,16 @@ def _run(case: SpecDecodeCase, *, graph_mode: str, speculative: bool) -> RunResu
         elapsed_seconds=elapsed,
         output_tokens_per_second=output_token_count / elapsed,
         hbm_in_use_bytes=hbm_in_use_bytes,
+        family=family,
     )
 
 
 def _assert_family_parity(case: SpecDecodeCase) -> None:
-    eager = _run(case, graph_mode="eager", speculative=True)
-    graph = _run(case, graph_mode="full_decode_only", speculative=True)
+    eager = _run(case, graph_mode="eager", speculative=True, verify_family=True)
+    graph = _run(case, graph_mode="full_decode_only", speculative=True, verify_family=True)
 
     assert _cache_layout(eager) == _cache_layout(graph)
+    assert eager.family == graph.family == case.expected_family
     assert all(eager.token_ids)
     assert all(graph.token_ids)
     assert eager.acceptance_length > 1.0
