@@ -15,7 +15,7 @@ from vllm.config import ParallelConfig
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
@@ -45,7 +45,7 @@ _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
     try:
-        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+        if not get_ascend_config().kv_pool_range_debug:
             return
         payload = {
             "event": "whole_key",
@@ -369,7 +369,7 @@ class MooncakeBackend(Backend):
         if ssd_kwargs:
             logger.info(
                 "Mooncake SSD offload enabled (Mode A): path=%s",
-                self.config.ssd_offload_path,
+                ssd_kwargs["ssd_offload_path"],
             )
         logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         self._ssd_prefetch_enabled = self._resolve_ssd_prefetch()
@@ -621,7 +621,7 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -641,6 +641,7 @@ class MooncakeBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) >= 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -652,6 +653,7 @@ class MooncakeBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:

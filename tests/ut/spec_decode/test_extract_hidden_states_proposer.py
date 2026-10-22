@@ -32,7 +32,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.fixture(autouse=True)

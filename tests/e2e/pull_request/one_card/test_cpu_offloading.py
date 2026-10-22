@@ -142,16 +142,10 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber) -> None:
 
 
 @pytest.mark.parametrize("enable_tiering", [False, True])
-def test_cpu_offloading(tmp_path, enable_tiering: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     """
     Tests the native CPU-only and multi-tier offloading specs.
     """
-
-    # The CPU-hit speedup below is the Model Runner V2 measurement. On V1 the
-    # same 0.6B prompt reloads from CPU slower than a cold prefill, so the
-    # 80% check fails and the engine can still be holding the card when the
-    # next case starts.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict[str, Any] = {

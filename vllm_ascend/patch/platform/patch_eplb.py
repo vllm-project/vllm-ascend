@@ -573,17 +573,8 @@ def _wrap_async_worker(original_worker):
     transfer_signature = signature(_async_worker.transfer_layer)
     transfer_stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
 
-    @wraps(original_worker)
-    def _transfer_run_periodically(*args, **kwargs):
-        bound = worker_signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        state = bound.arguments["state"]
-        stream = bound.arguments[worker_stream_parameter]
-        is_profile = bound.arguments["is_profile"]
-        if not isinstance(state, AscendEplbState) or is_profile:
-            return original_worker(*bound.args, **bound.kwargs)
-        while True:
-            state.rearrange_event.wait(stream=stream)
+    def _run(state, stream, is_profile):
+        while state.wait_for_rearrangement(stream):
             eplb_group = _async_worker.get_eplb_group().device_group
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
@@ -651,6 +642,27 @@ def _wrap_async_worker(original_worker):
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
+
+    @wraps(original_worker)
+    def _transfer_run_periodically(*args, **kwargs):
+        bound = worker_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        state = bound.arguments["state"]
+        stream = bound.arguments[worker_stream_parameter]
+        is_profile = bound.arguments["is_profile"]
+        if not isinstance(state, AscendEplbState) or is_profile:
+            return original_worker(*bound.args, **bound.kwargs)
+        try:
+            return _run(state, stream, is_profile)
+        except Exception as error:
+            if state._hixl_session is not None:
+                # Context restoration and the final stream synchronization also
+                # belong to the migration. Preserve ownership on any failure.
+                session = state._hixl_session
+                if session._error is None:
+                    session._error = error
+                session._usable = False
+            raise
 
     setattr(_transfer_run_periodically, _PATCH_MARKER, True)
     return _transfer_run_periodically

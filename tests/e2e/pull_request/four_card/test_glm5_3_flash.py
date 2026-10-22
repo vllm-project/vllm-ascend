@@ -21,6 +21,8 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
 from tests.e2e.conftest import VllmRunner
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 NUM_LAYERS = 9
 OUTPUT_TOKENS = 8
 LOADER = "glm53flash_functional_dummy"

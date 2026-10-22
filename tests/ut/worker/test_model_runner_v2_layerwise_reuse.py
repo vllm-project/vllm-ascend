@@ -3,7 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.worker.v2 import attn_utils
@@ -11,7 +17,7 @@ from vllm_ascend.worker.v2 import attn_utils
 
 @pytest.mark.parametrize("reuse_enabled", [False, True])
 @pytest.mark.parametrize("zero_stride", [False, True])
-@pytest.mark.parametrize("cache_kind", ["full", "sfa_c8", "indexer", "indexer_scale"])
+@pytest.mark.parametrize("cache_kind", ["full", "sfa_c8", "indexer", "indexer_scale", "indexer_mixed"])
 def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, zero_stride, cache_kind):
     spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
     if cache_kind == "sfa_c8":
@@ -31,7 +37,27 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
             scale_dim=1 if cache_kind == "indexer_scale" else 0,
         )
     names = ["model.layers.0.attn", "model.layers.1.attn"]
-    size = 3 * spec.page_size_bytes
+    specs = dict.fromkeys(names, spec)
+    if cache_kind == "indexer_mixed":
+        specs[names[0]] = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        )
+        specs[names[1]] = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        if not (reuse_enabled and zero_stride):
+            pytest.skip("Mixed private layers are covered by the per-spec allocator tests")
+    max_page_size = max(s.page_size_bytes for s in specs.values())
+    size = 3 * max_page_size
     config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[
@@ -39,11 +65,16 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
                 size=size if zero_stride else 2 * size,
                 layers=names,
                 layer_stride=0 if zero_stride else size,
-                block_stride=spec.page_size_bytes,
+                block_stride=max_page_size,
                 offset=0,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs=specs),
+            )
+        ],
     )
     vllm_config = SimpleNamespace(kv_transfer_config=None)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -65,7 +96,14 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
     raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
     shares = reuse_enabled and zero_stride
     assert len(allocations) == (1 if shares else 2)
-    assert (raw[names[0]] is raw[names[1]]) == shares
+    if cache_kind == "indexer_mixed":
+        assert len(raw[names[0]]) == 1
+        assert len(raw[names[1]]) == 2
+        assert allocations == [size]
+        assert raw[names[0]][0].numel() == 3 * specs[names[0]].page_size_bytes
+        assert sum(t.numel() for t in raw[names[1]]) == 3 * specs[names[1]].page_size_bytes
+    else:
+        assert (raw[names[0]] is raw[names[1]]) == shares
     first = raw[names[0]] if isinstance(raw[names[0]], torch.Tensor) else raw[names[0]][0]
     second = raw[names[1]] if isinstance(raw[names[1]], torch.Tensor) else raw[names[1]][0]
     first.fill_(7)

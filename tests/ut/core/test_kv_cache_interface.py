@@ -9,7 +9,11 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, SlidingWindowMLASpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    HiddenStateCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -23,7 +27,9 @@ from vllm_ascend.core.kv_cache_interface import (
     register_ascend_kv_cache_specs,
     resolve_bounded_replay,
     supports_bounded_replay,
+    supports_component_major_mla_pd,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _mla_spec():
@@ -68,6 +74,18 @@ def test_get_storage_block_size_and_dcp_memory():
     assert spec.max_memory_usage_bytes(vllm_config) > 0
 
 
+def test_get_storage_block_size_for_plain_mla_subclass():
+    # vLLM #57169 removed `MLAAttentionSpec.storage_block_size` on main; the
+    # v0.31.0 lane keeps it as an optional override. A plain MLA subclass
+    # (HiddenStateCacheSpec) must resolve on both lanes.
+    spec = HiddenStateCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    if vllm_version_is("0.31.0"):
+        expected = spec.block_size if spec.storage_block_size is None else spec.storage_block_size
+    else:
+        expected = spec.block_size
+    assert get_storage_block_size(spec) == expected
+
+
 def test_sliding_window_mla_storage_and_page_size():
     spec = AscendSlidingWindowMLASpec(
         block_size=16,
@@ -109,6 +127,36 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert pool.get_num_free_blocks() == len(old_ids)
 
 
+def test_component_major_mla_pd_gate():
+    assert supports_component_major_mla_pd(SimpleNamespace(kv_transfer_config=None))
+
+    for connector in ("MooncakeConnectorV2", "MooncakePullConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert supports_component_major_mla_pd(config)
+
+    for connector in ("MooncakeConnectorV1", "AscendStoreConnector", "MultiConnector"):
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector=connector,
+                kv_connector_module_path=None,
+            )
+        )
+        assert not supports_component_major_mla_pd(config)
+
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MooncakeConnectorV2",
+            kv_connector_module_path="custom.connector",
+        )
+    )
+    assert not supports_component_major_mla_pd(config)
+
+
 # --- the fields a hand-rebuilt spec has to carry -----------------------------
 
 
@@ -123,11 +171,6 @@ def _swa_spec(**overrides):
     )
 
 
-@pytest.mark.skipif(
-    not hasattr(SlidingWindowMLASpec, "bounded_replay"),
-    reason="bounded_replay arrives with vLLM #56227. Until the Main2Main pin includes it "
-    "no spec can set the field, so there is nothing for merge to carry.",
-)
 def test_sliding_window_mla_merge_carries_bounded_replay():
     """The Ascend override rebuilds the merged spec instead of calling the
     parent's ``merge``, so upstream's field has to be carried across by hand:
@@ -138,8 +181,11 @@ def test_sliding_window_mla_merge_carries_bounded_replay():
     merged = AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=True)])
     assert merged.bounded_replay
     assert not merged.prefix_cacheable
+    assert merged.prefix_replay_tokens == merged.sliding_window == 64
 
-    assert not AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()]).bounded_replay
+    ordinary = AscendSlidingWindowMLASpec.merge([_swa_spec(), _swa_spec()])
+    assert not ordinary.bounded_replay
+    assert ordinary.prefix_replay_tokens == 0
 
     with pytest.raises(AssertionError, match="replay policy"):
         AscendSlidingWindowMLASpec.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=False)])
@@ -190,9 +236,8 @@ def test_the_swa_spec_accepts_whatever_the_probe_returns():
     replaying = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", True))
     plain = _swa_spec(**declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", False))
 
-    if hasattr(SlidingWindowMLASpec, "bounded_replay"):
-        assert replaying.bounded_replay
-        assert not plain.bounded_replay
+    assert replaying.bounded_replay
+    assert not plain.bounded_replay
 
 
 # --- which layers may declare a replay window --------------------------------

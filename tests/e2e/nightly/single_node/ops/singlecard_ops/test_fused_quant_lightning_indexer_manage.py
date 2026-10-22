@@ -5,7 +5,7 @@ ManageCase structure and scenario matrix, adapted to the quantized ABI
 (int8 query/key + fp16 dequant scales, bf16 weights).  Differences:
 
 - The scoring reference is the official *quantized* indexer
-  (npu_lightning_indexer_quant) compared as TopK *sets* — the two int8
+  (npu_quant_lightning_indexer) compared as TopK *sets* — the two int8
   pipelines may break dense score ties differently, while every management
   output (miss lists, slot mapping, pool bijection, tail padding) stays exact
   because it is driven by the operator's own TopK.
@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 
 import pytest
 import torch
-import torch_npu  # noqa: F401  # NPU op registration side effect
+import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
 
@@ -36,6 +36,7 @@ MAX_CACHE_TOKENS = 32640
 INVALID_SLOT = -(1 << 31)
 PADDING_ID = -1
 INT8_MAX = 127
+INT64_MAX = torch.iinfo(torch.int64).max
 
 SMALL_HEAD_COUNT = 32
 LARGE_HEAD_COUNT = 64
@@ -350,7 +351,7 @@ def _native_topk(case: QuantManageCase) -> torch.Tensor:
     """Per-route official quantized LI reference rows (TND / PA_BSND)."""
     rows = []
     for route, visible_len in enumerate(_visible_lengths(case)):
-        output = torch.ops._C_ascend.npu_lightning_indexer_quant(
+        output = torch_npu.npu_quant_lightning_indexer(
             case.query[route : route + 1],
             case.index_key_cache,
             case.index_weights[route : route + 1].to(torch.float16),
@@ -365,6 +366,8 @@ def _native_topk(case: QuantManageCase) -> torch.Tensor:
             layout_key="PA_BSND",
             sparse_count=TOPK,
             sparse_mode=0,
+            pre_tokens=INT64_MAX,
+            next_tokens=INT64_MAX,
         )
         idx = output[0] if isinstance(output, (tuple, list)) else output
         rows.append(idx.reshape(-1)[:TOPK])

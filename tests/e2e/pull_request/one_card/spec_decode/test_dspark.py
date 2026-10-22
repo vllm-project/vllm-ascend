@@ -77,6 +77,7 @@ def test_dspark_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
+@pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 @pytest.mark.parametrize("method", DSPARK.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [7])
 def test_dspark_kv_sliding_window(

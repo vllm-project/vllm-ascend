@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
@@ -50,6 +51,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -99,7 +101,6 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
     assert coordinator.single_type_managers[-1]._record_new_block_ids
 
 
-@pytest.mark.skipif(not hasattr(SlidingWindowMLASpec, "bounded_replay"), reason="vLLM lacks SWA bounded replay")
 @pytest.mark.parametrize("group_count", [1, 2])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, wrapped):
@@ -1002,11 +1003,18 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
+            # vLLM main (#57169) resolves the KV cache layout when computing the
+            # pool bytes per block; v0.31.0 has no such argument.
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
         )
     )
 
-    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
+    if vllm_version_is("0.31.0"):
+        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
+        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
+    else:
+        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
@@ -1324,6 +1332,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+    assert manager.get_num_blocks_to_allocate("prefill", 16, [], 0, 0, 16, prefill_end=16) == 1
 
 
 def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:

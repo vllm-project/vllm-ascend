@@ -48,9 +48,12 @@ def _copy_pcp_kv_cache_kernel(
         for token_idx in range(tl.program_id(0), num_tokens, tl.num_programs(0)):
             slot_idx = tl.load(slots + token_idx).to(tl.int64)
             valid_slot = slot_idx >= 0
+            # Same clamping as the batched branch: keep computed addresses
+            # in-bounds instead of relying on the load mask.
+            load_slot_idx = tl.where(valid_slot, slot_idx, 0)
             key_offsets = (
-                (slot_idx // cache_block_size) * k_stride_block
-                + (slot_idx % cache_block_size) * k_stride_offset
+                (load_slot_idx // cache_block_size) * k_stride_block
+                + (load_slot_idx % cache_block_size) * k_stride_offset
                 + feature_indices * k_stride_d
             )
             key_values = tl.load(key_cache + key_offsets, mask=valid_slot & (feature_indices < k_dim), other=0)
@@ -61,8 +64,8 @@ def _copy_pcp_kv_cache_kernel(
             )
             if rope_dim > 0:
                 rope_offsets = (
-                    (slot_idx // cache_block_size) * rope_stride_block
-                    + (slot_idx % cache_block_size) * rope_stride_offset
+                    (load_slot_idx // cache_block_size) * rope_stride_block
+                    + (load_slot_idx % cache_block_size) * rope_stride_offset
                     + feature_indices * rope_stride_d
                 )
                 rope_values = tl.load(
@@ -79,9 +82,15 @@ def _copy_pcp_kv_cache_kernel(
             token_indices = tile_idx * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
             slot_indices = tl.load(slots + token_indices, mask=token_indices < num_tokens, other=-1).to(tl.int64)
             valid_slots = (token_indices < num_tokens) & (slot_indices >= 0)
+            # The Ascend compiler lowers these masked indirect loads into an
+            # unconditional copy followed by a select, so the mask only zeroes
+            # the result and never guards the access. Clamp invalid slots
+            # before computing addresses so slot -1 cannot read before the
+            # cache start and fault the SMMU.
+            load_slot_indices = tl.where(valid_slots, slot_indices, 0)
             key_offsets = (
-                (slot_indices[:, None] // cache_block_size) * k_stride_block
-                + (slot_indices[:, None] % cache_block_size) * k_stride_offset
+                (load_slot_indices[:, None] // cache_block_size) * k_stride_block
+                + (load_slot_indices[:, None] % cache_block_size) * k_stride_offset
                 + feature_indices * k_stride_d
             )
             key_values = tl.load(
@@ -94,8 +103,8 @@ def _copy_pcp_kv_cache_kernel(
             )  # type: ignore[index]
             if rope_dim > 0:
                 rope_offsets = (
-                    (slot_indices[:, None] // cache_block_size) * rope_stride_block
-                    + (slot_indices[:, None] % cache_block_size) * rope_stride_offset
+                    (load_slot_indices[:, None] // cache_block_size) * rope_stride_block
+                    + (load_slot_indices[:, None] % cache_block_size) * rope_stride_offset
                     + feature_indices * rope_stride_d
                 )
                 rope_values = tl.load(
