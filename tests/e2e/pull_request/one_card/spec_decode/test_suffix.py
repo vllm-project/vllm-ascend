@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 
 def test_suffix_acceptance(

@@ -448,6 +448,40 @@ class TestLegacyMetadata:
 
 
 class TestPCPMetadata:
+    @pytest.mark.parametrize("graph_width", [1, 8])
+    @pytest.mark.parametrize("packed_cache", [False, True])
+    def test_empty_rank_disables_captured_query_tasks(self, builders, graph_width, packed_cache):
+        owners = builders(world=4, rank=3, decode_sharded=True)
+        _build_planes(owners, _batch(4, 3, "prefill", decode_sharded=True))
+        builder = owners["swa"]
+        if packed_cache:
+            builder._a5_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+        captured = [builder._smla_metadata, builder._qli_metadata]
+        if packed_cache:
+            captured.append(builder._a5_smla_metadata)
+        for buffer in captured:
+            buffer.fill_(1)
+        addresses = [buffer.data_ptr() for buffer in captured]
+        global_metadata = builder._global_builder._seq_lens
+        assert global_metadata.numel() > 0
+        global_metadata.fill_(7)
+        batch = _batch(4, 3, "decode", decode_sharded=True)
+        common = batch.local.replace(
+            num_reqs=graph_width,
+            num_input_tokens=graph_width,
+            query_start_loc=torch.arange(graph_width + 1, dtype=torch.int32),
+        )
+
+        result = builder._build_empty_local_metadata(common)
+
+        assert result.num_actual_tokens == 0
+        assert result.num_input_tokens == graph_width
+        assert torch.count_nonzero(result.seq_lens) == 0
+        assert torch.all(result.slot_mapping == -1)
+        assert [buffer.data_ptr() for buffer in captured] == addresses
+        assert all(torch.count_nonzero(buffer) == 0 for buffer in captured)
+        assert torch.all(global_metadata == 7)
+
     @pytest.mark.parametrize(
         "world,rank,scenario,decode_sharded",
         [
@@ -662,6 +696,7 @@ def runtime(builders, monkeypatch):
         )
         projector.cv_wq_a, projector.cv_wq_b, projector.cv_wkv = map(CVLinearWrapper, (attn.wq_a, attn.wq_b, attn.wkv))
         monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))
+        monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
             SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
@@ -731,9 +766,11 @@ class TestPCPBatchLifecycle:
     ):
         state = runtime(sharding=sharding, overlap=overlap, decode_sharded=decode_sharded)
         profile_output = torch.empty(4, 4)
+        state.projector.reference_input = torch.zeros_like(profile_output)
+        state.projector.peer_inputs = list(state.projector.reference_input.chunk(2))
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
-        assert not state.events
+        assert state.events == (["project", "reduce"] if sharding else [])
         switches = state.projector._pcp_o_proj_weight_switches or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())

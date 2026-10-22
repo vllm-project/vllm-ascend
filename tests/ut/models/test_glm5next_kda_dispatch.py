@@ -80,6 +80,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
                 query_start_loc=metadata.spec_query_start_loc,
                 cache_indices=metadata.spec_state_indices_tensor,
                 num_accepted_tokens=metadata.num_accepted_tokens,
+                output_buffer=torch.zeros(tokens + 1, 384, dtype=torch.bfloat16),
             )
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
@@ -111,12 +112,13 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         torch.testing.assert_close(weight, expected_weight)
         assert weight is layer._merged_conv_weight
         if kwargs["run_mode"] == 0:
-            assert kwargs["cache_indices_opt"] is prefill_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], prefill_conv.cache_indices[:, 0])
             assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
             assert kwargs["num_accepted_tokens_opt"] is None
         else:
             spec_conv = metadata.spec_decode_metadata.spec_causal_conv1d
-            assert kwargs["cache_indices_opt"] is spec_conv.cache_indices
+            torch.testing.assert_close(kwargs["cache_indices_opt"], spec_conv.cache_indices[:, 0])
+            assert kwargs["cache_indices_opt"].is_contiguous()
             assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
             assert kwargs["initial_state_mode_opt"] is None
         return x.clone()
@@ -134,6 +136,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
 
     def fla_update(x, conv_state, weight, bias=None, **kwargs):
+        expected_buffer = metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer
+        assert kwargs["out"].data_ptr() == expected_buffer.data_ptr()
         return conv(
             torch.zeros_like(x),
             x,
@@ -153,7 +157,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         "vllm_ascend.models.glm5next.ops.causal_conv1d.causal_conv1d_update",
         fla_update,
     )
-    calls = []
+    calls: list[str] = []
 
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
         events.append("state_write")
@@ -179,7 +183,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
-    assert torch.count_nonzero(out[:, tokens:]) == 0
+    # Rows outside the scheduled token groups are left untouched.
+    assert torch.isnan(out[:, tokens:]).all()
     assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
@@ -248,7 +253,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
         num_decodes=0 if empty else 3,
         num_decode_tokens=3,
         non_spec_decode_metadata=SimpleNamespace(
-            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None])
+            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None], output_buffer=None)
         ),
     ).items():
         setattr(metadata, key, value)
@@ -279,7 +284,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []
-        assert torch.count_nonzero(target) == 0
+        assert torch.isnan(target).all()
         return
     assert calls == [True]
     torch.testing.assert_close(target[0, :3, 0], qkv[:3, :128] * 2)

@@ -29,6 +29,14 @@ spec:
                 value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -39,6 +47,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
@@ -149,6 +159,14 @@ spec:
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -159,6 +177,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER

@@ -27,7 +27,7 @@ from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkSWACache,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, DeepseekV41Model
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
@@ -91,6 +91,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
 
     model = SimpleNamespace(
         hc_mult=4,
+        decoder_replay_layers=None,
         needs_moe_input_ids=False,
         _mtp_hidden_buffer=None,
         prepare_engram=lambda input_ids, positions: ({}, torch.empty(0, dtype=torch.bool)),
@@ -250,13 +251,18 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
             )
         ),
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+        model_config=SimpleNamespace(dtype=torch.float16),
         quant_config=quant_config,
     )
     module = deepseek_v41_dspark_module
+    draft_impls = []
 
     def layer(*args, **kwargs):
         result = torch.nn.Module()
         result.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
+        impl = MagicMock(spec=module.AscendDSAImpl)
+        draft_impls.append(impl)
+        result.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
         return result
 
     monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
@@ -278,3 +284,9 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     confidence.assert_called_once_with(input_dim=12, prefix="model.confidence_head", bias=False, with_markov=True)
     assert linear.call_args.kwargs["quant_config"] is quant_config
     assert model.layers["42"].markov_head is model.markov_head
+    assert len(draft_impls) == 3
+    for impl in draft_impls:
+        assert impl._oproj_buffer_pool is model._oproj_buffer_pool
+        impl.reserve_oproj_buffers.assert_called_once_with(
+            torch.device(module.current_platform.device_type), torch.float16
+        )

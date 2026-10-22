@@ -228,7 +228,10 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
 
     assert not context_seq_len_npu.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather:
+    with (
+        mock.patch("vllm_ascend.device.device_op.try_load_strided_mla_cache", return_value=False),
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather,
+    ):
         BaseDeviceAdaptor.kv_cache_load(
             cache_kv_c,
             cache_k_pe,

@@ -225,12 +225,23 @@ def _is_json_writer() -> bool:
 
 
 def _group_rank(group: Any, src: int = 0) -> int:
+    """Resolve this process's rank inside ``group``.
+
+    Prefer ``rank_in_group``. If that is unavailable but ``is_first_rank`` is
+    set, treat this process as ``src`` (broadcast source). Otherwise raise —
+    never invent ``src + 1``, which made a broken source skip packing the
+    broadcast payload.
+    """
     try:
         return int(group.rank_in_group)
     except Exception:
         if bool(getattr(group, "is_first_rank", False)):
             return int(src)
-        return int(src) + 1
+        raise RuntimeError(
+            "[runtime_config] cannot resolve group rank "
+            f"(tried=rank_in_group, is_first_rank="
+            f"{bool(getattr(group, 'is_first_rank', False))}, src={src})"
+        ) from None
 
 
 def _cpu_gate(group: Any) -> Any | None:
