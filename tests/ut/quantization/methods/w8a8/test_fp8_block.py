@@ -113,8 +113,8 @@ class TestRequantizeBlockScales(TestBase):
         weight_before = weight.view(torch.uint8).clone()
         scale_before = scale_inv.clone()
         consumed_rows = 0
-        chunk_rows = []
-        native_outputs = []
+        chunk_rows: list[int] = []
+        native_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
         row_budget = max(block_n, 1024 // block_n * block_n)
 
         def native_quantize(resolved, *, dst_type, scale_alg):
