@@ -705,6 +705,12 @@ def _select_seq_lens(
     # iterations) over seq_lens_cpu (None in async spec decode mode).
     model_config = vllm_config.model_config
     num_reqs = common_attn_metadata.num_reqs
+    window_read = getattr(common_attn_metadata, "_draft_window_read", None)
+    if window_read is not None:
+        # Projection already owns a current exact CPU/device pair. Selecting
+        # device lengths again would repeat D2H in the parallel GQA builder.
+        # Uncertified baseline CPU mirrors retain the original selection below.
+        return window_read.exact_cpu_for(common_attn_metadata)[:num_reqs]
     if common_attn_metadata._seq_lens_cpu is not None:
         seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
     elif common_attn_metadata.seq_lens_cpu is not None:

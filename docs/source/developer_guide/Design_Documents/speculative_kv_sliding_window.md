@@ -198,7 +198,13 @@ Removing only the copy is insufficient. CPU planning chooses the table width
 and validates the exact query interval. GQA eager builders materialize length
 lists; MLA builders derive chunk loops and decode lists from CPU lengths.
 Generic parallel GQA drafting already selects device lengths and calls
-`tolist()`, adding a separate baseline synchronization. Default CPU-to-device
+`tolist()`, adding a separate baseline synchronization. An enabled Window
+projection now certifies its owned CPU/device exact pair to this selector,
+so parallel GQA does not repeat that transfer. Replacing any certified read
+operand invalidates the pair. OFF leaves no certificate on common metadata
+and keeps the baseline selection. The initial Window exact D2H remains;
+this reuse does not resolve the async-first architecture constraint.
+Default CPU-to-device
 copies for projection indices also require an asynchronous staging contract.
 SFA also has existing device-length consumers that can be reused; this does
 not make the GQA and MLA CPU consumers disappear. A device projector for the

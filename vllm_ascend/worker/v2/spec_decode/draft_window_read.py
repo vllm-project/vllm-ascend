@@ -60,6 +60,18 @@ class DraftReadView:
         common_metadata._seq_lens_cpu = self.seq_lens_cpu
         common_metadata.seq_lens_cpu_upper_bound = self.seq_lens_cpu_upper_bound
         common_metadata.max_seq_len = self.max_seq_len
+        common_metadata._draft_window_read = self
+
+    def exact_cpu_for(self, common_metadata: Any) -> torch.Tensor:
+        """Certify the snapshot only while all of its read operands are intact."""
+        if (
+            common_metadata.seq_lens is not self.seq_lens
+            or common_metadata.seq_lens_cpu is not self.seq_lens_cpu
+            or common_metadata._seq_lens_cpu is not self.seq_lens_cpu
+            or common_metadata.block_table_tensor is not self.block_table
+        ):
+            raise ValueError("Draft Window read operands were replaced after projection")
+        return self.seq_lens_cpu
 
 
 def materialize_direct_prefix(

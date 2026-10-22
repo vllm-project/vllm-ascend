@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+import ast
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -79,6 +81,58 @@ class TestCanonicalRead(unittest.TestCase):
         view = self.read(starts=(0, 4))
         self.assertEqual(view.seq_lens.tolist(), [21, 7, 0])
         self.assertEqual(view.block_table[0, :6].tolist(), [16, 17, 18, 19, 20, 21])
+
+    def sequence_length_selector(self):
+        # Run the complete shared selector without initializing a native backend.
+        path = Path(__file__).resolve().parents[4] / "vllm_ascend/attention/utils.py"
+        node = next(
+            node for node in ast.parse(path.read_text()).body if getattr(node, "name", None) == "_select_seq_lens"
+        )
+        scope = {"CrossAttentionSpec": type("CrossAttentionSpec", (), {}), "_is_glm_model": lambda config: False}
+        tree = ast.Module(
+            body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
+            type_ignores=[],
+        )
+        exec(compile(ast.fix_missing_locations(tree), str(path), "exec"), scope)
+        return scope["_select_seq_lens"]
+
+    def select_parallel_lengths(self, common):
+        return self.sequence_length_selector()(
+            common,
+            kv_cache_spec=None,
+            speculative_config=SimpleNamespace(parallel_drafting=True, use_dspark=lambda: False),
+            vllm_config=SimpleNamespace(model_config=object()),
+        )
+
+    def test_parallel_builder_reuses_the_current_window_exact_snapshot(self):
+        view = self.read()
+        common = SimpleNamespace(num_reqs=2)
+        view.apply(common)
+        selected = self.select_parallel_lengths(common)
+        # Generic parallel drafting otherwise reselects device lengths and
+        # synchronizes again at the GQA builder's tolist().
+        self.assertEqual(selected.data_ptr(), view.seq_lens_cpu.data_ptr())
+        self.assertNotEqual(selected.data_ptr(), view.seq_lens.data_ptr())
+        self.assertEqual(selected.tolist(), [9, 7])
+
+    def test_parallel_off_does_not_trust_an_uncertified_cpu_mirror(self):
+        common = SimpleNamespace(
+            num_reqs=2,
+            seq_lens=torch.tensor([9, 7], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([99, 99], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([99, 99], dtype=torch.int32),
+        )
+        self.assertIs(self.select_parallel_lengths(common), common.seq_lens)
+        self.assertFalse(hasattr(common, "_draft_window_read"))
+
+    def test_replacing_a_window_read_operand_invalidates_its_cpu_certificate(self):
+        for field in ("seq_lens", "_seq_lens_cpu", "seq_lens_cpu", "block_table_tensor"):
+            with self.subTest(field=field):
+                common = SimpleNamespace(num_reqs=2)
+                self.read().apply(common)
+                setattr(common, field, getattr(common, field).clone())
+                with self.assertRaisesRegex(ValueError, "replaced"):
+                    self.select_parallel_lengths(common)
 
 
 if __name__ == "__main__":
