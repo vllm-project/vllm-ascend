@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import Protocol, TypeAlias, cast
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.models.qwen4_exp.amd import (
@@ -35,6 +36,12 @@ from vllm.utils.torch_utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.models.qwen4_exp.qsa_fia import (
+    qsa_fia_shortseq_attention,
+    qsa_shortseq_fia_enabled,
+    qsa_shortseq_max_len,
+)
 from vllm_ascend.ops.gbsa_qsa import (
     qsa_gbsa_attention,
 )
@@ -378,6 +385,7 @@ class AscendQSAImpl:
 
     supports_dcp = False
     supports_pcp = False
+    shortseq_fia: bool = False
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         del kwargs
@@ -391,6 +399,68 @@ class AscendQSAImpl:
         self.sinks = None
         self.sliding_window = (-1, -1)
         self.supports_quant_query_input = False
+        self.shortseq_fia = qsa_shortseq_fia_enabled()
+
+    def _shortseq_fia_gate(
+        self,
+        layer: torch.nn.Module,
+        attn_metadata: QSAForwardMetadataProtocol,
+        side_metadata: QSAForwardMetadataProtocol | None = None,
+    ) -> bool:
+        """True when this step may run dense attention instead of GBSA.
+
+        The threshold is the indexer token budget: with kv length <= K the
+        top-k selection covers every micro-block, so the sparse and dense
+        attention paths are numerically identical.  CUDA graph capture stays
+        on the sparse path (the dense path allocates per-step buffers).
+        """
+        if not getattr(self, "shortseq_fia", False):
+            return False
+        try:
+            capturing = _EXTRA_CTX.capturing
+        except Exception:
+            # No forward context bound (e.g. unit tests): not capturing.
+            capturing = False
+        if capturing:
+            return False
+        # Profile/warmup dummy runs execute with capturing=False but carry
+        # synthetic metadata (dummy block tables, uninitialised logical
+        # positions) on which the dense FIAS operator cannot tile.
+        try:
+            in_profile_run = bool(_EXTRA_CTX.in_profile_run)
+        except Exception:
+            in_profile_run = False
+        if in_profile_run:
+            return False
+        # Startup graph-capture window (graph-memory profiling, pre-capture
+        # warmups, capture runs): upstream runs the pre-capture warmups with
+        # capturing=False and cudagraph_runtime_mode=NONE on purpose, so the
+        # checks below never see them. The global capturing-enabled flag is
+        # True for that whole window and False during real serving steps.
+        try:
+            from vllm.compilation.monitor import cudagraph_capturing_enabled
+
+            if cudagraph_capturing_enabled:
+                return False
+        except Exception:
+            pass
+        # Only real eager steps (mode NONE) may take the dense path; capture
+        # runs execute with the FULL graph mode.
+        runtime_mode = getattr(get_forward_context(), "cudagraph_runtime_mode", None)
+        if runtime_mode is not CUDAGraphMode.NONE:
+            return False
+        has_lp = (
+            side_metadata is not None
+            and hasattr(side_metadata, "logical_positions")
+        )
+        threshold = qsa_shortseq_max_len(layer.indexer.token_topk)
+        max_kv = getattr(attn_metadata, "max_seq_len", None)
+        result = (
+            has_lp
+            and max_kv is not None
+            and int(max_kv) <= threshold
+        )
+        return result
 
     def do_kv_cache_update(
         self,
@@ -415,6 +485,7 @@ class AscendQSAImpl:
         attn_metadata: QSAForwardMetadataProtocol,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
+        side_metadata: QSAForwardMetadataProtocol | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -427,6 +498,18 @@ class AscendQSAImpl:
             return output
         selected_indices = layer.topk_indices_buffer[:num_tokens]
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+        if self._shortseq_fia_gate(layer, attn_metadata, side_metadata):
+            return qsa_fia_shortseq_attention(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                attn_metadata,
+                token_to_req[:num_tokens],
+                output[:num_tokens],
+                scale=self.scale,
+                num_kv_heads=self.num_kv_heads,
+                logical_positions=side_metadata.logical_positions,
+            )
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = (
@@ -615,6 +698,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
+            side_metadata=side_metadata,
         )
 
 
