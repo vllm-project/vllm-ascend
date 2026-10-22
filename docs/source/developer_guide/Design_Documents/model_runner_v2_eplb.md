@@ -30,7 +30,7 @@ The Ascend integration adapts the boundaries between these planes; it does not
 implement a second controller or placement lifecycle.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Upstream EPLB controller"] -->|"committed placement"| B["Ascend EPLB state"]
     B -->|"refresh in place"| C["Device lookup table"]
     D["Router logical expert IDs"] --> C

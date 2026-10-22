@@ -20,22 +20,21 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 
 ```shell
 vllm_ascend
-├── eplb
-│   ├── adaptor
-│   │   └── vllm_adaptor.py
-│   ├── core
-│   │   ├── policy
-│   │   │   ├── policy_abstract.py
-│   │   │   ├── policy_default_eplb.py
-│   │   │   ├── policy_factory.py
-│   │   │   ├── policy_flashlb.py
-│   │   │   ├── policy_random.py
-│   │   │   └── policy_swift_balancer.py
-│   │   ├── eplb_device_transfer_loader.py
-│   │   ├── eplb_utils.py
-│   │   └── eplb_worker.py
-│   └── eplb_updator.py
-└───────────
+└── eplb
+    ├── adaptor
+    │   └── vllm_adaptor.py
+    ├── core
+    │   ├── policy
+    │   │   ├── policy_abstract.py
+    │   │   ├── policy_default_eplb.py
+    │   │   ├── policy_factory.py
+    │   │   ├── policy_flashlb.py
+    │   │   ├── policy_random.py
+    │   │   └── policy_swift_balancer.py
+    │   ├── eplb_device_transfer_loader.py
+    │   ├── eplb_utils.py
+    │   └── eplb_worker.py
+    └── eplb_updator.py
 ```
 
 **1. Adaptor Module**
@@ -53,14 +52,14 @@ vllm_ascend
       Abstract class for load balancing strategy interfaces
     - `policy_default_eplb.py`
       Default implementation of open-source EPLB paper algorithm
-    - `policy_swift_balancer.py`
-      Enhanced version optimizing expert swaps for low-bandwidth devices (e.g., A2)
+    - `policy_factory.py`
+      Strategy factory for automatic algorithm instantiation
     - `policy_flashlb.py`
       Threshold-based adjustment reducing operational costs through layer-wise fluctuation detection
     - `policy_random.py`
       Random policy for basic testing
-    - `policy_factory.py`
-      Strategy factory for automatic algorithm instantiation
+    - `policy_swift_balancer.py`
+      Enhanced version optimizing expert swaps for low-bandwidth devices (e.g., A2)
 
 - `eplb_device_transfer_loader.py`
   Manages expert table/weight transmission and updates
@@ -143,20 +142,20 @@ Note that the placement returned by a new policy must keep every logical expert 
 **Implementation Guide for Model Integration**
 
 1. **Adapter File Modification**
-   - Extend `vllm_ascend/eplb/adaptor/vllm_adaptor.py`
-   - The adaptor reads model-level facts from the model config (for example `first_k_dense_replace` for the dense-layer count); the global and local expert counts come from the registered MoE layers. Add model-specific parameters there when the config field names differ.
+    - Extend `vllm_ascend/eplb/adaptor/vllm_adaptor.py`
+    - The adaptor reads model-level facts from the model config (for example `first_k_dense_replace` for the dense-layer count); the global and local expert counts come from the registered MoE layers. Add model-specific parameters there when the config field names differ.
 
 2. **MoE Feature Integration**
-   - Extend `vllm_ascend/ops/fused_moe/routed_experts.py` with MoE-specific expert-weight bookkeeping if the new model stores expert tensors differently
+    - Extend `vllm_ascend/ops/fused_moe/routed_experts.py` with MoE-specific expert-weight bookkeeping if the new model stores expert tensors differently
 
 3. **Registration Logic Update**
-   - Ensure each MoE layer instance calls `VllmEplbAdaptor.register_layer` so the adaptor discovers the layer list for the current pipeline rank
-   - Maintain backward compatibility with existing model types
+    - Ensure each MoE layer instance calls `VllmEplbAdaptor.register_layer` so the adaptor discovers the layer list for the current pipeline rank
+    - Maintain backward compatibility with existing model types
 
 4. **Validation & Testing**
-   - Verify parameter consistency across layers
-   - Test cross-device communication for expert tables
-   - Benchmark against baseline implementations (e.g., Qwen3-MoE)
+    - Verify parameter consistency across layers
+    - Test cross-device communication for expert tables
+    - Benchmark against baseline implementations (e.g., Qwen3-MoE)
 
 *Key Implementation Notes:*
 

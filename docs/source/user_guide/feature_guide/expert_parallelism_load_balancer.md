@@ -23,7 +23,7 @@ The two paths use different switches and configuration schemas:
 | --- | --- | --- |
 | Enable | `--enable-eplb` with `VLLM_USE_V2_MODEL_RUNNER=1` | `eplb_config.dynamic_eplb: true` plus `export DYNAMIC_EPLB="true"` |
 | Configuration surface | Upstream `--eplb-config.*` plus `additional_config.eplb_config` (`load_collection_phase`, `stair_config`) | `additional_config.eplb_config` only |
-| Policies | `stair` (default), `default` | `eplb_policy_type` 0–3 |
+| Policies | `stair` (the Ascend default), `default` (the upstream algorithm) | `eplb_policy_type` 0–3 |
 | Movement | Asynchronous only; HIXL by default, Gloo CPU staging as fallback | Layer-by-layer D2D transfers on the forward thread; the placement plan is computed in a per-rank EPLB subprocess |
 
 !!!IMPORTANT
@@ -100,15 +100,17 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous EPLB
 
 On Ascend, Model Runner V2 is selected with the environment variable
-`VLLM_USE_V2_MODEL_RUNNER=1` (DeepSeek V4.1 on A5 additionally requires
-MRv2: startup fails with an explicit error unless the variable is set).
+`VLLM_USE_V2_MODEL_RUNNER=1` (DeepSeek V4.1 on 950PR&950DT Products
+additionally requires MRv2: startup fails with an explicit error unless the
+variable is set).
 Enable expert parallelism and upstream EPLB. Ascend selects the STAIR policy
 by default and automatically uses the HIXL communicator when it is available
 on every EPLB rank, falling back to Gloo otherwise. Movement is asynchronous
 only.
 
-The STAIR defaults do not require tuning. A minimal production configuration
-only needs the redundant-expert budget:
+The STAIR defaults do not require tuning; see
+[Tuning Suggestions](#tuning-suggestions) for the advanced STAIR parameters.
+A minimal production configuration only needs the redundant-expert budget:
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -139,16 +141,29 @@ vllm serve Qwen/Qwen3-30B-A3B \
 
 MRv2 uses the upstream `EPLBConfig` fields:
 
-| Parameter | Default | Description |
-| --- | --- | --- |
-| `window_size` | `1000` | Number of recent steps used for expert-load recording. |
-| `step_interval` | `3000` | Interval between expert rearrangements. If it exceeds `window_size`, only the last `window_size` steps of metrics are used. |
-| `num_redundant_experts` | `0` | Number of redundant physical experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. |
-| `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
-| `log_balancedness` | `false` | Log expert balancedness metrics. Incurs extra communication; recommended to leave disabled and only enable it temporarily when debugging. Do not set it in production configuration. |
-| `log_balancedness_interval` | `1` | Interval between balancedness log entries. Only relevant when `log_balancedness` is explicitly enabled for debugging. |
-| `communicator` | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
+| Parameter | Required | Value range | Default | Description |
+| --- | --- | --- | --- | --- |
+| `window_size` | No | positive integer | `1000` | Number of recent steps used for expert-load recording. |
+| `step_interval` | No | positive integer | `3000` | Interval between expert rearrangements. If it exceeds `window_size`, only the last `window_size` steps of metrics are used. |
+| `num_redundant_experts` | No | non-negative integer | `0` | Number of redundant physical experts. Must be `0` on A2. `(num_experts + num_redundant_experts)` must be divisible by the expert-parallel size. |
+| `use_async` | No | `true` / `false` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
+| `policy` | No | `stair`, `default` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
+| `log_balancedness` | No | `true` / `false` | `false` | Log expert balancedness metrics. Incurs extra communication; recommended to leave disabled and only enable it temporarily when debugging. Do not set it in production configuration. |
+| `log_balancedness_interval` | No | positive integer | `1` | Interval between balancedness log entries. Only relevant when `log_balancedness` is explicitly enabled for debugging. |
+| `communicator` | No | `hixl`, `torch_gloo`, unset | Auto (`None`) on Ascend | Leave unset to use HIXL when available and Gloo otherwise; set `hixl` or `torch_gloo` to select a backend explicitly. |
+
+Every field is optional: the engine starts with the defaults. Why the examples
+above deviate from them, and when to do the same:
+
+- `num_redundant_experts`: the default `0` means no redundancy, so EPLB can
+  only shuffle whole experts between ranks. For production, budget a small
+  hot-expert reserve that keeps `(num_experts + num_redundant_experts)`
+  divisible by the expert-parallel size — for example `16` for
+  Qwen3-30B-A3B with EP 16, which gives every rank one spare expert slot.
+- `window_size` / `step_interval`: keep the `1000` / `3000` defaults in
+  production. The `200` / `200` values in the validation example exist only
+  to shorten the feedback loop of short benchmark or accuracy runs; they
+  increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
@@ -219,39 +234,6 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
-
-#### Advanced STAIR Tuning
-
-Advanced STAIR parameters live under `additional_config.eplb_config.stair_config`.
-The defaults are tuned for general use; change them only after measuring a
-specific need. Numeric fields must not be booleans, and each field is range
-checked at startup.
-
-| Parameter | Default | Range | Description |
-| --- | --- | --- | --- |
-| `load_window_bins` | `64` | 2–256 | Maximum chronological bins used to compress the upstream EPLB load window. |
-| `load_risk_quantile` | `0.75` | (0.5, 1.0) exclusive | One-sided standard-normal quantile converted to a z-score for mean-plus-deviation expert and rank risk. |
-| `relative_balance_threshold` | `0.95` | (0, 1] | Rebalance when current balance divided by the last committed balance is at or below this value. |
-| `absolute_balance_threshold` | `0.90` | (0, 1] | Rebalance when current balance is at or below this value. |
-| `rank_transfer_limit` | `-1` | -1 or positive | Maximum outgoing and incoming expert transfers for each rank in one layer plan. `-1` removes the limit. |
-| `cross_node_transfer_limit` | `-1` | -1 or non-negative | Maximum outgoing and incoming cross-node expert transfers for each node in one layer plan. `-1` removes the limit; `0` disables cross-node transfers. |
-| `replica_search_num_stages` | `4` | 1–8 | Number of risk-ordered expert groups handled by the FlashTree-style replica search. |
-| `replica_search_radius` | `8` | 0–32 | Maximum distance from the greedy extra-replica budget explored at each search stage. |
-| `replica_search_beam_size` | `64` | 1–128 | Maximum unique replica-count candidates kept after each search stage. |
-| `placement_search_backtrack_limit` | `32` | 0–64 | Maximum feasible-branch reversals while constrained LPT places one candidate. `0` disables them. |
-
-Example:
-
-```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-expert-parallel \
-  --enable-eplb \
-  --additional-config '{"eplb_config":{"stair_config":{"rank_transfer_limit":2,"cross_node_transfer_limit":0}}}'
-```
-
-Balance is the reciprocal of the mean max-to-average rank-load ratio; STAIR
-rebalances a layer only when the hysteresis gates above fire, so lowering
-`step_interval` alone does not force continuous movement.
 
 #### MRv2 Constraints
 
@@ -473,33 +455,66 @@ under ideal load balance.
 - It cannot be combined with `eplb_config.dynamic_eplb`.
 - See [`enable_force_eplb`](../configuration/additional_config.md) for the full parameter reference.
 
+## Tuning Suggestions
+
+The default STAIR policy already covers general workloads; change the
+advanced parameters below only after measuring a specific need. They live
+under `additional_config.eplb_config.stair_config`. Numeric fields must not
+be booleans, and each field is range checked at startup.
+
+| Parameter | Default | Range | Description |
+| --- | --- | --- | --- |
+| `load_window_bins` | `64` | 2–256 | Maximum chronological bins used to compress the upstream EPLB load window. |
+| `load_risk_quantile` | `0.75` | (0.5, 1.0) exclusive | One-sided standard-normal quantile converted to a z-score for mean-plus-deviation expert and rank risk. |
+| `relative_balance_threshold` | `0.95` | (0, 1] | Rebalance when current balance divided by the last committed balance is at or below this value. |
+| `absolute_balance_threshold` | `0.90` | (0, 1] | Rebalance when current balance is at or below this value. |
+| `rank_transfer_limit` | `-1` | -1 or positive | Maximum outgoing and incoming expert transfers for each rank in one layer plan. `-1` removes the limit. |
+| `cross_node_transfer_limit` | `-1` | -1 or non-negative | Maximum outgoing and incoming cross-node expert transfers for each node in one layer plan. `-1` removes the limit; `0` disables cross-node transfers. |
+| `replica_search_num_stages` | `4` | 1–8 | Number of risk-ordered expert groups handled by the FlashTree-style replica search. |
+| `replica_search_radius` | `8` | 0–32 | Maximum distance from the greedy extra-replica budget explored at each search stage. |
+| `replica_search_beam_size` | `64` | 1–128 | Maximum unique replica-count candidates kept after each search stage. |
+| `placement_search_backtrack_limit` | `32` | 0–64 | Maximum feasible-branch reversals while constrained LPT places one candidate. `0` disables them. |
+
+Example:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --additional-config '{"eplb_config":{"stair_config":{"rank_transfer_limit":2,"cross_node_transfer_limit":0}}}'
+```
+
+Balance is the reciprocal of the mean max-to-average rank-load ratio; STAIR
+rebalances a layer only when the hysteresis gates above fire, so lowering
+`step_interval` alone does not force continuous movement.
+
 ## Critical Considerations
 
 1. Parameter Tuning:
-   - For MRv2, tune `window_size` and `step_interval` against the target
-     workload. For MRv1, tune `expert_heat_collection_interval` and
-     `algorithm_execution_interval`.
-   - `num_redundant_experts` must make `(num_experts +
-     num_redundant_experts)` divisible by the expert-parallel size.
+    - For MRv2, tune `window_size` and `step_interval` against the target
+      workload. For MRv1, tune `expert_heat_collection_interval` and
+      `algorithm_execution_interval`.
+    - `num_redundant_experts` must make `(num_experts +
+      num_redundant_experts)` divisible by the expert-parallel size.
 
 2. Hardware Requirements:
-   - Ensure that all NPUs have identical memory capacity and compute capabilities.
-   - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
-   - shm needs to be mounted for container
+    - Ensure that all NPUs have identical memory capacity and compute capabilities.
+    - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
+    - shm needs to be mounted for container
 
 3. Monitoring & Validation:
-   - MRv1: search for `Expert hotness imbalance` lines (logged as
-     `[eplb/worker] Expert hotness imbalance, current: mean=... max=...,
-     updated: ...`) on EP rank 0 once per balancing cycle. We calculate the
-     peak-to-average ratio of the load for each layer at different ranks,
-     and then find their mean and maximum values. Current means actual
-     peak-to-average ratio, update means estimated peak-to-average ratio
-     after algorithm adjustment. The same values are exported as
-     `eplb:expert_hotness:*` metrics when ms-service-metric collection is
-     enabled.
-   - MRv2: temporarily enable `--eplb-config.log_balancedness true` to log
-     `EPLB step: ... balancedness=...` per window sample, and check
-     `Ascend async EPLB cycle committed` lines for the per-cycle movement
-     summary (`mean ... -> ...`, changed layers, transfer counts).
-   - Use vLLM monitor to detect imbalances during runtime.
-   - Always verify expert map JSON structure before loading (validate with jq or similar tools).
+    - MRv1: search for `Expert hotness imbalance` lines (logged as
+      `[eplb/worker] Expert hotness imbalance, current: mean=... max=...,
+      updated: ...`) on EP rank 0 once per balancing cycle. We calculate the
+      peak-to-average ratio of the load for each layer at different ranks,
+      and then find their mean and maximum values. Current means actual
+      peak-to-average ratio, update means estimated peak-to-average ratio
+      after algorithm adjustment. The same values are exported as
+      `eplb:expert_hotness:*` metrics when ms-service-metric collection is
+      enabled.
+    - MRv2: temporarily enable `--eplb-config.log_balancedness true` to log
+      `EPLB step: ... balancedness=...` per window sample, and check
+      `Ascend async EPLB cycle committed` lines for the per-cycle movement
+      summary (`mean ... -> ...`, changed layers, transfer counts).
+    - Use vLLM monitor to detect imbalances during runtime.
+    - Always verify expert map JSON structure before loading (validate with jq or similar tools).
