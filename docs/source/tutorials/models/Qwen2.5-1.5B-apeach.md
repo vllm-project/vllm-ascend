@@ -52,7 +52,29 @@ Use the official docker image, refer to
 [using docker](../../installation.md#set-up-using-docker), or build from
 source, refer to [installation](../../installation.md).
 
-## 5 Online Service Deployment
+## 5 Environment Configuration
+
+**Primary (required for the custom op path):** the RMSNorm custom op
+`aclnnAddRmsNormBias` is shipped in the `_cann_ops_custom` vendor package
+and located via `ASCEND_CUSTOM_OPP_PATH`. `vllm_ascend_C.so` reads that
+variable at load time, before Python-side `bootstrap_custom_op_env()` runs,
+so it must be exported before starting vLLM:
+
+```shell
+. /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+```
+
+This is the PR-validated configuration (verified with
+`enable_custom_op() == True`).
+
+**Fallback (only if the vendor script is unavailable):**
+`VLLM_BATCH_INVARIANT=1` disables the custom op path
+(`enable_custom_op()` returns `False`) and falls back to
+`torch_npu.npu_add_rms_norm`. Note that this mode also makes
+single-vs-batch outputs bit-exact, which the default custom op path does
+not guarantee (~2e-3 kernel-level batch correlation is normal there).
+
+## 6 Online Service Deployment
 
 ```shell
 #!/bin/sh
@@ -71,9 +93,9 @@ vllm serve /root/.cache/huggingface/hub/models--jason9693--Qwen2.5-1.5B-apeach/s
     --port 8000
 ```
 
-> Note: adjust the `set_env.bash` path if your vllm-ascend installation
-> lives elsewhere; it exports `ASCEND_CUSTOM_OPP_PATH` and prepends the
-> vendor `op_api/lib` directory to `LD_LIBRARY_PATH`.
+> Adjust the `set_env.bash` path if your vllm-ascend installation lives
+> elsewhere; it exports `ASCEND_CUSTOM_OPP_PATH` and prepends the vendor
+> `op_api/lib` directory to `LD_LIBRARY_PATH`.
 
 Key parameter descriptions:
 
@@ -89,7 +111,7 @@ Key parameter descriptions:
 - `--enforce-eager`: the model is not on the graph whitelist; eager mode is
   the validated configuration.
 
-## 6 Functional Verification
+## 7 Functional Verification
 
 Start the server as above, then classify raw text with the `/classify`
 endpoint (classification models take plain text, no chat template):
@@ -125,7 +147,7 @@ for out in outputs:
     print(out.outputs.probs)  # [P(Default), P(Spoiled)]
 ```
 
-## 7 Known Limitations
+## 8 Known Limitations
 
 - Architecture registration: `Qwen2ForSequenceClassification` is not in the
   vLLM model registry; vLLM resolves it through the transformers fallback
