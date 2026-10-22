@@ -760,6 +760,13 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
+        # GLM-Next MRV1 already sizes its physical shared pool in the
+        # model-specific planner. A per-layer discount counts sharing twice.
+        from vllm_ascend.models.glm5next.cache_config import _get_glm5_next_cache_layout
+
+        if not self.use_v2_model_runner and _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+            return available_memory
+
         # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
         # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
         # all groups in one physical budget and must not take the generic
