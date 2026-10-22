@@ -1878,11 +1878,10 @@ def build_attn_metadata_factory(
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
         kwargs["attn_state"] = attn_state
+        kwargs["seq_lens_cpu_upper_bound"] = seq_lens_cpu_upper_bound
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
-        if seq_lens_cpu_upper_bound is not None:
-            kwargs["seq_lens_cpu_upper_bound"] = seq_lens_cpu_upper_bound
         if offload_kwargs is not None:
             kwargs.update(offload_kwargs)
         return raw(*args, **kwargs)
