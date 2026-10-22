@@ -15,36 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# CANN_QUAY_URL (optional): Registry URL of the CANN base image.
-ARG CANN_QUAY_URL="quay.io/ascend/cann"
-# CANN_VERSION (optional): CANN toolkit version used to select the base image tag.
-ARG CANN_VERSION="9.1.0"
-
-FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-openeuler24.03-py3.12
-
-# Build-time arguments (declared once at the top of the stage for clarity).
-# PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
-ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-# ASCEND_INDEX_URL (optional): Extra pip index URL for Ascend/CANN Python packages.
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
-# VLLM_REPO (optional): Git repository URL of vLLM.
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-# VLLM_TAG (optional): vLLM release tag to clone when VLLM_COMMIT is empty.
-ARG VLLM_TAG=v0.30.0
-# VLLM_COMMIT (optional): Exact vLLM commit to build; empty to fall back to VLLM_TAG.
-ARG VLLM_COMMIT=""
-# SOC_VERSION (optional): Ascend SoC version used for custom kernel compilation.
-ARG SOC_VERSION="ascend310p1"
-# COMPILE_CUSTOM_KERNELS (optional): Whether to compile custom Ascend kernels (1 = yes, 0 = no).
-ARG COMPILE_CUSTOM_KERNELS=1
-# BUILD_TYPE (optional): Build type: 'release' or 'daily' (daily installs extra deps).
-ARG BUILD_TYPE="release"
-# TORCH_NPU_VERSION (optional, empty if unset): torch_npu version for daily builds.
-ARG TORCH_NPU_VERSION
-# TORCH_NPU_DATE (optional, empty if unset): torch_npu build date for daily builds.
-ARG TORCH_NPU_DATE
-# DAILY_DEPS_MODE (optional): Daily deps install mode: 'full' or 'torch_npu_only'.
-ARG DAILY_DEPS_MODE="torch_npu_only"
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261016144033-310p-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
@@ -57,6 +28,9 @@ RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.
     python3 -m pip cache purge
 
 # Install vLLM
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_TAG=v0.30.0
+ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
@@ -66,16 +40,21 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     fi
 
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
 # Install vllm-ascend
+# Dependency versions used by the vllm-ascend build.
+ARG SOC_VERSION="ascend310p1"
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
@@ -131,15 +110,20 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
-# ===== Conditional installation based on BUILD_TYPE =====
-
-# Install daily packages via shared script
-COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
-RUN if [ "$BUILD_TYPE" = "daily" ]; then \
-        bash /tmp/install_daily_deps.sh; \
-    else \
-        echo "Building release version without daily packages"; \
-    fi && rm -f /tmp/install_daily_deps.sh
+# ===== Install pinned torch-npu =====
+# 310P installs only torch-npu (no memfabric/memcache/triton-ascend).
+ARG TORCH_NPU_VERSION="26.2.0"
+ARG TORCH_NPU_DATE="20261020.3"
+ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
+RUN ARCH=$(uname -m) && \
+    mkdir -p /tmp/torch_npu && \
+    wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
+        -O /tmp/torch_npu/torch_npu.tar.gz \
+        "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
+    tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
+    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    rm -rf /tmp/torch_npu && \
+    python3 -m pip cache purge
 
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
