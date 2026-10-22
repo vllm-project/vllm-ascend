@@ -26,6 +26,12 @@
 # base_image/ascend-ci/vllm-ascend. openEuler nightly images keep the previous
 # multi-arch (amd64+arm64) contract and are pushed to atlas_inference/vllm-ascend
 # on swr.cn-north-12, then mirrored to swr.cn-north-4 by the sync-tools workflow.
+#
+# Multi-arch ('full') builds follow the mainline nightly tag rule and publish
+# each image under two tags: the stable
+# nightly-ci-<branch>-<target>[-openeuler] tag, which is overwritten by every
+# nightly and is what the test workflows reference, and a unique
+# nightly-ci-...-<date>-r<run_number> tag that preserves each historical build.
 name: 'Nightly image build'
 
 on:
@@ -93,6 +99,7 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      tag_suffix: ${{ steps.set-tag.outputs.tag_suffix }}
     steps:
       - id: set-matrix
         run: |
@@ -116,6 +123,17 @@ jobs:
             exit 1
           fi
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+      - id: set-tag
+        run: |
+          # Full builds are published under the stable tag plus a unique history
+          # tag, so the suffix is computed once here and reused by the build and
+          # merge jobs. Release builds only keep the stable tag.
+          if [ "${{ inputs.build_type }}" = "full" ]; then
+            echo "tag_suffix=-$(date -u +%Y%m%d)-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     needs: generate-matrix
@@ -166,16 +184,21 @@ jobs:
           # in the Dockerfiles, so no CANN/date suffix is appended.
           TAG_SUFFIX=""
           FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+          # Same dual-tag rule as the mainline nightly builds: the stable tag is
+          # overwritten by each nightly, while a unique tag (build date + run
+          # number) keeps the history of nightly images.
+          UNIQUE_SUFFIX="${{ needs.generate-matrix.outputs.tag_suffix }}"
+          UNIQUE_TAG="${FULL_TAG}${UNIQUE_SUFFIX}"
 
           if [ "${{ inputs.build_type }}" = "full" ]; then
-            # Arch-specific images are pushed to the temp repo; the merge job
-            # creates the multi-arch manifest.
+            # Arch-specific images are pushed to the temp repo under the unique
+            # tag; the merge job creates both final multi-arch manifests.
             if [ -n "$OS_MARK" ]; then
               FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             else
               FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
             fi
-            PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${FULL_TAG}-${{ matrix.arch_name }}"
+            PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
           else
             FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
             PUSH_IMAGE="${FINAL_IMAGE}"
@@ -199,6 +222,7 @@ jobs:
           {
             echo "image=${FINAL_IMAGE}"
             echo "full_tag=${FULL_TAG}"
+            echo "unique_tag=${UNIQUE_TAG}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Log image push status
@@ -209,7 +233,7 @@ jobs:
   merge-image:
     name: Merge multi-arch nightly-${{ inputs.target }}
     runs-on: linux-amd64-cpu-4
-    needs: build
+    needs: [generate-matrix, build]
     # Run even if some matrix instances failed. Each OS variant is merged
     # independently, only when BOTH arch images exist.
     if: ${{ inputs.should_push && always() && inputs.build_type == 'full' }}
@@ -228,6 +252,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
           OS_FILTER: ${{ inputs.os_filter }}
+          TAG_SUFFIX: ${{ needs.generate-matrix.outputs.tag_suffix }}
         run: |
           set -euo pipefail
           BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
@@ -252,13 +277,15 @@ jobs:
               DEST="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend"
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
-            TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${TAG}"
+            # The build step pushed the per-arch images under the unique tag.
+            UNIQUE_TAG="${TAG}${TAG_SUFFIX}"
+            TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}"
 
             # A variant merges only when BOTH arch images exist.
             MISSING_ARCH=0
             for ARCH in amd64 arm64; do
               if ! docker buildx imagetools inspect "${TEMP}-${ARCH}" >/dev/null 2>&1; then
-                echo "::warning::Skipping ${TAG}: missing ${TEMP}-${ARCH}"
+                echo "::warning::Skipping ${UNIQUE_TAG}: missing ${TEMP}-${ARCH}"
                 MISSING_ARCH=1
                 break
               fi
@@ -268,9 +295,13 @@ jobs:
               continue
             fi
 
-            echo "Creating multi-arch manifest: ${DEST}:${TAG}"
+            # Publish both tags on the same manifest: the stable tag keeps being
+            # overwritten by the newest nightly, the unique tag preserves this
+            # build in history.
+            echo "Creating multi-arch manifests: ${DEST}:${TAG} and ${DEST}:${UNIQUE_TAG}"
             docker buildx imagetools create \
               -t "${DEST}:${TAG}" \
+              -t "${DEST}:${UNIQUE_TAG}" \
               "${TEMP}-amd64" \
               "${TEMP}-arm64"
             MERGED_VARIANT=1
