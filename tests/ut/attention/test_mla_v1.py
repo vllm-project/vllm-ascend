@@ -376,10 +376,6 @@ class TestAscendMLABackend(TestBase):
         )
         self.mla_config_patcher.start()
 
-        from vllm_ascend.attention.utils import is_dcp_enabled
-
-        is_dcp_enabled.cache_clear()
-
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
