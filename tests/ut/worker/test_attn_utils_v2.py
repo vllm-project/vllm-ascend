@@ -840,6 +840,44 @@ def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("cache_kind", ["tensor", "tuple", "list"])
+@pytest.mark.parametrize("with_active_layer", [False, True])
+@pytest.mark.parametrize("empty_shape", [(0,), (2, 0, 1, 8)])
+def test_v2_zeroer_skips_empty_cache_components(cache_kind, with_active_layer, empty_shape):
+    empty_cache = torch.empty(empty_shape, dtype=torch.float16)
+    if cache_kind != "tensor":
+        components = [None, empty_cache]
+        empty_cache = tuple(components) if cache_kind == "tuple" else components
+    context = {"placeholder": SimpleNamespace(kv_cache=empty_cache)}
+    if with_active_layer:
+        # Zero-valued allocated caches still need block-zeroing metadata.
+        active_cache = torch.zeros((2, 1, 4, 8), dtype=torch.float16)
+        context["active"] = SimpleNamespace(kv_cache=active_cache)
+    group = AttentionGroup(
+        backend=AscendAttentionBackend,
+        layer_names=list(context),
+        kv_cache_spec=FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float16),
+        kv_cache_group_id=0,
+    )
+    zeroer = AscendV2KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups_iter=[group],
+        kernel_block_sizes=[4],
+        static_forward_context=context,
+        num_blocks=2,
+    )
+
+    if with_active_layer:
+        assert len(zeroer._zeroers) == 1
+        meta = zeroer._zeroers[0]._meta
+        assert meta is not None
+        assert meta[0].tolist() == [active_cache.data_ptr()]
+    else:
+        assert zeroer._zeroers == []
+        zeroer.warmup(2)
+        zeroer.zero_block_ids([0, 1])
+
+
 def test_v2_zeroer_covers_each_mla_component_view():
     raw = torch.zeros(2 * 488448, dtype=torch.uint8)
     typed_raw = raw.view(torch.bfloat16)
