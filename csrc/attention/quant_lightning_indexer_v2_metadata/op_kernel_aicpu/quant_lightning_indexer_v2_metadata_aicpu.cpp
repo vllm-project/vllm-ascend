@@ -954,7 +954,7 @@ bool QuantLightningIndexerV2MetadataCpuKernel::GenMetadata(SplitResult &splitRes
 }
 
 namespace {
-static const char *kernelType = "QuantLightningIndexerV2Metadata";
+static const char *kernelType = "VllmAscendQuantLightningIndexerV2Metadata";
 REGISTER_CPU_KERNEL(kernelType, QuantLightningIndexerV2MetadataCpuKernel);
 } // namespace
 }; // namespace aicpu

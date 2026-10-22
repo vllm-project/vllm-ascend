@@ -14,11 +14,14 @@
 # Adapted from vllm/tests/lora/test_layers.py
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config.vllm import set_current_vllm_config
+from vllm.forward_context import ForwardContext, override_forward_context
 
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -303,50 +306,124 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.assertEqual(layer.num_org_embeddings_per_partition, layer.org_vocab_size_padded)
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
 
-    def test_pcp_embedding_communication_order(self):
-        layer = self._create_layer()
-        pcp_group = MagicMock(world_size=2, device_group="pcp")
-        tp_group = MagicMock(world_size=2, unique_name="tp")
-        layer.token_exchange_group = pcp_group
-        layer.output_reduce_group = tp_group
-        layer.embedding_tp_capacity = 2
-        layer.params_dtype = torch.float32
+
+def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0):
+    """Keep real planning, weight loading and lookup; replace only runtime topology."""
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_size, unique_name="tp")
+    exchange_group = SimpleNamespace(rank_in_group=exchange_rank, world_size=2, device_group="exchange")
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if mode is VocabParallelMode.PCP_X_TP else 1),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    for name, value in (
+        ("get_tp_group", tp_group),
+        ("get_pcp_group", exchange_group),
+        ("get_embed_tp_group", exchange_group),
+        ("get_current_vllm_config", config),
+        ("get_potential_max_tokens", 8),
+        ("enable_pcp_embedding_lmhead_weight_sharding", mode is VocabParallelMode.PCP_X_TP),
+        ("embedding_tp_enable", mode is VocabParallelMode.FINE_GRAINED),
+        ("lmhead_tp_enable", False),
+    ):
+        monkeypatch.setattr(f"{module}.{name}", lambda value=value: value)
+    layer = AscendVocabParallelEmbedding(8, 2, padding_size=4, prefix="model.embed_tokens")
+    weight = torch.arange(16, dtype=torch.float32).reshape(8, 2) + 1
+    layer.weight_loader(layer.weight, weight)
+    assert layer.parallel_mode is mode
+    return layer, weight
+
+
+@pytest.mark.parametrize(
+    "mode,tp_size",
+    [(VocabParallelMode.PCP_X_TP, 1), (VocabParallelMode.PCP_X_TP, 2), (VocabParallelMode.FINE_GRAINED, 1)],
+)
+def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
+    def run_batch(layer, weight, ids, span, tp_rank, rank):
+        padded_ids = torch.zeros(2, span, dtype=torch.long)
+        for peer in range(2):
+            padded_ids[peer, : ids[peer].numel()] = ids[peer]
+        gathered = padded_ids.flatten()
+        expected = weight[gathered]
+        local_contribution = expected * (gathered // layer.num_embeddings_per_partition == layer.tp_rank).unsqueeze(-1)
+        tp_contribution = expected * (gathered // (8 // tp_size) == tp_rank).unsqueeze(-1)
         events = []
 
         def all_gather(output, input_, *, group):
-            events.append(("pcp_all_gather", group))
-            output.copy_(input_.repeat(2))
-
-        def embedding(_, input_):
-            events.append(("embedding", None))
-            return input_.unsqueeze(-1).expand(-1, layer.embedding_dim).float()
+            events.append("gather")
+            assert group == "exchange"
+            assert input_.data_ptr() == layer._embed_ag_in_buf.data_ptr()
+            assert output.data_ptr() == layer._embed_ag_out_buf.data_ptr()
+            torch.testing.assert_close(input_, padded_ids[rank])
+            output.copy_(gathered)
 
         def reduce_scatter(output, input_, *, group):
-            events.append(("pcp_reduce_scatter", group))
-            output.copy_(input_[: output.shape[0]])
+            events.append("scatter")
+            assert group == "exchange"
+            assert input_.data_ptr() == layer._embed_rs_in_buf.data_ptr()
+            assert output.data_ptr() == layer._embed_rs_out_buf.data_ptr()
+            torch.testing.assert_close(input_, local_contribution)
+            output.copy_(tp_contribution.reshape(2, span, 2)[rank])
 
         def all_reduce(output, group_name):
-            events.append(("tp_all_reduce", group_name))
-            return output
+            events.append("reduce")
+            assert group_name == "tp"
+            torch.testing.assert_close(output, tp_contribution.reshape(2, span, 2)[rank, : ids[rank].numel()])
+            return weight[ids[rank]]
 
-        layer.quant_method.embedding = MagicMock(side_effect=embedding)
-        with (
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor", side_effect=all_gather),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.dist.reduce_scatter_tensor", side_effect=reduce_scatter),
-            patch("torch.ops.vllm.all_reduce", side_effect=all_reduce),
-        ):
-            output = layer(torch.tensor([15, 16]))
+        module = "vllm_ascend.ops.vocab_parallel_embedding"
+        monkeypatch.setattr(f"{module}.dist.all_gather_into_tensor", all_gather)
+        monkeypatch.setattr(f"{module}.dist.reduce_scatter_tensor", reduce_scatter)
+        monkeypatch.setattr(torch.ops.vllm, "all_reduce", all_reduce)
+        output = layer(ids[rank])
+        torch.testing.assert_close(output, weight[ids[rank]])
+        assert events == ["gather", "scatter"] + (["reduce"] if tp_size > 1 else [])
 
-        self.assertEqual(
-            events,
-            [
-                ("pcp_all_gather", "pcp"),
-                ("embedding", None),
-                ("pcp_reduce_scatter", "pcp"),
-                ("tp_all_reduce", "tp"),
-            ],
-        )
-        self.assertEqual(output.shape, (2, self.embedding_dim))
+    # One lifecycle covers fallback, unequal MM rows, graph-padded model input,
+    # shrinking batches and idle ranks. Fine-grained DP must keep fixed capacity.
+    batches = [
+        ([1, 5], [2, 6, 7], None, False, 8),
+        ([1, 5], [2, 6, 7], 3, False, 3),
+        ([1, 5, 0, 0], [2, 6, 7, 0], None, True, 4),
+        ([7], [1, 6], 2, False, 2),
+        ([], [2, 5], 2, False, 2),
+        ([], [], 0, False, 1),
+    ]
+    for tp_rank in range(tp_size):
+        for rank in range(2):
+            layer, weight = _exchange_embedding(monkeypatch, mode, tp_rank, tp_size, rank)
+            addresses = None
+            for first_ids, second_ids, published_span, in_forward, pcp_span in batches:
+                ids = [torch.tensor(first_ids, dtype=torch.long), torch.tensor(second_ids, dtype=torch.long)]
+                span = pcp_span if mode is VocabParallelMode.PCP_X_TP else 8
+                if published_span is not None:
+                    layer.set_embedding_num_tokens_padded(published_span)
+                with override_forward_context(ForwardContext({}, {}, {}) if in_forward else None):
+                    run_batch(layer, weight, ids, span, tp_rank, rank)
+                buffers = (
+                    layer._embed_ag_in_buf,
+                    layer._embed_ag_out_buf,
+                    layer._embed_rs_in_buf,
+                    layer._embed_rs_out_buf,
+                )
+                current_addresses = tuple(buffer.data_ptr() for buffer in buffers)
+                if addresses is not None:
+                    assert current_addresses == addresses
+                addresses = current_addresses
+                assert [buffer.shape[0] for buffer in buffers] == [8, 16, 16, 8]
+
+
+@pytest.mark.parametrize("num_tokens,padded_tokens", [(3, 2), (1, 9)])
+def test_embedding_exchange_rejects_invalid_batch_before_communication(monkeypatch, num_tokens, padded_tokens):
+    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.PCP_X_TP)
+    layer.set_embedding_num_tokens_padded(padded_tokens)
+    with (
+        override_forward_context(None),
+        patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor") as gather,
+        pytest.raises(ValueError, match="must cover .* tokens and fit the static capacity"),
+    ):
+        layer(torch.ones(num_tokens, dtype=torch.long))
+    gather.assert_not_called()
 
 
 class TestVocabParallelPlan(unittest.TestCase):
@@ -511,16 +588,12 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.rank_in_group = 0
         self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
-        # enable_reduce_sample must be explicitly False so _get_logits_lmheadtp
-        # reaches the lmhead_all_to_all branch (a MagicMock attribute is truthy
-        # and would silently skip it).
-        self.mock_ascend_config.enable_reduce_sample = False
+
         self.mock_quant_method = MagicMock()
         # 2 rows so lmhead_all_to_all's equal split (world_size=2) holds.
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(

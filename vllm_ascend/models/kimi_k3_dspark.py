@@ -3,13 +3,21 @@
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -41,6 +49,19 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
+
+
+def _normalize_dspark_mla_cache(
+    kv_cache: object,
+    kv_lora_rank: int,
+) -> tuple[torch.Tensor, ...] | object:
+    """Expose the NoPE/RoPE logical views consumed by MLA writers."""
+    if isinstance(kv_cache, torch.Tensor):
+        return (
+            kv_cache[..., :kv_lora_rank],
+            kv_cache[..., kv_lora_rank:],
+        )
+    return kv_cache
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -139,6 +160,16 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
+        # The draft config used for construction reports PP=1; query the real
+        # PP group, the same signal maybe_share_target_embed uses.
+        if get_pp_group().world_size > 1:
+            # PP stages after the first cannot alias the target's stage-0
+            # embedding; own the frozen copy shipped in the draft checkpoint.
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.target_hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
@@ -191,18 +222,33 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         cos, sin = get_cos_and_sin_mla(context_positions)
         for layer_idx, layer in enumerate(self.layers):
             attn = layer.self_attn
+            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
+            if slots is None:
+                continue
+            kv_cache = attn.kv_cache
+            assert attn.impl.kv_lora_rank is not None
+            normalized_cache = _normalize_dspark_mla_cache(kv_cache, attn.impl.kv_lora_rank)
+            if attn.impl._cache_requires_prolog_v3_writer(normalized_cache):
+                attn.impl.exec_context_kv_prolog_v3(
+                    context_states,
+                    cos,
+                    sin,
+                    normalized_cache,
+                    slots,
+                )
+                continue
+
             assert attn.fused_qkv_a_proj is not None
             assert attn.q_lora_rank is not None
             qkv_lora = attn.fused_qkv_a_proj(context_states)[0]
             kv_no_split = qkv_lora[..., attn.q_lora_rank :].contiguous()
-            slots = context_slot_mapping[layer_idx] if per_layer_slot_mapping else context_slot_mapping
-            if slots is None:
-                continue
+            # Context writes bypass MLA forward's fused-cache view split.
+            kv_cache = normalized_cache
             attn.impl.exec_kv_prefill(
                 kv_no_split,
                 cos,
                 sin,
-                attn.kv_cache,
+                kv_cache,
                 slots,
             )
 
@@ -240,6 +286,12 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head: nn.Module | None = None
+        self._owns_embed_tokens = get_pp_group().world_size > 1
+        if self._owns_embed_tokens:
+            # The draft runs on the last PP stage, where the target embedding
+            # (stage 0) cannot be aliased. Declare ownership so the loader's
+            # share check keeps the checkpoint copy instead of raising.
+            self.has_own_embed_tokens = True
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
@@ -282,7 +334,55 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         interface without creating that extra packed parameter.
         """
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self._owns_embed_tokens:
+            # Keep the frozen embedding without duplicating upstream mappings.
+            mapper = replace(
+                mapper,
+                orig_to_new_substr={
+                    key: value for key, value in mapper.orig_to_new_substr.items() if key != "embed_tokens"
+                },
+            )
+        checkpoint_lm_head = None
+
+        def weights_without_lm_head():
+            nonlocal checkpoint_lm_head
+            for name, weight in weights:
+                # Intercept before the inherited mapper discards lm_head.
+                if name == "lm_head.weight" or name.endswith(".lm_head.weight"):
+                    if checkpoint_lm_head is not None:
+                        raise ValueError("Multiple K3 DSpark checkpoint LM heads were found.")
+                    checkpoint_lm_head = weight
+                else:
+                    yield name, weight
+
+        loaded_weights = loader.load_weights(weights_without_lm_head(), mapper=mapper)
+        if checkpoint_lm_head is None:
+            logger.debug("No K3 DSpark checkpoint LM head; using target sharing/alignment.")
+            return loaded_weights
+
+        expected_shape = (self.config.vocab_size, self.config.hidden_size)
+        if tuple(checkpoint_lm_head.shape) != expected_shape:
+            raise ValueError(
+                f"K3 DSpark checkpoint LM head shape {tuple(checkpoint_lm_head.shape)} does not match {expected_shape}."
+            )
+        # load_weights runs outside BaseModelLoader's device context.
+        with torch.device(self.model.context_proj.weight.device):
+            lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                params_dtype=self.draft_model_config.dtype,
+                prefix="lm_head",
+            )
+        weight_loader = getattr(lm_head.weight, "weight_loader", default_weight_loader)
+        weight_loader(lm_head.weight, checkpoint_lm_head)
+        self.lm_head = lm_head
+        # The checkpoint head already consumes draft hidden states. Ownership
+        # prevents target sharing/alignment from replacing or rotating it.
+        self.has_own_lm_head = True
+        loaded_weights.add("lm_head.weight")
+        logger.info("Loaded K3 DSpark checkpoint LM head, local shape: %s", tuple(lm_head.weight.shape))
+        return loaded_weights
 
     def embed_input_ids(
         self,

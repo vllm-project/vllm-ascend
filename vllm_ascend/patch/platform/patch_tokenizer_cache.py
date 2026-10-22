@@ -28,22 +28,18 @@ every repeated turn.
 
 Correctness rests on one identity: encoding ``A + B`` must give exactly the
 concatenation of encoding ``A`` and encoding ``B``. That holds when the cut
-falls immediately after an *added token* (a special token such as
-``<|im_end|>``), because HF tokenizers split the input on the added vocabulary
-**before** the pre-tokenizer and BPE ever run, so a merge can never span an
-added token. Chat templates emit one at every message boundary, which is
-exactly where this module cuts. It is still a property of the tokenizer rather
-than a guarantee - a Metaspace/SentencePiece pre-tokenizer that prepends a
-space to each segment, or a model with no added tokens at all, breaks it - so
-the identity is verified empirically at renderer construction against a probe
-corpus and the cache disables itself if the check does not pass.
+falls immediately after an *added token* with context-independent matching.
+The legacy path restricts activation to standard stateless HF ByteLevel BPE
+encoding, then runs additional startup probes. Probes alone cannot establish
+this identity for arbitrary custom tokenizers.
 
 Enable with ``--additional-config '{"tokenizer_cache_gb": 4}'``; ``0`` (the
-default) is a no-op. The size is read from ``AscendConfig`` when a renderer is
-built rather than when this module is imported, because the platform plugin
-imports the module before any ``VllmConfig`` exists. The four wrappers below are
-therefore always installed, and each one is inert - a single lookup that misses
-- until a cache has been attached.
+default) is a no-op. Read the size from the renderer's ``VllmConfig`` after
+platform import. When vLLM provides a native cache, a positive native budget
+takes precedence; otherwise the legacy option is forwarded to a renderer-local
+copy of its model config. In that mode no tokenization methods are patched.
+On a core without the native feature, install the wrappers below and attach the
+HF cache only after its tokenizer thread pool has been constructed.
 
 Patched symbols:
 
@@ -63,9 +59,12 @@ no renderer, so the cache is published on the tokenizer itself (see
 ``_install_cache``). There is no module-level registry to keep in sync.
 """
 
+import copy
+import json
+import math
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import regex as re
@@ -424,6 +423,10 @@ def _chat_ids(
     """Token ids from the cache, or ``None`` to fall through to the original."""
     if chat_kwargs.get("tokenize", True) is False:
         return None
+    if any(chat_kwargs.get(key) for key in ("return_dict", "return_tensors", "return_assistant_tokens_mask")):
+        return None
+    if any(key in chat_kwargs for key in ("truncation", "max_length", "return_overflowing_tokens")):
+        return None
     if not cache.verify_chat_path(render):
         return None
     return cache.encode(render(tokenize=False))
@@ -450,30 +453,136 @@ def _configured_capacity_gb() -> int:
 def _patch_renderer_init() -> None:
     """Build the per-renderer cache as soon as the renderer knows its tokenizer."""
     from vllm.renderers.base import BaseRenderer
+    from vllm.renderers.hf import HfRenderer
 
     original = BaseRenderer.__init__
 
     def patched(self, config, tokenizer) -> None:
+        capacity_gb = _renderer_capacity_gb(config)
+        model_config = getattr(config, "model_config", None)
+        uses_native_cache = hasattr(model_config, "tokenizer_cache_gb")
+        if uses_native_cache and capacity_gb > 0:
+            if model_config.tokenizer_cache_gb > 0:
+                logger.info("Native tokenizer cache budget takes precedence over additional_config.tokenizer_cache_gb.")
+            else:
+                # Frontends can share their input configuration. Keep this
+                # renderer's legacy-budget alias local to its native cache.
+                config = copy.copy(config)
+                config.model_config = copy.copy(model_config)
+                config.model_config.tokenizer_cache_gb = capacity_gb
         original(self, config, tokenizer)
-        capacity_gb = _configured_capacity_gb()
         owned = self.tokenizer
-        if owned is None or capacity_gb <= 0:
+        if owned is None:
             return
-        cache = IncrementalTokenizerCache(owned, capacity_gb)
-        if not cache.enabled:
-            # The cache object already logged its reason; repeat it with the
-            # setting that asked for it, so an `additional_config
-            # .tokenizer_cache_gb` that buys nothing is impossible to miss.
-            logger.warning(
-                "additional_config.tokenizer_cache_gb=%.2f was requested but the cache is disabled for %s: %s",
-                capacity_gb,
-                type(owned).__name__,
-                cache.disabled_reason,
-            )
+        if uses_native_cache or capacity_gb <= 0:
+            if _cache_for(owned) is not None:
+                delattr(owned, _CACHE_ATTRIBUTE)
             return
-        _install_cache(owned, cache)
+        if isinstance(self, HfRenderer):
+            # HF deep-copies tokenizer state to build its thread pool after
+            # BaseRenderer initialization. Attach the lock-bearing cache later.
+            return
+        _attach_renderer_cache(owned, capacity_gb)
 
     BaseRenderer.__init__ = patched
+
+
+def _attach_renderer_cache(tokenizer, capacity_gb) -> None:
+    if not _legacy_tokenizer_supported(tokenizer):
+        logger.warning(
+            "Legacy tokenizer cache requires standard stateless HF ByteLevel BPE encoding; using regular encoding."
+        )
+        return
+    cache = IncrementalTokenizerCache(tokenizer, capacity_gb)
+    if cache.enabled:
+        _install_cache(tokenizer, cache)
+    else:
+        logger.warning(
+            "additional_config.tokenizer_cache_gb=%.2f was requested but the cache is disabled for %s: %s",
+            capacity_gb,
+            type(tokenizer).__name__,
+            cache.disabled_reason,
+        )
+
+
+def _legacy_tokenizer_supported(tokenizer) -> bool:
+    from transformers import TokenizersBackend
+
+    if not isinstance(tokenizer, TokenizersBackend):
+        return False
+    # HF's own pool delegates to unchanged copies of the input tokenizer.
+    from vllm.tokenizers.hf import ThreadSafeHFTokenizerMixin
+
+    encoder_type = type(tokenizer).__mro__[1] if isinstance(tokenizer, ThreadSafeHFTokenizerMixin) else type(tokenizer)
+    if any(
+        getattr(encoder_type, method, None) is not getattr(TokenizersBackend, method, None)
+        for method in (
+            "__call__",
+            "_call_one",
+            "encode",
+            "encode_plus",
+            "batch_encode_plus",
+            "_encode_plus",
+            "_batch_encode_plus",
+            "_convert_encoding",
+            "_get_padding_truncation_strategies",
+            "set_truncation_and_padding",
+        )
+    ):
+        return False
+    try:
+        state = json.loads(tokenizer.backend_tokenizer.to_str())
+        model = state["model"]
+        normalizer = state.get("normalizer")
+        if normalizer == {"type": "Sequence", "normalizers": []}:
+            normalizer = None
+        if model["type"] != "BPE" or model.get("dropout") is not None:
+            return False
+        if normalizer not in (None, {"type": "NFC"}):
+            return False
+        pre = state.get("pre_tokenizer")
+        parts = pre.get("pretokenizers", [pre]) if pre else []
+        if not any(part["type"] == "ByteLevel" for part in parts):
+            return False
+        if any(part["type"] not in ("ByteLevel", "Split") or part.get("add_prefix_space", False) for part in parts):
+            return False
+        return bool(state.get("added_tokens")) and not any(
+            token.get("single_word")
+            or token.get("lstrip")
+            or token.get("rstrip")
+            or (normalizer and token.get("normalized", True))
+            for token in state["added_tokens"]
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _patch_hf_renderer_init() -> None:
+    from vllm.renderers.hf import HfRenderer
+
+    original = HfRenderer.__init__
+
+    def patched(self, config, tokenizer) -> None:
+        original(self, config, tokenizer)
+        capacity_gb = _renderer_capacity_gb(config)
+        if self.tokenizer is not None and capacity_gb > 0:
+            _attach_renderer_cache(self.tokenizer, capacity_gb)
+
+    HfRenderer.__init__ = patched
+
+
+def _renderer_capacity_gb(config) -> float:
+    if not hasattr(config, "additional_config"):
+        return _configured_capacity_gb()
+    additional = config.additional_config
+    if not isinstance(additional, Mapping):
+        # VllmConfig also accepts plugin-specific SupportsHash objects. They
+        # carry no legacy budget, so preserve ordinary renderer construction.
+        return 0
+    capacity = additional.get("tokenizer_cache_gb", 0)
+    if not isinstance(capacity, (int, float)) or not math.isfinite(capacity) or capacity < 0:
+        raise ValueError("tokenizer_cache_gb must be a finite number >= 0")
+    return capacity
 
 
 def _patch_tokenize_prompt() -> None:
@@ -534,12 +643,19 @@ def _patch_renderer_chat(renderer_cls) -> None:
         if cache is not None:
             # ``kwargs`` carries the conversation (``messages``/``conversation``),
             # so the probe below has to keep it and only override ``tokenize``.
+            paired_result = False
+
             def render(**kw):
-                return original(self, *args, **{**kwargs, **kw})
+                nonlocal paired_result
+                result = original(self, *args, **{**kwargs, **kw})
+                if isinstance(result, tuple) and len(result) == 2 and result[1] is None:
+                    paired_result = True
+                    return result[0]
+                return result
 
             token_ids = _chat_ids(cache, render, kwargs)
             if token_ids is not None:
-                return token_ids
+                return (token_ids, None) if paired_result else token_ids
         return original(self, *args, **kwargs)
 
     renderer_cls._apply_chat_template = patched
@@ -570,7 +686,13 @@ def _install() -> None:
     cache exists, and falls straight through to the original on its first
     check, so ``tokenizer_cache_gb=0`` still leaves request handling unchanged.
     """
+    from vllm.config import ModelConfig
+
     _patch_renderer_init()
+    if "tokenizer_cache_gb" in getattr(ModelConfig, "__dataclass_fields__", {}):
+        logger.info("Native tokenizer cache available; only the additional_config compatibility adapter is installed.")
+        return
+    _patch_hf_renderer_init()
     _patch_tokenize_prompt()
     _patch_hf_chat()
     _patch_deepseek_chat()

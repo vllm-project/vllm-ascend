@@ -23,6 +23,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
+from fla_npu.ops.ascendc import recurrent_kda
 
 
 def _flatten_bsnd(x: torch.Tensor, layout: str) -> torch.Tensor:
@@ -228,17 +229,19 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_qkv_and_state_pool():
     assert state_view.storage_offset() > 0
     assert all(not tensor.is_contiguous() for tensor in qkv_views)
 
-    out = torch.ops._C_ascend.recurrent_kda(
+    out, _ = recurrent_kda(
         q_view,
         k_view,
         v_view,
         raw_gate_cpu.to(device),
         beta_cpu.to(device),
         state_view,
-        torch.tensor(cu_seqlens_host, dtype=torch.int32, device=device),
-        state_indices_cpu.to(device),
-        a_log_cpu.to(device),
-        dt_bias_cpu.to(device),
+        cu_seqlens=torch.tensor(cu_seqlens_host, dtype=torch.int32, device=device),
+        ssm_state_indices=state_indices_cpu.to(device),
+        A_log=a_log_cpu.to(device),
+        dt_bias=dt_bias_cpu.to(device),
+        state_v_first=True,
+        inplace_final_state=True,
         scale=dim**-0.5,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,

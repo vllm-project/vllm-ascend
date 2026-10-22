@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -36,6 +37,7 @@ def _is_device_sdma() -> bool:
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+MEMCACHE_SSD_MEDIA_TYPE = 2
 
 
 def _validate_device_ub_qos() -> None:
@@ -195,12 +197,17 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
         extra_config: dict[str, Any] | None = None,
+        dp_init_barrier: bool = True,
     ):
+        if not isinstance(dp_init_barrier, bool):
+            raise ValueError("memcache_dp_init_barrier in kv_connector_extra_config must be a boolean.")
         _inject_device_ub_qos(extra_config)
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
+        # Lazy initialization can be triggered independently by each DP rank.
+        self._dp_init_barrier = dp_init_barrier and parallel_config.data_parallel_size > 1 and not self._lazy_init
 
         self.store: Any | None = None
         self._store_initialized = False
@@ -210,6 +217,12 @@ class MemcacheBackend(Backend):
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
+
+    def close(self) -> None:
+        if self.store is not None:
+            self.store.close()
+            self.store = None
+            self._store_initialized = False
 
     def ensure_initialized(self):
         if self._store_initialized:
@@ -250,6 +263,12 @@ class MemcacheBackend(Backend):
             raise
 
         assert res == 0
+        if self._init_bm and self._dp_init_barrier:
+            # Keep early ranks from entering NPU work while peers are still
+            # establishing MemCache channels. Metadata-only clients must not join.
+            logger.info("Waiting for all DP MemCache initializations")
+            torch.distributed.barrier(group=get_dp_group().cpu_group)
+            logger.info("All DP MemCache initializations completed")
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
@@ -304,7 +323,7 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
-    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+    def batch_get_key_info(self, keys: list[str], *, for_load: bool = False) -> list[Any]:
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MemcacheBackend.batch_get_key_info called before store initialization; "
@@ -313,7 +332,46 @@ class MemcacheBackend(Backend):
             )
             return []
         assert self.store is not None
-        return self.store.batch_get_key_info(keys)
+        infos = self.store.batch_get_key_info(keys)
+        if not for_load:
+            return infos
+        if infos is None or len(infos) != len(keys):
+            logger.error("Memcache key-info response length mismatch")
+            return [None] * len(keys)
+        rewarmed = False
+        for key, info in zip(keys, infos, strict=True):
+            # A missing key yields a None entry: there is no SSD object to
+            # rewarm, and the caller treats it as not loadable.
+            if info is None:
+                continue
+            # MEDIA_SSD=2 has no directly readable GVA. Query and AddLease
+            # do not rewarm in the deployed SDK; only the regular Get path
+            # waits for SSD -> DRAM completion. Its API requires a full-size
+            # destination. UBoE does not enable host swap buffers by default,
+            # so use one registered temporary NPU blob at a time.
+            if (
+                info.size() <= 0
+                or MEMCACHE_SSD_MEDIA_TYPE not in info.type_list()
+                or any(gva > 0 for gva in info.gva_list())
+            ):
+                continue
+            size = info.size()
+            scratch = torch.empty(size, dtype=torch.uint8, device="npu")
+            address = scratch.data_ptr()
+            registered = self.store.register_buffer(address, size)
+            if registered != 0:
+                logger.error("Memcache SSD rewarm buffer registration failed: result=%s", registered)
+                return [None] * len(keys)
+            try:
+                results = self.store.batch_get_into([key], [address], [size], MmcDirect.COPY_G2L.value)
+            finally:
+                self.store.unregister_buffer(address, size)
+            if results != [0]:
+                logger.error("Memcache SSD rewarm failed: key=%s, results=%s", key, results)
+                return [None] * len(keys)
+            rewarmed = True
+            logger.debug("Memcache layerwise SSD rewarm completed key=%s bytes=%d", key, size)
+        return self.store.batch_get_key_info(keys) if rewarmed else infos
 
     def batch_get_into_buffers(
         self,
@@ -362,10 +420,18 @@ class MemcacheBackend(Backend):
         if self._lazy_init and not self._store_initialized:
             return [False] * len(keys)
         key_infos = self.batch_get_key_info(keys)
-        if len(key_infos) != len(keys):
-            raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
+        if key_infos is None or len(key_infos) != len(keys):
+            logger.error(
+                "Memcache readability query failed: expected=%d key infos, got=%s; treating as cache misses",
+                len(keys),
+                len(key_infos) if key_infos is not None else None,
+            )
+            return [False] * len(keys)
         readable = []
         for key_info in key_infos:
+            if key_info is None:
+                readable.append(False)
+                continue
             try:
                 size = int(key_info.size())
                 gvas = key_info.gva_list()
@@ -375,6 +441,7 @@ class MemcacheBackend(Backend):
         return readable
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
+        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
         self.ensure_initialized()
         assert self.store is not None
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
@@ -389,11 +456,7 @@ class MemcacheBackend(Backend):
 
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         assert self.store is not None
-        finish = getattr(self.store, "batch_write_finish", None)
-        if finish is None:
-            # Older MemCache releases publish writes directly in batch_copy.
-            return [0] * len(keys)
-        return finish(keys, results)
+        return self.store.batch_write_finish(keys, results)
 
     def get(
         self,
@@ -441,7 +504,7 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
-    ):
+    ) -> list[bool] | bool:
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -459,6 +522,7 @@ class MemcacheBackend(Backend):
                 logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
                 if self._lazy_init:
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return [int(value) == 0 for value in res]
         except Exception as e:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
@@ -470,6 +534,7 @@ class MemcacheBackend(Backend):
             logger.debug("Failed to put key details. keys=%s", key)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            return False
 
     def put_from(
         self,

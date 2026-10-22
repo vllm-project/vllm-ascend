@@ -32,6 +32,7 @@ SCENES = (SCENE_SINGLE, SCENE_MULTI)
 #          Treated like ``git bisect skip`` and excluded from the search.
 Verdict = Literal["PASS", "FAIL", "SKIP"]
 
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -40,8 +41,8 @@ Verdict = Literal["PASS", "FAIL", "SKIP"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Nightly launch entries we reuse instead of re-implementing.
-SINGLE_NODE_TEST_PATH = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
-MULTI_NODE_RUN_SH = "tests/e2e/nightly/multi_node/scripts/run.sh"
+SINGLE_NODE_TEST_PATH = "tests/e2e/common/single_node/test_single_node.py"
+MULTI_NODE_RUN_SH = "tests/e2e/common/multi_node/run.sh"
 
 # The "good table" lives on a fixed nightly path (PVC / shared cache). It is a
 # plain CSV so it can be eyeballed and edited by hand. Override with
@@ -219,6 +220,8 @@ class BisectOptions:
     # worker also exits promptly once this file appears (run.sh touches its
     # ``done`` file on every leader exit path).
     release_file: str | None = None
+    # Only set when the caller guarantees a fresh directory for this run.
+    run_scoped_coord: bool = False
     # Per-trial pytest timeout (seconds).
     trial_timeout_s: float = 7200.0
 

@@ -1,7 +1,9 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zlib import adler32
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -9,6 +11,9 @@ pytest.importorskip("vllm")
 pytest.importorskip("torch_npu")
 pytest.importorskip("memfabric_hybrid")
 
+from vllm.config import CUDAGraphMode  # noqa: E402
+
+from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (  # noqa: E402
     sparse_kv_offload_manager as manager_module,
 )
@@ -19,7 +24,101 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT,
     SparseKVOffloadManager,
+    update_sparse_kv_offload_metadata,
 )
+
+
+@pytest.mark.parametrize(
+    ("capturing", "runtime_mode", "expected"),
+    [
+        (False, CUDAGraphMode.NONE, False),
+        (True, CUDAGraphMode.NONE, True),
+        (False, CUDAGraphMode.FULL, True),
+    ],
+)
+def test_v2_offload_graph_detection_uses_extra_context(capturing, runtime_mode, expected):
+    forward_context = SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+    with (
+        patch("vllm_ascend.attention.sfa_kv_offload.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.attention.sfa_kv_offload.get_forward_context", return_value=forward_context),
+        patch("vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX", SimpleNamespace(capturing=capturing)),
+    ):
+        assert AscendSFAKVOffloadImpl._in_graph_runtime() is expected
+
+
+def test_v2_sparse_offload_metadata_accepts_numpy_query_boundaries():
+    copied = []
+    req_ids = SimpleNamespace(
+        np=np.full(4, -1, dtype=np.int64),
+        copy_to_gpu=lambda count: copied.append(("req_ids", count)),
+    )
+    token_to_req = SimpleNamespace(
+        np=np.full(8, -1, dtype=np.int32),
+        copy_to_gpu=lambda count: copied.append(("token_to_req", count)),
+    )
+
+    update_sparse_kv_offload_metadata(
+        num_tokens=3,
+        num_reqs=2,
+        num_tokens_padded=6,
+        num_reqs_padded=4,
+        req_ids=["first", "second"],
+        query_start_loc=np.array([0, 2, 3], dtype=np.int32),
+        offload_req_ids_tensor=req_ids,
+        offload_token_to_req=token_to_req,
+    )
+
+    assert req_ids.np.tolist() == [adler32(b"first"), adler32(b"second"), 0, 0]
+    assert token_to_req.np[:6].tolist() == [0, 0, 1, 0, 0, 0]
+    assert copied == [("req_ids", 4), ("token_to_req", 6)]
+
+
+@pytest.mark.parametrize("device_block_table", [False, True])
+def test_fused_dense_fill_accepts_v1_cpu_or_v2_tensor_block_table(device_block_table):
+    manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager.topk_buffers_k = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    manager.topk_buffers_v = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    manager.copy_sfa_host_bases = [torch.tensor([[1000], [2000]], dtype=torch.int64)]
+    manager.copy_sfa_device_bases = [torch.tensor([[3000], [4000]], dtype=torch.int64)]
+    manager.copy_sfa_kv = MagicMock()
+    block_table = torch.tensor([[1, 3]], dtype=torch.int32)
+    if not device_block_table:
+        block_table = block_table.numpy()
+
+    manager.dense_fill_copy_sfa_rows({0: (0, 200)}, block_size=128, block_table=block_table)
+
+    sources, destinations, lengths, count = manager.copy_sfa_kv.call_args.args
+    assert sources.tolist() == [1512, 2536, 2512, 3536]
+    assert destinations.tolist() == [3000, 3512, 4000, 4512]
+    assert lengths.tolist() == [512, 288, 512, 288]
+    assert count.tolist() == [4]
+
+
+def test_fused_dense_fill_tensor_block_table_promotes_offsets_without_to():
+    manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager.topk_buffers_k = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    manager.topk_buffers_v = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    manager.copy_sfa_host_bases = [torch.tensor([[1000], [2000]], dtype=torch.int64)]
+    manager.copy_sfa_device_bases = [torch.tensor([[3000], [4000]], dtype=torch.int64)]
+    manager.copy_sfa_kv = MagicMock()
+    block_table = torch.tensor([[17_000_000]], dtype=torch.int32)
+
+    with patch.object(torch.Tensor, "to", side_effect=AssertionError("Tensor block table must not call to()")):
+        manager.dense_fill_copy_sfa_rows({0: (0, 128)}, block_size=128, block_table=block_table)
+
+    sources = manager.copy_sfa_kv.call_args.args[0]
+    assert sources.dtype == torch.int64
+    assert sources.tolist() == [8_704_001_000, 8_704_002_000]
+
+
+def test_fused_dense_fill_rejects_tensor_block_table_on_another_device():
+    manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager.topk_buffers_k = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    manager.topk_buffers_v = [torch.empty((1, 512, 4), dtype=torch.int8)]
+    block_table = torch.empty((1, 1), dtype=torch.int32, device="meta")
+
+    with pytest.raises(ValueError, match="same device"):
+        manager.dense_fill_copy_sfa_rows({0: (0, 128)}, block_size=128, block_table=block_table)
 
 
 def _make_sparse_kv_ops():

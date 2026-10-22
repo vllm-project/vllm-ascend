@@ -4,19 +4,22 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
+import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.models import kimi_k3
+from vllm_ascend.models import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
@@ -93,37 +96,6 @@ def test_kimi_moe_leaves_routed_input_transform_to_runner():
     torch.testing.assert_close(result, output)
 
 
-def test_ascend_attn_res_matches_canonical_k3_math():
-    prefix_sum = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    block_residual = torch.tensor(
-        [
-            [[0.5, 1.5], [2.5, 3.5], [1000.0, 1000.0]],
-            [[1.0, 0.0], [0.0, 1.0], [1000.0, 1000.0]],
-        ]
-    )
-    norm = SimpleNamespace(weight=torch.tensor([1.0, 1.5]), variance_epsilon=1e-5)
-    proj = SimpleNamespace(weight=torch.tensor([[0.25, -0.5]]))
-
-    output = kimi_k3._apply_ascend_attn_res(
-        prefix_sum,
-        block_residual,
-        proj,
-        norm,
-        num_valid_blocks=2,
-    )
-
-    values = torch.cat(
-        (block_residual[:, :2], prefix_sum.unsqueeze(1)),
-        dim=1,
-    ).float()
-    inverse_rms = torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
-    normalized_without_gamma = values * inverse_rms
-    score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    probabilities = (normalized_without_gamma * score_weight).sum(-1).softmax(-1).unsqueeze(1)
-    expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
-    torch.testing.assert_close(output, expected)
-
-
 def test_k3_dspark_reports_draft_attention_causality():
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
@@ -139,30 +111,231 @@ def test_k3_dspark_reports_draft_attention_causality():
     assert model.get_draft_attn_causal() == [False, False, False]
 
 
+def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
+    model = AscendK3DSparkModel.__new__(AscendK3DSparkModel)
+    nn.Module.__init__(model)
+
+    fused_cache = torch.arange(36, dtype=torch.float32).reshape(2, 3, 1, 6)
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=MagicMock(return_value=(torch.randn(3, 8),)),
+        q_lora_rank=2,
+        kv_cache=fused_cache,
+        impl=SimpleNamespace(
+            kv_lora_rank=4,
+            _cache_requires_prolog_v3_writer=MagicMock(return_value=False),
+            exec_kv_prefill=MagicMock(),
+        ),
+    )
+    model.layers = [SimpleNamespace(self_attn=attn)]
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
+    )
+
+    model.precompute_and_store_context_kv(
+        context_states=torch.randn(3, 8),
+        context_positions=torch.tensor([0, 1, 2]),
+        context_slot_mapping=torch.tensor([0, 1, 2]),
+    )
+
+    cache = attn.impl.exec_kv_prefill.call_args.args[3]
+    assert isinstance(cache, tuple)
+    assert cache[0].shape == (2, 3, 1, 4)
+    assert cache[1].shape == (2, 3, 1, 2)
+    assert cache[0].untyped_storage() is fused_cache.untyped_storage()
+    assert cache[1].untyped_storage() is fused_cache.untyped_storage()
+    torch.testing.assert_close(cache[0], fused_cache[..., :4])
+    torch.testing.assert_close(cache[1], fused_cache[..., 4:])
+
+
+def _make_component_major_strided_cache() -> tuple[torch.Tensor, torch.Tensor]:
+    backing = torch.empty(14, dtype=torch.float32)
+    nope = torch.as_strided(backing, size=(2, 2, 1, 2), stride=(6, 2, 2, 1), storage_offset=0)
+    rope = torch.as_strided(backing, size=(2, 2, 1, 1), stride=(6, 1, 1, 1), storage_offset=2)
+    return nope, rope
+
+
+def _make_token_fused_cache() -> torch.Tensor:
+    return torch.arange(2 * 2 * 1 * 3, dtype=torch.float32).reshape(2, 2, 1, 3)
+
+
+@pytest.mark.parametrize("cache_factory", [_make_component_major_strided_cache, _make_token_fused_cache])
+def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch, cache_factory):
+    model = AscendK3DSparkModel.__new__(AscendK3DSparkModel)
+    nn.Module.__init__(model)
+    original_cache = cache_factory()
+    prolog = MagicMock()
+    fused_qkv_a_proj = MagicMock()
+    route_gate = MagicMock(return_value=True)
+    attn = SimpleNamespace(
+        fused_qkv_a_proj=fused_qkv_a_proj,
+        q_lora_rank=2,
+        kv_cache=original_cache,
+        impl=SimpleNamespace(
+            kv_lora_rank=2,
+            _cache_requires_prolog_v3_writer=route_gate,
+            exec_context_kv_prolog_v3=prolog,
+            exec_kv_prefill=MagicMock(),
+        ),
+    )
+    model.layers = [SimpleNamespace(self_attn=attn)]
+    context_states = torch.randn(4, 8)
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        lambda positions: (torch.ones(4, 1, 1, 1), torch.zeros(4, 1, 1, 1)),
+    )
+
+    model.precompute_and_store_context_kv(
+        context_states=context_states,
+        context_positions=torch.arange(4),
+        context_slot_mapping=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+
+    normalized_cache = route_gate.call_args.args[0]
+    assert isinstance(normalized_cache, tuple)
+    if isinstance(original_cache, torch.Tensor):
+        torch.testing.assert_close(normalized_cache[0], original_cache[..., :2])
+        torch.testing.assert_close(normalized_cache[1], original_cache[..., 2:])
+        assert normalized_cache[0].untyped_storage() is original_cache.untyped_storage()
+        assert normalized_cache[1].untyped_storage() is original_cache.untyped_storage()
+    assert prolog.call_count == 1
+    assert prolog.call_args.args[0] is context_states
+    assert prolog.call_args.args[3] is normalized_cache
+    assert prolog.call_args.args[4].dtype is torch.int32
+    assert fused_qkv_a_proj.call_count == 0
+    attn.impl.exec_kv_prefill.assert_not_called()
+
+
+@pytest.mark.parametrize("cache_factory", [_make_component_major_strided_cache, _make_token_fused_cache])
+def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monkeypatch, cache_factory):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_flashmla = False
+    impl.use_mla_rope = True
+    impl.fa_quant_layer = False
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 2
+    impl.qk_rope_head_dim = 1
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
+    impl.q_a_layernorm = SimpleNamespace(
+        weight=torch.ones(2),
+        variance_epsilon=1e-5,
+    )
+    impl.kv_a_layernorm = SimpleNamespace(
+        weight=torch.ones(2),
+        variance_epsilon=1e-6,
+    )
+    impl._prepare_prolog_v3_weights = lambda: {
+        "quant_type": None,
+        "weight_dq": object(),
+        "weight_dkv_kr": object(),
+        "weight_uq_qr": object(),
+        "weight_uk": object(),
+    }
+    cache = cache_factory()
+    if isinstance(cache, torch.Tensor):
+        cache = (cache[..., :2], cache[..., 2:])
+    calls = []
+
+    def fake_prolog(**kwargs):
+        calls.append(kwargs)
+
+    legacy = MagicMock()
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_mla_prolog_v3", fake_prolog)
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_kv_rmsnorm_rope_cache", legacy)
+    context_states = torch.randn(4, 8)
+    cos = torch.ones(4, 1, 1, 1)
+    sin = torch.zeros(4, 1, 1, 1)
+
+    impl.exec_context_kv_prolog_v3(
+        context_states,
+        cos,
+        sin,
+        cache,
+        torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+    )
+
+    assert len(calls) == 1
+    legacy.assert_not_called()
+    assert calls[0]["cache_mode"] == "PA_BSND"
+    assert calls[0]["tile_size"] == 128
+    assert calls[0]["kv_cache"] is cache[0]
+    assert calls[0]["kr_cache"] is cache[1]
+    assert calls[0]["cache_index"].dtype is torch.int64
+    assert calls[0]["rope_cos"].shape == (4, 1)
+    assert calls[0]["rope_sin"].shape == (4, 1)
+    assert calls[0]["weight_quant_mode"] == 0
+    assert calls[0]["kv_cache_quant_mode"] == 0
+
+
+def test_k3_dspark_prolog_v3_prepares_native_weights_without_mutating_source(monkeypatch):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.q_lora_rank = 2
+    impl.q_a_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
+    impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-6)
+    fused = nn.Module()
+    fused.quant_method = SimpleNamespace(quant_method=None)
+    fused.weight = nn.Parameter(torch.arange(20, dtype=torch.float32).reshape(5, 4), False)
+    q_proj = nn.Module()
+    q_proj.quant_method = SimpleNamespace(quant_method=None)
+    q_proj.weight = nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(3, 2), False)
+    impl.fused_qkv_a_proj = fused
+    impl.q_proj = q_proj
+    impl.mlapo_W_UK_T = torch.empty(1, 2, 2)
+    monkeypatch.setattr(mla_v1.torch_npu, "npu_format_cast", lambda tensor, _: tensor)
+
+    prepared = impl._prepare_prolog_v3_weights()
+
+    assert prepared["quant_type"] is None
+    assert prepared["weight_dq"].shape == (4, 2)
+    assert prepared["weight_dkv_kr"].shape == (4, 3)
+    assert prepared["weight_uq_qr"].shape == (2, 3)
+    assert fused.weight.shape == (5, 4)
+    assert q_proj.weight.shape == (3, 2)
+
+
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        is_moe=False,
+        is_linear_attn=True,
+        linear_attn_config={},
+        q_lora_rank=None,
+        num_hidden_layers=1,
+        num_nextn_predict_layers=0,
+    )
+    model.n_redundant_experts = 0
+    loaded_calls = []
+
+    def recorder(param_name, shard_id_positional):
+        def weight_loader(param, loaded_weight, *args, **kwargs):
+            shard_id = kwargs.pop("loaded_shard_id", None)
+            if shard_id_positional and args:
+                shard_id = args[0]
+            loaded_calls.append((param_name, loaded_weight.flatten()[0].item(), shard_id))
+
+        return weight_loader
+
     layer = nn.Module()
     layer.self_attn = nn.Module()
     layer.self_attn.fused_bfg_proj = nn.Module()
     packed_weight = nn.Parameter(torch.empty(6, 4))
+    packed_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.weight", True)
     layer.self_attn.fused_bfg_proj.register_parameter("weight", packed_weight)
-    layer.self_attn.fused_bfg_proj.register_parameter("f_a_weight", nn.Parameter(torch.empty(1)))
-    layer.self_attn.fused_bfg_proj.register_parameter("f_b_weight", nn.Parameter(torch.empty(1)))
+    f_a_weight = nn.Parameter(torch.empty(1))
+    f_a_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.f_a_weight", False)
+    layer.self_attn.fused_bfg_proj.register_parameter("f_a_weight", f_a_weight)
+    f_b_weight = nn.Parameter(torch.empty(1))
+    f_b_weight.weight_loader = recorder("layers.0.self_attn.fused_bfg_proj.f_b_weight", False)
+    layer.self_attn.fused_bfg_proj.register_parameter("f_b_weight", f_b_weight)
     layer.router = nn.Linear(4, 1, bias=False)
+    layer.router.weight.weight_loader = recorder("layers.0.router.weight", False)
+    layer.self_attn.o_proj = nn.Module()
+    o_proj_weight = nn.Parameter(torch.empty(1))
+    o_proj_weight.weight_loader = recorder("layers.0.self_attn.o_proj.weight", False)
+    layer.self_attn.o_proj.register_parameter("weight", o_proj_weight)
     model.layers = nn.ModuleList([layer])
 
-    remaining = []
-
-    def fake_upstream_load_weights(_self, weights):
-        remaining.extend(weights)
-        return {name for name, *_ in remaining}
-
-    monkeypatch.setattr(
-        kimi_k3.UpstreamKimiLinearModel,
-        "load_weights",
-        fake_upstream_load_weights,
-    )
     source_weights = [
         ("layers.0.router.weight", torch.full((1, 4), 0.5)),
         ("layers.0.self_attn.g_proj.weight", torch.full((1,), 1.0)),
@@ -174,16 +347,16 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
 
     loaded = model.load_weights(iter(source_weights))
 
-    assert remaining[0] == source_weights[0]
-    assert remaining[-1] == source_weights[-1]
-    assert [name for name, _, _ in remaining[1:5]] == [
+    assert [name for name, _, _ in loaded_calls] == [
+        "layers.0.router.weight",
         "layers.0.self_attn.fused_bfg_proj.weight",
         "layers.0.self_attn.fused_bfg_proj.f_a_weight",
         "layers.0.self_attn.fused_bfg_proj.f_b_weight",
         "layers.0.self_attn.fused_bfg_proj.weight",
+        "layers.0.self_attn.o_proj.weight",
     ]
-    assert [loaded_weight.item() for _, loaded_weight, _ in remaining[1:5]] == [1.0, 2.0, 3.0, 4.0]
-    assert [kwargs["loaded_shard_id"] for _, _, kwargs in remaining[1:5]] == [2, None, None, 0]
+    assert [loaded_weight for _, loaded_weight, _ in loaded_calls] == [0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert [shard_id for _, _, shard_id in loaded_calls[1:5]] == [2, None, None, 0]
     assert loaded == {
         "layers.0.self_attn.fused_bfg_proj.weight",
         "layers.0.self_attn.fused_bfg_proj.f_a_weight",
@@ -239,15 +412,18 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
+    layer.fuse_o_proj_mm_reduce_scatter = False
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
-    layer.input_layernorm = nn.Identity()
-    layer.post_attention_layernorm = nn.Identity()
+    # The main-contract fused path reads the norm/proj weights directly, so use
+    # weight-bearing stand-ins rather than opaque sentinels.
+    layer.input_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
+    layer.post_attention_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.mlp = nn.Identity()
-    layer.self_attention_res_proj = object()
-    layer.self_attention_res_norm = object()
-    layer.mlp_res_proj = object()
-    layer.mlp_res_norm = object()
+    layer.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 2))
+    layer.self_attention_res_norm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
+    layer.mlp_res_proj = SimpleNamespace(weight=torch.ones(1, 2))
+    layer.mlp_res_norm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     layer.self_attn = IdentityAttention()
 
     collective_shapes = []
@@ -262,25 +438,28 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     monkeypatch.setattr(kimi_k3, "sp_all_gather", fake_all_gather)
     monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
-    monkeypatch.setattr(
-        kimi_k3,
-        "_apply_ascend_attn_res",
-        lambda prefix_sum, *_args, **_kwargs: prefix_sum,
-    )
+    layer.prepare_attn_residual = MethodType(lambda self, prefix, bank, **kwargs: (prefix, prefix, prefix), layer)
+
+    def fake_fused(prefix, addend, *_args, **_kwargs):
+        raw = prefix if addend is None else prefix + addend
+        return raw, raw, raw
+
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
-    output, returned_residual = layer.forward_attn_residual(
+    _, returned_residual, output = layer.forward_attn_residual(
         positions=torch.arange(3),
         hidden_states=hidden_states,
         block_residual=block_residual,
+        prefix_delta=None,
     )
+    assert output.shape == torch.Size([2, 2])
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
         ("reduce_scatter", torch.Size([3, 2])),
     ]
-    assert output.shape == torch.Size([2, 2])
     assert returned_residual.shape == torch.Size([2, 1, 2])
 
 
@@ -290,9 +469,13 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
             super().__init__()
             self.residual_shape = None
 
-        def forward(self, *, positions, hidden_states, residual):
+        def prepare_attn_residual(self, prefix, bank, addend=None, **kwargs):
+            raw = prefix if addend is None else prefix + addend
+            return raw, raw, raw
+
+        def forward(self, *, positions, hidden_states, residual, **kwargs):
             self.residual_shape = residual.shape
-            return hidden_states, residual
+            return hidden_states, residual, None
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
@@ -303,8 +486,8 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
     model.layers = nn.ModuleList([layer])
     model.use_sequence_parallel = True
     model.aux_hidden_state_layers = set()
-    model.output_attn_res_proj = object()
-    model.output_attn_res_norm = object()
+    model.output_attn_res_proj = SimpleNamespace(weight=torch.ones(1, 2))
+    model.output_attn_res_norm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
     model._maybe_add_hidden_state = MethodType(
         lambda self, states, *_args: states,
         model,
@@ -325,11 +508,13 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
         "sp_all_gather",
         lambda hidden_states: torch.cat((hidden_states, hidden_states), dim=0),
     )
-    monkeypatch.setattr(
-        kimi_k3,
-        "_apply_ascend_attn_res",
-        lambda hidden_states, *_args, **_kwargs: hidden_states,
-    )
+    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
+
+    def fake_fused(prefix, addend, *_args, **_kwargs):
+        raw = prefix if addend is None else prefix + addend
+        return raw, raw, raw
+
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
 
     output = model(
         input_ids=None,
@@ -343,29 +528,32 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
 
 def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
-    class RecordingLayer(nn.Module):
+    class RecordingLayer(nn.Module):  # type: ignore[no-redef]
         def __init__(self, layer_idx: int) -> None:
             super().__init__()
             self.layer_idx = layer_idx
             self.prev_valid_blocks = layer_idx
-            self.self_attention_res_proj = nn.Identity()
-            self.self_attention_res_norm = nn.Identity()
+            self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
+            self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
 
-        def forward(self, *, positions, hidden_states, residual):
+        def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
             del positions
-            materialized = kimi_k3._apply_ascend_attn_res(
-                hidden_states,
-                residual,
-                self.self_attention_res_proj,
-                self.self_attention_res_norm,
-                self.prev_valid_blocks,
-            )
-            return materialized + 10, residual
+            return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
 
-    def fake_attn_res(prefix_sum, _residual, _projection, _norm, num_valid_blocks):
-        return prefix_sum + 100 * num_valid_blocks
+    expected_materialized = torch.tensor([[1016.0]])
+    expected_raw = torch.tensor([[16.0]])
 
-    monkeypatch.setattr(kimi_k3, "_apply_ascend_attn_res", fake_attn_res)
+    monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
+
+    def fake_fused(prefix, addend, *_args, **kwargs):
+        raw = prefix if addend is None else prefix + addend
+        if kwargs.get("return_materialized"):
+            # A distinct marker keeps the materialized tap distinguishable from
+            # the raw prefix tap selected by the other mode.
+            return raw, raw, raw + 1000
+        return raw, raw, raw
+
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", fake_fused, raising=False)
     monkeypatch.setattr(
         kimi_k3,
         "get_pp_group",
@@ -379,8 +567,8 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
     model.end_layer = 2
     model.layers = nn.ModuleList([RecordingLayer(0), RecordingLayer(1)])
     model.use_sequence_parallel = False
-    model.output_attn_res_proj = nn.Identity()
-    model.output_attn_res_norm = nn.Identity()
+    model.output_attn_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
+    model.output_attn_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
     model._set_aux_hidden_state_layers((1,))
 
     model.dspark_aux_capture_materialized = True
@@ -390,7 +578,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
-    torch.testing.assert_close(materialized_aux[0], torch.tensor([[111.0]]))
+    torch.testing.assert_close(materialized_aux[0], expected_materialized)
 
     model.dspark_aux_capture_materialized = False
     _, raw_aux = model(
@@ -399,7 +587,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
-    torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
+    torch.testing.assert_close(raw_aux[0], expected_raw)
 
 
 def test_projector_applies_optional_modelslim_rotation():
@@ -428,6 +616,7 @@ def test_projector_applies_optional_modelslim_rotation():
 def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
+    model._owns_embed_tokens = False
     model.model = nn.Module()
     model.model.context_proj = nn.Linear(4, 2, bias=False)
     model.model.context_norm = nn.LayerNorm(2)
@@ -515,3 +704,34 @@ def test_k3_dspark_embed_input_ids_merges_multimodal_embeddings():
             ]
         ),
     )
+
+
+def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
+    from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM as UpstreamK3DSpark
+
+    loader = MagicMock()
+    monkeypatch.setattr(kimi_k3_dspark, "AutoWeightsLoader", lambda model: loader)
+    model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    model._owns_embed_tokens = True
+    model.load_weights([])
+    pp_mapper = loader.load_weights.call_args.kwargs["mapper"]
+    upstream_mapper = UpstreamK3DSpark.hf_to_vllm_mapper
+
+    # The frozen embedding copy must survive on PP stages that cannot alias
+    # the target's stage-0 embedding.
+    assert pp_mapper._map_name("embed_tokens.weight") == "model.embed_tokens.weight"
+    assert upstream_mapper._map_name("embed_tokens.weight") is None
+
+    # Everything else matches upstream: heads stay dropped, layers keep the
+    # model. prefix and the stacked projections map identically.
+    for name in ("lm_head.weight", "confidence_head.weight"):
+        assert pp_mapper._map_name(name) is None
+        assert upstream_mapper._map_name(name) is None
+    for name in (
+        "layers.0.self_attn.q_a_proj.weight",
+        "layers.0.self_attn.kv_a_proj_with_mqa.weight",
+        "layers.0.mlp.gate_proj.weight",
+        "context_proj.weight",
+    ):
+        assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)

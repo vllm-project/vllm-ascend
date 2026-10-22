@@ -1,0 +1,4 @@
+pr: 16298
+entries:
+  - category: feature
+    text: Added opt-in segment tokenizer caching through additional_config.tokenizer_cache_gb, with conservative fallback for unsupported tokenizers. When a native vLLM tokenizer cache is available, reuse it and honor its positive budget before the compatibility option.

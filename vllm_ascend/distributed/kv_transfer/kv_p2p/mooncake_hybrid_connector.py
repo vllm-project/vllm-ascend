@@ -65,7 +65,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     inject_qos,
     validate_register_region_count,
 )
-from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
+from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model, vllm_version_is
 
 # isort: off
 if TYPE_CHECKING:
@@ -1208,7 +1208,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
     ):
         assert vllm_config.kv_transfer_config is not None
-        self._kv_transfer_config = vllm_config.kv_transfer_config
+        if vllm_version_is("0.31.0"):
+            self._kv_transfer_config = vllm_config.kv_transfer_config
+        else:
+            # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
+            # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
+            super().__init__(vllm_config, role, kv_cache_config)
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
 
@@ -1224,6 +1229,17 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    if not vllm_version_is("0.31.0"):
+
+        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+            # vLLM main's scheduler uses this for skip_zeroing_group_ids.
+            # Mooncake restores the request's own transfer blocks.
+            return self._kv_cache_config.transfer_group_ids
+
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
@@ -1458,6 +1474,13 @@ class MooncakeConnectorScheduler:
                 transfer_block_ids.append([])
         return tuple(transfer_block_ids)
 
+    def on_new_request(self, request: "Request") -> None:
+        # The scheduler looks up local KV before asking connectors for hits.
+        # Truncate first so both lookups use the same prompt length.
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1488,9 +1511,6 @@ class MooncakeConnectorScheduler:
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
-
-        if params is not None and params.get("do_remote_decode") and self.need_truncate:
-            self._truncate_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False

@@ -12,6 +12,7 @@ K>1 draft-decode FULL uses per-step graphs: host slot_mapping between steps.
 
 from __future__ import annotations
 
+import copy
 import os
 from contextlib import contextmanager
 from typing import Any
@@ -29,9 +30,23 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
+
+# vLLM #60335 renamed `autoregressive` to `target_dependent_ar` on main; the
+# release lane (v0.31.0) still ships the old module and class name.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+        AutoRegressiveSpeculator,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
 
 
 class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
@@ -39,8 +54,15 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_model_config = self.speculative_config.draft_model_config
-        if draft_model_config.hf_overrides is None:
-            draft_model_config.hf_overrides = {}
+        # Draft MTP ModelConfig often carries a *callable* hf_overrides composed by
+        # SpeculativeConfig.compose_draft_hf_overrides (e.g. Qwen3 legacy normalizer).
+        # Ascend W8A8 has no HF quantization_config; platform auto-detect re-runs
+        # get_quant_config during VllmConfig.replace(), which requires dict overrides.
+        # Copy so we do not mutate the shared SpeculativeConfig.draft_model_config.
+        model_config_for_vllm = draft_model_config
+        if not isinstance(getattr(draft_model_config, "hf_overrides", None), dict):
+            model_config_for_vllm = copy.copy(draft_model_config)
+            model_config_for_vllm.hf_overrides = {}
 
         parallel_config = replace(
             self.vllm_config.parallel_config,
@@ -48,8 +70,9 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         )
         draft_vllm_config = replace(
             self.vllm_config,
-            model_config=draft_model_config,
+            model_config=model_config_for_vllm,
             parallel_config=parallel_config,
+            quant_config=self.vllm_config.quant_config,
         )
 
         target_path = os.path.realpath(self.vllm_config.model_config.model)
@@ -153,107 +176,295 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        cg_mode: CUDAGraphMode,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+        query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Keep the legacy metadata entry point for 310P draft graphs."""
+        assert self.input_batch is not None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp:
+            assert self.dcp_manager is not None
+            seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
+                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
+                is_prefilling=is_prefilling,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                step=step,
+                max_model_len=self.max_model_len,
+            )
+
+        with build_attn_metadata_factory(
+            self.input_buffers.positions,
+            num_tokens_padded,
+            is_prefilling,
+            seq_lens_cpu=seq_lens_cpu,
+            parallel_config=self.draft_vllm_config.parallel_config,
+        ):
+            # The upstream builders now take a batch descriptor. Preserve the
+            # 310P call sites while routing through the current Ascend hooks.
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=cg_mode,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            if query_start_loc_np is not None:
+                attn_metadata = self._build_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+            else:
+                attn_metadata = self._build_uniform_attn_metadata(
+                    batch_desc=batch_desc,
+                    num_reqs=num_reqs,
+                    num_query_per_req=num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+        if attn_metadata is not None:
+            # Align with draft ACLGraph capture: q_len>1 / step0 → SpecDecoding
+            # (splitfuse); single-token draft-decode → DecodeOnly (PA).
+            q_len = num_tokens_padded // max(num_reqs_padded, 1) if num_reqs_padded else 1
+            use_spec_decoding = step == 0 or num_query_per_req > 1 or q_len > 1
+            draft_attn_state = (
+                AscendAttentionState.SpecDecoding if use_spec_decoding else AscendAttentionState.DecodeOnly
+            )
+            for metadata in attn_metadata.values():
+                if metadata is None:
+                    continue
+                metadata.attn_state = draft_attn_state
+
+            # Step 0 is draft prefill; only decode steps update CPU lengths.
+            if step > 0:
+                self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
+        return attn_metadata
+
     @torch.inference_mode()
     def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         num_rejected = kwargs.get("num_rejected")
         if num_rejected is None and len(args) >= 7:
             num_rejected = args[6]
-        if isinstance(num_rejected, torch.Tensor):
-            self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
+        # Prefer host mirror published by postprocess_sampled (already synced).
+        # Avoid an extra device→host copy on every MTP propose.
+        if getattr(self, "_last_num_rejected_cpu", None) is None and isinstance(num_rejected, torch.Tensor):
+            if num_rejected.device.type == "cpu":
+                self._last_num_rejected_cpu = num_rejected
+            else:
+                self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
         return super().propose(*args, **kwargs)
 
-    def _generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
-        """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
-        # Call GPU AR generate_draft (sample + update_draft_inputs) without the
-        # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-            AutoRegressiveSpeculator,
-        )
+    # vLLM #60335 renamed the upstream AR speculator and added a per-batch
+    # `num_speculative_steps` argument on main. Gate the signature and the
+    # upstream call outside the method body, matching the parent speculator.
+    if vllm_version_is("0.31.0"):
 
-        AutoRegressiveSpeculator._generate_draft(
+        def _generate_draft(
             self,
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-        if attn_metadata is None or torch.npu.is_current_stream_capturing():
-            return
-        self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+            num_reqs: int,
+            num_tokens_padded: int,
+            attn_metadata: dict[str, Any] | None,
+            slot_mappings: dict[str, torch.Tensor] | None,
+            num_tokens_across_dp: torch.Tensor | None,
+            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        ) -> None:
+            """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
+            # Call GPU AR generate_draft (sample + update_draft_inputs) without the
+            # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
+            AutoRegressiveSpeculator._generate_draft(
+                self,
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
+            if attn_metadata is None or torch.npu.is_current_stream_capturing():
+                return
+            self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    else:
+
+        def _generate_draft(
+            self,
+            num_reqs: int,
+            num_tokens_padded: int,
+            attn_metadata: dict[str, Any] | None,
+            slot_mappings: dict[str, torch.Tensor] | None,
+            num_tokens_across_dp: torch.Tensor | None,
+            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+            num_speculative_steps: int | None = None,
+        ) -> None:
+            """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
+            # Call GPU AR generate_draft (sample + update_draft_inputs) without the
+            # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
+            AutoRegressiveSpeculator._generate_draft(
+                self,
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                # vLLM #60335 added `num_speculative_steps` on main.
+                num_speculative_steps,
+            )
+            if attn_metadata is None or torch.npu.is_current_stream_capturing():
+                return
+            self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
     def _set_draft_step(self, step: int) -> None:
         self.current_draft_step.fill_(step)
         set_draft_step_host(step)
 
-    def _multi_step_decode(
-        self,
-        num_reqs: int,
-        skip_attn: bool,
-        batch_desc: BatchExecutionDescriptor,
-        num_tokens_across_dp: torch.Tensor | None,
-        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
-    ) -> None:
-        """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
-        assert seq_lens_cpu_upper_bound is not None
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-        seq_ub = seq_lens_cpu_upper_bound
-        rejected = getattr(self, "_last_num_rejected_cpu", None)
-        if rejected is not None and rejected.numel() >= num_reqs:
-            seq_ub = seq_lens_cpu_upper_bound.clone()
-            seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
+    if vllm_version_is("0.31.0"):
 
-        use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
-        attn_metadata = None
-        slot_mappings_by_layer = None
-        for step in range(1, self.num_speculative_steps):
-            if not skip_attn and (self.advance_draft_positions or step == 1):
-                # Host slot_mapping + attn metadata must run outside capture.
-                slot_mappings_by_layer = self._compute_draft_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
-                    batch_desc.num_tokens,
-                )
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=num_reqs,
-                    num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    num_tokens_padded=batch_desc.num_tokens,
-                    seq_lens_cpu_upper_bound=seq_ub,
-                    step=step,
-                )
-                if attn_metadata is not None:
-                    for meta in attn_metadata.values():
-                        if meta is None:
-                            continue
-                        seq_lens = getattr(meta, "seq_lens", None)
-                        if seq_lens is not None and seq_lens.device != self.device:
-                            meta.seq_lens = seq_lens.to(device=self.device, non_blocking=False)
+        def _multi_step_decode(
+            self,
+            num_reqs: int,
+            skip_attn: bool,
+            batch_desc: BatchExecutionDescriptor,
+            num_tokens_across_dp: torch.Tensor | None,
+            seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+        ) -> None:
+            """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
+            assert seq_lens_cpu_upper_bound is not None
+            positions = self.input_buffers.positions[:num_reqs]
+            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+            idx_mapping = self.idx_mapping[:num_reqs]
+            seq_ub = seq_lens_cpu_upper_bound
+            rejected = getattr(self, "_last_num_rejected_cpu", None)
+            if rejected is not None and rejected.numel() >= num_reqs:
+                seq_ub = seq_lens_cpu_upper_bound.clone()
+                seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
 
-            self._set_draft_step(step)
-            if use_full:
-                assert self.decode_cudagraph_manager is not None
-                self._pending_draft_attn_metadata = attn_metadata
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-                if attn_metadata is not None:
-                    self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
-            else:
-                self._generate_draft(
-                    num_reqs,
-                    batch_desc.num_tokens,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                )
+            use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
+            attn_metadata = None
+            slot_mappings_by_layer = None
+            for step in range(1, self.num_speculative_steps):
+                if not skip_attn and (self.advance_draft_positions or step == 1):
+                    # Host slot_mapping + attn metadata must run outside capture.
+                    slot_mappings_by_layer = self._compute_draft_slot_mappings(
+                        idx_mapping,
+                        query_start_loc,
+                        positions,
+                        batch_desc.num_tokens,
+                    )
+                    attn_metadata = self._build_draft_attn_metadata(
+                        num_reqs=num_reqs,
+                        num_reqs_padded=batch_desc.num_reqs or num_reqs,
+                        num_tokens_padded=batch_desc.num_tokens,
+                        seq_lens_cpu_upper_bound=seq_ub,
+                        step=step,
+                        cg_mode=batch_desc.cg_mode,
+                    )
+                    if attn_metadata is not None:
+                        for meta in attn_metadata.values():
+                            if meta is None:
+                                continue
+                            seq_lens = getattr(meta, "seq_lens", None)
+                            if seq_lens is not None and seq_lens.device != self.device:
+                                meta.seq_lens = seq_lens.to(device=self.device, non_blocking=False)
+
+                self._set_draft_step(step)
+                if use_full:
+                    assert self.decode_cudagraph_manager is not None
+                    self._pending_draft_attn_metadata = attn_metadata
+                    self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                    if attn_metadata is not None:
+                        self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+                else:
+                    self._generate_draft(
+                        num_reqs,
+                        batch_desc.num_tokens,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    )
+
+    else:
+
+        def _multi_step_decode(
+            self,
+            num_reqs: int,
+            skip_attn: bool,
+            batch_desc: BatchExecutionDescriptor,
+            num_tokens_across_dp: torch.Tensor | None,
+            seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+            num_speculative_steps: int | None = None,
+        ) -> None:
+            """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
+            assert seq_lens_cpu_upper_bound is not None
+            positions = self.input_buffers.positions[:num_reqs]
+            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+            idx_mapping = self.idx_mapping[:num_reqs]
+            seq_ub = seq_lens_cpu_upper_bound
+            rejected = getattr(self, "_last_num_rejected_cpu", None)
+            if rejected is not None and rejected.numel() >= num_reqs:
+                seq_ub = seq_lens_cpu_upper_bound.clone()
+                seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
+
+            use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
+            attn_metadata = None
+            slot_mappings_by_layer = None
+            # vLLM #60335 passes the per-batch step count on main.
+            for step in range(1, num_speculative_steps):
+                if not skip_attn and (self.advance_draft_positions or step == 1):
+                    # Host slot_mapping + attn metadata must run outside capture.
+                    slot_mappings_by_layer = self._compute_draft_slot_mappings(
+                        idx_mapping,
+                        query_start_loc,
+                        positions,
+                        batch_desc.num_tokens,
+                    )
+                    attn_metadata = self._build_draft_attn_metadata(
+                        num_reqs=num_reqs,
+                        num_reqs_padded=batch_desc.num_reqs or num_reqs,
+                        num_tokens_padded=batch_desc.num_tokens,
+                        seq_lens_cpu_upper_bound=seq_ub,
+                        step=step,
+                        cg_mode=batch_desc.cg_mode,
+                    )
+                    if attn_metadata is not None:
+                        for meta in attn_metadata.values():
+                            if meta is None:
+                                continue
+                            seq_lens = getattr(meta, "seq_lens", None)
+                            if seq_lens is not None and seq_lens.device != self.device:
+                                meta.seq_lens = seq_lens.to(device=self.device, non_blocking=False)
+
+                self._set_draft_step(step)
+                if use_full:
+                    assert self.decode_cudagraph_manager is not None
+                    self._pending_draft_attn_metadata = attn_metadata
+                    self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                    if attn_metadata is not None:
+                        self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+                else:
+                    self._generate_draft(
+                        num_reqs,
+                        batch_desc.num_tokens,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        num_speculative_steps=num_speculative_steps,
+                    )

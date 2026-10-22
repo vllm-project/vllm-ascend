@@ -18,6 +18,8 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
 
 def _build_or_get_topk(
     moe_comm_method,
@@ -91,7 +93,7 @@ def get_force_eplb_topk(
     num_logical_experts: int,
 ) -> torch.Tensor | None:
     """Return deterministic round-robin ids when the policy is enabled."""
-    moe_comm_method = get_forward_context().moe_comm_method
+    moe_comm_method = _EXTRA_CTX.moe_comm_method
     if moe_comm_method is None:
         return None
     top_k = int(topk_ids.shape[1])

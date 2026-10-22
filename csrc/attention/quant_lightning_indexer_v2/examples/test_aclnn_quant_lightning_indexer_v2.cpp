@@ -18,7 +18,7 @@
 #include <cstring>
 #include "securec.h"
 #include "acl/acl.h"
-#include "aclnnop/aclnn_quant_lightning_indexer_v2.h"
+#include "aclnnop/aclnn_vllm_ascend_quant_lightning_indexer_v2.h"
 #include "aclnnop/aclnn_quant_lightning_indexer_v2_metadata.h"
 #include "aclnn/opdev/platform.h"
 
@@ -218,7 +218,7 @@ int GenerateMetadata(TensorResources &resources, aclrtStream stream, int64_t B, 
 
     aclOpExecutor *executor;
     uint64_t workspaceSize = 0;
-    int ret = aclnnQuantLightningIndexerV2MetadataGetWorkspaceSize(
+    int ret = aclnnVllmAscendQuantLightningIndexerV2MetadataGetWorkspaceSize(
         nullptr, nullptr, nullptr, nullptr, nullptr, N1, N2, D, topk, quantMode, B, S1, S2, layoutQCopy, layoutKCopy,
         maskMode, cmpRatio, resources.metadataTensor, &workspaceSize, &executor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
@@ -235,7 +235,7 @@ int GenerateMetadata(TensorResources &resources, aclrtStream stream, int64_t B, 
         }
     }
 
-    ret = aclnnQuantLightningIndexerV2Metadata(metadataWsAddr, workspaceSize, executor, stream);
+    ret = aclnnVllmAscendQuantLightningIndexerV2Metadata(metadataWsAddr, workspaceSize, executor, stream);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
         LOG_PRINT("aclnnQuantLightningIndexerV2Metadata failed. ERROR: %d\n", ret);
         if (metadataWsAddr) {
@@ -285,7 +285,7 @@ int ExecuteQuantLightningIndexerV2(TensorResources &resources, aclrtStream strea
     }
     aclOpExecutor *executor;
 
-    int ret = aclnnQuantLightningIndexerV2GetWorkspaceSize(
+    int ret = aclnnVllmAscendQuantLightningIndexerV2GetWorkspaceSize(
         resources.queryTensor, resources.keyTensor, resources.weightsTensor, resources.qScaleTensor,
         resources.kScaleTensor, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, resources.metadataTensor,
         topk, quantMode, -1, layoutQ, layoutK, maskMode, cmpRatio, returnValue, resources.sparseIndicesTensor,
@@ -304,7 +304,7 @@ int ExecuteQuantLightningIndexerV2(TensorResources &resources, aclrtStream strea
         }
     }
 
-    ret = aclnnQuantLightningIndexerV2(*workspaceAddr, *workspaceSize, executor, stream);
+    ret = aclnnVllmAscendQuantLightningIndexerV2(*workspaceAddr, *workspaceSize, executor, stream);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
         LOG_PRINT("aclnnQuantLightningIndexerV2 failed. ERROR: %d\n", ret);
         return ret;

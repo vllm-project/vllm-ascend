@@ -21,16 +21,25 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-
-# FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
-# through the OOT registration in `vllm_ascend.utils` rather than by import.
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.models.glm5next.config import Glm5NextConfig
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
+# package on main; the release lane (v0.31.0) still ships them under
+# `vllm.transformers_utils.configs.glm5_next`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
+else:
+    from transformers import Glm5NextConfig
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -101,6 +110,9 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
+    use_contiguous_conv_indices = True
+    use_shared_conv_output = True
+
     head_dim: int
     num_heads: int
     conv_size: int
@@ -234,6 +246,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
+        # FLA imports can initialize an NPU context through capability queries.
+        # Resolve and register the Ascend subclass after worker device selection.
+        # TODO: Restore eager import/registration once supported vLLM FLA or
+        # Triton Ascend versions make these queries safe before device selection.
+        from vllm_ascend.utils import register_ascend_fla_customop
+
+        register_ascend_fla_customop()
+        from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,
@@ -264,7 +285,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def get_attn_backend(self):
-        return AscendGDNAttentionBackend
+        return AscendGDNHostMetadataBackend
 
     def forward(
         self,
@@ -335,6 +356,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             core_attn_out.zero_()
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
         non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata_narrowed.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
@@ -427,6 +450,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=1,
                 num_accepted_tokens=conv_meta.num_accepted_tokens,
+                output_buffer=conv_meta.output_buffer,
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -455,6 +479,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.query_start_loc,
                 conv_meta.cache_indices,
                 run_mode=1,
+                output_buffer=conv_meta.output_buffer,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
@@ -465,8 +490,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         direct_output = (
             not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
         )
-        if not direct_output:
-            core_attn_out.zero_()
+        # Prefill copies its output and speculative dispatch scatters both token
+        # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
             spec_output = recurrent_kda(
                 rearrange(q_spec),
@@ -485,6 +510,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
+            maybe_save_kv_layer_to_connector("", [])
             return
         q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
         metadata = attn_metadata_narrowed
@@ -523,8 +549,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
         assert output is not None
         if direct_output:
+            maybe_save_kv_layer_to_connector("", [])
             return
         if use_spec:
             core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
+        maybe_save_kv_layer_to_connector("", [])

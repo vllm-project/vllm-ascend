@@ -22,6 +22,7 @@ therefore never participates in a BPE merge across the cut.
 """
 
 import copy
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -310,16 +311,10 @@ class _CopyingRenderer:
         self.tokenizer = copy.copy(tokenizer)
 
 
-class _FakeAscendConfig:
-    def __init__(self, tokenizer_cache_gb: int) -> None:
-        self.tokenizer_cache_gb = tokenizer_cache_gb
-
-
 def _with_capacity(monkeypatch, capacity_gb: int) -> None:
-    """Make ``get_ascend_config()`` report the requested cache size."""
-    import vllm_ascend.ascend_config as ascend_config_mod
-
-    monkeypatch.setattr(ascend_config_mod, "get_ascend_config", lambda: _FakeAscendConfig(capacity_gb), raising=True)
+    """Set the fallback budget provider used by older renderer configs."""
+    cache_mod = sys.modules[_patch_renderer_init.__module__]
+    monkeypatch.setattr(cache_mod, "_configured_capacity_gb", lambda: capacity_gb)
 
 
 def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkeypatch):
@@ -337,7 +332,17 @@ def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkey
     _with_capacity(monkeypatch, 1)
     _patch_renderer_init()
     try:
-        passed_in = _FakeTokenizer()
+        from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+        from transformers import TokenizersBackend
+
+        backend = Tokenizer(models.BPE())
+        backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        backend.train_from_iterator(
+            ["hello world"],
+            trainers.BpeTrainer(vocab_size=260, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()),
+        )
+        backend.add_special_tokens([_END, _START])
+        passed_in = TokenizersBackend(tokenizer_object=backend)
         renderer = _CopyingRenderer(None, passed_in)
 
         assert renderer.tokenizer is not passed_in

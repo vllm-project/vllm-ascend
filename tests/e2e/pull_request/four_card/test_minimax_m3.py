@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -44,13 +43,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "0"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def _configure_jemalloc() -> None:
-    jemalloc_path = "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
-    if Path(jemalloc_path).exists():
-        ld_preload = os.environ.get("LD_PRELOAD", "")
-        os.environ["LD_PRELOAD"] = f"{jemalloc_path}:{ld_preload}" if ld_preload else jemalloc_path
 
 
 def _apply_minimax_chat_template(tokenizer) -> str:
@@ -111,8 +103,6 @@ def _assert_logprobs_match(baseline, replay) -> None:
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
 @wait_until_npu_memory_free()
 def test_minimax_m3_tp4_dummy_logprobs() -> None:
-    _configure_jemalloc()
-
     with VllmRunner(
         MINIMAX_M3_MODEL_PATH,
         seed=0,

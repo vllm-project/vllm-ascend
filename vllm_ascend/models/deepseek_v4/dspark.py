@@ -27,7 +27,10 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -37,7 +40,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
+from vllm.platforms import current_platform
 
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
@@ -72,6 +77,35 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
     return int(num_layers or 3)
 
 
+# NOTE: Keep this implementation identical to
+# vllm.models.deepseek_v4.nvidia.dspark._duplicate_context_wkv_weights.
+# It remains local to avoid importing the NVIDIA DSpark model module solely
+# for this weight-loading helper.
+_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
+
+
+def _duplicate_context_wkv_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    num_layers: int,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Duplicate each draft layer's WKV params into the stacked projection."""
+    for name, weight in weights:
+        yield name, weight
+
+        match = _CONTEXT_WKV_RE.fullmatch(name)
+        if match is None:
+            continue
+
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_layers:
+            continue
+
+        stacked_weight = weight.detach()
+        stacked_weight.shard_id = layer_idx
+
+        yield f"context_wkv_proj.{match.group(2)}", stacked_weight
+
+
 class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -102,9 +136,33 @@ class DeepseekV4DSparkModel(nn.Module):
                 for idx in range(self.num_dspark_layers)
             }
         )
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers.values():
+            impl = layer.self_attn.dsa_attn.dsa_attn.impl
+            if not isinstance(impl, AscendDSAImpl):
+                continue
+            impl._oproj_buffer_pool = self._oproj_buffer_pool
+            impl.reserve_oproj_buffers(torch.device(current_platform.device_type), vllm_config.model_config.dtype)
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = first_layer.use_sequence_parallel_moe
+
+        # Stack the WKV projections from all DSpark layers into one linear.
+        #
+        # Important for Ascend quantization:
+        # ModelSlim chooses the quantization method according to the linear prefix.
+        # context_wkv_proj is a synthetic runtime module and does not exist in the
+        # checkpoint quantization description, so reuse the first DSpark WKV prefix
+        # when selecting its quantization scheme.
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix="mtp.0.self_attn.wkv",
+            disable_tp=True,
+        )
 
         _model_quant_cfg = getattr(config, "quantization_config", None)
         _main_proj_qconfig = (
@@ -176,13 +234,13 @@ class DeepseekV4DSparkModel(nn.Module):
 
     def _project_shared_kv(
         self,
-        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
         positions: torch.Tensor,
         attn: type[nn.Module] | None = None,
         rope=None,
     ) -> torch.Tensor:
         assert attn is not None
-        kv = attn.kv_norm(attn.wkv(hidden_states))
+        kv = attn.kv_norm(kv)
         # npu_rotary_mul writes its result back to the input storage
         # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
         # can run in-place on the rope-segment view of kv; the previous
@@ -213,7 +271,17 @@ class DeepseekV4DSparkModel(nn.Module):
         while isinstance(swa_kv_cache, (list, tuple)) and len(swa_kv_cache) == 1:
             swa_kv_cache = swa_kv_cache[0]
 
-        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, write_dsa_cache
+
+        dsa_impl = attn.dsa_attn.dsa_attn.impl
+        turboquant = getattr(dsa_impl, "turboquant", None)
+        if turboquant is not None:
+            # Draft queries and context KV must use the same rotated basis.
+            shared_kv = turboquant.forward(shared_kv)
+            if slot_mapping.ndim == 1:
+                slot_mapping = dsa_impl.get_kv_plan().format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
+            write_dsa_cache(swa_kv_cache, shared_kv, slot_mapping)
+            return
 
         if slot_mapping.ndim == 1:
             slot_mapping = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
@@ -227,20 +295,32 @@ class DeepseekV4DSparkModel(nn.Module):
         context_positions: torch.Tensor,
         context_slot_mapping: list[torch.Tensor | None] | None = None,
     ) -> None:
-        if context_states.numel() == 0 or context_slot_mapping is None:
+        if context_states.numel() == 0 or context_positions.numel() == 0:
             return
+        # All DSpark layers consume the same context hidden states.
+        # Stack their WKV projections so that we only launch one linear op.
+        # Profile runs omit slot mappings but must still exercise this new
+        # projection so its workspace is included in memory profiling.
+        all_kv = self.context_wkv_proj(context_states).view(
+            context_states.shape[0],
+            self.num_dspark_layers,
+            self.config.head_dim,
+        )
+        if context_slot_mapping is None:
+            return
+
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(
             context_positions,
             layer_names=rope_layers,
         )
-        for layer_idx, layer in enumerate(self.layers.values()):
-            layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
-            if context_positions.numel() == 0:
-                return
+        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+            layer_context_slot_mapping = context_slot_mapping[layer_idx]
+            if layer_context_slot_mapping is None:
+                continue
             attn = layer.self_attn
             shared_kv = self._project_shared_kv(
-                context_states,
+                kv,
                 context_positions,
                 attn,
                 rope=rope,
@@ -319,6 +399,8 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -445,6 +527,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         head_start = n_local_head * tp_rank
         head_end = n_local_head * (tp_rank + 1)
 
+        # Keep the per-layer WKV weights for draft-token forward and load one
+        # extra packed copy into context_wkv_proj. This adds hidden_size *
+        # head_dim * num_dspark_layers elements plus quantization metadata,
+        # trading memory for one merged context projection instead of one per
+        # layer.
+        weights = _duplicate_context_wkv_weights(weights, self.model.num_dspark_layers)
+
         for name, loaded_weight in weights:
             if name == "embed.weight" and not self.rotation_path:
                 name = "model.embed_tokens.weight"
@@ -465,6 +554,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+
+                param.weight_loader(
+                    param,
+                    loaded_weight,
+                    loaded_weight.shard_id,
+                )
+
+                loaded_params.add(name)
+                continue
 
             # The multimodal checkpoint also contains one vision-router bias
             # for each MTP/DSpark layer.  DSpark runs only during text decode,
@@ -508,12 +609,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 break
             else:
                 if "attn_sink" in name:
+                    param = params_dict[name]
+                    # Route the write through the parameter's loader, like the
+                    # target model does. A live weight update runs inside vLLM's
+                    # layerwise reload, which parks the layer on the meta device
+                    # and only replays loads made through ``weight_loader``; a
+                    # direct ``copy_`` lands on the meta tensor and is lost, so
+                    # the draft model's sinks would keep their dummy values.
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     if enable_dsa_cp():
-                        narrow = loaded_weight
+                        weight_loader(param, loaded_weight)
                     else:
-                        narrow = loaded_weight[head_start:head_end]
-                    with torch.no_grad():
-                        params_dict[name].copy_(narrow)
+                        # Handle attention sinks (distributed across ranks)
+                        weight_loader(param, loaded_weight[head_start:head_end])
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]
@@ -525,6 +633,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
+
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None

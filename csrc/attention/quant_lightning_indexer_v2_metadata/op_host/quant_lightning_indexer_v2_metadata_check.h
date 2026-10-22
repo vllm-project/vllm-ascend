@@ -26,7 +26,7 @@ extern "C" {
 
 namespace {
 
-static constexpr const char *QLI_V2_ACLNN_OP_NAME = "QuantLightningIndexerV2Metadata";
+static constexpr const char *QLI_V2_ACLNN_OP_NAME = "VllmAscendQuantLightningIndexerV2Metadata";
 
 inline constexpr int64_t QLI_V2_QUANT_MODE_1 = 1;
 inline constexpr int64_t QLI_V2_QUANT_MODE_2 = 2;

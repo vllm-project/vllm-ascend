@@ -147,6 +147,7 @@ def test_memfabric_transfer_protocol_defaults_to_sdma():
         manager.get_transfer_engine("127.0.0.1")
 
     assert raw_engine.initialize.call_args.kwargs["data_op_type"] == _FakeTransDataOpType.SDMA
+    assert raw_engine.initialize.call_args.kwargs["store_server_role"] == MEMFABRIC_ROLE_PREFILL
 
 
 @pytest.mark.parametrize(
