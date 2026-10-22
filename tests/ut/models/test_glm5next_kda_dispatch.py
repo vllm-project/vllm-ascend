@@ -80,6 +80,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
                 query_start_loc=metadata.spec_query_start_loc,
                 cache_indices=metadata.spec_state_indices_tensor,
                 num_accepted_tokens=metadata.num_accepted_tokens,
+                output_buffer=torch.zeros(tokens + 1, 384, dtype=torch.bfloat16),
             )
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
@@ -135,6 +136,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
 
     def fla_update(x, conv_state, weight, bias=None, **kwargs):
+        expected_buffer = metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer
+        assert kwargs["out"].data_ptr() == expected_buffer.data_ptr()
         return conv(
             torch.zeros_like(x),
             x,
@@ -250,7 +253,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
         num_decodes=0 if empty else 3,
         num_decode_tokens=3,
         non_spec_decode_metadata=SimpleNamespace(
-            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None])
+            causal_conv1d=SimpleNamespace(query_start_loc=starts, cache_indices=ids[:, None], output_buffer=None)
         ),
     ).items():
         setattr(metadata, key, value)

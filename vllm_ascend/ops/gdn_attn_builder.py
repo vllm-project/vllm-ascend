@@ -135,6 +135,7 @@ class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     initial_state_mode: torch.Tensor | None
+    output_buffer: torch.Tensor | None = None
 
 
 @dataclass
@@ -142,6 +143,7 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    output_buffer: torch.Tensor | None = None
 
 
 @dataclass
@@ -1012,6 +1014,26 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         self._conv_layer_name = layer_names[0] if layer_names else None
         self._spec_conv_indices: torch.Tensor | None = None
         self._non_spec_conv_indices: torch.Tensor | None = None
+        self._conv_output_buffer: torch.Tensor | None = None
+
+    def _ensure_conv_output_buffer(self) -> None:
+        if self._conv_output_buffer is not None:
+            return
+        layers = getattr(self.compilation_config, "static_forward_context", {})
+        layer = layers.get(self._conv_layer_name)
+        if not getattr(layer, "use_shared_conv_output", False):
+            return
+        # Decode needs at most K+1 tokens per request; prefill does not use this
+        # buffer. Include graph padding without reserving the prefill token budget.
+        token_capacity = max(
+            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
+            self.decode_cudagraph_max_bs,
+        )
+        self._conv_output_buffer = torch.empty(
+            (token_capacity, 3 * layer.local_projection_size),
+            dtype=self.vllm_config.model_config.dtype,
+            device=self.spec_sequence_masks.device,
+        )
 
     def _ensure_conv_index_buffers(self) -> None:
         if self._spec_conv_indices is not None:
@@ -1055,6 +1077,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
         num_actual_reqs: int | None = None,
     ) -> GDNAttentionMetadata:
         self._ensure_conv_index_buffers()
+        self._ensure_conv_output_buffer()
         metadata = super().build(
             common_prefix_len,
             common_attn_metadata,
@@ -1063,6 +1086,15 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
+        if self._conv_output_buffer is not None:
+            # Layers in this group consume the same decode rows in sequence.
+            # Clear once per step, including inactive captured branches: rows
+            # that were active on the previous replay can now be padding.
+            self._conv_output_buffer.zero_()
+            if metadata.spec_decode_metadata is not None:
+                metadata.spec_decode_metadata.spec_causal_conv1d.output_buffer = self._conv_output_buffer
+            if metadata.non_spec_decode_metadata is not None:
+                metadata.non_spec_decode_metadata.causal_conv1d.output_buffer = self._conv_output_buffer
         if self._spec_conv_indices is None:
             return metadata
         assert self._non_spec_conv_indices is not None
