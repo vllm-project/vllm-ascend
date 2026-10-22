@@ -313,16 +313,11 @@ def test_session_reuses_inventory_and_final_digest(runtime, monkeypatch, process
     verify = Mock(wraps=session.planner.verify_structural_digest)
     monkeypatch.setattr(session.planner, "verify_structural_digest", verify)
 
-    with pytest.raises(RuntimeError, match="unavailable"):
-        backend.snapshot_registered_tensor_inventory()
     try:
         assert session.register_destination(model, processed_layout, excluded)
         assert collect.call_count == 1
         assert session.planner.structural_digest == expected_digest
         assert len(backend._registered_transferable_tensors) == (1 if exclude_shared else 2)
-        assert backend.snapshot_registered_tensor_inventory() == inventory
-        backend.snapshot_registered_tensor_inventory().clear()
-        assert len(backend.snapshot_registered_tensor_inventory()) == 2
         seed_info = runtime.types.SeedTransferInfo(
             "seed-session", dict(backend.weight_manifest), formats=dict(backend.weight_formats)
         )
@@ -365,8 +360,6 @@ def test_session_reuses_inventory_and_final_digest(runtime, monkeypatch, process
     finally:
         session.seed_lease = None
         assert session.shutdown()
-    with pytest.raises(RuntimeError, match="unavailable"):
-        backend.snapshot_registered_tensor_inventory()
 
 
 @pytest.mark.parametrize("processed_layout", [False, True])

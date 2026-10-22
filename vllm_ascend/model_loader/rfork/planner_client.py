@@ -24,7 +24,6 @@ from vllm_ascend.model_loader.rfork.types import (
     SeedReportStatus,
 )
 
-HEARTBEAT_LOG_EVERY_N = 4
 SEED_REMOVAL_MAX_ATTEMPTS = 3
 SEED_REMOVAL_RETRY_BACKOFF_SEC = 0.1
 RESPONSE_LOG_MAX_CHARS = 256
@@ -199,9 +198,13 @@ class RForkPlannerClient:
         except (requests.RequestException, RuntimeError, ValueError) as exc:
             logger.warning("RFork planner seed acquisition failed: %s", exc)
             if lease_for_release is not None:
+                # Record the allocation before the release attempt so an escaping
+                # exception cannot lose the cleanup handle for the planner lease.
+                self._rejected_seed_lease = lease_for_release
                 result = self.release_seed_once(lease_for_release)
-                if result is not LeaseReleaseResult.RELEASED:
-                    self._rejected_seed_lease = lease_for_release
+                if result is LeaseReleaseResult.RELEASED:
+                    self._rejected_seed_lease = None
+                else:
                     logger.warning(
                         "RFork rejected a seed lease but could not return its planner allocation: lease=%s result=%s",
                         lease_log_id(lease_for_release),
@@ -394,35 +397,3 @@ class RForkPlannerClient:
             return SeedReportResult(SeedReportStatus.RETRYABLE, type(exc).__name__)
         except (RuntimeError, ValueError, OSError) as exc:
             return SeedReportResult(SeedReportStatus.REJECTED, type(exc).__name__)
-
-    def run_seed_heartbeat(
-        self,
-        port: int,
-        sleep_interval: float | None = None,
-        stop_event: threading.Event | None = None,
-        seed_ip: str | None = None,
-        initial_delay: bool = False,
-    ) -> None:
-        if sleep_interval is None:
-            sleep_interval = self.config.heartbeat_interval_sec
-        if (
-            isinstance(sleep_interval, bool)
-            or not isinstance(sleep_interval, (int, float))
-            or not math.isfinite(sleep_interval)
-            or sleep_interval <= 0
-        ):
-            raise ValueError("heartbeat sleep_interval must be a finite positive number")
-        if initial_delay and stop_event is not None and stop_event.wait(sleep_interval):
-            return
-        heartbeat_index = 0
-        while stop_event is None or not stop_event.is_set():
-            heartbeat_index += 1
-            reported = self.report_seed_once(port, seed_ip=seed_ip)
-            if not reported:
-                logger.warning("RFork heartbeat failed for seed_key=%s", self.seed_key)
-            elif heartbeat_index % HEARTBEAT_LOG_EVERY_N == 0:
-                logger.debug("RFork heartbeat accepted for seed_key=%s", self.seed_key)
-            if stop_event is None:
-                time.sleep(sleep_interval)
-            else:
-                stop_event.wait(sleep_interval)

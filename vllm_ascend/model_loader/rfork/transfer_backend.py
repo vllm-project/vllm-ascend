@@ -214,7 +214,6 @@ class RForkTransferBackend:
         self.registered_weight_blocks: list[tuple[int, int]] = []
         self.registered_memory_addresses: list[int] = []
         self.excluded_weight_blocks: list[tuple[int, int]] = []
-        self._registered_tensor_inventory: list[tuple[str, torch.Tensor]] | None = None
         self._registered_transferable_tensors: list[tuple[str, torch.Tensor]] | None = None
         self._registered_transferable_storages: list[Any] | None = None
         self._all_transferable_tensors_excluded = False
@@ -287,7 +286,6 @@ class RForkTransferBackend:
         self.registered_structural_digest = None
         self.registered_weight_blocks = []
         self.registered_memory_addresses = []
-        self._registered_tensor_inventory = None
         self._registered_transferable_tensors = None
         self._registered_transferable_storages = None
         self._all_transferable_tensors_excluded = False
@@ -296,13 +294,6 @@ class RForkTransferBackend:
         """Return a consistent copy for draft exclusion; this does not pin its lifetime."""
         with self._lifecycle_lock:
             return list(self.registered_weight_blocks)
-
-    def snapshot_registered_tensor_inventory(self) -> list[tuple[str, torch.Tensor]]:
-        """Return the registration inventory, including excluded target-shared tensors."""
-        with self._lifecycle_lock:
-            if self._registered_tensor_inventory is None:
-                raise RuntimeError("RFork tensor inventory is unavailable before registration or after reset.")
-            return list(self._registered_tensor_inventory)
 
     def log_model_layout_summary(
         self,
@@ -491,7 +482,6 @@ class RForkTransferBackend:
         self.weight_formats = weight_format_dict
         self.registered_weight_blocks = list(merged_blocks)
         self.registered_memory_addresses = []
-        self._registered_tensor_inventory = all_transferable_tensors
         self._registered_transferable_tensors = transferable_tensors
         self._registered_transferable_storages = transferable_storages
         self._all_transferable_tensors_excluded = bool(not transferable_tensors and excluded_names)
