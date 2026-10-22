@@ -1021,7 +1021,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             return
         layers = getattr(self.compilation_config, "static_forward_context", {})
         layer = layers.get(self._conv_layer_name)
-        if not getattr(layer, "use_shared_conv_output", False):
+        if layer is None or not getattr(layer, "use_shared_conv_output", False):
             return
         # Decode needs at most K+1 tokens per request; prefill does not use this
         # buffer. Include graph padding without reserving the prefill token budget.
