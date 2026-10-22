@@ -416,36 +416,6 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
-    def test_memcache_keeps_existing_layer_completion_lifetime(self):
-        worker = make_worker(
-            self,
-            tp_size=2,
-            use_mla=True,
-            use_kvpp=True,
-            use_layerwise=True,
-            extra_config={"backend": "memcache"},
-        )
-        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
-        worker.layer_load_finished_events[0].set()
-        worker.process_layer_data = MagicMock()
-        worker.prepare_layerwise_step(AscendConnectorMetadata(preempted_req_ids=set()))
-        self.assertTrue(worker.layer_load_finished_events[0].is_set())
-        worker.kv_recv_thread = MagicMock()
-        worker._submit_ready_layer_loads = MagicMock()
-        worker.external_slot_release_waiter = None
-        worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
-        worker.kv_recv_thread.raise_if_failed.assert_not_called()
-        worker.wait_for_layer_load()
-        self.assertFalse(worker.layer_load_finished_events[0].is_set())
-
-    def test_memcache_connector_does_not_forward_load_ready_observer(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.use_layerwise = True
-        connector.backend_name = "memcache"
-        connector.connector_worker = MagicMock()
-        connector.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
-        connector.connector_worker.wait_for_layer_load_ready.assert_not_called()
-
     def test_pp_owner_indices_are_stage_local(self):
         from tests.ut.kvpp_utils import layer_name, make_kvpp_config
 

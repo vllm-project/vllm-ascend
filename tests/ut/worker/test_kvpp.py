@@ -84,10 +84,7 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
         kv_caches=caches if explicit_caches else None,
     )
     scheduler = runtime.scheduler
-    assert scheduler.layerwise == (backend == "mooncake")
-    if backend == "memcache":
-        scheduler.schedule_forward(True)
-        assert len(scheduler._prefetch_executor.submitted) == 1
+    assert scheduler.layerwise == (backend is not None)
     assert scheduler.attention_layer_names == (main,)
     assert context[main].impl.layerwise_kv_cache_hook is scheduler
     assert not hasattr(context[indexer].impl, "layerwise_kv_cache_hook")

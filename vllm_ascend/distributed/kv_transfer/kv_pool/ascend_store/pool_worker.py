@@ -1367,7 +1367,7 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
-        if self.use_kvpp and self.use_block_key_layerwise:
+        if self.use_kvpp:
             assert self.layer_load_finished_events is not None
             for event in self.layer_load_finished_events:
                 event.clear()
@@ -3141,9 +3141,7 @@ class KVPoolWorker:
             submit_layer_load(layer_id)
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
-        """Observe Mooncake completion without consuming the attention signal."""
-        if not (self.use_kvpp and self.use_block_key_layerwise):
-            return
+        """Observe completion without consuming the attention hook's signal."""
         physical_layer = self._extract_physical_layer_index(layer_name)
         layer_id = self._global_to_local_layer.get(physical_layer, physical_layer)
         assert self.kv_recv_thread is not None
@@ -3202,7 +3200,7 @@ class KVPoolWorker:
                 self._finish_current_layerwise_load_sessions()
             raise
         # KVPP can observe completion after attention; reset at the next bind.
-        if not (self.use_kvpp and self.use_block_key_layerwise):
+        if not self.use_kvpp:
             self.layer_load_finished_events[self.current_layer].clear()
         if (
             getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
