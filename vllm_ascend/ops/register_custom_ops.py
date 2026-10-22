@@ -87,14 +87,12 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
                 # order, so trimming the SP tail padding needs no copy.
                 x = x[: int(num_tokens_across_dp_cpu[0])]
             else:
-                result = torch.empty(
-                    (num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype
-                )
+                result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
                 x = x.view(dp_size, _EXTRA_CTX.padded_length, *x.shape[1:])
                 offset = 0
                 for idx in range(dp_size):
                     num_tokens_dp = int(num_tokens_across_dp_cpu[idx])
-                    result[offset: offset + num_tokens_dp] = x[idx, :num_tokens_dp]
+                    result[offset : offset + num_tokens_dp] = x[idx, :num_tokens_dp]
                     offset += num_tokens_dp
                 x = result
 
