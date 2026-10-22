@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,6 +32,12 @@ def inputs():
 @pytest.fixture
 def launches(monkeypatch):
     """Exercise host dispatch on CPU; numerical kernels have separate NPU tests."""
+    # The CPU Triton placeholder does not provide next_power_of_2.
+    monkeypatch.setattr(
+        utils,
+        "triton",
+        SimpleNamespace(cdiv=utils.triton.cdiv, next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
+    )
     mocks = {}
     for name in (
         "_compute_block_stats_kernel",
@@ -135,6 +142,10 @@ def test_upstream_verify_uses_processed_logits_without_class_patch(monkeypatch, 
     verifier.synthetic_conditional_rates = None
     verifier.use_block_verification = False
     verifier.watermark_key = None
+    # Upstream main adds this argument; the supported release omits it.
+    verify_kwargs = {}
+    if "verify_draft_sampled" in inspect.signature(verifier._verify).parameters:
+        verify_kwargs["verify_draft_sampled"] = inputs["draft_sampled"]
     result, _, _ = verifier._verify(
         inputs["target_logits"],
         inputs["draft_logits"],
@@ -146,6 +157,7 @@ def test_upstream_verify_uses_processed_logits_without_class_patch(monkeypatch, 
         inputs["expanded_idx_mapping"],
         inputs["expanded_local_pos"],
         inputs["cu_num_logits"][1:].numpy(),
+        **verify_kwargs,
     )
     assert result is processed
     verifier.sampler.apply_sampling_params.assert_called_once()
