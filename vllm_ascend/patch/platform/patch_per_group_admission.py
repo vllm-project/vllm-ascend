@@ -58,6 +58,9 @@ def _inflight_reservations(scheduler) -> GroupBlockReservation:
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
+            # The pin's own boundary, so reservations see the same demand the
+            # request itself will meet at admission.
+            prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
         for group_id, blocks in enumerate(demand):
             reserved[group_id] += blocks

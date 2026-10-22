@@ -177,6 +177,68 @@ def test_sliding_inflight_reservation_is_preserved():
     assert _state(manager) == before
 
 
+def test_inflight_reservations_pass_the_pin_prefill_end():
+    manager = _manager()
+    first, second = _request("a", 32), _request("b", 48)
+    # A resumed sequence: its prefill ends before the replayed token tail.
+    second.num_prompt_tokens = 40
+    scheduler = SimpleNamespace(
+        kv_cache_manager=manager,
+        max_model_len=128,
+        _inflight_prefills=[first, second],
+    )
+    seen = []
+    real = manager.coordinator.get_num_blocks_to_allocate_by_group
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("prefill_end"))
+        return real(*args, **kwargs)
+
+    manager.coordinator.get_num_blocks_to_allocate_by_group = spy
+
+    assert _inflight_reservations(scheduler) == GroupBlockReservation((5, 5))
+    # max(num_prompt_tokens, num_tokens - 1), the pin's own boundary.
+    assert seen == [32, 47]
+
+
+def test_sparse_retention_keeps_the_pin_prefill_end_in_group_demand():
+    manager = _manager()
+    demand_manager = manager.coordinator.single_type_managers[1]
+    seen = []
+    real = demand_manager.get_num_blocks_to_allocate
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("prefill_end"))
+        return real(*args, **kwargs)
+
+    demand_manager.get_num_blocks_to_allocate = spy
+    # 0 = keep only the latest replay boundary: the chunk reaching prefill_end
+    # is the one reserving a checkpoint, so the pin's value must be forwarded.
+    manager.coordinator.retention_interval = 0
+
+    assert manager.allocate_slots(_request(), 32) is not None
+    assert seen == [32]
+
+
+def test_dense_retention_zeroes_the_pin_prefill_end_in_group_demand():
+    manager = _manager()
+    demand_manager = manager.coordinator.single_type_managers[1]
+    seen = []
+    real = demand_manager.get_num_blocks_to_allocate
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("prefill_end"))
+        return real(*args, **kwargs)
+
+    demand_manager.get_num_blocks_to_allocate = spy
+    # None = dense retention: every chunk publishes a state, so the pin's
+    # coordinator zeroes the boundary and the manager must see that zero.
+    manager.coordinator.retention_interval = None
+
+    assert manager.allocate_slots(_request(), 32) is not None
+    assert seen == [0]
+
+
 def test_prefix_hit_is_not_touched_when_another_group_cannot_fit():
     manager = _manager(enable_caching=True)
     sliding, full = manager.coordinator.block_pools

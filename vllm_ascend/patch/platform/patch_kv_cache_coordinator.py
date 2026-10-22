@@ -302,20 +302,42 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> tuple[int, ...]:
         """Predict demand without allocating, touching hits or consulting free space."""
-        return tuple(
-            manager.get_num_blocks_to_allocate(
-                request_id,
-                num_encoder_tokens if isinstance(manager, CrossAttentionManager) else num_tokens,
-                [] if isinstance(manager, CrossAttentionManager) else new_computed_blocks[group_id],
-                0 if isinstance(manager, CrossAttentionManager) else total_computed_tokens,
-                0 if isinstance(manager, CrossAttentionManager) else num_local_computed_tokens,
-                num_encoder_tokens if isinstance(manager, CrossAttentionManager) else num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
+        # Upstream zeroes the boundary unless a sparse retention interval is
+        # configured; keep the same rule so mamba checkpoint reservation keeps
+        # the pin's semantics on every demand path.
+        if self.retention_interval != 0:
+            prefill_end = 0
+        demands = []
+        for group_id, manager in enumerate(self.single_type_managers):
+            if isinstance(manager, CrossAttentionManager):
+                demands.append(
+                    manager.get_num_blocks_to_allocate(
+                        request_id,
+                        num_encoder_tokens,
+                        [],
+                        0,
+                        0,
+                        num_encoder_tokens,
+                        apply_admission_cap=apply_admission_cap,
+                    )
+                )
+                continue
+            demands.append(
+                manager.get_num_blocks_to_allocate(
+                    request_id,
+                    num_tokens,
+                    new_computed_blocks[group_id],
+                    total_computed_tokens,
+                    num_local_computed_tokens,
+                    num_tokens_main_model,
+                    apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
+                )
             )
-            for group_id, manager in enumerate(self.single_type_managers)
-        )
+        return tuple(demands)
 
     def get_num_blocks_to_allocate(
         self,
@@ -327,6 +349,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         demands = self.get_num_blocks_to_allocate_by_group(
             request_id,
@@ -337,6 +360,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
+            prefill_end=prefill_end,
         )
         if isinstance(self.block_pool, PerGroupBlockPools):
             return demands[self.block_pool.primary_group_id]
