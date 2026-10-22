@@ -73,6 +73,7 @@ class KVPPRuntime:
             attention_layer_names=tuple(layer_buffers),
             layerwise=any(
                 connector.get("kv_connector") == "AscendStoreConnector"
+                and connector.get("kv_connector_extra_config", {}).get("backend", "mooncake").lower() == "mooncake"
                 and connector.get("kv_connector_extra_config", {}).get("use_layerwise", False)
                 for connector in connectors
             ),

@@ -1367,7 +1367,7 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
-        if self.use_kvpp:
+        if self.use_kvpp and self.use_block_key_layerwise:
             assert self.layer_load_finished_events is not None
             for event in self.layer_load_finished_events:
                 event.clear()
@@ -2453,19 +2453,15 @@ class KVPoolWorker:
         return self._make_layerwise_full_key(0, block_hash_or_tail)
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
-        if self.use_kvpp:
-            return [
-                (group_id, layer_idx)
-                for group_id, layer_idx in self.physical_layer_to_group_layers.get(local_layer, [])
-                if group_id in self.cacheable_group_ids
-            ]
         if self.use_block_key_layerwise:
             # The map and buffer builders both use stage-local physical layer
             # indices. A group's dense layer index is a third, distinct axis.
-            if self.num_kv_cache_groups == 1:
+            if self.num_kv_cache_groups == 1 and not getattr(self, "use_kvpp", False):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
+                if getattr(self, "use_kvpp", False):
+                    return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
         # GVA groups use stage-local indices too; PP offsets apply to pool keys and remote addresses.
@@ -3145,7 +3141,9 @@ class KVPoolWorker:
             submit_layer_load(layer_id)
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
-        """Observe completion without consuming the attention hook's signal."""
+        """Observe Mooncake completion without consuming the attention signal."""
+        if not (self.use_kvpp and self.use_block_key_layerwise):
+            return
         physical_layer = self._extract_physical_layer_index(layer_name)
         layer_id = self._global_to_local_layer.get(physical_layer, physical_layer)
         assert self.kv_recv_thread is not None
@@ -3204,7 +3202,7 @@ class KVPoolWorker:
                 self._finish_current_layerwise_load_sessions()
             raise
         # KVPP can observe completion after attention; reset at the next bind.
-        if not self.use_kvpp:
+        if not (self.use_kvpp and self.use_block_key_layerwise):
             self.layer_load_finished_events[self.current_layer].clear()
         if (
             getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
