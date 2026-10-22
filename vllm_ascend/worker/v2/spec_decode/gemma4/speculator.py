@@ -23,7 +23,6 @@ from contextlib import contextmanager
 from copy import copy
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, replace
@@ -72,22 +71,18 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
     num_sampled_h = num_sampled[:num_reqs].tolist()
     idx_slots = input_batch.idx_mapping[:num_reqs].tolist()
     is_prefilling = input_batch.is_prefilling_np
-    saw_decode_continue = False
 
     pos_buf = spec.input_buffers.positions
     hidden = spec.hidden_states
     stash = spec._g4_stash
-    committed = []
     for i in range(num_reqs):
         qs = int(qsl[i])
         full_len = int(qsl[i + 1]) - qs
         qe = qs + full_len
         if full_len <= 0:
-            committed.append(0)
             continue
         slot = idx_slots[i]
         if num_sampled_h[i] > 0 and not is_prefilling[i]:
-            saw_decode_continue = True
             head_hidden = stash[slot].clone()
             stash[slot].copy_(hidden[qs])
             shifted = hidden[qs : qe - 1].clone()
@@ -95,10 +90,7 @@ def _rebuild_gemma4_windows(spec, input_batch, num_sampled, num_rejected):
             hidden[qs + 1 : qe].copy_(shifted)
             pos_buf[qs:qe].copy_(input_batch.positions[qs:qe])
         else:
-            committed.append(int(input_batch.positions[qe - 1].item()) + 1)
             stash[slot].copy_(hidden[qe - 1])
-    if not saw_decode_continue:
-        spec._g4_committed = np.asarray(committed, dtype=np.int32)
 
 
 class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
@@ -112,7 +104,6 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             dtype=self.hidden_states.dtype,
             device=device,
         )
-        self._g4_committed = None
 
     def propose(  # type: ignore[override]
         self,
@@ -135,7 +126,6 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         is_profile: Any = None,
         num_speculative_tokens: int | None = None,
     ):
-        self._g4_committed = None
         with _gemma4_prefill_inputs(self, input_batch, num_sampled, num_rejected):
             return AscendAutoRegressiveSpeculator.propose(
                 self,
