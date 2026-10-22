@@ -311,6 +311,7 @@ context regressions, and separately compare candidate OFF to the clean base.
 - MRV2 policy and integration: `vllm_ascend/worker/v2/spec_decode/`
 - MRV2 source/math/ownership: `draft_window_read.py`, `draft_window_plan.py`, `draft_window_lifetime.py`
 - MRV2 builder seam: `vllm_ascend/worker/v2/attn_utils.py`
+
 ## Parallel GQA device exact reader (candidate)
 
 For ordinary contiguous FP16/BF16 GQA caches, DFlash and DSpark can prepare
@@ -341,3 +342,8 @@ engine correctness, reader completion and performance must be measured before
 declaring this candidate accepted. In the installed torch_npu version,
 `torch._assert_async` itself synchronizes through a scalar copy and is not
 used to validate device lengths in this path.
+
+To keep Target Graph with Draft eager, set
+`speculative_config.enforce_eager=true`. The MRV2 runtime checks this explicit
+Draft override as well as the inherited model eager flag, matching the actual
+Ascend speculator graph-manager selection.

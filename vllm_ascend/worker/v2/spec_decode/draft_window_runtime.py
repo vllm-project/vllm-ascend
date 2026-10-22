@@ -67,7 +67,10 @@ class DraftWindowRuntime:
             raise ValueError("Eagle3 draft_window_size must cover first-pass query width plus the proposal horizon")
         if self.method == "eagle3" and speculator.use_fused_multi_step_decode:
             raise NotImplementedError("Eagle3 Draft Window requires per-step metadata preparation")
-        if not speculator.draft_model_config.enforce_eager:
+        # The model config inherits the Target flag. All three Ascend
+        # speculators also force their graph managers to NONE for the explicit
+        # speculative override, allowing Target Graph with Draft eager.
+        if not (speculator.draft_model_config.enforce_eager or speculator.speculative_config.enforce_eager):
             raise ValueError("Draft Window requires an eager Draft model; Target graph mode is independent")
         self.speculator = speculator
         self.window_size = policy.effective_window_size

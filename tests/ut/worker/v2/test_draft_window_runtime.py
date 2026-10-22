@@ -43,6 +43,7 @@ def setup(monkeypatch):
     canonical = torch.arange(48, dtype=torch.int32).reshape(6, 8)
     spec = SimpleNamespace(
         draft_model_config=SimpleNamespace(enforce_eager=True),
+        speculative_config=SimpleNamespace(enforce_eager=None),
         vllm_config=SimpleNamespace(max_concurrent_batches=2),
         num_query_per_req=3,
         num_speculative_steps=3,
@@ -56,6 +57,24 @@ def setup(monkeypatch):
     policy = resolve_draft_window_policy(requested_window_size=8, method="dflash")
     runtime = DraftWindowRuntime(spec, policy)
     return runtime, spec, canonical, completions
+
+
+@pytest.mark.parametrize("method", ["eagle3", "dflash", "dspark"])
+@pytest.mark.parametrize("inherited_eager", [False, True])
+@pytest.mark.parametrize("draft_override", [None, False, True])
+def test_effective_draft_eager_preserves_target_graph(setup, method, inherited_eager, draft_override):
+    _, spec, _, _ = setup
+    spec.draft_model_config.enforce_eager = inherited_eager
+    spec.speculative_config.enforce_eager = draft_override
+    policy = resolve_draft_window_policy(requested_window_size=1024, method=method)
+    # Match actual graph-manager initialization: an eager Target supplies NONE,
+    # and the explicit Draft eager flag additionally forces NONE. False does
+    # not enable graphs when the Target supplied NONE.
+    if inherited_eager or draft_override:
+        assert DraftWindowRuntime(spec, policy).method == method
+    else:
+        with pytest.raises(ValueError, match="eager Draft"):
+            DraftWindowRuntime(spec, policy)
 
 
 def batch(*, rows=(1, 3), computed=(8, 24), prompt=(16, 16), scheduled=(7, 3), drafts=(3, 2)):
