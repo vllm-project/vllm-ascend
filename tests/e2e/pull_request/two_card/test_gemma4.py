@@ -61,7 +61,7 @@ def _run_full_decode_graph_smoke(model: str, *, enable_expert_parallel: bool) ->
 
 @pytest.mark.e2e_model("google/gemma-4-26B-A4B-it")
 @pytest.mark.e2e_coverage(
-    arch="dense",
+    arch="moe",
     feature="",
     parallel="TP,EP",
     deploy="pd_mix",
