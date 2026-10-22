@@ -350,3 +350,10 @@ To keep Target Graph with Draft eager, set
 `speculative_config.enforce_eager=true`. The MRV2 runtime checks this explicit
 Draft override as well as the inherited model eager flag, matching the actual
 Ascend speculator graph-manager selection.
+
+The reader keeps attention scores and probabilities in FP32 on device, then
+casts the output to the original query dtype. Fused BF16 attention reproduced
+a small-result cancellation failure even with exact native lengths; the
+FP32 path preserves the independent same-window numerical contract without
+relaxing its tolerance. This adds intermediate storage and compute that must
+be included in actual correctness, lifetime and performance measurements.

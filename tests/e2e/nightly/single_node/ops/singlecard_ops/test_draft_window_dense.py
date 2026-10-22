@@ -101,3 +101,64 @@ def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, d
 
     if page_layers:
         torch.testing.assert_close(backing, backing_before, atol=0, rtol=0, equal_nan=True)
+
+
+def test_bfloat16_probability_cancellation():
+    # Two nearly equal probabilities multiply large opposite values. Rounding
+    # both probabilities to BF16 first loses the small output; keep FP32 PV.
+    block, dim, query_width = 128, 128, 8
+    query = torch.zeros((query_width, 1, dim), dtype=torch.bfloat16, device="npu")
+    query[:, :, 0] = 1
+    keys = torch.zeros((2, block, 1, dim), dtype=torch.bfloat16, device="npu")
+    keys[:, :, :, 0] = -9984
+    keys[1, 0, :, 0] = 0.0439453125
+    keys[1, 1, :, 0] = 0
+    values = torch.zeros_like(keys)
+    values[1, 0] = 128
+    values[1, 1] = -128.5
+    source = DirectPrefixSource(torch.tensor([[1]], dtype=torch.int32, device="npu"), (0,), (1,), block)
+    retained = []
+    read = prepare_dense_draft_read(
+        source,
+        exact_device=torch.tensor([8], dtype=torch.int32, device="npu"),
+        row_indices=torch.tensor([0], device="npu"),
+        upper_cpu=torch.tensor([8], device="cpu"),
+        window_size=128,
+        anchor_span=128,
+        query_width=query_width,
+        causal=False,
+        retain=lambda *objects: retained.extend(objects),
+    )
+    q, k, v = query.cpu().float(), keys[1, :8].cpu().float(), values[1, :8].cpu().float()
+    scores = torch.einsum("qhd,khd->hqk", q, k) / math.sqrt(dim)
+    expected = torch.einsum("hqk,khd->qhd", scores.softmax(-1), v)
+    actual = dense_draft_attention(read, query, keys, values, 1 / math.sqrt(dim))
+    torch.testing.assert_close(actual.cpu().float(), expected, atol=2**-7, rtol=2**-6)
+
+
+def test_small_causal_window_empty_rows_are_zero():
+    block, query_width, dim = 128, 8, 128
+    query = torch.ones((query_width, 1, dim), dtype=torch.bfloat16, device="npu")
+    keys = torch.full((3, block, 1, dim), torch.nan, dtype=torch.bfloat16, device="npu")
+    values = torch.full_like(keys, torch.nan)
+    keys[2, 0] = 1
+    values[2, 0] = 7
+    source = DirectPrefixSource(torch.tensor([[1, 2]], dtype=torch.int32, device="npu"), (0,), (2,), block)
+    retained = []
+    read = prepare_dense_draft_read(
+        source,
+        exact_device=torch.tensor([129], dtype=torch.int32, device="npu"),
+        row_indices=torch.tensor([0], device="npu"),
+        upper_cpu=torch.tensor([130], device="cpu"),
+        window_size=1,
+        anchor_span=block,
+        query_width=query_width,
+        causal=True,
+        retain=lambda *objects: retained.extend(objects),
+    )
+    # Independent per-query read set: positions121..127 have no key after S128;
+    # position128 has one key whose value is7. W remains legal and unchanged.
+    expected = torch.zeros((query_width, 1, dim), dtype=torch.bfloat16, device="cpu")
+    expected[-1] = 7
+    actual = dense_draft_attention(read, query, keys, values, 1 / math.sqrt(dim))
+    torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
