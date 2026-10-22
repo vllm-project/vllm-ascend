@@ -484,7 +484,9 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(load_spec.kvpool_cached_tokens, 48)
         self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
         self.assertTrue(load_spec.can_load)
-        scheduler.update_state_after_alloc(request, MagicMock(), 0)
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1, 2, 3]]
+        scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
@@ -533,6 +535,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1]]
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertIn("r1", scheduler._unfinished_requests)
 
@@ -564,6 +567,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1]]
         scheduler.update_state_after_alloc(request, blocks, 0)
         self.assertFalse(scheduler.load_specs["r1"].can_load)
 
@@ -1475,12 +1479,14 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
 
     def test_zero_external_tokens(self):
         scheduler = self._make_scheduler()
-        scheduler.update_state_after_alloc(MagicMock(request_id="missing"), MagicMock(), 0)
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1]]
+        scheduler.update_state_after_alloc(MagicMock(request_id="missing"), blocks, 0)
         self.assertNotIn("missing", scheduler.load_specs)
 
         scheduler.use_layerwise = True
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
-        scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
+        scheduler.update_state_after_alloc(MagicMock(request_id="r1"), blocks, 0)
         self.assertTrue(scheduler.load_specs["r1"].can_load)
 
 
