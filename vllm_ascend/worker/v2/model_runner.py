@@ -289,9 +289,30 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
-        self.pd_dspark_aux_layer_ids = aux_layers
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            join_early_kernel_warmup,
+            start_early_kernel_warmup,
+        )
+        from vllm_ascend.model_executor.warmup.nz_warmup import (
+            join_nz_warm_thread,
+            start_nz_warm_thread,
+        )
+
+        # Overlap the one-off NZ cast and Triton compile with weight I/O.
+        # Every model goes through here.
+        start_nz_warm_thread("thread")
+        start_early_kernel_warmup()
+        try:
+            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+            super().load_model(load_dummy_weights, *args, **kwargs)
+            self.pd_dspark_aux_layer_ids = aux_layers
+        finally:
+            # Join even when weight loading fails: these threads touch the NPU
+            # device and must not outlive this call. Joining here is also before
+            # memory profiling.
+            join_nz_warm_thread()
+            join_early_kernel_warmup("load_model")
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
@@ -521,11 +542,6 @@ class NPUModelRunner(GPUModelRunner):
             for groups in self.attn_groups
             for group in groups
         )
-
-        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
-        # vLLM lane where ModelConfig no longer exposes the flag.
-        if getattr(self.model_config, "enable_return_routed_experts", False):
-            self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
@@ -1148,15 +1164,14 @@ class NPUModelRunner(GPUModelRunner):
 
     @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        # TODO: Remove this workaround once upstream dummy-batch preparation
+        # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
             # FULL modes can also pad requests; only change token-only PIECEWISE padding.
             self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
             and self.pcp_manager is None
-            # Hybrid models also need recurrent-state metadata to stay aligned.
-            # TODO: Verify whether this hybrid-model guard can be removed.
-            and not self.model_config.is_hybrid
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens

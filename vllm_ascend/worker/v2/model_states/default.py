@@ -438,6 +438,8 @@ class AscendModelState(DefaultModelState):
             # Piecewise cudagraphs and eager use the actual request count.
             num_reqs = input_batch.num_reqs
 
+        # TODO: Remove the PIECEWISE dummy condition once the common metadata
+        # path handles padded attention inputs separately from logical queries.
         if (
             cudagraph_mode == CUDAGraphMode.FULL
             or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
