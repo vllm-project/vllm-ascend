@@ -62,6 +62,8 @@ class AscendMTPSpeculator(AscendAutoRegressiveSpeculator, MTPSpeculator):
         layer_heads = []
         for layer in layers.values():
             shared_head = getattr(layer, "shared_head", None)
+            if shared_head is None:
+                continue
             head = getattr(shared_head, "head", None)
             if head is not None:
                 layer_heads.append((shared_head, head))

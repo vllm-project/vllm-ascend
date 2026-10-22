@@ -375,7 +375,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
             hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
         )
-        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp)
+        self._lmhead_tp_publish_dspark_draft_capacity(num_tokens_across_dp)
         return hidden_states
 
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
@@ -537,7 +537,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     num_speculative_tokens=num_speculative_tokens,
                 )
 
-    def _lmhead_tp_publish_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
+    def _lmhead_tp_publish_dspark_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
         """Publish the per-step DSpark draft LM-head capacity.
 
         ``num_tokens_across_dp`` is the group-agreed per-rank query token count
