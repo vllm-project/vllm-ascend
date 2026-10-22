@@ -2221,6 +2221,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(for_cudagraph_ca
 
     assert metadata["layer.0"] is is_prefilling
     assert builder.extra_kwargs == {}
+    assert builder.common_attn_metadata is not None
     assert builder.common_attn_metadata.pcp_context is pcp_context
     assert builder.common_attn_metadata.pcp_cache_group_idx == 0
 
