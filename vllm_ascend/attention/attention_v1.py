@@ -666,10 +666,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        # Match eager FIA: DFlash's non-causal query attention takes precedence
+        # over a configured sliding window and must see the full query block.
+        sliding_window = self.sliding_window if attn_metadata.causal else None
+        attn_mask = attn_metadata.attn_mask if attn_metadata.causal else None
+        sparse_mode = 4 if sliding_window else 3 if attn_metadata.causal else 0
+        pre_tokens = sliding_window or SWA_INT_MAX
+        next_tokens = 0 if sliding_window else SWA_INT_MAX
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
@@ -745,7 +748,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             },
             FIAParamProvider(
                 self._layer_name,
-                self.sliding_window,
+                sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
             ),

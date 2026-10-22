@@ -381,6 +381,8 @@ A few important things to consider when using DFlash2 draft models:
    request, so every capture size must be `n * (num_speculative_tokens + 1)`
    for each batch size `n` you want to support — `[9]` above, for batch size
    1 with `num_speculative_tokens = 8`.
+   For `num_speculative_tokens` of 4, 5, or 6, use multiples of 5, 6, or 7,
+   respectively. Choose a draft length supported by the checkpoint.
 
 4. **The draft must use the target's unquantized LM head**: the candidate
    top-k is taken over the full-vocabulary logits, so a reduced draft
