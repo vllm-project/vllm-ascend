@@ -1,0 +1,4 @@
+pr: 19445
+entries:
+  - category: bugfix
+    text: Fixed incorrect layer selection and possible array out-of-bounds errors in layerwise memcache/GVA KV pool transfers with KVPP enabled.
