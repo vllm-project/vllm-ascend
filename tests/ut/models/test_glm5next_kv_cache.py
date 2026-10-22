@@ -12,7 +12,6 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
@@ -53,11 +52,6 @@ def keypool_kernels(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "vllm_ascend.ops.triton.glm5_next_cann_keypool", kernels)
     return kernels
-
-
-@pytest.fixture(autouse=True)
-def default_dsa_cp_disabled(monkeypatch):
-    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.enable_dsa_cp", lambda: False)
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -467,12 +461,7 @@ def _common():
 
 @pytest.mark.parametrize("input_tokens", [9, 10])
 @pytest.mark.parametrize("unpadded", [None, "positions", "slot_mapping"])
-@pytest.mark.parametrize("dsa_cp", [False, True])
-def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
-    input_tokens, unpadded, dsa_cp, keypool_kernels, monkeypatch
-):
-    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
-    monkeypatch.setattr(backend_module, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=1))
+def test_metadata_delegates_to_kernel_and_keeps_capture_storage(input_tokens, unpadded, keypool_kernels, monkeypatch):
     builder, common = _builder(_config()), _common()
     common.num_input_tokens = input_tokens
     if unpadded:
@@ -480,18 +469,11 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
     first = builder.build(0, common)
     args = keypool_kernels.build_keypool_metadata.call_args.args
     assert args[0] is common
-    cache_tokens = backend_module._round_up(input_tokens, 2 if dsa_cp else 1)
+    cache_tokens = input_tokens
     assert args[2:] == (cache_tokens, 8 if unpadded else input_tokens, 128, 4)
     assert first.num_actual_tokens == common.num_actual_tokens
     kwargs = keypool_kernels.build_keypool_metadata.call_args.kwargs
-    assert kwargs["query_metadata"] is first.query_metadata
-    assert kwargs["local_start"] == (5 if dsa_cp else 0)
-    if dsa_cp:
-        assert first.query_metadata.positions.data_ptr() == first.positions[5:].data_ptr()
-        assert first.query_metadata.positions.shape == (5,)
-        assert first.query_metadata.num_actual_tokens == 3
-        for field in ("cum_query_lens", "seq_lens", "pool_tail"):
-            assert getattr(first.query_metadata, field).dtype == torch.int64
+    assert not kwargs
     assert first.keypool_state_table.tolist() == [[1, 3, 3, 3], [2, 4, 4, 4]]
     fields = ("start_pos", "query_start_loc", "pool_tail", "pooled_slot_mapping", "keypool_state_table")
     pointers = [getattr(first, f).data_ptr() for f in fields]
@@ -499,15 +481,10 @@ def test_metadata_delegates_to_kernel_and_keeps_capture_storage(
     common.positions.add_(1)
     second = builder.build(0, common)
     assert pointers == [getattr(second, f).data_ptr() for f in fields]
-    if dsa_cp:
-        for field in ("positions", "cum_query_lens", "seq_lens", "pool_tail"):
-            assert getattr(first.query_metadata, field).data_ptr() == getattr(second.query_metadata, field).data_ptr()
 
 
 @pytest.mark.parametrize("width", [1, 4])
-@pytest.mark.parametrize("dsa_cp", [False, True])
-def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, dsa_cp, keypool_kernels, monkeypatch):
-    monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
+def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, keypool_kernels, monkeypatch):
     config, common = _config(), _common()
     spec = AscendIndexerKPoolTailSpec(
         block_size=7,

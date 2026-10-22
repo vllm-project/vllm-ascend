@@ -39,7 +39,6 @@ class BaseLinearTest(unittest.TestCase):
             ),
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
         ]
 
         for p in self.patches:
@@ -258,7 +257,6 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
@@ -296,7 +294,6 @@ class TestRowParallelOpDispatch(unittest.TestCase):
         self._patches = [
             patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
-            patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
             patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:

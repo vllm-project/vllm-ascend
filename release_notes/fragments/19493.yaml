@@ -1,0 +1,4 @@
+pr: 19493
+entries:
+  - category: breaking
+    text: Removed legacy DSA-CP and the enable_dsa_cp configuration option. Use --prefill-context-parallel-size for PCP instead.

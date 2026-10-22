@@ -69,14 +69,12 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     replay.rows = torch.tensor([4, 5])
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     replay(torch.arange(6), None, torch.arange(6))
     for buffer, offset in zip(buffers, (0, 10, 20, 30)):
         assert buffer[:2].tolist() == [offset + 4, offset + 5]
 
 
 def test_replay_scatter_preserves_row_zero_with_padding(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     buffer = torch.arange(6).reshape(6, 1)
     hidden = torch.arange(6, dtype=torch.float32).reshape(6, 1)
     replay = replay_mod.AscendDecoderReplayLayers(
@@ -99,7 +97,6 @@ def test_replay_without_rows_keeps_inputs():
 
 
 def test_model_replays_only_layers_after_kv_sources(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     seen = []
 
     class Layer:
