@@ -467,7 +467,6 @@ def _commit_kda_state_kernel(
     mask_v = offs_v < V
     mask_state = mask_v[:, None] & mask_k[None, :]
     state_ptrs = source_state_ptr + offs_v[:, None] * stride_state_v + offs_k[None, :] * stride_state_k
-    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     A = tl.exp(tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32))
 
     dt_bias = tl.load(
@@ -507,19 +506,21 @@ def _commit_kda_state_kernel(
             lower_bound,
             USE_LOWER_BOUND,
         )
-        update = correction[:, None] * normalized_k[None, :]
         decay = tl.exp(gate)
-        final_correction += update * final_decay[None, :]
+        weighted_k = normalized_k * final_decay
+        final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
         final_decay *= decay
         if ALIGN_MODE:
             before_boundary = token_offset < boundary_recovery_len
-            boundary_correction += tl.where(
+            boundary_k = normalized_k * boundary_decay
+            boundary_correction = tl.where(
                 before_boundary,
-                update * boundary_decay[None, :],
-                0.0,
+                tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
+                boundary_correction,
             )
             boundary_decay *= tl.where(before_boundary, decay, 1.0)
 
+    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     state = initial_state * final_decay[None, :] + final_correction
     if ALIGN_MODE:
         boundary_ptrs = (
@@ -949,7 +950,10 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE)
+        # Commit can use twice the verify value tile after shortening state liveness.
+        # Align mode keeps both final and boundary correction tiles live.
+        value_tile = RECOVERSSM_VALUE_TILE if block_table is not None else RECOVERSSM_VALUE_TILE * 2
+        block_v = min(triton.next_power_of_2(value_dim), value_tile)
         grid = (
             triton.cdiv(value_dim, block_v),
             batch,
