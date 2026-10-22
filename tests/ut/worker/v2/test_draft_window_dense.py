@@ -103,3 +103,24 @@ def test_allocation_upper_cannot_authorize_uninitialized_columns():
             causal=False,
             retain=lambda *objects: None,
         )
+
+
+def test_cpu_capacity_fields_ignore_default_tensor_device():
+    source = DirectPrefixSource(torch.tensor([[2, 1]], dtype=torch.int32), (0,), (2,), 128)
+    exact, upper, rows = torch.tensor([129]), torch.tensor([130]), torch.tensor([0])
+    with torch.device("meta"):
+        read = prepare_dense_draft_read(
+            source,
+            exact_device=exact,
+            row_indices=rows,
+            upper_cpu=upper,
+            window_size=128,
+            anchor_span=128,
+            query_width=8,
+            causal=False,
+            retain=lambda *objects: None,
+        )
+        common = SimpleNamespace(num_reqs=1)
+        read.apply(common)
+        assert common.seq_lens_cpu_upper_bound.device.type == "cpu"
+        assert read.capacity_cpu(common).device.type == "cpu"

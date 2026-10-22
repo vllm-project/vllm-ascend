@@ -36,7 +36,7 @@ class DenseDraftRead:
         lengths[: self.num_reqs] = self.seq_lens
         common.seq_lens = lengths
         # These are explicitly capacity/workspace bounds, never CPU exact.
-        common.seq_lens_cpu_upper_bound = torch.full((n,), self.capacity, dtype=torch.int32)
+        common.seq_lens_cpu_upper_bound = torch.full((n,), self.capacity, dtype=torch.int32, device="cpu")
         common.seq_lens_cpu = None
         common._seq_lens_cpu = None
         common.max_seq_len = self.capacity
@@ -45,7 +45,7 @@ class DenseDraftRead:
     def capacity_cpu(self, common: Any) -> torch.Tensor:
         if getattr(common, "_draft_window_device_read", None) is not self:
             raise ValueError("Dense Draft read belongs to another common metadata object")
-        return torch.full((common.num_reqs,), self.capacity, dtype=torch.int32)
+        return torch.full((common.num_reqs,), self.capacity, dtype=torch.int32, device="cpu")
 
 
 def prepare_dense_draft_read(
@@ -81,7 +81,7 @@ def prepare_dense_draft_read(
         raise ValueError("Invalid dense Draft read geometry")
     if upper_cpu.device.type != "cpu" or upper_cpu.shape != (n,) or upper_cpu.dtype not in (torch.int32, torch.int64):
         raise ValueError("Missing current preparation allocation upper bounds")
-    available = torch.tensor(source.valid_columns, dtype=torch.int64) * source.block_span
+    available = torch.tensor(source.valid_columns, dtype=torch.int64, device="cpu") * source.block_span
     if source.table.ndim != 2 or any(count < 1 or count > source.table.shape[1] for count in source.valid_columns):
         raise ValueError("Invalid initialized canonical column extent")
     if any(row < 0 or row >= source.table.shape[0] for row in source.request_rows):
