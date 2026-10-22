@@ -29,6 +29,10 @@ from typing import Any
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # GLM-5.3-Flash precision CI provisioning input. Default: None; otherwise
+    # a read-only local 0916 checkpoint directory. Not sensitive, and never
+    # read by inference code. Missing input is an error in the precision test.
+    "GLM53_FLASH_SOURCE_DIR": lambda: os.getenv("GLM53_FLASH_SOURCE_DIR"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

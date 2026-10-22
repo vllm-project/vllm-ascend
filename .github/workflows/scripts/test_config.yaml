@@ -78,6 +78,7 @@ skip_tests:
 # 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
 # their normal directory-based partitions.
 accuracy_tests:
+  - tests/e2e/pull_request/two_card/test_glm53_flash_logprobs.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
