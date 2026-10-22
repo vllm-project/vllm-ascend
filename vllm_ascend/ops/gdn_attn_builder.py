@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import get_pcp_group
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -1084,7 +1084,20 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
-    def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
+    def get_builder_cls() -> type[GDNAttentionMetadataBuilder]:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config.hf_text_config.model_type in (
+            "glm5_next",
+            "glm5_next_text",
+        ):
+            # The RecoverSSM builder imports these host descriptors. Resolve it
+            # lazily. Selection only reads the opt-in validated at config init.
+            from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+
+            if use_glm_recoverssm(vllm_config):
+                from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+
+                return AscendKDARecoverSSMMetadataBuilder
         return AscendGDNHostMetadataBuilder
 
 
