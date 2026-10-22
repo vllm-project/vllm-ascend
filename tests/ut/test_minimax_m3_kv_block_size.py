@@ -77,6 +77,7 @@ def test_m3_fp8_keeps_upstream_alignment_at_128(architecture, dtype, user_specif
 @pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
 @pytest.mark.parametrize("dtype", ["fp8", "fp8_e4m3"])
 @pytest.mark.parametrize("user_specified", [False, True])
+@pytest.mark.parametrize("pp_size", [1, 2, 4])
 @pytest.mark.parametrize(
     "backends",
     [
@@ -88,9 +89,9 @@ def test_m3_fp8_keeps_upstream_alignment_at_128(architecture, dtype, user_specif
     ],
     ids=["indexer-first-pp-stage", "sparse-first-pp-stage", "dense-first-pp-stage", "indexer-only", "sparse-only"],
 )
-def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, user_specified, backends):
+def test_m3_fp8_pp_stages_keep_128_without_dense_layers(architecture, dtype, user_specified, pp_size, backends):
     config = make_config(architecture, dtype)
-    config.parallel_config.pipeline_parallel_size = 2
+    config.parallel_config.pipeline_parallel_size = pp_size
     config.cache_config.user_specified_block_size = user_specified
     with (
         patch.object(
