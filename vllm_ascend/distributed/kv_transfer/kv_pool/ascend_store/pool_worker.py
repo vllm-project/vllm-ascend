@@ -686,7 +686,11 @@ class KVPoolWorker:
         # or those extra layers are skipped during the save/load lifecycle. A
         # block-key store owns a stage-local object, so its count stays local
         # under PP. A GVA store retains the global PP layout and offset below.
-        if self.use_block_key_layerwise or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1):
+        if (
+            self.use_block_key_layerwise
+            or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
+            or (self.use_layerwise_transfer and getattr(self, "pp_size", 1) > 1)
+        ):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
