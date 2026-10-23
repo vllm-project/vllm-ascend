@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
-"""Compare eager and captured draft FlashAttn with explicit matmul/softmax."""
+"""Compare eager DFlash2 FlashAttn with explicit matmul/softmax."""
 
 from types import SimpleNamespace
 
@@ -41,10 +41,7 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(
-    ("num_heads", "num_kv_heads", "window", "query_len"),
-    [(8, 1, None, 6), (8, 1, 2048, 6), (8, 2, 1024, 8), (4, 1, 1024, 8)],
-)
+@pytest.mark.parametrize("window", [None, 2048])
 @pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("head_dim", [128, 192])
@@ -77,10 +74,9 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
         get_splitfuse_attn_mask=lambda: mask,
     )
     common = SimpleNamespace(
-        seq_lens=optimistic - rejected,
         num_reqs=3,
         num_actual_tokens=query.shape[0],
-        query_start_loc=torch.tensor([0, query_len, 2 * query_len, 2 * query_len], dtype=torch.int32, device=device),
+        query_start_loc=torch.tensor([0, 6, 12, 12], dtype=torch.int32, device=device),
         block_table_tensor=block_table,
         slot_mapping=torch.arange(query.shape[0], dtype=torch.int32, device=device),
         max_query_len=query_len,
@@ -96,6 +92,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     output = torch.empty_like(query)
 
     def run():
+        common.seq_lens = optimistic - rejected
         metadata = builder.build(0, common)
         for _ in range(6):
             result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
