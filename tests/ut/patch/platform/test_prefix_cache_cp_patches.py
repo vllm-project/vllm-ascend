@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 import math
 from dataclasses import replace
 from types import SimpleNamespace
@@ -7,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
@@ -52,6 +52,18 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
+# that prefix caching requires `mamba_cache_mode="align"`; the v0.31.0 lane still
+# allowed `"none"` together with `enable_caching=True`.
+_MAMBA_CACHING_MODE = "none" if vllm_version_is("0.31.0") else "align"
+
+# vLLM #42309 gives the upstream admission helper a leading `builder` argument;
+# v0.31.0 and older main checkouts keep the two-argument form. `vllm_version_is`
+# cannot tell two main dev builds apart, so probe the live upstream signature.
+_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = (
+    "builder" in inspect.signature(kv_cache_utils_patch._orig_max_memory_usage_bytes_from_groups).parameters
+)
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -915,10 +927,19 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
-    needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
-        vllm_config,
-        kv_cache_config.kv_cache_groups,
-    )
+    if _UPSTREAM_MAX_MEMORY_TAKES_BUILDER:
+        # vLLM #42309 threads the KVCacheConfigBuilder through admission on
+        # main; the DSV4 shared-tuple branch does not read it.
+        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+            MagicMock(),
+            vllm_config,
+            kv_cache_config.kv_cache_groups,
+        )
+    else:
+        needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+            vllm_config,
+            kv_cache_config.kv_cache_groups,
+        )
     full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
@@ -1016,7 +1037,8 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
         upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
-    assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    live_module = kv_cache_utils_patch._kv_cache_planning
+    assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
     expected_num_blocks = 7
     replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
@@ -1310,7 +1332,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         block_size=16,
         shapes=((1,),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="none",
+        mamba_cache_mode=_MAMBA_CACHING_MODE,
     )
     block_pool = BlockPool(
         10,

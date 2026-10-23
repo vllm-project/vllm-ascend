@@ -273,12 +273,23 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         object(),
         128,
     )
-    args = (*forward_args, False, "capture")
-    expected_kwargs = {
-        "causal": False,
-        "precompute_context_kv": "capture",
-        "progress_bar_desc": "Capturing CUDA graphs",
-    }
+    if vllm_version_is("0.31.0"):
+        # v0.31.0 calls the drafter hook ``precompute_context_kv(num_reqs)``.
+        args = (*forward_args, False, "capture")
+        expected_kwargs = {
+            "causal": False,
+            "precompute_context_kv": "capture",
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
+    else:
+        # vLLM main renamed the hook to
+        # ``prepare_forward(num_reqs, attn_metadata)``.
+        args = (*forward_args, False, None, "capture")
+        expected_kwargs = {
+            "causal": False,
+            "prepare_forward": "capture",
+            "progress_bar_desc": "Capturing CUDA graphs",
+        }
 
     def capture(self, *received, **kwargs):
         assert self is manager

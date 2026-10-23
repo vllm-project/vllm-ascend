@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -30,6 +29,13 @@ from vllm_ascend.core.kv_cache_interface import (
     supports_component_major_mla_pd,
 )
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.31.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+else:
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 
 def _mla_spec():

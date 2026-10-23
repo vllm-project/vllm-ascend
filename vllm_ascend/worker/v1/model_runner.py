@@ -246,7 +246,6 @@ from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -266,6 +265,15 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+
+# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.31.0 lane
+# still ships `AscendMedusaProposer`. Keep the name for the drafter type union
+# on both lanes, but on main never resolve it at runtime: the dispatch below
+# short-circuits on the version first, and the config rejects `method="medusa"`
+# before a proposer could be constructed.
+if vllm_version_is("0.31.0"):
+    from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer  # type: ignore[import-not-found]
+
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2066,7 +2074,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
-        elif isinstance(self.drafter, AscendMedusaProposer):
+        elif vllm_version_is("0.31.0") and isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
                 # maximum when the feature is disabled).

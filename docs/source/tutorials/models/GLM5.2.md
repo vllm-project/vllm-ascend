@@ -1074,7 +1074,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
             ```
 
         2. Prefill node 1
@@ -1179,7 +1179,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}' \
               --headless
             ```
 
