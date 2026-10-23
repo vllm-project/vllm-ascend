@@ -443,6 +443,31 @@ The following code configures vLLM Ascend to use speculative decoding where prop
       --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "enforce_eager": true}'
     ```
 
+### MiniMax-M3 on 950DT
+
+MiniMax-M3 supports `Qwen3DSparkModel` drafts such as
+`nvidia/MiniMax-M3-DSpark` with Model Runner V2 on 950DT. Set
+`enforce_eager: false` and `kv_cache_dtype: "bfloat16"` in the speculative
+configuration to use CANN FlashAttn for the draft's dense and sliding-window
+attention with full draft graph capture. Use `enforce_eager: true` to run the
+same draft backend eagerly. The target model retains its existing attention
+backends and may use FP8 KV cache independently.
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+vllm serve "${MODEL_PATH}" \
+  --tensor-parallel-size 4 \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --dtype bfloat16 \
+  --quantization mxfp8 \
+  --kv-cache-dtype fp8 \
+  --block-size 128 \
+  --max-model-len 16384 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --speculative-config '{"method": "dspark", "model": "nvidia/MiniMax-M3-DSpark", "num_speculative_tokens": 8, "enforce_eager": false, "kv_cache_dtype": "bfloat16"}'
+```
+
 ### Adaptive verification
 
 Adaptive verification lets DSpark choose how many draft tokens to verify for
