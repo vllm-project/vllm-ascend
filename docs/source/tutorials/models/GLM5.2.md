@@ -1589,7 +1589,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
-                    "engine_id": "3",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1679,7 +1679,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
-                    "engine_id": "4",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1766,7 +1766,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "engine_id": "5",
+                    "engine_id": "2",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1852,7 +1852,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "engine_id": "6",
+                    "engine_id": "3",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -2132,7 +2132,7 @@ layerwise setting and topology.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
-        "engine_id": "7",
+        "engine_id": "0",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
@@ -2221,7 +2221,7 @@ layerwise setting and topology.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
-        "engine_id": "8",
+        "engine_id": "1",
         "kv_port": "30100",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
@@ -2499,7 +2499,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "9",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2621,7 +2621,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "10",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2737,7 +2737,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "11",
+                    "engine_id": "2",
                     "kv_port": "30300",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2991,7 +2991,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "12",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3105,7 +3105,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "13",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3218,7 +3218,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "14",
+                    "engine_id": "2",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3330,7 +3330,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "15",
+                    "engine_id": "3",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3626,7 +3626,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "16",
+        "engine_id": "0",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "connectors": [
@@ -3748,7 +3748,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "17",
+        "engine_id": "1",
         "kv_port": "30200",
         "kv_connector_extra_config": {
           "connectors": [
@@ -3985,7 +3985,7 @@ Select the tab that matches your deployment hardware.
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
-                "engine_id": "18",
+                "engine_id": "0",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -4082,7 +4082,7 @@ Select the tab that matches your deployment hardware.
             --kv-transfer-config '{
             "kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_consumer",
-            "engine_id": "19",
+            "engine_id": "1",
             "kv_port": "30200",
             "kv_connector_extra_config": {
             "use_ascend_direct": true,
@@ -4329,7 +4329,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
-                    "engine_id": "20",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4428,7 +4428,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
-                    "engine_id": "21",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4523,7 +4523,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "engine_id": "22",
+                    "engine_id": "2",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4618,7 +4618,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
-                    "engine_id": "23",
+                    "engine_id": "3",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
