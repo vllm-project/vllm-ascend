@@ -611,18 +611,85 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
     assert copies_arg is copies
 
 
-def test_sampler_accepts_temperature_min_p_and_rejects_penalties() -> None:
+def test_sampler_accepts_temperature_min_p_penalties_rejects_logprobs() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     _add_request(sampler, 0, 4, SamplingParams(temperature=0))
     _add_request(sampler, 1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
     _add_request(sampler, 2, 4, SamplingParams(temperature=0.9, min_p=0.1, seed=3))
+    _add_request(
+        sampler,
+        3,
+        4,
+        SamplingParams(temperature=0, frequency_penalty=0.5, presence_penalty=0.1, repetition_penalty=1.2),
+    )
     sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
     assert sampler.sampling_states.min_p.gpu[2].item() == pytest.approx(0.1)
+    assert sampler.sampling_states.frequency_penalty.gpu[3].item() == pytest.approx(0.5)
+    assert sampler.sampling_states.presence_penalty.gpu[3].item() == pytest.approx(0.1)
+    assert sampler.sampling_states.repetition_penalty.gpu[3].item() == pytest.approx(1.2)
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        _add_request(sampler, 3, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+        _add_request(sampler, 0, 4, SamplingParams(temperature=0, logprobs=5))
+
+
+def _make_penalty_req_states(
+    *,
+    prompt_tokens: list[int],
+    output_tokens: list[int],
+    vocab_size: int,
+) -> SimpleNamespace:
+    """Minimal req_states surface for MRV1-style penalty rebuilds."""
+    total = prompt_tokens + output_tokens
+    all_ids = torch.zeros((1, max(len(total), 1)), dtype=torch.int32)
+    if total:
+        all_ids[0, : len(total)] = torch.tensor(total, dtype=torch.int32)
+    return SimpleNamespace(
+        all_token_ids=SimpleNamespace(cpu=all_ids),
+        prompt_len=SimpleNamespace(np=np.array([len(prompt_tokens)], dtype=np.int32)),
+        total_len=SimpleNamespace(np=np.array([len(total)], dtype=np.int32)),
+        vocab_size=vocab_size,
+    )
+
+
+def test_sampler_presence_penalty_lowers_seen_output_token() -> None:
+    """Presence penalty subtracts from logits of tokens seen in the output."""
+    vocab_size = 4
+    req_states = _make_penalty_req_states(prompt_tokens=[0], output_tokens=[1], vocab_size=vocab_size)
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=vocab_size, req_states=req_states)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, presence_penalty=2.0))
+    sampler.apply_staged_writes()
+    logits = torch.tensor([[1.0, 3.0, 0.5, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    # Token 1 was in output; after -2.0 presence penalty it should lose to token 0.
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
+
+
+def test_sampler_frequency_penalty_scales_with_output_count() -> None:
+    """Frequency penalty subtracts count * penalty from repeated output tokens."""
+    vocab_size = 4
+    req_states = _make_penalty_req_states(prompt_tokens=[0], output_tokens=[2, 2, 2], vocab_size=vocab_size)
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=vocab_size, req_states=req_states)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, frequency_penalty=1.0))
+    sampler.apply_staged_writes()
+    # raw argmax would be token 2 (logit 5); after -3.0 it should fall below token 1.
+    logits = torch.tensor([[0.0, 2.5, 5.0, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
+
+
+def test_sampler_repetition_penalty_penalizes_prompt_token() -> None:
+    """Repetition penalty shrinks positive logits for tokens in the prompt."""
+    vocab_size = 4
+    req_states = _make_penalty_req_states(prompt_tokens=[1], output_tokens=[], vocab_size=vocab_size)
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=vocab_size, req_states=req_states)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, repetition_penalty=2.0))
+    sampler.apply_staged_writes()
+    # Token 1 starts higher but is in the prompt → divide by 2.0 → loses to token 0.
+    logits = torch.tensor([[1.6, 2.0, 0.0, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
 def test_sampler_min_p_masks_low_probability_tokens() -> None:

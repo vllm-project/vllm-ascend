@@ -4,17 +4,19 @@
 
 """Triton-free MRV2 sampler for Ascend 310P.
 
-Aligns temperature / top-k / top-p / min_p post-processing with MRV1's
-``AscendSampler310`` (inverse-CDF random sampling) while keeping the MRV2
-``sampling_states`` surface required by MTP draft ``propose()``.
+Aligns temperature / top-k / top-p / min_p / penalties post-processing with
+MRV1's ``AscendSampler310`` (inverse-CDF random sampling) while keeping the
+MRV2 ``sampling_states`` surface required by MTP draft ``propose()``.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.utils import apply_penalties as apply_penalties_vllm
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -66,12 +68,21 @@ def _apply_min_p_pytorch(
     logits.masked_fill_(invalid, float("-inf"))
 
 
+def _use_penalty_params(sampling_params: SamplingParams) -> bool:
+    return bool(
+        sampling_params.repetition_penalty != 1.0
+        or sampling_params.presence_penalty != 0.0
+        or sampling_params.frequency_penalty != 0.0
+    )
+
+
 class Ascend310PSampler:
     """Triton-free sampler for 310P MRV2 with MRV1-aligned post-processing.
 
     Exposes ``sampling_states.temperature/seeds/top_k/top_p/min_p`` so MTP draft
     ``propose()`` (and ``_dummy_run``) can read device buffers without UVA
-    SamplingStates.
+    SamplingStates. Penalties rebuild prompt/output token tensors from
+    ``req_states`` at apply time (MRV1 ``apply_penalties`` path).
     """
 
     # TODO: Refactor this sampler to register 310P implementations through
@@ -82,8 +93,11 @@ class Ascend310PSampler:
         max_num_reqs: int = 1,
         device: torch.device | str | None = None,
         vocab_size: int | None = None,
+        req_states: Any | None = None,
     ) -> None:
+        # Keep attribute for upstream post_update compatibility (no persistent bins).
         self.penalties_state = SimpleNamespace(output_bin_counts=None)
+        self.req_states = req_states
         self.max_num_reqs = max_num_reqs
         self.vocab_size = int(vocab_size) if vocab_size is not None else 0
         if device is None:
@@ -102,6 +116,9 @@ class Ascend310PSampler:
         )
         top_p_gpu = torch.ones(max_num_reqs, dtype=torch.float32, device=device)
         min_p_gpu = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
+        repetition_gpu = torch.ones(max_num_reqs, dtype=torch.float32, device=device)
+        frequency_gpu = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
+        presence_gpu = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
         self.temperature_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
         self.seeds_cpu = torch.zeros(max_num_reqs, dtype=torch.int64, device="cpu")
         self.top_k_cpu = torch.full(
@@ -112,6 +129,9 @@ class Ascend310PSampler:
         )
         self.top_p_cpu = torch.ones(max_num_reqs, dtype=torch.float32, device="cpu")
         self.min_p_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
+        self.repetition_penalty_cpu = torch.ones(max_num_reqs, dtype=torch.float32, device="cpu")
+        self.frequency_penalty_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
+        self.presence_penalty_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
         self._sampling_state_dirty = False
         self.sampling_states = SimpleNamespace(
             temperature=SimpleNamespace(gpu=temperature_gpu),
@@ -119,12 +139,19 @@ class Ascend310PSampler:
             top_k=SimpleNamespace(gpu=top_k_gpu),
             top_p=SimpleNamespace(gpu=top_p_gpu),
             min_p=SimpleNamespace(gpu=min_p_gpu),
+            repetition_penalty=SimpleNamespace(gpu=repetition_gpu),
+            frequency_penalty=SimpleNamespace(gpu=frequency_gpu),
+            presence_penalty=SimpleNamespace(gpu=presence_gpu),
             vocab_size=self.vocab_size,
         )
         self._temperature_np = np.zeros(max_num_reqs, dtype=np.float32)
         self._top_k_np = np.full(max_num_reqs, fill_value=max(self.vocab_size, 1), dtype=np.int32)
         self._top_p_np = np.ones(max_num_reqs, dtype=np.float32)
         self._min_p_np = np.zeros(max_num_reqs, dtype=np.float32)
+        self._repetition_penalty_np = np.ones(max_num_reqs, dtype=np.float32)
+        self._frequency_penalty_np = np.zeros(max_num_reqs, dtype=np.float32)
+        self._presence_penalty_np = np.zeros(max_num_reqs, dtype=np.float32)
+        self._use_penalty = np.zeros(max_num_reqs, dtype=bool)
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
@@ -144,10 +171,6 @@ class Ascend310PSampler:
         sampling_params: SamplingParams,
     ) -> None:
         unsupported = []
-        if sampling_params.repetition_penalty != 1.0:
-            unsupported.append("repetition_penalty")
-        if sampling_params.presence_penalty != 0.0 or sampling_params.frequency_penalty != 0.0:
-            unsupported.append("presence/frequency penalty")
         if sampling_params.logprobs is not None or sampling_params.prompt_logprobs is not None:
             unsupported.append("logprobs")
         if (
@@ -157,8 +180,7 @@ class Ascend310PSampler:
         ):
             unsupported.append("logits processors")
         if unsupported:
-            # TODO: Support penalties / logprobs / logits processors in a later
-            # 310P MRV2 iteration.
+            # TODO: Support logprobs / logits processors in a later 310P MRV2 iteration.
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
@@ -169,6 +191,9 @@ class Ascend310PSampler:
         top_p = float(sampling_params.top_p)
         top_k = int(sampling_params.top_k)
         min_p = float(sampling_params.min_p)
+        repetition_penalty = float(sampling_params.repetition_penalty)
+        frequency_penalty = float(sampling_params.frequency_penalty)
+        presence_penalty = float(sampling_params.presence_penalty)
         if self.vocab_size <= 0:
             # Late-bind from logits on first sample if caller omitted vocab_size.
             vocab_size = max(top_k, 1)
@@ -181,10 +206,17 @@ class Ascend310PSampler:
         self._top_p_np[req_idx] = top_p
         self._top_k_np[req_idx] = top_k
         self._min_p_np[req_idx] = min_p
+        self._repetition_penalty_np[req_idx] = repetition_penalty
+        self._frequency_penalty_np[req_idx] = frequency_penalty
+        self._presence_penalty_np[req_idx] = presence_penalty
+        self._use_penalty[req_idx] = _use_penalty_params(sampling_params)
         self.temperature_cpu[req_idx] = temperature
         self.top_p_cpu[req_idx] = top_p
         self.top_k_cpu[req_idx] = top_k
         self.min_p_cpu[req_idx] = min_p
+        self.repetition_penalty_cpu[req_idx] = repetition_penalty
+        self.frequency_penalty_cpu[req_idx] = frequency_penalty
+        self.presence_penalty_cpu[req_idx] = presence_penalty
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
@@ -210,6 +242,9 @@ class Ascend310PSampler:
         self.sampling_states.top_k.gpu.copy_(self.top_k_cpu, non_blocking=True)
         self.sampling_states.top_p.gpu.copy_(self.top_p_cpu, non_blocking=True)
         self.sampling_states.min_p.gpu.copy_(self.min_p_cpu, non_blocking=True)
+        self.sampling_states.repetition_penalty.gpu.copy_(self.repetition_penalty_cpu, non_blocking=True)
+        self.sampling_states.frequency_penalty.gpu.copy_(self.frequency_penalty_cpu, non_blocking=True)
+        self.sampling_states.presence_penalty.gpu.copy_(self.presence_penalty_cpu, non_blocking=True)
         self._sampling_state_dirty = False
 
     def _maybe_bind_vocab_size(self, vocab_size: int) -> None:
@@ -230,18 +265,102 @@ class Ascend310PSampler:
             or np.any(self._top_k_np[idx_mapping_np] != max(self.vocab_size, 1))
             or np.any(self._top_p_np[idx_mapping_np] != 1.0)
             or np.any(self._min_p_np[idx_mapping_np] != 0.0)
+            or np.any(self._use_penalty[idx_mapping_np])
         )
 
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self._temperature_np[idx_mapping_np] >= _SAMPLING_EPS))
+
+    def _build_penalty_token_tensors(
+        self,
+        expanded_idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor | None,
+        expanded_local_pos: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build per-logit-row prompt/output token tensors (MRV1 pad=vocab_size)."""
+        assert self.req_states is not None
+        vocab_size = max(self.vocab_size, 1)
+        num_rows = int(expanded_idx_mapping_np.shape[0])
+        all_token_ids_cpu = self.req_states.all_token_ids.cpu
+        prompt_lens = self.req_states.prompt_len.np
+        total_lens = self.req_states.total_len.np
+
+        prompt_lists: list[list[int]] = []
+        output_lists: list[list[int]] = []
+        max_prompt = 0
+        max_output = 0
+        local_pos_np = None if expanded_local_pos is None else expanded_local_pos.detach().to("cpu").numpy()
+        input_ids_cpu = None if input_ids is None else input_ids.detach().to("cpu")
+
+        for row_idx, req_idx in enumerate(expanded_idx_mapping_np.tolist()):
+            req_idx = int(req_idx)
+            if req_idx < 0 or not self._use_penalty[req_idx]:
+                prompt_lists.append([])
+                output_lists.append([])
+                continue
+            prompt_len = int(prompt_lens[req_idx])
+            total_len = int(total_lens[req_idx])
+            prompt = all_token_ids_cpu[req_idx, :prompt_len].tolist()
+            output = all_token_ids_cpu[req_idx, prompt_len:total_len].tolist()
+            # Match upstream MRV2 draft accumulation into output bin counts.
+            if local_pos_np is not None and input_ids_cpu is not None:
+                pos = int(local_pos_np[row_idx])
+                if pos > 0:
+                    start_idx = row_idx - pos
+                    for prev_pos in range(pos):
+                        output.append(int(input_ids_cpu[start_idx + prev_pos + 1].item()))
+            prompt_lists.append(prompt)
+            output_lists.append(output)
+            max_prompt = max(max_prompt, len(prompt))
+            max_output = max(max_output, len(output))
+
+        max_prompt = max(max_prompt, 1)
+        max_output = max(max_output, 1)
+        prompt_t = torch.full((num_rows, max_prompt), fill_value=vocab_size, dtype=torch.int64, device=self.device)
+        output_t = torch.full((num_rows, max_output), fill_value=vocab_size, dtype=torch.int64, device=self.device)
+        for row_idx, (prompt, output) in enumerate(zip(prompt_lists, output_lists)):
+            if prompt:
+                prompt_t[row_idx, : len(prompt)] = torch.tensor(prompt, dtype=torch.int64)
+            if output:
+                output_t[row_idx, : len(output)] = torch.tensor(output, dtype=torch.int64)
+        return prompt_t, output_t
+
+    def _apply_penalties_pytorch(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor | None = None,
+        expanded_local_pos: torch.Tensor | None = None,
+    ) -> None:
+        """In-place penalties via MRV1 ``apply_penalties`` (torch repetition path)."""
+        if not np.any(self._use_penalty[idx_mapping_np]):
+            return
+        if self.req_states is None:
+            raise RuntimeError("310P MRV2 penalties require req_states bound on Ascend310PSampler.")
+        expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+        prompt_t, output_t = self._build_penalty_token_tensors(expanded_np, input_ids, expanded_local_pos)
+        repetition = self.sampling_states.repetition_penalty.gpu[expanded_idx_mapping]
+        frequency = self.sampling_states.frequency_penalty.gpu[expanded_idx_mapping]
+        presence = self.sampling_states.presence_penalty.gpu[expanded_idx_mapping]
+        apply_penalties_vllm(logits, prompt_t, output_t, presence, frequency, repetition)
 
     def _apply_postprocess(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor | None = None,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Temperature → min_p → top-k/top-p (MRV1 / upstream MRV2 order)."""
+        """Penalties → temperature → min_p → top-k/top-p (MRV1 / upstream MRV2)."""
+        self._apply_penalties_pytorch(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            input_ids=input_ids,
+            expanded_local_pos=expanded_local_pos,
+        )
         _apply_temperature_pytorch(
             logits,
             expanded_idx_mapping,
@@ -263,17 +382,21 @@ class Ascend310PSampler:
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor | None = None,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """FP32 copy + temperature / min_p / top-k/top-p for MTP rejection verify.
-
-        Mirrors upstream ``Sampler.apply_sampling_params`` (without penalties /
-        logit bias) so ``RejectionSampler310V2`` matches MRV1 tempered verify.
-        """
+        """FP32 copy + penalties / temperature / min_p / top-k/top-p for verify."""
         self._maybe_bind_vocab_size(logits.shape[-1])
         processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
         if not self._batch_needs_logits_processing(idx_mapping_np):
             return processed
-        return self._apply_postprocess(processed, expanded_idx_mapping, idx_mapping_np)
+        return self._apply_postprocess(
+            processed,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            input_ids=input_ids,
+            expanded_local_pos=expanded_local_pos,
+        )
 
     def _build_row_generators(
         self,
@@ -297,6 +420,8 @@ class Ascend310PSampler:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         num_reqs = input_batch.num_reqs
+        input_ids = getattr(input_batch, "input_ids", None)
+        expanded_local_pos = getattr(input_batch, "expanded_local_pos", None)
 
         # Fast path: all greedy and no logits post-process → argmax.
         if not self._any_random(idx_mapping_np) and not self._batch_needs_logits_processing(idx_mapping_np):
@@ -310,11 +435,17 @@ class Ascend310PSampler:
                 num_rejected=torch.zeros_like(num_sampled),
             )
 
-        # Copy to FP32 before in-place temperature / min_p / top-k / top-p.
+        # Copy to FP32 before in-place post-process.
         processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         if self._batch_needs_logits_processing(idx_mapping_np):
-            processed = self._apply_postprocess(processed, expanded_idx_mapping, idx_mapping_np)
+            processed = self._apply_postprocess(
+                processed,
+                expanded_idx_mapping,
+                idx_mapping_np,
+                input_ids=input_ids,
+                expanded_local_pos=expanded_local_pos,
+            )
 
         if not self._any_random(idx_mapping_np):
             sampled = processed.argmax(dim=-1).to(torch.int32)

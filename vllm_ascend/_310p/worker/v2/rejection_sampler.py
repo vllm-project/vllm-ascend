@@ -77,6 +77,8 @@ class RejectionSampler310V2(RejectionSampler):
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
+            input_ids=getattr(input_batch, "input_ids", None),
+            expanded_local_pos=getattr(input_batch, "expanded_local_pos", None),
         )
 
         temperature_np = getattr(self.sampler, "_temperature_np", None)
