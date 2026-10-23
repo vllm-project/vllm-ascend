@@ -869,7 +869,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
     ```
 
-    Start four DP4/TP4 Decode engines. `--dp-address` uses the Decode node
+    Start four TP4 Decode engines(total DP4). `--dp-address` uses the Decode node
     IP. The launcher assigns API ports `9900-9903`.
 
     ```shell
@@ -1203,7 +1203,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     exec bash ./run_d.sh "$@"
     ```
 
-    Start four DP8/TP2 engines on each Decode node. `--dp-rank-start` is
+    Start four TP2 engines(total DP8) on each Decode node. `--dp-rank-start` is
     `0` on D0 and `4` on D1. `--dp-address` is D0's IP on both nodes, and
     the launcher assigns API ports `9900-9903` on each node.
 
@@ -1279,7 +1279,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       DP2/TP8 Prefill and DP4/TP4 Decode, each on one node with 16 logical devices.
     - P0 and P1 use the shared launcher with one local DP rank each. P0
       exposes the Prefill API with `--api-server-count 1`; P1 is headless.
-      D0 and D1 each run four API-serving DP8/TP2 engines through their
+      D0 and D1 each run four API-serving TP2 engines(total DP8) through their
       node-specific wrapper scripts.
     - `kv_connector_extra_config` enables `use_ascend_direct` for direct
       NPU-to-NPU KV transfer and declares the actual Prefill and Decode
