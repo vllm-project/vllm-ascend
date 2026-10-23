@@ -226,9 +226,9 @@ Each node exposes eight devices. Install `fastokens` before enabling
 `VLLM_USE_FASTOKENS=1`.
 
 Before running a role script, export `MODEL_PATH`, `LOCAL_IP`, and
-`NIC_NAME`. PP roles also require `P0_IP`;
-P1 uses the same P0 master address and runs headless.
-Use the same checkpoint path on all nodes.
+`NIC_NAME`. PP ranks within each Prefill instance must use that instance's
+master address; non-master PP ranks run headless. Follow the master-address
+variable in the selected script. Use the same checkpoint path on all nodes.
 
 #### 5.1.1 Single-Node Deployment
 
@@ -912,7 +912,7 @@ layerwise setting and topology.
 
     See [950DT preparation](#glm-950-preparation) for checkpoint, environment and PP-node settings.
 
-    Run the Prefill script on P0/P1. Decode uses DP16/TP1 across two eight-device nodes, with eight local ranks per node (global ranks 0–15). Both roles declare DP16/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
+    This 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0–15). Both roles declare DP16/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
 
     ###### Prepare the Scripts
 
@@ -971,7 +971,7 @@ layerwise setting and topology.
 
     2. prepare the script `run_dp_template.sh` on each node.
 
-        1. Prefill node 0
+        1. Prefill PP rank 0 (P0 and P2)
 
             ```shell
             #!/usr/bin/env bash
@@ -981,7 +981,7 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${P0_IP:?Set the shared PP master address}"
+            : "${PP_MASTER_IP:?Set the PP master address for this Prefill instance}"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1035,7 +1035,7 @@ layerwise setting and topology.
               --enable-expert-parallel \
               --pipeline-parallel-size 2 \
               --distributed-executor-backend mp \
-              --master-addr "$P0_IP" \
+              --master-addr "$PP_MASTER_IP" \
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 0 \
@@ -1077,7 +1077,7 @@ layerwise setting and topology.
               --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}'
             ```
 
-        2. Prefill node 1
+        2. Prefill PP rank 1 (P1 and P3)
 
             ```shell
             #!/usr/bin/env bash
@@ -1087,7 +1087,7 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${P0_IP:?Set the shared PP master address}"
+            : "${PP_MASTER_IP:?Set the PP master address for this Prefill instance}"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1141,7 +1141,7 @@ layerwise setting and topology.
               --enable-expert-parallel \
               --pipeline-parallel-size 2 \
               --distributed-executor-backend mp \
-              --master-addr "$P0_IP" \
+              --master-addr "$PP_MASTER_IP" \
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 1 \
@@ -1285,27 +1285,41 @@ layerwise setting and topology.
     ###### Start the Engines
 
     Export the node-specific `MODEL_PATH`, `LOCAL_IP` and `NIC_NAME`, and the shared
-    `P0_IP` / `D0_IP` addresses before starting the corresponding node script.
+    `D0_IP` address before starting the corresponding node script. Each Prefill
+    instance uses its own `PP_MASTER_IP`: P0 for P0/P1, and P2 for P2/P3. Save
+    the appropriate PP-rank script above as `run_dp_template.sh` on each node.
 
-    1. Prefill node 0
-
-        ```shell
-        bash run_dp_template.sh
-        ```
-
-    2. Prefill node 1
+    1. Prefill node 0 (PP rank 0 of the first instance)
 
         ```shell
-        bash run_dp_template.sh
+        PP_MASTER_IP="<P0_IP>" bash run_dp_template.sh
         ```
 
-    3. Decode node 0
+    2. Prefill node 1 (PP rank 1 of the first instance)
+
+        ```shell
+        PP_MASTER_IP="<P0_IP>" bash run_dp_template.sh
+        ```
+
+    3. Prefill node 2 (PP rank 0 of the second instance)
+
+        ```shell
+        PP_MASTER_IP="<P2_IP>" bash run_dp_template.sh
+        ```
+
+    4. Prefill node 3 (PP rank 1 of the second instance)
+
+        ```shell
+        PP_MASTER_IP="<P2_IP>" bash run_dp_template.sh
+        ```
+
+    5. Decode node 0
 
         ```shell
         python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
-    4. Decode node 1
+    6. Decode node 1
 
         ```shell
         python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
@@ -1321,17 +1335,18 @@ layerwise setting and topology.
     scenarios simultaneously on the same devices or ports.
 
     Run the proxy on a separate host after all API endpoints are healthy.
-    Replace the host placeholders below. Do not register the headless Prefill
-    node as an API endpoint.
+    Register P0 and P2 as the two Prefill endpoints. P1 and P3 are headless
+    and must not be registered as API endpoints. Replace the host placeholders below.
 
     ```shell
     P0_IP="<P0_IP>"
+    P2_IP="<P2_IP>"
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
-        --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
+        --prefiller-hosts "$P0_IP" "$P2_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
@@ -1352,8 +1367,10 @@ layerwise setting and topology.
     topology and scripts in the other tabs for A3 or A2 series.
 
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
-      the Prefill engine, with `VLLM_PP_LAYER_PARTITION="42,36"` across
-      two nodes. Only PP rank 0 exposes the Prefill API.
+      each Prefill instance, with `VLLM_PP_LAYER_PARTITION="42,36"` across
+      two nodes. Two instances use four Prefill nodes in total.
+      `PP_MASTER_IP` is P0 for the first instance and P2 for the second;
+      only PP rank 0 in each instance exposes its Prefill API.
     - The Decode launcher uses `--dp-size 16`, `--tp-size 1`, and
       `--dp-size-local 8`: eight local ranks on each of two nodes.
       `--dp-address` and `--dp-rpc-port` must match across Decode nodes;
