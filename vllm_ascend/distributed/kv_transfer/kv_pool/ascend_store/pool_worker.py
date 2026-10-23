@@ -65,6 +65,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     LayerBatchBuilder,
     _circular_shift,
+    _should_use_mla_read_dedup,
     record_failed_blocks,
     sharded_get_all_gather,
 )
@@ -1405,6 +1406,14 @@ class KVPoolWorker:
         block_ids: list[int],
         views: list[list[torch.Tensor]],
     ) -> tuple[bool, set[int], int] | None:
+        total_bytes = sum(sum(key_sizes) for key_sizes in sizes)
+        if not _should_use_mla_read_dedup(total_bytes, self.tp_size):
+            logger.debug(
+                "KV read deduplication skipped for small request: bytes=%d tp_size=%d",
+                total_bytes,
+                self.tp_size,
+            )
+            return None
         try:
             tp_group = get_tp_group()
         except AssertionError:
