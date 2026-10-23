@@ -125,6 +125,9 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
         "batch_size": eval_config.get("batch_size", "auto"),
+        # humaneval/mbpp metric (code_eval) executes model-generated code;
+        # the nightly harness runs in a controlled environment on purpose.
+        "confirm_run_unsafe_code": True,
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
