@@ -1203,7 +1203,10 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
-            self.model.llm_engine.engine_core.shutdown()
+            # A child can exit between enumeration and inspection in vLLM's
+            # shutdown path. Generation has already completed at this point.
+            with contextlib.suppress(psutil.NoSuchProcess):
+                self.model.llm_engine.engine_core.shutdown()
         finally:
             del self.model
             clear_ascend_config()
