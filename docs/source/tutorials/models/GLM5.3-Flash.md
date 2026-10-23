@@ -212,7 +212,7 @@ are not interchangeable.
 | `--quantization ascend` | Selects the Ascend quantization loader for ModelSlim checkpoints. Use weights matching the selected hardware and quantization format. |
 | `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
-| `--reasoning-parser` | Separates reasoning from the final answer. Use the parser in the selected example (`glm47` or `glm45`); do not infer it from the tool-call parser name. |
+| `--reasoning-parser` | Separates reasoning from the final answer. Use `glm47` for all examples on this page. |
 
 ### 5.1 Single-Node Online Deployment
 
@@ -777,7 +777,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
-      --reasoning-parser glm45 \
+      --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
       --prefix-cache-retention-interval None \
@@ -854,7 +854,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --tool-call-parser glm47 \
-      --reasoning-parser glm45 \
+      --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -1037,7 +1037,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --async-scheduling \
       --enforce-eager \
       --tool-call-parser glm47 \
-      --reasoning-parser glm45 \
+      --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
       ${SERVER_ROLE_ARGS:-} \
@@ -1164,7 +1164,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --async-scheduling \
       --tool-call-parser glm47 \
-      --reasoning-parser glm45 \
+      --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
@@ -1853,7 +1853,7 @@ and role-specific settings when reproducing the deployment.
 
   ```shell
   --tool-call-parser glm47 \
-  --reasoning-parser glm45 \
+  --reasoning-parser glm47 \
   --enable-auto-tool-choice \
   ```
 
