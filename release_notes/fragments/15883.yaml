@@ -1,0 +1,6 @@
+pr: 15883
+entries:
+  - category: feature
+    text: Added a Mooncake backend for allocating Decode sparse KV offload host memory through Ascend VMM shared segments.
+  - category: config
+    text: Added sparse_kv_offload_config.host_backend (default memfabric) and lru_max_threads (default 8, capped by available CPUs). Enabled Mooncake Host offload automatically skips process-wide NUMA page migration while retaining CPU binding, without an additional switch.

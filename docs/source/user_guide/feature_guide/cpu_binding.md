@@ -87,6 +87,12 @@ The worker process and runtime threads are still pinned, but pages already
 placed on remote NUMA nodes are not migrated, which **can reduce locality and
 degrade latency or throughput.**
 
+When Engram Host offload (`engram_config.cpu_offload`) is enabled, or sparse KV
+offload is enabled with `sparse_kv_offload_config.host_backend="mooncake"`, CPU
+binding automatically skips process-wide NUMA page migration while retaining
+thread and IRQ affinity. No additional switch is required. Placement of these
+shared Host allocations remains under their backend's control.
+
 For optimal locality, use a cpuset that is evenly distributed across NUMA
 nodes. Unbalanced cpusets may reduce the locality benefit of CPU binding.
 

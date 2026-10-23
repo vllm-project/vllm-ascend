@@ -1934,6 +1934,53 @@ class TestNPUWorker(TestBase):
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
 
+    def test_compile_or_warm_up_model_selects_memory_migration_for_host_backends(self):
+        from vllm_ascend.ascend_config import SparseKVOffloadConfig
+        from vllm_ascend.worker.worker import NPUWorker
+
+        cases = [
+            ("default", False, "memfabric", None, True),
+            ("memfabric", True, "memfabric", None, True),
+            ("disabled_mooncake", False, "mooncake", None, True),
+            ("mooncake", True, "mooncake", None, False),
+            ("engram", False, "memfabric", SimpleNamespace(cpu_offload=True), False),
+            ("disabled_engram", False, "memfabric", SimpleNamespace(cpu_offload=False), True),
+            ("both", True, "mooncake", SimpleNamespace(cpu_offload=True), False),
+        ]
+        for name, enabled, backend, engram_config, migrate_memory in cases:
+            with self.subTest(case=name):
+                ascend_config = MagicMock()
+                ascend_config.enable_cpu_binding = True
+                ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+                ascend_config.sparse_kv_offload_config = SparseKVOffloadConfig(
+                    enabled=enabled, host_backend=backend, use_fused_overlap=True
+                )
+                with (
+                    patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+                    patch.object(kw_module, "kernel_warmup"),
+                    patch("vllm_ascend.worker.worker.get_ascend_config", return_value=ascend_config),
+                    patch("vllm_ascend.worker.worker.get_current_hardware_profile") as hardware_profile,
+                    patch("vllm_ascend.worker.worker.bind_cpus") as bind_cpus,
+                    patch(
+                        "vllm_ascend.worker.worker.current_platform.device_id_to_physical_device_id",
+                        return_value=3,
+                    ),
+                    patch("vllm_ascend.worker.worker.set_random_seed"),
+                ):
+                    hardware_profile.return_value.supports.return_value = False
+                    worker = NPUWorker()
+                    worker.local_rank = 1
+                    worker.model_runner = MagicMock()
+                    worker.vllm_config = MagicMock(attention_config=AttentionConfig(), engram_config=engram_config)
+                    worker.vllm_config.compilation_config.compile_sizes = []
+                    worker.vllm_config.compilation_config.cudagraph_capture_sizes = []
+                    worker.model_config = SimpleNamespace(enforce_eager=True, seed=1234)
+                    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1024)
+
+                    worker.compile_or_warm_up_model()
+
+                    bind_cpus.assert_called_once_with(1, npu_id=3, migrate_memory=migrate_memory)
+
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
         """The persisted budget must include the measured NPU graph memory."""
         from vllm_ascend.worker.worker import NPUWorker
