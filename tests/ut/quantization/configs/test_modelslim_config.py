@@ -255,10 +255,10 @@ class TestAscendModelSlimConfig(TestBase):
                 super().__init__()
                 self.seen: list[str] = []
                 self.weight = torch.nn.Parameter(torch.empty(8, 8, dtype=torch.int8), requires_grad=False)
-                self.weight_loader = _make_modelslim_moe_weight_loader(self.weight_loader)
+                self.weight_loader = _make_modelslim_moe_weight_loader(self._load_weight)
                 self.weight.weight_loader = self.weight_loader
 
-            def weight_loader(
+            def _load_weight(
                 self,
                 param: torch.nn.Parameter,
                 loaded_weight: torch.Tensor,
@@ -273,8 +273,9 @@ class TestAscendModelSlimConfig(TestBase):
         layer = Expert()
         meta_weight = None
         try:
-            loader = layer.weight.weight_loader
+            loader = getattr(layer.weight, "weight_loader")
             self.assertIsInstance(loader, MethodType)
+            assert isinstance(loader, MethodType)
             self.assertIs(loader.__self__, layer)
             self.assertNotIn("weight_loader", loader.__func__.__code__.co_freevars)
             self.assertFalse(hasattr(loader, "__wrapped__"))
@@ -293,10 +294,14 @@ class TestAscendModelSlimConfig(TestBase):
 
             layerwise.record_metadata_for_reloading(layer)
             meta_weight = layerwise.LAYERWISE_INFO[layer].restore_metadata[0]["weight"]
-            self.assertIs(meta_weight.weight_loader.__self__, layer_ref_sentinel)
+            meta_loader = getattr(meta_weight, "weight_loader")
+            assert isinstance(meta_loader, MethodType)
+            self.assertIs(meta_loader.__self__, layer_ref_sentinel)
 
             restore_layer_refs(meta_weight, layer)
-            reloaded = meta_weight.weight_loader(
+            meta_loader = getattr(meta_weight, "weight_loader")
+            assert isinstance(meta_loader, MethodType)
+            reloaded = meta_loader(
                 param=meta_weight,
                 loaded_weight=meta_weight,
                 weight_name="model.layers.0.mlp.experts.w13_scale_bias",
@@ -313,6 +318,7 @@ class TestAscendModelSlimConfig(TestBase):
             del layer
             del meta_weight
             del loader
+            del meta_loader
             gc.collect()
             gc.collect()
             self.assertIsNone(layer_ref())
