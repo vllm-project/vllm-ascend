@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import VERIFY_LEASE_MSG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
@@ -47,6 +48,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     zmq_ctx,
 )
+
+LEASE_CHECK_TIMEOUT_MS = 1000
 
 
 class MooncakePullRecvingThread(threading.Thread):
@@ -607,7 +610,27 @@ class MooncakePullRecvingThread(threading.Thread):
 
         if submission_error is not None:
             raise submission_error
+        completed = {req_id: meta for req_id, meta in requests.items() if req_id not in failed_request_ids}
+        if completed:
+            failed_request_ids.update(self._verify_remote_leases(remote_host, remote_port, completed))
         return failed_request_ids
+
+    def _verify_remote_leases(self, host: str, port: int, requests: dict[str, ReqMeta]) -> set[str]:
+        """Check producer ownership after every transfer bucket has completed."""
+        path = make_zmq_path("tcp", host, port)
+        leases = tuple((meta.remote_request_id, meta.remote_lease_nonce) for meta in requests.values())
+        with zmq_ctx(zmq.REQ, path) as sock:
+            # One bounded exchange. An unavailable producer cannot prove a hold.
+            sock.setsockopt(zmq.SNDTIMEO, LEASE_CHECK_TIMEOUT_MS)
+            sock.setsockopt(zmq.RCVTIMEO, LEASE_CHECK_TIMEOUT_MS)
+            sock.send(self.encoder.encode((VERIFY_LEASE_MSG, leases)))
+            response = msgspec.msgpack.decode(sock.recv(), type=list[bool])
+        if len(response) != len(requests):
+            raise ValueError("Mooncake lease verification response count mismatch")
+        failed = {req_id for req_id, valid in zip(requests, response) if not valid}
+        if failed:
+            logger.warning("Mooncake producer no longer holds verified KV for requests %s", sorted(failed))
+        return failed
 
     def _build_transfer_block_buckets(
         self,
