@@ -1019,6 +1019,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$2" \
+      --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --enable-chunked-prefill \
       --enable-prefix-caching \
@@ -1557,10 +1558,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     series RoCE network with the `P2PHANDSHAKE` metadata server and the
     `ascend` protocol, and the A3 series fabric-memory exports do not apply.
 
-    The refreshed pool scripts keep both Prefill nodes API-serving and use
-    `$4` to derive unique engine IDs and lookup ports. P0 and P1 therefore
-    register as two Prefill endpoints; no Prefill `--headless` or
-    `--data-parallel-start-rank` option is used.
+    The refreshed pool scripts keep both Prefill nodes API-serving and use the
+    launcher-provided `$4` DP rank to derive unique engine IDs and lookup
+    ports. Start the pool Prefill engines with `launch_online_dp.py`; do not
+    invoke the pool templates with only the two direct-start arguments from
+    Section 5.3. No Prefill `--headless` or `--data-parallel-start-rank`
+    option is used.
 
     For backend installation, memory sizing, eviction, and tenant options, refer
     to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
@@ -1751,8 +1754,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       }'
     ```
 
-    Both role templates use the launcher DP-rank argument `$4` for the
-    engine ID and lookup port. Each engine must have a unique `engine_id` and
+    The Prefill and Decode templates use the launcher DP rank `$4` for engine
+    IDs and lookup ports. Each engine must have a unique `engine_id` and
     `lookup_rpc_port`; the child connectors inherit the outer engine ID. The
     Prefill lookup ports are `37000-37001`, and the Decode lookup ports are
     `37100-37107`. On each Decode node, the Mooncake KV ports are derived from
@@ -1782,9 +1785,33 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        (`--dp-rank-start 0` and `4`; four engines per node on ports
        `8000-8003`). Wait until all eight Decode engines answer
        `curl /v1/models`.
-    3. Start P0 and P1 with the direct commands from Section 5.3. Both
-       Prefill nodes serve an API endpoint on port `8000`; wait until both
-       endpoints answer `curl /v1/models`.
+     3. Start P0 and P1 with the pool launcher commands from Section 5.3.
+        Both Prefill nodes serve an API endpoint on port `8000`; wait until
+        both endpoints answer `curl /v1/models`.
+
+        ```shell
+        # P0
+        python launch_online_dp.py \
+          --template ./run_p0.sh \
+          --dp-size 2 \
+          --tp-size 8 \
+          --dp-size-local 1 \
+          --dp-rank-start 0 \
+          --dp-address "<PREFILL_NODE0_IP>" \
+          --dp-rpc-port 12321 \
+          --vllm-start-port 8000
+
+        # P1
+        python launch_online_dp.py \
+          --template ./run_p1.sh \
+          --dp-size 2 \
+          --tp-size 8 \
+          --dp-size-local 1 \
+          --dp-rank-start 1 \
+          --dp-address "<PREFILL_NODE0_IP>" \
+          --dp-rpc-port 12321 \
+          --vllm-start-port 8000
+        ```
     4. Start the A2 series proxy from Section 5.3 on port `28000`. Send
        inference requests to `<PREFILL_NODE0_IP>:28000` using the examples in
        Section 6.
