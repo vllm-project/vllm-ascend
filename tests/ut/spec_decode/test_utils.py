@@ -58,6 +58,18 @@ def test_copy_slot_mapping_copies_strided_alias_with_same_data_ptr() -> None:
     assert buffer.tolist() == [0, 2, 4, -1, -1, -1, -1, -1]
 
 
+def test_copy_slot_mapping_clones_shifted_overlapping_view() -> None:
+    buffer = torch.arange(8, dtype=torch.int32)
+
+    copy_slot_mapping_to_padded_buffer(
+        buffer,
+        buffer[1:5],
+        padding_value=-1,
+    )
+
+    assert buffer.tolist() == [1, 2, 3, 4, -1, -1, -1, -1]
+
+
 def test_copy_slot_mapping_rejects_invalid_lengths() -> None:
     buffer = torch.zeros(4, dtype=torch.int32)
     slot_mapping = torch.arange(3, dtype=torch.int32)

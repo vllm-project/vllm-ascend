@@ -78,7 +78,7 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
-    if speculative_config.uses_draft_model():
+    if family is SpecDecodeFamily.DRAFT_MODEL:
         from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
             AscendStandaloneARSpeculator,
         )

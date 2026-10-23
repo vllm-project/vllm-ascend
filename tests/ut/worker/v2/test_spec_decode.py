@@ -230,6 +230,22 @@ def test_init_speculator_eagle(monkeypatch):
     speculator_cls.assert_called_once_with(config, device)
 
 
+def test_init_speculator_draft_model(monkeypatch):
+    """Draft-model decoding uses the standalone upstream AR speculator on V2."""
+    config = _make_config("draft_model")
+    device = torch.device("cpu")
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator",
+        "AscendStandaloneARSpeculator",
+    )
+
+    result = init_speculator(config, device)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device)
+
+
 def test_init_speculator_requires_speculative_config():
     """Test that init_speculator requires speculative_config to be present."""
     config = SimpleNamespace(speculative_config=None)
