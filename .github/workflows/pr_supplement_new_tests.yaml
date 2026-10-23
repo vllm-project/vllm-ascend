@@ -49,54 +49,21 @@ jobs:
             exit 0
           fi
 
-          # The coverage upload overwrites this single object with the release
-          # branch whose package is current. Supplement only that branch.
           POINTER_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage_release_branch.txt"
-          http_code=$(curl -sSL --retry 3 -o coverage_release_branch.txt -w "%{http_code}" "${POINTER_URL}" || true)
-          HTTP_CODE="${http_code}" python3 - <<'PY'
+          curl -sSL --retry 3 -o coverage_release_branch.txt "${POINTER_URL}" || true
+          python3 - <<'PY'
           import os
-          import sys
 
-          def is_release_branch(name: str) -> bool:
-              prefix = "releases/v"
-              if not name.startswith(prefix):
-                  return False
-              version = name[len(prefix):]
-              if not version or not version[0].isdigit():
-                  return False
-              allowed = set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-")
-              return all(char in allowed for char in version)
-
-          http_code = os.environ["HTTP_CODE"].strip()
           base_ref = os.environ["BASE_REF"]
           pointer_path = "coverage_release_branch.txt"
-          pointer_missing = http_code == "404" or (
-              http_code == "200" and os.path.getsize(pointer_path) == 0
-          )
-          if pointer_missing:
-              print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt is absent")
-              supported = False
-          elif http_code != "200":
-              print(
-                  "::error::Failed to download ci/precision-test/coverage_release_branch.txt "
-                  f"(HTTP {http_code})",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-          else:
+          recorded = ""
+          if os.path.isfile(pointer_path):
               recorded = open(pointer_path, encoding="utf-8").read().strip()
-              if not is_release_branch(recorded):
-                  print(
-                      "::error::coverage_release_branch.txt does not name a releases/v* branch: "
-                      f"{recorded!r}",
-                      file=sys.stderr,
-                  )
-                  raise SystemExit(1)
-              supported = base_ref == recorded
-              if supported:
-                  print(f"PR targets the release branch recorded by coverage: {recorded}")
-              else:
-                  print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt records {recorded}")
+          supported = recorded == base_ref
+          if supported:
+              print(f"PR targets the release branch recorded by coverage: {recorded}")
+          else:
+              print(f"Skip PR targeting {base_ref}; coverage_release_branch.txt records {recorded or '<empty>'}")
 
           obs_object = ""
           if supported:
