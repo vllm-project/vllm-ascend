@@ -131,7 +131,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`.     |
+| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`. Values `0` and `1` disable O-projection TP; values greater than `1` enable sharding.     |
 | `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
 | `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
@@ -153,7 +153,7 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
+| `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. The rejection sampler and penalty kernels are v1-only and skipped by the v2 model runner. |
 | `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
 
 **eplb_config**

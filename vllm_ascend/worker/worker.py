@@ -760,22 +760,23 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
-        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
+        # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
+        # physical storage across all groups. Their budgets must not take the
+        # generic per-layer scale, including when the runner uses sparse SFA.
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-            if any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in specs):
+            if any(
+                getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41", "glm5_next"} for spec in specs
+            ):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
         # allocation. For the default layer/block-compact layout, Ascend can
-        # preserve that contract for hybrid attention/Mamba models while still
-        # exposing contiguous per-layer views to its existing backends. Do not
+        # preserve that contract for attention/Mamba and eligible full/sliding
+        # attention models while exposing contiguous per-layer views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -788,13 +789,20 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        shares_attention_pool = False
+        if getattr(self, "use_v2_model_runner", False):
+            # Load V2 helpers only for V2 workers; V1 retains private allocation
+            # and must keep its original multi-group budget scaling.
+            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+
+            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and (has_mamba or is_step_model)
+            and (has_mamba or is_step_model or shares_attention_pool)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
@@ -858,7 +866,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -884,7 +892,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()

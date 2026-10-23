@@ -18,7 +18,7 @@
 #
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -974,6 +975,91 @@ def _uses_single_raw_mla_cache(
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
 
 
+def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
+    """Keep Gemma 4's budget and the V2 runner on the same dense layout.
+
+    Equal physical pages let full and sliding-window groups overlay the same
+    pool even when their head dimensions and tokens per block differ. Keep
+    specialized/quantized caches and distributed transfer on their existing
+    allocation paths. Limit this regression fix to Gemma 4 so other models
+    retain their existing allocation behavior.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) != "gemma4_text":
+        return False
+    if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+        return False
+    specs = tuple(specs)
+    if {type(spec) for spec in specs} != {FullAttentionSpec, SlidingWindowSpec}:
+        return False
+    if vllm_config.kv_transfer_config is not None:
+        return False
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size != 1 or parallel_config.prefill_context_parallel_size != 1:
+        return False
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not (layout.is_layer_compact and layout.is_block_compact):
+        return False
+    return len({spec.page_size_bytes for spec in specs}) == 1 and all(
+        spec.dtype in (torch.float16, torch.bfloat16)
+        and spec.kv_quant_mode == KVQuantMode.NONE
+        and spec.head_size == spec.head_size_v
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and spec.tokens_per_state == 1
+        and spec.num_head_slots is None
+        and spec.state_content_bytes is None
+        for spec in specs
+    )
+
+
+def allocate_shared_attention_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    allocate: Callable[[int], torch.Tensor],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Materialize overlay descriptors as contiguous K/V views of one pool.
+
+    Groups share block IDs from one scheduler pool, so the same ID cannot be
+    live in two groups at once. Split each layer slot into K and V halves;
+    equal, unpadded pages and equal K/V widths make this mapping identical
+    across groups while preserving the contiguous layout required by PA.
+    Upstream constructs the layer coverage, offsets and allocation bounds.
+    Check only the shared backing and contiguous strides required here:
+    upstream permits alignment padding that this K/V split cannot consume.
+    """
+    descriptors = kv_cache_config.kv_cache_tensors
+    specs = {
+        name: (
+            group.kv_cache_spec.kv_cache_specs[name]
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group.kv_cache_spec
+        )
+        for group in kv_cache_config.kv_cache_groups
+        for name in group.layer_names
+    }
+    sizes = {descriptor.size for descriptor in descriptors}
+    if len(sizes) != 1 or kv_cache_config.num_blocks <= 0:
+        raise ValueError("Shared attention KV cache requires one nonempty backing allocation.")
+    backing_size = sizes.pop()
+    regions: dict[str, tuple[int, int]] = {}
+    for descriptor in descriptors:
+        for index, name in enumerate(descriptor.layers):
+            spec = specs[name]
+            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            start = descriptor.offset + index * descriptor.layer_stride
+            if descriptor.layer_stride != layer_size or descriptor.block_stride != spec.page_size_bytes:
+                raise ValueError(f"Invalid shared attention KV cache descriptor for {name}.")
+            regions[name] = (start, layer_size)
+    backing = allocate(backing_size)
+    return {
+        name: (
+            backing[start : start + layer_size // 2],
+            backing[start + layer_size // 2 : start + layer_size],
+        )
+        for name, (start, layer_size) in regions.items()
+    }
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
@@ -1010,6 +1096,13 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
+    # Gemma 4 full/sliding groups share one pool while retaining contiguous
+    # K/V views. The worker keeps the full budget only for this V2 path.
+    if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
+        return allocate_shared_attention_kv_cache(
+            kv_cache_config,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+        )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
@@ -1854,7 +1947,14 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, offload_kwargs=None
+    positions,
+    pad,
+    is_prefilling,
+    seq_lens_cpu=None,
+    *,
+    attn_state=None,
+    parallel_config=None,
+    offload_kwargs=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 

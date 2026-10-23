@@ -43,24 +43,24 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
-from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
-from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.spec_decode.utils import (
-    update_num_computed_tokens_for_batch_change,
-)
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
 )
+from vllm_ascend.worker.spec_decode_utils import (
+    update_num_computed_tokens_for_batch_change,
+)
+from vllm_ascend.worker.v1._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend.worker.v1._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
+from vllm_ascend.worker.v1._310p.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1

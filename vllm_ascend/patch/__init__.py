@@ -974,7 +974,7 @@
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
 #
-#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
 #    Why:
 #       310P needs to protect the tail slot during MTP input_ids shift to avoid
 #       GatherV2 corruption from persistent drafter input buffers.

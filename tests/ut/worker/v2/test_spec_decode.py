@@ -49,6 +49,7 @@ def _make_config(
         use_dspark=MagicMock(return_value=use_dspark),
         use_dflash=MagicMock(return_value=use_dflash),
         use_eagle=MagicMock(return_value=use_eagle),
+        uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
         draft_model_config=SimpleNamespace(architectures=architectures or []),

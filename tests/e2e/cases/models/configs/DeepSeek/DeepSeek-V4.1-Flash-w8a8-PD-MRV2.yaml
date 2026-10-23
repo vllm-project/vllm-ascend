@@ -89,7 +89,7 @@ templates:
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "16384"
+      - "8192"
       - --max-num-seqs
       - "32"
       - --speculative-config
@@ -109,7 +109,7 @@ templates:
       - --safetensors-load-strategy
       - "lazy"
       - --gpu-memory-utilization
-      - "0.9"
+      - "0.92"
       - --quantization
       - "ascend"
       - --enforce-eager

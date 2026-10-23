@@ -40,7 +40,7 @@ class TestBlockTable310(TestBase):
             mock_dcp_group.rank_in_group = dcp_rank
             mock_get_dcp_group.return_value = mock_dcp_group
 
-            from vllm_ascend._310p.block_table import BlockTable
+            from vllm_ascend.worker.v1._310p.block_table import BlockTable
 
             return BlockTable(
                 block_size=self.block_size,
@@ -73,7 +73,7 @@ class TestBlockTable310(TestBase):
             mock_dcp_group.rank_in_group = dcp_rank
             mock_get_dcp_group.return_value = mock_dcp_group
 
-            from vllm_ascend._310p.block_table import MultiGroupBlockTable
+            from vllm_ascend.worker.v1._310p.block_table import MultiGroupBlockTable
 
             return MultiGroupBlockTable(
                 max_num_reqs=self.max_num_reqs,

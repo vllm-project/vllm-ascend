@@ -828,7 +828,7 @@ class AscendConfig:
                 )
 
         finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
@@ -963,6 +963,15 @@ class AscendConfig:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            if (
+                self.enable_pcp_embedding_lmhead_weight_sharding
+                and vc.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "batch-sharded sampling is incompatible with "
+                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
                     "Please disable one of them."
                 )
 

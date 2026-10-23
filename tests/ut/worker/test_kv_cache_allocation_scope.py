@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
