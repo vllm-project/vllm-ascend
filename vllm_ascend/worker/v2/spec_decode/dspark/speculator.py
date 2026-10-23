@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any, cast
 
 import numpy as np
@@ -253,13 +254,19 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            # Draft physical KV blocks may differ from the target configuration.
+            draft_block_sizes = {
+                kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.block_size
+                for group_id in self.draft_kv_cache_group_ids
+            }
+            if len(draft_block_sizes) != 1:
+                raise ValueError("DSpark input preparation requires one physical KV block size across draft groups")
+            draft_block_size = draft_block_sizes.pop()
             if vllm_version_is("0.31.0"):
-                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
-                    self.vllm_config.cache_config.block_size
-                )
+                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(draft_block_size)
             else:
                 dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
-                    self.vllm_config.cache_config.block_size,
+                    draft_block_size,
                     block_tables,
                 )
 
@@ -462,6 +469,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
                 )
             with (
+                # Context KV consumes prompt states; the draft MoE consumes its query block.
+                self.expert_offload_manager.execution(has_prefill=False, is_profile=is_profile)
+                if getattr(self, "expert_offload_manager", None) is not None
+                else nullcontext(),
                 build_attn_metadata_wrapper(),
                 build_attn_metadata_factory(
                     self.input_buffers.positions,
@@ -540,6 +551,10 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
                 )
             with (
+                # Context KV consumes prompt states; the draft MoE consumes its query block.
+                self.expert_offload_manager.execution(has_prefill=False, is_profile=is_profile)
+                if getattr(self, "expert_offload_manager", None) is not None
+                else nullcontext(),
                 build_attn_metadata_wrapper(),
                 build_attn_metadata_factory(
                     self.input_buffers.positions,

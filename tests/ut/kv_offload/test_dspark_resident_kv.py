@@ -61,6 +61,7 @@ def _prefill_runner(
     connector="SfaRemoteD2HConnector",
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.expert_offload_manager = None
     runner.debugger = None
     runner.model_state = SimpleNamespace()
     runner.prompt_logprobs_worker = None

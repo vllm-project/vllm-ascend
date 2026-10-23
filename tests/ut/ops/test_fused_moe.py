@@ -211,6 +211,7 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         "get_ascend_config",
         lambda: SimpleNamespace(
             ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
+            expert_offload_config=SimpleNamespace(enabled=False),
             enable_shared_expert_dp=False,
         ),
     )
@@ -281,6 +282,7 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
         "get_ascend_config",
         lambda: SimpleNamespace(
             ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
+            expert_offload_config=SimpleNamespace(enabled=False),
             enable_shared_expert_dp=False,
         ),
     )
