@@ -603,7 +603,7 @@ done
 
 For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase before running actual performance benchmarks. Since HCCS one-sided communication connections are created lazily after instance launch, full-mesh connections incur a one-time overhead (4 MB device memory per connection). Warm-up recommendation: input sequence length 8k, output sequence length 1, total requests 2-3x number of devices.
 
-## Scenario 2: Memcache Backend
+## Scenario 2: Memcache Backend {: #scenario-2-memcache-backend }
 
 ### Configuration Examples
 
@@ -1553,7 +1553,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 
 ## Reference
 
-### kv-transfer-config Common Parameters
+### kv-transfer-config Common Parameters {: #kv-transfer-config-common-parameters }
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -1579,7 +1579,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `comm_resource_config.listen_port` | int | 16666 | No | Port number | One-sided communication listen port. Use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
 | `fabric_memory.max_capacity` | int | No default | Only when fabric mem budget is insufficient | Integer (GB per process) | Fabric memory quota. |
 
-### HDK and CANN Version Compatibility Reference
+### HDK and CANN Version Compatibility Reference {: #hdk-and-cann-version-compatibility-reference }
 
 | Hardware Series | HDK Requirement | CANN Requirement | Other Dependencies |
 | :--- | :--- | :--- | :--- |

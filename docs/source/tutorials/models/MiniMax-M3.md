@@ -716,7 +716,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=1024
+    export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
@@ -2833,9 +2833,9 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
 | GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 133000 | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
-| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=1.0, top_p=0.95 |
+| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
+| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
 
 ### 8.3 Multimodal Evaluation
 
