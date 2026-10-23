@@ -1612,6 +1612,10 @@ class KVCacheRecvingThread(threading.Thread):
         sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            if self.export_metadata is not None:
+                # Metadata shares the producer's serial export queue. A cold
+                # handshake may wait behind an in-flight quantization/transfer.
+                sock.setsockopt(zmq.RCVTIMEO, max(int(self.timeout * 1000), get_transfer_timeout_value()))
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
             metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
@@ -1644,6 +1648,8 @@ class KVCacheRecvingThread(threading.Thread):
             raise
         finally:
             if sock is not None:
+                if self.export_metadata is not None:
+                    sock.setsockopt(zmq.RCVTIMEO, int(self.timeout * 1000))
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
 
@@ -1660,6 +1666,8 @@ class KVCacheRecvingThread(threading.Thread):
         sock: zmq.Socket | None = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            if self.export_metadata is not None:
+                sock.setsockopt(zmq.RCVTIMEO, max(int(self.timeout * 1000), get_transfer_timeout_value()))
             data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id, remote_port_send_num))
             ensure_zmq_send(sock, data_bytes, f"{remote_host}:{remote_handshake_port}")
             resp = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
@@ -1680,6 +1688,8 @@ class KVCacheRecvingThread(threading.Thread):
                 logger.warning("Unexpected error occurred in socket. error=%s. ", e)
         finally:
             if sock is not None:
+                if self.export_metadata is not None:
+                    sock.setsockopt(zmq.RCVTIMEO, int(self.timeout * 1000))
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
 

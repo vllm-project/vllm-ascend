@@ -20,7 +20,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
-from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -56,15 +55,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_KV_CACHE_TUPLE_LEN,
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
-from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.turboquant_prefill import (
-    LATENT_DIM,
-    TILE_ROWS,
-    current_workspace_shapes,
-    expand_turboquant_pages,
-    workspace_shapes,
-)
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -907,16 +898,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.final_prefill = (
             ColocatedFinalPrefill(self.turboquant) if ascend_config.enable_turboquant_final_prefill else None
         )
-        self.tq_prefill_bf16_current = ascend_config.enable_turboquant_prefill_bf16_current
-        parallel = self.vllm_config.parallel_config
-        self.tq_prefill_workspace_bytes = (
-            ascend_config.turboquant_prefill_workspace_mb * 1024**2
-            if self.enable_sparse_sfa_turboquant
-            and parallel.decode_context_parallel_size == 1
-            and parallel.prefill_context_parallel_size == 1
-            and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            else 0
-        )
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
@@ -1630,85 +1611,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         assert self.turboquant is not None
         return self.turboquant.inverse(attn_out)
 
-    def _prepare_tq_current_workspace(self, hidden_states, cache, metadata):
-        """Use rank-uniform metadata before deciding whether to enter a TP collective."""
-        budget = getattr(self, "tq_prefill_workspace_bytes", 0)
-        if (
-            not budget
-            or not getattr(self, "tq_prefill_bf16_current", False)
-            or metadata.num_prefills == 0
-            or metadata.num_decodes != 0
-            or hidden_states.dtype != torch.bfloat16
-            or cache.shape[1] <= 0 or cache.shape[1] % TILE_ROWS
-            or cache.shape[2:] != (1, 386)
-            or not cache.is_contiguous()
-            or metadata.block_table.stride(1) != 1
-            or metadata.block_table.shape[1] * cache.shape[1] < metadata.max_seq_len
-        ):
-            return None
-        local_tokens = hidden_states.shape[0]
-        context = getattr(metadata, "dsa_cp_context", None)
-        gathered_tokens = context.num_tokens_pad if context is not None else local_tokens
-        if context is not None:
-            assert gathered_tokens == local_tokens * get_tp_group().world_size
-        shapes = current_workspace_shapes(
-            metadata.seq_lens.numel(), metadata.max_seq_len, local_tokens, gathered_tokens, budget
-        )
-        if shapes is None:
-            return None
-        views = current_workspace_manager().get_simultaneous(*shapes)
-        # No persistent per-layer state: the caller owns these views only until
-        # attention consumes them. Projection/indexer code must not borrow this
-        # manager during that interval. Send/receive regions never overlap.
-        return (*views[:3], views[3], views[-1])
-
-    def _try_tq_prefill_workspace(
-        self, ql_nope, q_pe, cache, topk_indices, metadata, qlens, klens, block_table, current_workspace=None
-    ):
-        budget = getattr(self, "tq_prefill_workspace_bytes", 0)
-        if (
-            not budget
-            or metadata.num_prefills == 0
-            or metadata.num_decodes != 0
-            or ql_nope.dtype != torch.bfloat16
-            or ql_nope.shape[-1] != LATENT_DIM
-            or ql_nope.shape[:-1] != q_pe.shape[:-1]
-            or q_pe.shape[-1] != 64
-            or cache.shape[1] <= 0 or cache.shape[1] % TILE_ROWS
-            or cache.shape[2:] != (1, 386)
-            or not cache.is_contiguous()
-            or block_table.stride(1) != 1
-        ):
-            return None
-        shapes = workspace_shapes(klens.numel(), metadata.max_seq_len, ql_nope.shape[0], budget)
-        if shapes is None or block_table.shape[1] * cache.shape[1] < metadata.max_seq_len:
-            return None
-        assert self.turboquant is not None and self.turboquant.centroids is not None
-        if current_workspace is None:
-            nope, rope, table = current_workspace_manager().get_simultaneous(*shapes)
-            expand_turboquant_pages(cache, block_table, klens, self.turboquant.centroids, nope, rope, table)
-        else:
-            nope, rope, table, _, current_kv = current_workspace
-            expand_turboquant_pages(
-                cache, block_table, klens, self.turboquant.centroids, nope, rope, table,
-                current_kv=current_kv,
-                current_query_lens=metadata.cum_query_lens,
-                full_seq_lens=metadata.seq_lens,
-            )
-        query = self.turboquant.forward(ql_nope)
-        result = DeviceOperator.execute_sparse_flash_attention_process(
-            self,
-            query,
-            q_pe,
-            (nope, rope),
-            topk_indices,
-            metadata,
-            qlens,
-            klens,
-            block_table=table,
-        )
-        return self._tq_inverse_output(result)
-
     def _turboquant_sfa(
         self,
         query: torch.Tensor,
@@ -1764,12 +1666,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         block_table=None,
     ):
         if self.final_prefill is not None and not self.final_prefill.plan.has_prefill:
-            # BF16 prolog and PrefixCache remain authoritative. Only the
+            # C8 prolog and PrefixCache remain authoritative. Only the
             # attention read switches to the stable TQ4 mirror during Decode.
             self.final_prefill.update_decode_tokens(self._get_sfa_kv_slot_mapping(attn_metadata))
             attn_out, _, _ = self._turboquant_sfa(
                 self._tq_rotate_query(ql_nope, q_pe),
-                self.final_prefill.cache[2],
+                self.final_prefill.cache[1],
                 topk_indices,
                 attn_metadata.block_table if block_table is None else block_table,
                 actual_seq_lengths_query,
@@ -1778,23 +1680,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             return self._tq_inverse_output(attn_out)
         if self.final_prefill is not None and attn_metadata.num_decode_tokens:
-            # Mixed batches compute against authoritative BF16 pages. Keep
+            # Mixed batches compute against authoritative C8 pages. Keep
             # existing decoders' mirrors current for the next pure-decode step.
             slots = self._get_sfa_kv_slot_mapping(attn_metadata)[: attn_metadata.num_decode_tokens]
             self.final_prefill.update_decode_tokens(slots)
         if self.enable_sparse_sfa_turboquant:
-            expanded = self._try_tq_prefill_workspace(
-                ql_nope,
-                q_pe,
-                kv_cache[0],
-                topk_indices,
-                attn_metadata,
-                actual_seq_lengths_query,
-                actual_seq_lengths_key,
-                attn_metadata.block_table if block_table is None else block_table,
-            )
-            if expanded is not None:
-                return expanded
             attn_out, _, _ = self._turboquant_sfa(
                 self._tq_rotate_query(ql_nope, q_pe),
                 kv_cache[0],
@@ -2047,17 +1937,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.turboquant._initialize(hidden_states.device)
             if attn_metadata is not None:
                 self.final_prefill.bind(kv_cache)
-                kv_cache = kv_cache[:2]
+                kv_cache = kv_cache[:1]
         if self.enable_sparse_sfa_turboquant:
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
-            if attn_metadata is None and getattr(self, "tq_prefill_workspace_bytes", 0):
-                # Reserve once in the shared manager before KV capacity is
-                # profiled. All layers reuse this storage on the current stream.
-                current_workspace_manager().get_simultaneous(
-                    ((self.tq_prefill_workspace_bytes,), torch.uint8),
-                )
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
@@ -2109,8 +1993,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # preallocated output for the caller while running attention only on
         # the token rows described by metadata, matching upstream backends.
         hidden_states = hidden_states[:num_input_tokens]
-        current_workspace = None
-        current_kv_handle = None
         if gate_hidden_states is not None:
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
@@ -2177,20 +2059,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
-            current_workspace = self._prepare_tq_current_workspace(hidden_states, kv_cache[0], attn_metadata)
-            if current_workspace is None:
-                kv_outputs = self.exec_kv(
-                    kv_no_split, cos, sin, kv_cache, parallel_context.kv_slot_mapping, attn_metadata
-                )
-            else:
-                assert self.kv_a_layernorm is not None and self.turboquant is not None
-                kv_outputs = turboquant_kv_rmsnorm_rope(
-                    kv_no_split.view(-1, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim),
-                    self.kv_a_layernorm.weight, cos, sin, self.kv_lora_rank, self.qk_rope_head_dim,
-                    turboquant=self.turboquant,
-                    epsilon=self.kv_a_layernorm.variance_epsilon,
-                    current_kv=current_workspace[3],
-                )
+            kv_outputs = self.exec_kv(
+                kv_no_split, cos, sin, kv_cache, parallel_context.kv_slot_mapping, attn_metadata
+            )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             # k_li no longer exists at this point: it is computed by
@@ -2202,11 +2073,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 knope_scale,
                 parallel_context.gather_full_o_proj,
             )
-            if current_workspace is not None and getattr(attn_metadata, "dsa_cp_context", None) is not None:
-                _, current_kv_handle = all_gather_async(
-                    current_workspace[3], get_tp_group(), output=current_workspace[4], async_op=True
-                )
-
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
             if self.qk_rope_head_dim:
                 q_pe = self.rope_single(q_pe, cos, sin)
@@ -2277,28 +2143,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
         with attention_transfer_window():
-            # All TP ranks join and complete the collective, even a padded rank
-            # with no local query. Never reuse receive storage while it is live.
-            if current_kv_handle is not None:
-                current_kv_handle.wait()
             if has_local_query:
-                attn_output = None
-                if current_workspace is not None:
-                    attn_output = self._try_tq_prefill_workspace(
-                        ql_nope, q_pe, kv_cache[0], topk_indices, attn_metadata,
-                        actual_seq_lengths_query, actual_seq_lengths_key, attn_metadata.block_table,
-                        current_workspace=current_workspace,
-                    )
-                if attn_output is None:
-                    attn_output = self._execute_sparse_flash_attention_process(
-                        ql_nope,
-                        q_pe,
-                        kv_cache,
-                        topk_indices,
-                        attn_metadata,
-                        actual_seq_lengths_query,
-                        actual_seq_lengths_key,
-                    )
+                attn_output = self._execute_sparse_flash_attention_process(
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    topk_indices,
+                    attn_metadata,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                )
 
         if has_local_query:
             attn_output = self._v_up_proj(attn_output)
@@ -2338,7 +2192,6 @@ def turboquant_kv_rmsnorm_rope(
     *,
     turboquant: TurboQuantLatent,
     epsilon: float = 1e-5,
-    current_kv: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """TurboQuant counterpart of custom_kv_rmsnorm_rope.
 
@@ -2353,13 +2206,7 @@ def turboquant_kv_rmsnorm_rope(
     # fp16 bytes of s_t = ||latent|| / ||dequantized unit vector||, the factor
     # attention applies to rescale the whole slot.
     packed_bytes = get_tq_packed_bytes(kv_lora_rank)
-    if current_kv is None:
-        row = turboquant.compress(k_nope)
-    else:
-        # Preserve original RoPE and rotated latent before TQ quantization and
-        # RoPE pre-division. copy_ casts into strided views without a new GEMM.
-        current_kv[:, kv_lora_rank:].copy_(k_rope)
-        row = turboquant.compress(k_nope, rotated_out=current_kv[:, :kv_lora_rank])
+    row = turboquant.compress(k_nope)
     row = row.reshape(k_nope.shape[0], -1)
     nibbles = row[:, :packed_bytes].view(torch.int8)
     scale = row[:, packed_bytes:].contiguous().view(torch.float16).reshape(-1, 1)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Colocated BF16 active/prefix pages with an incremental TQ4 decode mirror.
+"""Colocated C8 active/prefix pages with an incremental TQ4 decode mirror.
 
-Both pools are charged to the scheduler's page budget. BF16 pages remain the
+Both pools are charged to the scheduler's page budget. C8 pages remain the
 source of truth for prefix sharing and mixed batches; this compatibility mode
 does not claim the capacity of a TQ4-only cache. No page format is changed in
 place and both views retain stable addresses for FULL decode graphs.
@@ -12,20 +12,22 @@ from dataclasses import dataclass
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import (
+    C8_SLOT_BYTES,
     LATENT_DIM,
     ROPE_DIM,
     TQ_SLOT_BYTES,
 )
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import pack_c8_kv
 
 FINAL_PREFILL_CHUNK_TOKENS = 4096
-BF16_SLOT_BYTES = (LATENT_DIM + ROPE_DIM) * 2
 
 
 def validate_colocated_final_prefill(config):
     parallel = config.parallel_config
-    if config.cache_config.cache_dtype != "auto" or config.model_config.dtype != torch.bfloat16:
-        raise ValueError("Final-prefill active cache requires --kv-cache-dtype auto and BF16 model dtype")
+    if config.cache_config.cache_dtype != "int8" or config.model_config.dtype != torch.bfloat16:
+        raise ValueError("Final-prefill active cache requires --kv-cache-dtype int8 and BF16 model dtype")
     if config.kv_transfer_config is not None:
         raise ValueError("Use final_prefill_export on the P/D connector; the colocated mirror needs no connector")
     if getattr(config, "use_v2_model_runner", False):
@@ -63,21 +65,19 @@ def plan_final_prefill(requests, scheduled, pending_req_ids=None):
 
 def colocated_cache_views(raw, num_blocks, block_size):
     rows = num_blocks * block_size
-    nope_end = rows * LATENT_DIM * 2
-    rope_end = rows * BF16_SLOT_BYTES
-    expected = rows * (BF16_SLOT_BYTES + TQ_SLOT_BYTES)
+    active_end = rows * C8_SLOT_BYTES
+    expected = rows * (C8_SLOT_BYTES + TQ_SLOT_BYTES)
     if raw.numel() != expected:
         raise ValueError("Final-prefill cache allocation does not match its charged page size")
     shape = (num_blocks, block_size, 1)
     return (
-        raw[:nope_end].view(torch.bfloat16).view(*shape, LATENT_DIM),
-        raw[nope_end:rope_end].view(torch.bfloat16).view(*shape, ROPE_DIM),
-        raw[rope_end:].view(torch.int8).view(*shape, TQ_SLOT_BYTES),
+        raw[:active_end].view(torch.int8).view(*shape, C8_SLOT_BYTES),
+        raw[active_end:].view(torch.int8).view(*shape, TQ_SLOT_BYTES),
     )
 
 
 def plan_incremental_slots(requests, scheduled, group_id, block_size, pending, initial):
-    """Convert new rows only; on admission/resume also cover a BF16 prefix hit."""
+    """Convert new rows only; on admission/resume also cover a C8 prefix hit."""
     slots = []
     for req_id, count in scheduled.items():
         if req_id not in pending:
@@ -135,15 +135,15 @@ class ColocatedFinalPrefill:
             self.pipeline.submit(self)
 
     def update_decode_tokens(self, slots):
-        """BF16 prolog already wrote these tokens. Invalid graph slots stay -1."""
-        nope, rope, packed_cache = self.cache
+        """C8 prolog already wrote these tokens. Invalid graph slots stay -1."""
+        active_cache, packed_cache = self.cache
         slots = slots.reshape(-1).long()
         for start in range(0, slots.numel(), FINAL_PREFILL_CHUNK_TOKENS):
             target = slots[start:start + FINAL_PREFILL_CHUNK_TOKENS]
             indices = target.clamp_min(0)
-            self.quantizer.compress_kv_into(
-                nope.view(-1, LATENT_DIM).index_select(0, indices),
-                rope.view(-1, ROPE_DIM).index_select(0, indices),
-                target,
-                packed_cache.view(-1, TQ_SLOT_BYTES),
+            packed = pack_c8_kv(
+                active_cache.view(-1, C8_SLOT_BYTES).index_select(0, indices), self.quantizer,
+            )
+            DeviceOperator.scatter_cache(
+                packed_cache.view(-1, TQ_SLOT_BYTES), target.view(-1, 1), packed.view(torch.int8),
             )

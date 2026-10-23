@@ -448,7 +448,6 @@ class AscendConfig:
             "enable_sparse_li_c4": false,
             "enable_turboquant_rotation_fusion": false,
             "enable_turboquant_fused_finalize": false,
-            "turboquant_prefill_workspace_mb": 0,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -584,13 +583,8 @@ class AscendConfig:
     # Compatibility switch; GLM retains reference scale reduction/packing.
     # The historical DeepSeek path keeps its original fused implementation.
     enable_turboquant_fused_finalize: bool = False
-    # Opt-in BF16 layer workspace, shared across SFA layers; zero disables it.
-    turboquant_prefill_workspace_mb: int = 0
-    # Keep current Prefill KV in BF16 before quantization; scratch and TP gather
-    # buffers share the workspace budget. Changes the Prefill numerical path.
-    enable_turboquant_prefill_bf16_current: bool = False
-    # Colocated compatibility mode: persistent BF16 active/prefix cache plus a
-    # separately budgeted TQ4 decode mirror, populated incrementally during Prefill.
+    # Colocated C8 active/prefix cache plus a separately budgeted TQ4 decode
+    # mirror, populated incrementally during Prefill.
     enable_turboquant_final_prefill: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
@@ -670,8 +664,6 @@ class AscendConfig:
         if self.enable_turboquant_rotation_fusion:
             logger.warning_once("TurboQuant rotation folding is disabled to preserve the original BF16 rounding.")
             self.enable_turboquant_rotation_fusion = False
-        if self.turboquant_prefill_workspace_mb < 0:
-            raise ValueError("turboquant_prefill_workspace_mb must be non-negative")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
@@ -936,9 +928,9 @@ class AscendConfig:
 
             validate_colocated_final_prefill(vc)
             if not use_sparse or self.enable_kv_nz or self.enable_turboquant_rotation_fusion:
-                raise ValueError("Final-prefill BF16 cache requires SFA ND layout and unfolded BF16 projections")
+                raise ValueError("Final-prefill C8 cache requires SFA ND layout and unfolded BF16 projections")
             if self.sparse_kv_offload_config.enabled:
-                raise ValueError("Final-prefill BF16 cache does not support sparse KV host offload")
+                raise ValueError("Final-prefill C8 cache does not support sparse KV host offload")
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -9,7 +9,7 @@ from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill import (
-    BF16_SLOT_BYTES,
+    C8_SLOT_BYTES,
     TQ_SLOT_BYTES,
     ColocatedFinalPrefill,
     FinalPrefillPlan,
@@ -30,7 +30,7 @@ def request(computed, prompt=30000, generated=0, blocks=None):
 
 def config():
     return SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="int8"),
         model_config=SimpleNamespace(dtype=torch.bfloat16,
                                      enforce_eager=False,
                                      hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)),
@@ -137,44 +137,44 @@ def test_new_request_refreshes_mirror_before_decode(monkeypatch, computed):
 def test_both_cache_pools_are_charged_and_nonoverlapping():
     spec = AscendMLAAttentionSpec(block_size=128,
                                   num_kv_heads=1,
-                                  head_size=576,
-                                  dtype=torch.bfloat16,
+                                  head_size=C8_SLOT_BYTES,
+                                  dtype=torch.int8,
+                                  cache_sparse_sfa_c8=True,
                                   cache_final_prefill_turboquant=True)
-    assert spec.page_size_bytes == 128 * (BF16_SLOT_BYTES + TQ_SLOT_BYTES)
+    assert spec.page_size_bytes == 128 * (C8_SLOT_BYTES + TQ_SLOT_BYTES)
     raw = torch.zeros(spec.page_size_bytes * 3, dtype=torch.int8)
-    nope, rope, tq = colocated_cache_views(raw, 3, 128)
-    nope.fill_(1)
-    rope.fill_(2)
+    active, tq = colocated_cache_views(raw, 3, 128)
+    active.fill_(1)
     tq.fill_(3)
-    assert torch.all(nope == 1) and torch.all(rope == 2) and torch.all(tq == 3)
+    assert torch.all(active == 1) and torch.all(tq == 3)
 
 
-def test_update_changes_only_target_mirror_rows_preserving_bf16():
-    raw = torch.zeros(3 * 128 * (BF16_SLOT_BYTES + TQ_SLOT_BYTES), dtype=torch.int8)
+def test_update_changes_only_target_mirror_rows_preserving_c8():
+    raw = torch.zeros(3 * 128 * (C8_SLOT_BYTES + TQ_SLOT_BYTES), dtype=torch.int8)
     cache = colocated_cache_views(raw, 3, 128)
     cache[0].fill_(1)
-    cache[1].fill_(2)
-    before = [t.clone() for t in cache[:2]]
-    quantizer = MagicMock()
-
-    def store(nope, rope, slots, output):
-        assert torch.all(nope == 1) and torch.all(rope == 2)
-        output[slots] = 7
-
-    quantizer.compress_kv_into.side_effect = store
-    state = ColocatedFinalPrefill(quantizer)
+    before = cache[0].clone()
+    state = ColocatedFinalPrefill(MagicMock())
     state.bind(cache)
-    state.update_decode_tokens(torch.tensor([256, 0]))
-    assert torch.all(cache[2].view(-1, TQ_SLOT_BYTES)[[0, 256]] == 7)
-    assert not cache[2][1].count_nonzero()
-    for old, now in zip(before, cache[:2]):
-        torch.testing.assert_close(old, now, rtol=0, atol=0)
+
+    def scatter(output, slots, values):
+        output[slots.flatten()] = values
+
+    with patch("vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill.pack_c8_kv",
+               return_value=torch.full((2, TQ_SLOT_BYTES), 7, dtype=torch.uint8)) as pack, patch(
+            "vllm_ascend.quantization.methods.kv_cache.turboquant.final_prefill.DeviceOperator.scatter_cache",
+            side_effect=scatter):
+        state.update_decode_tokens(torch.tensor([256, 0]))
+    assert torch.all(pack.call_args.args[0] == 1)
+    assert torch.all(cache[1].view(-1, TQ_SLOT_BYTES)[[0, 256]] == 7)
+    assert not cache[1][1].count_nonzero()
+    torch.testing.assert_close(before, cache[0], rtol=0, atol=0)
 
 
-def test_native_page_copy_preserves_all_three_cache_components():
+def test_native_page_copy_preserves_active_and_mirror_cache_components():
     from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
-    raw = torch.zeros(3 * 128 * (BF16_SLOT_BYTES + TQ_SLOT_BYTES), dtype=torch.int8)
+    raw = torch.zeros(3 * 128 * (C8_SLOT_BYTES + TQ_SLOT_BYTES), dtype=torch.int8)
     cache = colocated_cache_views(raw, 3, 128)
     for index, tensor in enumerate(cache):
         tensor[0].fill_(index + 1)

@@ -8,19 +8,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import pack_bf16_kv, unpack_c8_kv
+
 from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import (
-    BF16_TO_BF16,
-    BF16_TO_TQ4,
+    C8_TO_TQ4,
     TQ_ABI,
     FinalPrefillExporter,
     describe_layout,
     final_prefill_mode,
-    pack_bf16_kv,
+    pack_c8_kv,
     validate_remote_layout,
 )
 
 
-def metadata(tensors, *, mode=BF16_TO_TQ4, logical_block=4, group=0, indexer=False, tq=False):
+def metadata(tensors, *, mode=C8_TO_TQ4, logical_block=4, group=0, indexer=False, tq=False):
     meta = SimpleNamespace(
         tensor_group_idx=[group] * len(tensors),
         kv_caches_base_addr=[t.data_ptr() for t in tensors],
@@ -30,6 +31,7 @@ def metadata(tensors, *, mode=BF16_TO_TQ4, logical_block=4, group=0, indexer=Fal
     cls = type("AscendSFAIndexerCacheSpec" if indexer else "AscendMLAAttentionSpec", (), {})
     spec = cls()
     spec.block_size, spec.cache_sparse_sfa_turboquant = logical_block, tq
+    spec.cache_sparse_sfa_c8 = not indexer and not tq and len(tensors) == 1
     describe_layout(meta, tensors, spec, mode, not tq)
     return meta
 
@@ -53,9 +55,13 @@ def padded(shape, dtype, pad=32):
     return view, storage
 
 
-def fake_pack(nope, rope, quantizer):
-    # Preserve enough input bits to catch wrong pages/order, including the
-    # kernel/logical page ratio; the numerical packer is tested separately.
+def c8_cache(nope, rope):
+    return torch.cat((nope.to(torch.int8), rope.contiguous().view(torch.int8),
+                      torch.ones((*nope.shape[:-1], 4), dtype=torch.float32).view(torch.int8)), -1)
+
+
+def fake_pack(packed, quantizer):
+    nope, rope = unpack_c8_kv(packed)
     result = torch.zeros((nope.shape[0], 386), dtype=torch.uint8)
     result[:, :256] = nope[:, :256].to(torch.uint8)
     result[:, 256:384] = rope.contiguous().view(torch.uint8)
@@ -63,9 +69,9 @@ def fake_pack(nope, rope, quantizer):
     return result
 
 
-@pytest.mark.parametrize("mode", [BF16_TO_TQ4, BF16_TO_BF16])
 @pytest.mark.parametrize("incremental", [False, True])
-def test_export_scattered_pages_partial_tail_and_shared_prefix_unchanged(mode, incremental):
+def test_export_scattered_pages_partial_tail_and_shared_prefix_unchanged(incremental):
+    mode = C8_TO_TQ4
     nope, ns = padded((8, 2, 1, 512), torch.bfloat16)
     rope, rs = padded((8, 2, 1, 64), torch.bfloat16)
     nope.copy_(torch.arange(16).reshape(8, 2, 1, 1))
@@ -73,21 +79,19 @@ def test_export_scattered_pages_partial_tail_and_shared_prefix_unchanged(mode, i
     indexer, ins = padded((8, 2, 1, 8), torch.int8)
     indexer.copy_(torch.arange(16).reshape(8, 2, 1, 1))
     before = [t.clone() for t in (ns, rs, ins)]
-    if mode == BF16_TO_TQ4:
-        packed, ps = padded((4, 4, 1, 386), torch.uint8)
-        dest_main, dest_storage = (packed, ), [ps]
-    else:
-        dn, dns = padded(nope.shape, nope.dtype)
-        dr, drs = padded(rope.shape, rope.dtype)
-        dest_main, dest_storage = (dn, dr), [dns, drs]
+    packed, ps = padded((4, 4, 1, 386), torch.uint8)
+    dest_main, dest_storage = (packed, ), [ps]
+    active, active_storage = padded((8, 2, 1, 656), torch.int8)
+    active.copy_(c8_cache(nope, rope))
+    active_before = active_storage.clone()
     di, dis = padded(indexer.shape, indexer.dtype)
-    caches = {"main": (nope, rope), "indexer": (indexer, )}
+    caches = {"main": (active,), "indexer": (indexer, )}
     local = {
         "main": metadata(caches["main"], mode=mode),
         "indexer": metadata(caches["indexer"], mode=mode, group=1, indexer=True),
     }
     remote = {
-        "main": metadata(dest_main, mode=mode, tq=mode == BF16_TO_TQ4),
+        "main": metadata(dest_main, mode=mode, tq=mode == C8_TO_TQ4),
         "indexer": metadata((di, ), mode=mode, group=1, indexer=True),
     }
     request = SimpleNamespace(
@@ -112,19 +116,13 @@ def test_export_scattered_pages_partial_tail_and_shared_prefix_unchanged(mode, i
 
     task = SimpleNamespace(wait_event=MagicMock(), send_request={"r": request}, layer_names=list(caches))
     with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_bf16_kv", side_effect=fake_pack) as pack:
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=fake_pack) as pack:
         exporter.transfer(task)
-    if mode == BF16_TO_TQ4:
-        assert pack.call_count == 2
-        for source, target in ((2, 1), (0, 3)):
-            expected = fake_pack(nope[source * 2:source * 2 + 2].reshape(4, 512),
-                                 rope[source * 2:source * 2 + 2].reshape(4, 64), None)
-            torch.testing.assert_close(dest_main[0][target].reshape(4, 386), expected)
-    else:
-        pack.assert_not_called()
-        for source, target in ((2, 1), (0, 3)):
-            for src, dst in zip(caches["main"], dest_main):
-                torch.testing.assert_close(dst[target * 2:target * 2 + 2], src[source * 2:source * 2 + 2])
+    assert pack.call_count == 2
+    torch.testing.assert_close(active_storage, active_before)
+    for source, target in ((2, 1), (0, 3)):
+        expected = fake_pack(active[source * 2:source * 2 + 2].reshape(4, 656), None)
+        torch.testing.assert_close(dest_main[0][target].reshape(4, 386), expected)
     for source, target in ((2, 1), (0, 3)):
         torch.testing.assert_close(di[target * 2:target * 2 + 2], indexer[source * 2:source * 2 + 2])
     for original, current in zip(before, (ns, rs, ins)):
@@ -132,7 +130,7 @@ def test_export_scattered_pages_partial_tail_and_shared_prefix_unchanged(mode, i
     for storage in (*dest_storage, dis):
         assert torch.all(storage[:, -32:] == 7)  # Never copy source padding.
     assert torch.all(dest_main[0][0] == 7)  # D's cached prefix remains intact.
-    if mode == BF16_TO_TQ4:
+    if mode == C8_TO_TQ4:
         assert max(sum(call[3]) for call in exporter.engine.calls[:2]) <= 4 * 386
 
 
@@ -158,7 +156,7 @@ def test_packer_keeps_scale_and_predivides_rope_without_normalizing_again():
     ("tensor_group_idx", [1]),
 ])
 def test_reject_incompatible_remote(field, value):
-    local = metadata((torch.empty(4, 2, 1, 512, dtype=torch.bfloat16), torch.empty(4, 2, 1, 64, dtype=torch.bfloat16)))
+    local = metadata((torch.empty(4, 2, 1, 656, dtype=torch.int8),))
     remote = metadata((torch.empty(2, 4, 1, 386, dtype=torch.uint8), ), tq=True)
     assert remote.cache_format == TQ_ABI
     validate_remote_layout(local, remote)
@@ -175,9 +173,8 @@ def test_export_write_failure_is_not_silently_successful():
         exporter._write("remote", [1], [2], [3])
 
 
-@pytest.mark.parametrize("producer,mode,dtype", [(True, BF16_TO_TQ4, "auto"),
-                                                 (False, BF16_TO_TQ4, "turboquant_4bit_nc"),
-                                                 (False, BF16_TO_BF16, "auto")])
+@pytest.mark.parametrize("producer,mode,dtype", [(True, C8_TO_TQ4, "int8"),
+                                                 (False, C8_TO_TQ4, "turboquant_4bit_nc")])
 def test_role_config_and_reject_context_parallel(producer, mode, dtype):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"final_prefill_export": mode},
@@ -212,26 +209,25 @@ def test_role_config_and_reject_context_parallel(producer, mode, dtype):
 
 def test_staging_is_aligned_and_bounded_and_registration_failure_raises():
     caches = {
-        'main': (torch.empty(4, 128, 1, 512, dtype=torch.bfloat16), torch.empty(4, 128, 1, 64, dtype=torch.bfloat16))
+        'main': (torch.empty(4, 128, 1, 656, dtype=torch.int8),)
     }
     meta = {'main': metadata(caches['main'], logical_block=256)}
     engine = MagicMock()
     engine.register_memory.return_value = 0
     with patch('torch.npu.Stream'), patch('torch.npu.Event'), patch(
-            'vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_bf16_kv', side_effect=fake_pack) as pack:
-        exporter = FinalPrefillExporter(caches, meta, BF16_TO_TQ4, 1024, engine)
+            'vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv', side_effect=fake_pack) as pack:
+        exporter = FinalPrefillExporter(caches, meta, C8_TO_TQ4, 1024, engine)
         assert exporter.staging.data_ptr() % (2 * 1024**2) == 0
         assert exporter.staging.numel() == 1024 * 386
         assert exporter._staging_storage.numel() == 1024 * 386 + 2 * 1024**2
         engine.register_memory.assert_called_once_with(exporter.staging.data_ptr(), 1024 * 386)
         pack.assert_called_once()
-        assert pack.call_args.args[0].shape == (256, 512)
-        assert pack.call_args.args[1].shape == (256, 64)
+        assert pack.call_args.args[0].shape == (256, 656)
         with pytest.raises(ValueError, match='at least one'):
-            FinalPrefillExporter(caches, meta, BF16_TO_TQ4, 128, engine)
+            FinalPrefillExporter(caches, meta, C8_TO_TQ4, 128, engine)
         engine.register_memory.return_value = -1
         with pytest.raises(RuntimeError, match='registration failed'):
-            FinalPrefillExporter(caches, meta, BF16_TO_TQ4, 1024, engine)
+            FinalPrefillExporter(caches, meta, C8_TO_TQ4, 1024, engine)
         pack.assert_called_once()
 
 
@@ -255,15 +251,16 @@ def test_incremental_double_buffer_reuse_waits_for_previous_transfer():
     nope = torch.arange(16, dtype=torch.bfloat16).view(8, 2, 1, 1).expand(-1, -1, -1, 512).contiguous()
     rope = torch.zeros(8, 2, 1, 64, dtype=torch.bfloat16)
     destination = torch.zeros(4, 4, 1, 386, dtype=torch.uint8)
-    exporter.caches = {"main": (nope, rope)}
-    local = metadata((nope, rope))
+    active = c8_cache(nope, rope)
+    exporter.caches = {"main": (active,)}
+    local = metadata((active,))
     remote = metadata((destination,), tq=True)
     order = []
     exporter.quantizer = MagicMock()
 
-    def store(nope, rope, quantizer):
+    def store(packed, quantizer):
         order.append("convert")
-        return fake_pack(nope, rope, quantizer)
+        return fake_pack(packed, quantizer)
     engine = CopyEngine()
 
     def write(*args):
@@ -272,12 +269,11 @@ def test_incremental_double_buffer_reuse_waits_for_previous_transfer():
 
     exporter.engine = SimpleNamespace(batch_transfer_sync_write=write)
     with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_bf16_kv", side_effect=store):
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=store):
         exporter._convert_and_write("main", local, remote, [3, 1, 2, 0], [0, 1, 2, 3], "remote")
     assert order == ["convert", "convert", "send", "convert", "send", "convert", "send", "send"]
     for target, source in enumerate([3, 1, 2, 0]):
-        expected = fake_pack(nope[source * 2:source * 2 + 2].reshape(4, 512),
-                             rope[source * 2:source * 2 + 2].reshape(4, 64), None)
+        expected = fake_pack(active[source * 2:source * 2 + 2].reshape(4, 656), None)
         torch.testing.assert_close(destination[target].reshape(4, 386), expected)
 
 
@@ -287,18 +283,18 @@ def test_bulk_export_accepts_configured_pipeline_and_draft(pp, mtp):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="MooncakeConnectorV1",
-            kv_connector_extra_config={"final_prefill_export": BF16_TO_TQ4},
+            kv_connector_extra_config={"final_prefill_export": C8_TO_TQ4},
             is_kv_producer=True, is_kv_consumer=False,
         ),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1, decode_context_parallel_size=1,
             pipeline_parallel_size=pp,
         ),
-        cache_config=SimpleNamespace(cache_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="int8"),
         model_config=SimpleNamespace(dtype=torch.bfloat16, enforce_eager=True),
         speculative_config=SimpleNamespace(num_speculative_tokens=3) if mtp else None,
     )
-    assert final_prefill_mode(config) == BF16_TO_TQ4
+    assert final_prefill_mode(config) == C8_TO_TQ4
     if pp != 1 or mtp:
         config.kv_transfer_config.kv_connector = "MooncakeLayerwiseConnector"
         with pytest.raises(ValueError, match="requires MooncakeConnectorV1"):
@@ -314,7 +310,7 @@ def test_bulk_export_preserves_unquantized_layers_with_different_group_ids():
     exporter = FinalPrefillExporter.__new__(FinalPrefillExporter)
     exporter.metadata = {"mtp.attn": local}
     exporter.caches = {"mtp.attn": source}
-    exporter.mode = BF16_TO_TQ4
+    exporter.mode = C8_TO_TQ4
     exporter.ready = MagicMock()
     exporter.stream = MagicMock()
     exporter.engine = CopyEngine()

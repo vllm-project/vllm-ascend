@@ -1607,7 +1607,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
 def test_final_prefill_scheduler_accumulates_chunks_and_prefix_without_early_send():
     scheduler = MooncakeLayerwiseConnectorScheduler.__new__(MooncakeLayerwiseConnectorScheduler)
-    scheduler.final_prefill_export = "bf16_to_tq4"
+    scheduler.final_prefill_export = "c8_to_tq4"
     scheduler.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=False))
     scheduler.block_size = [4]
     request = SimpleNamespace(all_token_ids=list(range(15)),
@@ -1654,7 +1654,7 @@ def test_final_prefill_scheduler_accumulates_chunks_and_prefix_without_early_sen
 
 def test_final_prefill_initializes_before_hooks_once_and_drains_exports():
     connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
-    connector.final_prefill_export = "bf16_to_tq4"
+    connector.final_prefill_export = "c8_to_tq4"
     connector._is_kv_producer = True
     connector.connector_worker = MagicMock()
     metadata = MooncakeLayerwiseConnectorMetadata()
@@ -1673,7 +1673,7 @@ def test_final_prefill_initializes_before_hooks_once_and_drains_exports():
 
 def test_final_prefill_uses_post_attention_event():
     worker, metadata = _make_worker_for_cache_write_event_test()
-    worker.final_prefill_export = "bf16_to_tq4"
+    worker.final_prefill_export = "c8_to_tq4"
     early, final = MagicMock(), MagicMock()
     worker._cache_write_events[0] = early
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.Event",
@@ -1686,7 +1686,7 @@ def test_final_prefill_uses_post_attention_event():
 
 def test_incremental_export_dispatches_at_write_once():
     connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
-    connector.final_prefill_export = "bf16_to_tq4"
+    connector.final_prefill_export = "c8_to_tq4"
     connector.prefill_export_incremental = True
     connector._is_kv_producer = True
     connector.connector_worker = MagicMock()
@@ -1703,7 +1703,7 @@ def test_incremental_export_dispatches_at_write_once():
 
 def test_incremental_export_uses_cache_write_event():
     worker, metadata = _make_worker_for_cache_write_event_test()
-    worker.final_prefill_export = "bf16_to_tq4"
+    worker.final_prefill_export = "c8_to_tq4"
     worker.prefill_export_incremental = True
     early = MagicMock()
     worker._cache_write_events[0] = early
@@ -1714,7 +1714,7 @@ def test_incremental_export_uses_cache_write_event():
 
 def test_incremental_scheduler_advances_only_sent_pages_and_resets_on_resume():
     scheduler = MooncakeLayerwiseConnectorScheduler.__new__(MooncakeLayerwiseConnectorScheduler)
-    scheduler.final_prefill_export = "bf16_to_tq4"
+    scheduler.final_prefill_export = "c8_to_tq4"
     scheduler.prefill_export_incremental = True
     scheduler.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=False))
     scheduler.block_size = [4]

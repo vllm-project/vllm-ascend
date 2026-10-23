@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded final or incremental export of ordinary BF16 SFA caches.
+"""Bounded final or incremental export of ordinary C8 SFA caches.
 
 The producer cache (including shared prefix pages) is read-only here. Only the
 registered staging tensor is recycled, after each synchronous Mooncake write.
@@ -13,14 +13,17 @@ from dataclasses import dataclass, field
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
-from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent, pack_bf16_kv
+from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE, get_sfa_qsfa_packed_head_dim
 
-BF16_TO_TQ4 = "bf16_to_tq4"
-BF16_TO_BF16 = "bf16_to_bf16"
+from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent, pack_c8_kv
+
+C8_TO_TQ4 = "c8_to_tq4"
 LATENT_DIM = 512
 ROPE_DIM = 64
 PACKED_DIM = LATENT_DIM // 2
 TQ_SLOT_BYTES = PACKED_DIM + ROPE_DIM * 2 + 2
+C8_SLOT_BYTES = get_sfa_qsfa_packed_head_dim(LATENT_DIM, ROPE_DIM)
+C8_ABI = "glm_sfa_c8_v1"
 TQ_ABI = "glm_sfa_tq4_nc_v1"
 TRANSFER_ALIGNMENT = 2 * 1024**2
 
@@ -30,8 +33,8 @@ def final_prefill_mode(config):
     value = extra.get("final_prefill_export") if isinstance(extra, dict) else None
     if value is None:
         return None
-    if value not in (BF16_TO_TQ4, BF16_TO_BF16):
-        raise ValueError("final_prefill_export must be bf16_to_tq4 or bf16_to_bf16")
+    if value != C8_TO_TQ4:
+        raise ValueError("final_prefill_export must be c8_to_tq4")
     parallel = config.parallel_config
     if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
         raise ValueError("Final-prefill export requires unsharded SFA KV pages (PCP=DCP=1)")
@@ -41,7 +44,7 @@ def final_prefill_mode(config):
     transfer = config.kv_transfer_config
     if transfer.is_kv_producer == transfer.is_kv_consumer:
         raise ValueError("Final-prefill export requires separate kv_producer and kv_consumer roles")
-    expected_dtype = "turboquant_4bit_nc" if transfer.is_kv_consumer and value == BF16_TO_TQ4 else "auto"
+    expected_dtype = "turboquant_4bit_nc" if transfer.is_kv_consumer else "int8"
     if config.cache_config.cache_dtype != expected_dtype or config.model_config.dtype != torch.bfloat16:
         raise ValueError(f"Final-prefill export requires BF16 model dtype and kv-cache-dtype={expected_dtype}")
     if not config.model_config.enforce_eager:
@@ -73,15 +76,20 @@ def describe_layout(meta, tensors, spec, mode, is_producer):
         raise ValueError("Final-prefill export supports ND SFA pages [blocks, tokens, 1, dim] only")
     dims = [t.shape[-1] for t in tensors]
     if getattr(spec, "cache_sparse_sfa_turboquant", False):
-        if is_producer or mode != BF16_TO_TQ4 or dims != [TQ_SLOT_BYTES] or tensors[0].element_size() != 1:
+        if is_producer or mode != C8_TO_TQ4 or dims != [TQ_SLOT_BYTES] or tensors[0].element_size() != 1:
             raise ValueError("Invalid TQ4 destination layout")
         cache_format = TQ_ABI
     elif "Indexer" in type(spec).__name__:
         cache_format = "sfa_indexer_v1"
+    elif getattr(spec, "cache_sparse_sfa_c8", False):
+        if not is_producer or dims != [C8_SLOT_BYTES] or tensors[0].dtype != torch.int8:
+            raise ValueError("Final-prefill export requires the SFA INT8 packed source layout")
+        cache_format = C8_ABI
     else:
+        # Auxiliary layers that are not quantized retain their original ABI.
         if dims != [LATENT_DIM, ROPE_DIM] or any(t.dtype != torch.bfloat16 for t in tensors):
-            raise ValueError("Final-prefill export requires GLM SFA BF16 latent512 + RoPE64")
-        cache_format = "sfa_bf16_v1"
+            raise ValueError("Unsupported passthrough cache layout")
+        cache_format = "sfa_float_v1"
     meta.export_mode = mode
     meta.cache_format = cache_format
     meta.logical_block_size = spec.block_size
@@ -110,8 +118,8 @@ def validate_remote_layout(local, remote, *, match_group=True):
         raise ValueError("P/D final-prefill mode and logical block sizes must match")
     if match_group and local.tensor_group_idx[0] != remote.tensor_group_idx[0]:
         raise ValueError("P/D cache group ordering must match")
-    if (local.cache_format == "sfa_bf16_v1" and local.export_mode == BF16_TO_TQ4
-            and remote.cache_format != "sfa_bf16_v1"):
+    if (local.cache_format == C8_ABI and local.export_mode == C8_TO_TQ4
+            and remote.cache_format != C8_ABI):
         shape = [remote.logical_block_size // remote.block_size_scale[0], 1, TQ_SLOT_BYTES]
         if (remote.cache_format != TQ_ABI or remote.component_shapes != [shape]
                 or remote.component_dtypes not in (["torch.int8"], ["torch.uint8"])
@@ -150,7 +158,7 @@ class FinalPrefillExporter:
         self.quantizer = TurboQuantLatent(fused_finalize=fused_finalize)
         self.chunk_tokens = chunk_tokens
         self.staging = None
-        if mode == BF16_TO_TQ4:
+        if mode == C8_TO_TQ4:
             largest_block = max(m.logical_block_size for m in metadata.values())
             if chunk_tokens < largest_block:
                 raise ValueError("final_prefill_chunk_tokens must fit at least one logical cache block")
@@ -164,21 +172,22 @@ class FinalPrefillExporter:
             if engine.register_memory(self.staging.data_ptr(), self.staging.numel()) != 0:
                 raise RuntimeError("Final-prefill staging memory registration failed")
         self.staging_buffers = [self.staging]
-        if mode == BF16_TO_TQ4 and incremental:
+        if mode == C8_TO_TQ4 and incremental:
             self._second_storage = torch.empty(size + TRANSFER_ALIGNMENT, dtype=torch.uint8, device=self.device)
             offset = (-self._second_storage.data_ptr()) % TRANSFER_ALIGNMENT
             second = self._second_storage[offset:offset + size].view(chunk_tokens, TQ_SLOT_BYTES)
             if engine.register_memory(second.data_ptr(), second.numel()) != 0:
                 raise RuntimeError("Final-prefill staging memory registration failed")
             self.staging_buffers.append(second)
-        if mode == BF16_TO_TQ4:
+        if mode == C8_TO_TQ4:
             # Load/compile the packer before serving requests. Doing this in
             # the serial export thread can block other D workers' handshakes.
-            pack_bf16_kv(
-                torch.ones((largest_block, LATENT_DIM), dtype=torch.bfloat16, device=self.device),
-                torch.zeros((largest_block, ROPE_DIM), dtype=torch.bfloat16, device=self.device),
-                self.quantizer,
-            )
+            warmup = torch.zeros((largest_block, C8_SLOT_BYTES), dtype=torch.int8, device=self.device)
+            warmup[:, :LATENT_DIM] = 1
+            warmup[:, LATENT_DIM + ROPE_DIM * 2:] = torch.ones(
+                (largest_block, LATENT_DIM // SFA_QSFA_TILE_SIZE), dtype=torch.float32, device=self.device
+            ).view(torch.int8)
+            pack_c8_kv(warmup, self.quantizer)
         # Transforms/staging are created on the model stream before worker use.
         self.ready = torch.npu.Event()
         self.ready.record()
@@ -276,7 +285,7 @@ class FinalPrefillExporter:
                 for tensor, scale in zip(self.caches[name], local.block_size_scale):
                     indices = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
                     parts.append(tensor.index_select(0, indices).reshape(-1, tensor.shape[-1]))
-                packed = pack_bf16_kv(*parts, self.quantizer)
+                packed = pack_c8_kv(parts[0], self.quantizer)
                 self.staging[:packed.shape[0]].copy_(packed)
             self.stream.synchronize()
             page_bytes = math.prod(remote.component_shapes[0])
@@ -293,7 +302,7 @@ class FinalPrefillExporter:
         """Queue conversion N+1 before the blocking transfer of buffer N.
 
         At most two registered buffers are live; a buffer is reused only after
-        its synchronous transfer completed. Persistent BF16 source pages remain
+        its synchronous transfer completed. Persistent C8 source pages remain
         owned until the model-step send queue is drained.
         """
         pages = self.chunk_tokens // local.logical_block_size
@@ -316,7 +325,7 @@ class FinalPrefillExporter:
                 for tensor, scale in zip(self.caches[name], local.block_size_scale):
                     indices = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
                     parts.append(tensor.index_select(0, indices).reshape(-1, tensor.shape[-1]))
-                packed = pack_bf16_kv(*parts, self.quantizer)
+                packed = pack_c8_kv(parts[0], self.quantizer)
                 buffer[:packed.shape[0]].copy_(packed)
                 event = torch.npu.Event()
                 event.record()

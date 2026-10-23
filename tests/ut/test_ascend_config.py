@@ -1536,24 +1536,13 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
         self.assertFalse(config.enable_turboquant_rotation_fusion)
         self.assertFalse(config.enable_turboquant_fused_finalize)
-        self.assertFalse(config.enable_turboquant_prefill_bf16_current)
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             enable_turboquant_rotation_fusion="true",
             enable_turboquant_fused_finalize="true",
-            enable_turboquant_prefill_bf16_current="true",
         )
         self.assertFalse(config.enable_turboquant_rotation_fusion)
         self.assertTrue(config.enable_turboquant_fused_finalize)
-        self.assertTrue(config.enable_turboquant_prefill_bf16_current)
-
-    def test_turboquant_workspace_budget_is_typed_and_nonnegative(self):
-        config = AscendConfig(
-            sparse_kv_offload_config=SimpleNamespace(enabled=False), turboquant_prefill_workspace_mb="64"
-        )
-        self.assertEqual(config.turboquant_prefill_workspace_mb, 64)
-        with self.assertRaises(ValueError):
-            AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False), turboquant_prefill_workspace_mb=-1)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

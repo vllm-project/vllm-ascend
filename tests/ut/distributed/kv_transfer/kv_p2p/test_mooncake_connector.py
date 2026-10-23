@@ -1696,6 +1696,42 @@ class TestMetadataHandling(unittest.TestCase):
             self.assertEqual(self.thread.kv_caches_base_addr["remote_engine"][5555], [[0x3000], [0x4000]])
             self.assertEqual(self.thread.remote_block_stride_per_addr["remote_engine"][5555], [[1024]])
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_transfer_timeout_value", return_value=12345)
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv")
+    def test_get_remote_metadata_export_timeout(self, mock_recv, mock_send, mock_timeout):
+        self.thread.export_metadata = MagicMock()
+        self.test_metadata.export_mode = "c8_to_tq4"
+        mock_recv.return_value = msgspec.msgpack.encode(self.test_metadata)
+        with (
+            patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
+            patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
+        ):
+            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_get_socket.return_value = mock_socket
+            self.thread._get_remote_metadata("host1", 5555)
+            self.assertEqual(
+                mock_socket.setsockopt.call_args_list,
+                [unittest.mock.call(zmq.RCVTIMEO, 12345), unittest.mock.call(zmq.RCVTIMEO, 1000)],
+            )
+            mock_return_socket.assert_called_once_with(mock_socket, "host1", 5555)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_transfer_timeout_value", return_value=12345)
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv", side_effect=RuntimeError("timeout"))
+    def test_get_remote_metadata_export_timeout_failure(self, mock_recv, mock_send, mock_timeout):
+        self.thread.export_metadata = MagicMock()
+        with (
+            patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
+            patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
+        ):
+            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_get_socket.return_value = mock_socket
+            with self.assertRaisesRegex(RuntimeError, "timeout"):
+                self.thread._get_remote_metadata("host1", 5555)
+            mock_socket.close.assert_called_once()
+            mock_return_socket.assert_not_called()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv",
@@ -1713,6 +1749,39 @@ class TestMetadataHandling(unittest.TestCase):
                 self.thread._get_remote_metadata("host1", 5555)
 
             self.assertEqual(str(context.exception), "Network error")
+            mock_socket.close.assert_called_once()
+            mock_return_socket.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_transfer_timeout_value", return_value=12345)
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv", return_value=b"ACK")
+    def test_export_completion_ack_timeout(self, mock_recv, mock_send, mock_timeout):
+        self.thread.export_metadata = MagicMock()
+        with (
+            patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
+            patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
+        ):
+            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_get_socket.return_value = mock_socket
+            self.thread._send_done_recv_signal("request", "host1", 5555, {})
+            self.assertEqual(
+                mock_socket.setsockopt.call_args_list,
+                [unittest.mock.call(zmq.RCVTIMEO, 12345), unittest.mock.call(zmq.RCVTIMEO, 1000)],
+            )
+            mock_return_socket.assert_called_once_with(mock_socket, "host1", 5555)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_transfer_timeout_value", return_value=12345)
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_send")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.ensure_zmq_recv", side_effect=RuntimeError("timeout"))
+    def test_export_completion_ack_timeout_failure(self, mock_recv, mock_send, mock_timeout):
+        self.thread.export_metadata = MagicMock()
+        with (
+            patch.object(self.thread, "_get_remote_socket") as mock_get_socket,
+            patch.object(self.thread, "_return_remote_socket") as mock_return_socket,
+        ):
+            mock_socket = MagicMock(spec=zmq.Socket)
+            mock_get_socket.return_value = mock_socket
+            self.thread._send_done_recv_signal("request", "host1", 5555, {})
             mock_socket.close.assert_called_once()
             mock_return_socket.assert_not_called()
 
@@ -5159,7 +5228,7 @@ def test_export_routes_registered_layers_and_mtp_by_name(pp):
     def layout(group):
         return ExportLayerMetadata(
             [group, group], [100, 200], [4096, 512], [1, 1],
-            "bf16_to_tq4", "sfa_bf16_v1", 4,
+            "c8_to_tq4", "sfa_float_v1", 4,
             [[4, 1, 512], [4, 1, 64]], ["torch.bfloat16"] * 2,
             [4096, 512], [20, 20],
         )
@@ -5171,7 +5240,7 @@ def test_export_routes_registered_layers_and_mtp_by_name(pp):
     worker._prefill_pp_size = pp
     worker.num_draft_layers = 1
     local = make_agent_metadata(engine_id="D", local_ip="destination", te_rpc_port=88)
-    local.export_mode = "bf16_to_tq4"
+    local.export_mode = "c8_to_tq4"
     local.export_layers = {name: layout(1) for name in names}
     worker.export_metadata = local
     worker.encoder = msgspec.msgpack.Encoder()
@@ -5186,7 +5255,7 @@ def test_export_routes_registered_layers_and_mtp_by_name(pp):
         if stage == pp - 1:
             stage_names += names[-1:]
         remote = make_agent_metadata(engine_id="P")
-        remote.export_mode = "bf16_to_tq4"
+        remote.export_mode = "c8_to_tq4"
         remote.export_layers = {name: layout(0) for name in stage_names}
         worker.remote_export_metadata = {("P", 100 + stage): remote}
         worker._export_kv_cache({

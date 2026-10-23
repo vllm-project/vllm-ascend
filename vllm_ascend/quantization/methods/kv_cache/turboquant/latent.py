@@ -10,6 +10,8 @@ from importlib import import_module
 import numpy as np
 import torch
 
+from vllm_ascend.attention.utils import SFA_QSFA_TILE_SIZE
+
 from . import HEAD_DIM
 
 # The historical DeepSeek V4 Lloyd-Max codebook was trained from 400,000
@@ -106,7 +108,7 @@ class TurboQuantLatent:
         assert inverse_rotation is not None
         return (x.float().reshape(-1, HEAD_DIM) @ inverse_rotation).to(x.dtype).reshape(x.shape)
 
-    def compress(self, x, *, rotated_out: torch.Tensor | None = None):
+    def compress(self, x):
         self._initialize(x.device)
         rotation = self.rotation
         centroids = self.centroids
@@ -115,8 +117,6 @@ class TurboQuantLatent:
         assert centroids is not None
         assert norm_lut is not None
         rotated = (x.float().reshape(-1, HEAD_DIM) @ rotation).contiguous()
-        if rotated_out is not None:
-            rotated_out.copy_(rotated)
         packed, norm = _get_turbo_quant_op()(rotated, centroids)
         # ops-nn returns the original norm. MixedQuantSparseFlashMla multiplies
         # centroids by scale directly; retain the old DS norm correction here.
@@ -130,14 +130,28 @@ class TurboQuantLatent:
         scale = (norm.float() / selected_norm).to(torch.float16)
         return torch.cat((packed, scale.view(torch.uint8).reshape(-1, 2)), dim=-1).unsqueeze(1)
 
-    def compress_kv_into(self, nope, rope, slots, output):
-        """Pack the established GLM ABI and scatter directly into target slots."""
-        from vllm_ascend.device.device_op import DeviceOperator
 
-        packed = pack_bf16_kv(nope, rope, self)
-        # P/D staging is uint8, whereas the cache is int8. Scatter supports
-        # signed bytes only; reinterpret both views without changing the ABI.
-        DeviceOperator.scatter_cache(output.view(torch.int8), slots.view(-1, 1), packed.view(torch.int8))
+def unpack_c8_kv(packed, tile_size=SFA_QSFA_TILE_SIZE):
+    """Decode the existing SFA C8 ABI, retaining BF16 RoPE and FP32 scales."""
+    rope_dim = 64
+    if tile_size <= 0 or HEAD_DIM % tile_size:
+        raise ValueError("Invalid SFA INT8 quantization tile size")
+    scale_count = HEAD_DIM // tile_size
+    rope_end = HEAD_DIM + rope_dim * 2
+    if (packed.dtype != torch.int8
+            or packed.shape[-1] != rope_end + scale_count * 4):
+        raise ValueError("Invalid SFA INT8 cache layout")
+    rows = packed.reshape(-1, packed.shape[-1])
+    scales = rows[:, rope_end:].contiguous().view(torch.float32)
+    nope = (rows[:, :HEAD_DIM].float().reshape(-1, scale_count, tile_size)
+            * scales.unsqueeze(-1)).reshape(-1, HEAD_DIM).bfloat16()
+    rope = rows[:, HEAD_DIM:rope_end].contiguous().view(torch.bfloat16)
+    return nope, rope
+
+
+def pack_c8_kv(packed, quantizer):
+    """Convert a bounded C8 chunk using the unchanged TurboQuant quantizer."""
+    return pack_bf16_kv(*unpack_c8_kv(packed), quantizer)
 
 
 def pack_bf16_kv(nope, rope, quantizer):
