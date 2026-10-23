@@ -78,7 +78,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -565,7 +564,7 @@ class BalanceScheduler(Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
@@ -789,7 +788,7 @@ class BalanceScheduler(Scheduler):
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
-        # connector before building its metadata. (vLLM main/v0.31.0)
+        # connector before building its metadata on both supported vLLM lanes.
         kv_connector_block_state = None
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
         if self.connector is not None:

@@ -30,19 +30,9 @@ from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
-
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #60335 renamed the AR speculator class/module on main; the release
-# lane (v0.31.0) still ships `autoregressive.speculator.AutoRegressiveSpeculator`.
-if vllm_version_is("0.31.0"):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
-        AutoRegressiveSpeculator,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
-        TargetDependentARSpeculator as AutoRegressiveSpeculator,
-    )
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator as AutoRegressiveSpeculator,
+)
 
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -63,7 +53,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 )
 
 # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main.
-_DP_SYNC_KWARG = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+_DP_SYNC_KWARG = "dp_sync_state"
 
 
 @pytest.fixture(autouse=True)

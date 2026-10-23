@@ -711,10 +711,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # vLLM #58737 derives num_reqs from the block table and asserts that
         # seq_lens has the same number of rows. Ascend's unpadded() intentionally
         # keeps the padded block-table rows, so on vLLM main pass only the real
-        # request rows. v0.31.0's align path already derives its output rows from
+        # request rows. v0.32.0's align path already derives its output rows from
         # seq_lens, so the result is unchanged there.
         if (
-            not vllm_version_is("0.31.0")
+            not vllm_version_is("0.32.0")
             and mamba_cache_mode != "none"
             and mamba_block_table.shape[0] != m.seq_lens.shape[0]
         ):
