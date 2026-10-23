@@ -145,6 +145,15 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         for metric in task["metrics"]:
             metric_name = metric["name"]
             ground_truth = metric["value"]
+            if metric_name not in task_result:
+                # lm_eval metric keys differ across versions (e.g. pass@1 vs
+                # pass_at_1 vs pass_at_k); fall back to a prefix match.
+                print(f"WARNING: metric {metric_name!r} not in results keys {sorted(task_result)!r}")
+                stem = metric_name.split(",")[0].split("@")[0]
+                matched = [k for k in task_result if k.split(",")[0].split("@")[0] == stem]
+                if not matched:
+                    raise KeyError(f"metric {metric_name!r} not found; have {sorted(task_result)!r}")
+                metric_name = matched[0]
             measured_value = round(task_result[metric_name], 4)
             task_success = bool(np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success
