@@ -271,7 +271,7 @@ do not select a partition using memory capacity alone.
 
 ## Advanced Scenarios
 
-### PP with Speculative Decoding
+### PP with Speculative Decoding {: #pp-with-speculative-decoding}
 
 `VLLM_PP_LAYER_PARTITION` partitions only the target model. Draft-model layers
 are not included in its layer sum, and their weight naming and layer layout
