@@ -357,12 +357,33 @@ def test_preflight_accepts_native_tensor_scale_abi(monkeypatch, caplog):
         torch.ops.cann_ops_transformer,
         "engram_fetch_wait",
         SimpleNamespace(
-            default=SimpleNamespace(_schema="engram_fetch_wait(Tensor fetched, Tensor fetched_sf) -> Tensor")
+            default=SimpleNamespace(
+                _schema="cann_ops_transformer::engram_fetch_wait(Tensor context, Tensor fetched) -> Tensor"
+            )
         ),
         raising=False,
     )
     table._check_fp8_runtime(SimpleNamespace(engram_write=lambda storage, sf=None: None))
     assert "opp_validation=pending-runtime-probe" in caplog.text
+
+
+def test_preflight_rejects_missing_fetch_wait(monkeypatch):
+    from vllm_ascend.device import hardware_profile
+
+    table = _table()
+    monkeypatch.setattr(table, "_target_device", lambda: SimpleNamespace(type="npu"))
+    monkeypatch.setattr(
+        hardware_profile, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
+    )
+    monkeypatch.setattr(
+        torch.ops.cann_ops_transformer,
+        "engram_fetch",
+        SimpleNamespace(default=SimpleNamespace(_schema="engram_fetch(Tensor sf_table, Tensor fetched_sf) -> Tensor")),
+        raising=False,
+    )
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "engram_fetch_wait", None, raising=False)
+    with pytest.raises(RuntimeError, match="registered.*EngramFetchWait"):
+        table._check_fp8_runtime(SimpleNamespace(engram_write=lambda storage, sf=None: None))
 
 
 def test_preflight_rejects_cpu_runtime():

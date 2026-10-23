@@ -499,16 +499,15 @@ class ElasticEngramEmbedding(nn.Module):
         try:
             wait_schema = str(torch.ops.cann_ops_transformer.engram_fetch_wait.default._schema)
         except AttributeError as exc:
-            raise RuntimeError("Engram MXFP8 requires the registered tensor-scale EngramFetchWait ABI") from exc
-        if "Tensor fetched_sf" not in wait_schema:
-            raise RuntimeError(f"Engram MXFP8 requires the tensor-scale ABI; installed wait schema: {wait_schema}")
+            raise RuntimeError("Engram MXFP8 requires the registered EngramFetchWait operation") from exc
         logger.debug(
             "FOR-ENGRAM FP8 interface preflight: layer=%s tp_rank=%d write_signature=%s "
-            "fetch_schema=%s opp_validation=pending-runtime-probe storage_policy=fp8-only",
+            "fetch_schema=%s wait_schema=%s opp_validation=pending-runtime-probe storage_policy=fp8-only",
             self.layer_id,
             self.rank,
             signature,
             schema,
+            wait_schema,
         )
 
     def _prepare_fp8_scale(self) -> None:
