@@ -309,6 +309,7 @@ requirements in the relevant feature guide.
 | Lmhead TP | Supported. |
 | MLAPO | Supported. |
 | Multimodal inputs (mm) | Supported. |
+| Multistream MoE | Supported. |
 | Shared Expert DP | Supported. |
 | Quantization | Supported for all quantization methods available for the model and hardware, including W4A4, W4A8, and W8A8. |
 | Weight NZ | Supported. |
