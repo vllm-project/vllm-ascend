@@ -262,7 +262,6 @@ For Host RoCE, also expose the RDMA devices, provide the HRN5 shared library, an
 ```
 
 - Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
-- Ensure `libibv_extend.so.4` is loadable. No separate mount is needed when the complete driver mount already supplies it on the runtime library search path.
 - `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
 - Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
