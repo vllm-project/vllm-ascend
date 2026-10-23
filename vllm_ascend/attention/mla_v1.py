@@ -2423,7 +2423,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.layer_name is not None
 
         if self.layerwise_kv_cache_hook is not None:
-            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+            if num_actual_tokens > num_decode_tokens and getattr(self.layerwise_kv_cache_hook, "layerwise", False):
                 wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
@@ -2870,8 +2870,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
-        if self.layerwise_kv_cache_hook is not None and getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-            record_attention_compute_start()
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -3253,9 +3251,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         # Sharded decode writes other ranks' KV even without local queries.
         should_write_kv_cache = has_decode or has_prefill or self.is_pcp_decode_sharded
-        if has_prefill or (
-            self.layerwise_kv_cache_hook is not None and getattr(self.layerwise_kv_cache_hook, "layerwise", False)
-        ):
+        if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
@@ -3403,8 +3399,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_prefills == 0
         ):
             if self.layerwise_kv_cache_hook is not None:
-                if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
-                    wait_for_kv_layer_from_connector(layer_name)
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
                 hidden_states, kv_cache, attn_metadata
