@@ -9,7 +9,8 @@ from vllm.distributed.device_communicators.shm_broadcast import SpinCondition
 from zmq.constants import Flag, PollEvent
 from zmq.error import Again
 
-_NOTIFY_POLL_INTERVAL_S = 1.0
+# Match upstream vLLM PR #63165.
+_NOTIFY_POLL_INTERVAL_S = 2.0
 
 
 def record_read(self: SpinCondition) -> None:
