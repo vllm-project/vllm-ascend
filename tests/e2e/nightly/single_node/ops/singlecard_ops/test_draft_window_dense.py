@@ -66,6 +66,12 @@ def test_dense_device_exact_reader(geometry, query_width, future, causal, page_l
         assert not keys.is_contiguous() and values.storage_offset() > 0
         backing_before = backing.clone()
     source_table = canonical.npu()
+    if page_layers:
+        # The planner must use real table strides, without a Full-table copy.
+        table_backing = torch.full((4, 24), -1, dtype=torch.int32, device="npu")
+        source_table = table_backing[:, ::2]
+        source_table.copy_(canonical.npu())
+        assert source_table.stride(1) == 2
     source = DirectPrefixSource(source_table, rows, (12, 12), B)
     upper_cpu = torch.tensor(ends, dtype=torch.int32) + 1
     upper_device, rejected = upper_cpu.npu(), torch.ones(2, dtype=torch.int32, device="npu")

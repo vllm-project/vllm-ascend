@@ -99,38 +99,55 @@ def prepare_dense_draft_read(
     if exact_device.device != source.table.device or row_indices.device != source.table.device:
         raise ValueError("Dense read operands must share their source device")
     exact = exact_device[:n].clone()
-    if frozen_starts is None:
-        starts = torch.div(torch.clamp(exact - window_size, min=0), anchor_span, rounding_mode="floor") * anchor_span
-    else:
-        if (
-            frozen_starts.shape != (n,)
-            or frozen_starts.device != exact.device
-            or frozen_starts.dtype not in (torch.int32, torch.int64)
-        ):
-            raise ValueError("Frozen Draft anchors must match current request rows and device")
-        starts = frozen_starts.clone()
-    visible = exact - starts
+    if frozen_starts is not None and (
+        frozen_starts.shape != (n,)
+        or frozen_starts.device != exact.device
+        or frozen_starts.dtype not in (torch.int32, torch.int64)
+    ):
+        raise ValueError("Frozen Draft anchors must match current request rows and device")
     # Both are allocation bounds: V <= E <= U and V <= W+B-1. Avoid
     # window-sized padding on short contexts without using U to choose S/V.
     capacity_bound = min(window_size + anchor_span - 1, int(upper_cpu.max()))
     capacity = (capacity_bound + 31) // 32 * 32
-    columns = torch.arange(capacity, device=exact.device, dtype=torch.int64)
-    # Every gather address denotes an actual token in [S,E), including padding.
-    absolute = starts[:, None] + torch.minimum(columns[None, :], visible[:, None] - 1)
-    block_columns = torch.div(absolute, source.block_span, rounding_mode="floor")
-    # Flat gathers avoid the advanced-index AICPU fallback on current CANN.
-    table_indices = row_indices[:, None] * source.table.shape[1] + block_columns
-    blocks = source.table.reshape(-1).index_select(0, table_indices.reshape(-1)).reshape(n, capacity)
-    slots = blocks.to(torch.int64) * source.block_span + absolute % source.block_span
-    mask = (columns[None, None, :] >= visible[:, None, None]).expand(n, query_width, capacity)
-    if causal:
-        queries = visible[:, None] - query_width + torch.arange(query_width, device=exact.device)[None, :]
-        mask = mask | (columns[None, None, :] > queries[:, :, None])
+    if exact.device.type == "npu":
+        from vllm_ascend.ops.triton.v2.spec_decode.draft_window import plan_draft_window
+
+        slots, starts, visible, mask = plan_draft_window(
+            source.table,
+            row_indices,
+            exact,
+            frozen_starts,
+            block_span=source.block_span,
+            anchor_span=anchor_span,
+            window=window_size,
+            capacity=capacity,
+            query_width=query_width,
+            causal=causal,
+        )
+    else:
+        # Keep a CPU execution path for geometry/ownership contract tests.
+        starts = (
+            torch.div(torch.clamp(exact - window_size, min=0), anchor_span, rounding_mode="floor") * anchor_span
+            if frozen_starts is None
+            else frozen_starts.clone()
+        )
+        visible = exact - starts
+        columns = torch.arange(capacity, device=exact.device, dtype=torch.int64)
+        absolute = starts[:, None] + torch.minimum(columns[None, :], visible[:, None] - 1)
+        block_columns = torch.div(absolute, source.block_span, rounding_mode="floor")
+        table_indices = row_indices[:, None] * source.table.shape[1] + block_columns
+        blocks = source.table.reshape(-1).index_select(0, table_indices.reshape(-1)).reshape(n, capacity)
+        slots = blocks.to(torch.int64) * source.block_span + absolute % source.block_span
+        mask = (columns[None, None, :] >= visible[:, None, None]).expand(n, query_width, capacity)
+        if causal:
+            queries = visible[:, None] - query_width + torch.arange(query_width, device=exact.device)[None, :]
+            mask = mask | (columns[None, None, :] > queries[:, :, None])
+        mask = mask[:, None].contiguous()
     read = DenseDraftRead(
         slots,
         visible,
         starts,
-        mask[:, None].contiguous(),
+        mask,
         capacity,
         query_width,
         retain,
