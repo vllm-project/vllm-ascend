@@ -38,7 +38,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
-      - '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}'
+      - '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":false}'
       - "--additional-config"
       - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
     benchmarks:

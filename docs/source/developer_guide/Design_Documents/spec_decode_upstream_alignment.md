@@ -49,14 +49,15 @@ router, and the MRV2 readiness gate all consume that result.
 | Method patches | vLLM runner modules | `vllm_ascend/patch/worker/patch_v2/*` | Retain only while the verified upstream revision lacks an extension point. |
 
 The slot-mapping write contract is centralized in
-`vllm_ascend.spec_decode.utils.copy_slot_mapping_to_padded_buffer`. It owns
-dtype conversion, source aliasing, and graph-padding sentinel values for MTP,
-Step3.5 MTP, and multi-KV-group MTP.
+`vllm_ascend.worker.v1.spec_decode.utils.copy_slot_mapping_to_padded_buffer`. It
+owns dtype conversion, source aliasing, and graph-padding sentinel values for
+MTP, Step3.5 MTP, and multi-KV-group MTP.
 
 MRV2 readiness falls back to MRV1 for speculative families without an Ascend
-V2 speculator: suffix, NGram, Medusa, standalone draft model, Gemma4 MTP, and
-Step3.5 MTP. DFlash2 and parallel-drafting EAGLE are excluded only when their
-documented graph limitations apply.
+V2 speculator: suffix, NGram, Medusa, Gemma4 MTP, Step3.5 MTP, and unknown
+methods. Standalone draft model uses the upstream standalone-AR speculator on
+V2. DFlash2 and parallel-drafting EAGLE are excluded only when their documented
+graph limitations apply.
 
 ## Difference Inventory
 
@@ -66,7 +67,7 @@ removing NPU behavior that upstream cannot express.
 
 | Area | Current Ascend owner | Upstream owner | Classification | Migration action |
 | --- | --- | --- | --- | --- |
-| Speculative family selection | `vllm_ascend/spec_decode/method.py` | vLLM `SpeculativeConfig` method/use helpers | Portable policy | Keep one Ascend selector for runner parity; add new families here before adding runner branches. |
+| Speculative family selection | `vllm_ascend/worker/spec_decode_family.py` | vLLM `SpeculativeConfig` method/use helpers | Portable policy | Keep one Ascend selector for runner parity; add new families here before adding runner branches. |
 | MRV1 proposer lifecycle | `AscendSpecDecodeBaseProposer` | `vllm/v1/spec_decode/llm_base_proposer.py` | Mixed | Reuse upstream sampling, proposal, and accounting methods. Retain overrides only for Ascend metadata, graph, PCP/DCP, and custom operators, then narrow those overrides behind hooks. |
 | MRV1 DFlash/DSpark input preparation | `AscendDflashProposer`, `AscendDSparkProposer` | `vllm/v1/spec_decode/dflash.py` and base proposer | Mostly NPU | Retain NPU copy/expand and graph-safe buffers; delete any duplicated host-side preparation already supplied upstream. |
 | MRV2 autoregressive draft loop | `AscendAutoRegressiveSpeculator` | `TargetDependentARSpeculator` | Mixed | Continue delegating prefill, multi-step decode, and draft iteration to `super()`; keep only metadata construction, ACL Graph, replicated PCP, and hidden-state broadcast overrides. |
@@ -168,14 +169,17 @@ Current hardware verification uses an Ascend A3 device:
   same two execution paths in MRV2.
 - DSpark with `Qwen3-0.6B` and `yosefw/Qwen3-0.6B-DSpark` passed eager and
   `FULL_DECODE_ONLY`; both paths used acceptance length 2.7083.
+- A cached `Qwen3-0.6B` target/draft smoke test passed through the MRV2
+  standalone-AR speculator, covering the plain `draft_model` route.
 - The public draft checkpoints are configurable through
   `SPEC_DECODE_MTP_MODEL`, `SPEC_DECODE_EAGLE3_MODEL`,
   `SPEC_DECODE_DSPARK_MODEL`, and the corresponding `*_DRAFT_MODEL` variables.
 
 The special `MULTI_KV_CACHE_GROUP_MTP` family is exercised by unit tests in this
-change and by the existing 16-card GLM5.2 MTP/MTP-V2 nightly jobs. Public 3-layer
-GLM5.2 test checkpoints are backbone-only and explicitly omit the MTP layer, so
-they are not valid substitutes for that runtime case. DFlash remains
+change. The 16-card GLM5.2 MTP-V2 nightly job now runs the family with
+`FULL_DECODE_ONLY`, while the non-V2 MTP job retains eager coverage. Public
+3-layer GLM5.2 test checkpoints are backbone-only and explicitly omit the MTP
+layer, so they are not valid substitutes for that runtime case. DFlash remains
 family-specific CI coverage. CPU-only unit tests are not acceptance evidence for
 NPU attention layouts or graph replay.
 
@@ -187,7 +191,9 @@ available KV blocks is recorded but is not required to match across modes becaus
 Graph capture changes the remaining HBM budget. Eager and Graph are independent
 execution modes and are not required to produce the same long-horizon greedy
 tokens; ACL Graph numerical drift on the audited MTP model was observed after
-token 20.
+token 20. Each mode is also compared with checked-in baseline goldens
+(`spec_decode_parity_goldens.json`) for exact greedy token IDs and cache layout,
+plus acceptance length and per-position rates within five percent.
 
 The baseline/candidate benchmark compares the same family in the same execution
 mode. Greedy token IDs over the fixed parity window, cache signature (including

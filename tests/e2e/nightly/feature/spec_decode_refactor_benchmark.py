@@ -49,7 +49,7 @@ def _serving_metrics(path: str | None) -> dict[str, float]:
         "output_throughput": ("output_throughput",),
     }
     result: dict[str, float] = {}
-    for prefix, source_names in metric_names.items():
+    for source_names in metric_names.values():
         for source_name in source_names:
             if source_name not in payload:
                 continue
@@ -73,7 +73,7 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
             "model": args.draft_model,
         }
     case = replace(case, **updates)
-    results = [_run(case, graph_mode=args.mode, speculative=True) for _ in range(args.repeats)]
+    results = [_run(case, graph_mode=args.mode) for _ in range(args.repeats)]
     result = _aggregate_results(results)
     payload = asdict(result)
     payload.update(
@@ -83,6 +83,15 @@ def _record(args: argparse.Namespace) -> dict[str, Any]:
             "speculative_config": case.speculative_config,
             "graph_mode": args.mode,
             "repeat_count": len(results),
+            "repeat_samples": [
+                {
+                    "acceptance_length": result.acceptance_length,
+                    "elapsed_seconds": result.elapsed_seconds,
+                    "hbm_in_use_bytes": result.hbm_in_use_bytes,
+                    "output_tokens_per_second": result.output_tokens_per_second,
+                }
+                for result in results
+            ],
             "serving": _serving_metrics(args.serving_json),
         }
     )
