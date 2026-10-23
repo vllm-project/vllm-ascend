@@ -8,14 +8,13 @@ legacy per-update packed wire parameters are local. The packed producer/consumer
 and the layerwise cross-chunk behaviour are unchanged.
 """
 
-from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext, suppress
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
     VLLMWeightSyncClient,
@@ -93,27 +92,6 @@ class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
 
     def __post_init__(self) -> None:
         _validate_packed_params(self)
-
-
-@dataclass
-class HCCLTrainerSendWeightsArgs:
-    """Deprecated static-path arguments; use HCCLTrainerInitInfo instead."""
-
-    group: Any
-    """Process group (PyHcclCommunicator) for HCCL communication."""
-    src: int = 0
-    """Source rank (default 0, trainer is typically rank 0)."""
-    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor] | None = None
-    """Optional function applied to each (name, tensor) pair before sending.
-    If None, extracts just the tensor."""
-    packed: bool = False
-    """Whether to batch tensors into packed buffers before broadcasting."""
-    stream: torch.npu.Stream | None = None
-    """Stream used by the unpacked path; the packed path creates its own."""
-    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes of each packed buffer; must match the worker side."""
-    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
-    """Number of packed buffers; must match the worker side."""
 
 
 @dataclass
@@ -239,53 +217,6 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         group, self.model_update_group = getattr(self, "model_update_group", None), None
         if group is not None:
             group.close()
-
-    @staticmethod
-    @deprecated(
-        "HCCLWeightTransferEngine.trainer_init is deprecated. Use "
-        "WeightTransferTrainerFactory.trainer_init(HCCLTrainerInitInfo(...), "
-        "client=..., source=...) instead."
-    )
-    def trainer_init(init_info: HCCLWeightTransferInitInfo | dict) -> "PyHcclCommunicator":
-        """Legacy rendezvous for trainers that drive their own update RPCs."""
-        return hccl_common.trainer_init(init_info)
-
-    @staticmethod
-    @deprecated(
-        "HCCLWeightTransferEngine.trainer_send_weights is deprecated. Use "
-        "HCCLTrainerWeightTransferEngine.send_weights() instead."
-    )
-    def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any] | HCCLTrainerSendWeightsArgs,
-    ) -> None:
-        """Broadcast weights from a trainer that drives the RPCs itself.
-
-        Legacy entry point kept for existing trainers; new code should build
-        `HCCLTrainerWeightTransferEngine` through `WeightTransferTrainerFactory`.
-        """
-        args = HCCLTrainerSendWeightsArgs(**trainer_args) if isinstance(trainer_args, dict) else trainer_args
-        post = args.post_iter_func or (lambda item: item[1])
-        device = getattr(args.group, "device", None)
-        with torch.npu.device(device) if device is not None else nullcontext():
-            if args.packed:
-                packed_broadcast_producer(
-                    iterator=iterator,
-                    group=args.group,
-                    src=args.src,
-                    post_iter_func=post,
-                    buffer_size_bytes=args.packed_buffer_size_bytes,
-                    num_buffers=args.packed_num_buffers,
-                )
-            else:
-                stream = args.stream or torch.npu.current_stream()
-                for item in iterator:
-                    tensor = post(item)
-                    args.group.broadcast(tensor, src=args.src, stream=stream)
-                    # PyHcclCommunicator.broadcast only enqueues the collective.
-                    # Wait for it here so the staging tensor stays alive (and its
-                    # storage cannot be reused) until the broadcast has landed.
-                    stream.synchronize()
 
 
 class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
