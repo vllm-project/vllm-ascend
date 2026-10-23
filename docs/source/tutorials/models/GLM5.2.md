@@ -981,7 +981,8 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${PP_MASTER_IP:?Set the PP master address for this Prefill instance}"
+            # P0/P1 use <P0_IP>; P2/P3 use <P2_IP>.
+            PP_MASTER_IP="<P0_IP>"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1087,7 +1088,8 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${PP_MASTER_IP:?Set the PP master address for this Prefill instance}"
+            # P0/P1 use <P0_IP>; P2/P3 use <P2_IP>.
+            PP_MASTER_IP="<P0_IP>"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1285,35 +1287,35 @@ layerwise setting and topology.
     ###### Start the Engines
 
     Export the node-specific `MODEL_PATH`, `LOCAL_IP` and `NIC_NAME`, and the shared
-    `D0_IP` address before starting the corresponding node script. Each Prefill
-    instance uses its own `PP_MASTER_IP`: P0 for P0/P1, and P2 for P2/P3. Save
-    the appropriate PP-rank script above as `run_dp_template.sh` on each node. Run each
-    command on its named node in a separate terminal. Start both PP ranks of
-    each Prefill instance and both Decode nodes before waiting for the APIs
-    to become ready.
+    `D0_IP` address before starting the corresponding node script. Set
+    `PP_MASTER_IP` inside each Prefill script: `<P0_IP>` on P0/P1 and `<P2_IP>`
+    on P2/P3. Save the appropriate PP-rank script above as `run_dp_template.sh`
+    on each node. Run each command on its named node in a separate terminal.
+    Start both PP ranks of each Prefill instance and both Decode nodes before
+    waiting for the APIs to become ready.
 
     1. Prefill node 0 (PP rank 0 of the first instance)
 
         ```shell
-        PP_MASTER_IP="<P0_IP>" bash run_dp_template.sh
+        bash run_dp_template.sh
         ```
 
     2. Prefill node 1 (PP rank 1 of the first instance)
 
         ```shell
-        PP_MASTER_IP="<P0_IP>" bash run_dp_template.sh
+        bash run_dp_template.sh
         ```
 
     3. Prefill node 2 (PP rank 0 of the second instance)
 
         ```shell
-        PP_MASTER_IP="<P2_IP>" bash run_dp_template.sh
+        bash run_dp_template.sh
         ```
 
     4. Prefill node 3 (PP rank 1 of the second instance)
 
         ```shell
-        PP_MASTER_IP="<P2_IP>" bash run_dp_template.sh
+        bash run_dp_template.sh
         ```
 
     5. Decode node 0
