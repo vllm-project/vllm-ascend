@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import inspect as _inspect
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
@@ -66,8 +67,32 @@ from vllm_ascend.spec_decode.utils import (
     compact_mtp_topk_indices,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import _is_glm_model, check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
-from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
+from vllm_ascend.utils import (
+    _is_glm_model,
+    check_gdn_layer,
+    enable_sp,
+    lmhead_tp_enable,
+    use_updatable_graph,
+)
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataExecutor,
+    DeviceMetadataTask,
+    DeviceMetadataTaskProvider,
+)
+
+# DSpark draft ACL-graph support (see dspark_proposer.py for the three
+# capture invariants). This module carries the per-step side of the
+# contract:
+#   * the deferred draft device-metadata kernels (DSA ``sas_metadata`` /
+#     ``dspark_swa_indices``) run synchronously on the current stream
+#     before every draft step - nothing is submitted to a
+#     DeviceMetadataExecutor and no in-graph wait is recorded;
+#   * the dispatch bucket for a uniform decode step is computed from
+#     ``num_reqs * (1 + num_speculative_tokens)`` so the replay bucket
+#     matches the bucket the capture was keyed on (mismatched buckets
+#     crashed with ``assert num_reqs <= num_reqs_padded`` at >= 7
+#     concurrent requests).
+_DSPARK_DRAFT_GRAPH_ENABLED = os.environ.get("VLLM_ASCEND_ENABLE_DSPARK_DRAFT_GRAPH", "0") == "1"
 
 
 class _HiddenStateDrafter(Protocol):
@@ -304,6 +329,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+
+        # [TARGETPOS-FIX] Resident staging buffer for the target runner's per-step
+        # ``target_positions``.  The target runner hands that tensor out freshly
+        # allocated on every step (``self.positions[token_indices]`` - advanced
+        # indexing in ``gpu_model_runner._get_positions`` / the Ascend runner's
+        # ``propose_draft_token_ids`` override), so its address moves on every
+        # replay while an ACLGraph replay never re-runs Python.  Refresh one
+        # persistent buffer in place once per step and hand out only a slice of
+        # it, exactly like ``dsa_v1``'s resident ``start_pos_draft``.  Created
+        # lazily so that dtype/device are taken from the tensor the target runner
+        # actually passes (it is int64, while this drafter's own ``self.positions``
+        # above is int32).
+        self._draft_target_positions: torch.Tensor | None = None
 
         self.token_arange_np = np.arange(self.max_num_tokens + 1, dtype=np.int32)
         self.enable_enpu = self.runner.enable_enpu
@@ -1007,6 +1045,56 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
+    def _stage_target_positions(self, target_positions: torch.Tensor) -> torch.Tensor:
+        """[TARGETPOS-FIX] Return ``target_positions`` as a slice of a resident buffer.
+
+        Address invariance, not values, is the point: the draft ACL graph is
+        replayed by ``ACLGraphWrapper`` (``entry.aclgraph.replay()``) without
+        re-running this Python, so every tensor it is *told* about must live at an
+        address that does not move between steps.  ``target_positions`` arrives
+        from the target runner as a fresh allocation per step
+        (``_get_positions(token_indices)`` -> advanced indexing ->
+        ``self.positions[token_indices]``), so its address moves every step.
+
+        The buffer is created once, aligned to the dtype/device of the incoming
+        tensor (the runner's positions are int64, this proposer's own
+        ``self.positions`` is int32 - a hard-coded dtype would silently cast), and
+        every later call must agree with that dtype/device: silently re-allocating
+        on a dtype change would itself move the address.  ``n`` above the buffer
+        capacity is a hard error rather than a silent truncation.
+        """
+        if target_positions.dim() != 1:
+            # M-RoPE / xdrope variants hand out ``(dim, num_tokens)`` slices of a
+            # persistent buffer already, so their address is invariant as-is.
+            return target_positions
+        num_tokens = target_positions.shape[0]
+        # ``getattr`` fallbacks keep this safe on partially-constructed
+        # proposers (tests build instances via ``__new__`` without running
+        # ``__init__``).
+        buffer = getattr(self, "_draft_target_positions", None)
+        if buffer is None:
+            capacity = max(int(getattr(self, "max_num_tokens", 0) or 0), num_tokens)
+            buffer = torch.zeros(
+                capacity,
+                dtype=target_positions.dtype,
+                device=target_positions.device,
+            )
+            self._draft_target_positions = buffer
+        if buffer.dtype != target_positions.dtype or buffer.device != target_positions.device:
+            raise RuntimeError(
+                "[TARGETPOS-FIX] target_positions dtype/device changed mid-run "
+                f"({buffer.dtype}/{buffer.device} -> {target_positions.dtype}/{target_positions.device}); "
+                "refusing to swap the resident buffer out from under the captured draft graph"
+            )
+        if num_tokens > buffer.shape[0]:
+            raise ValueError(
+                "[TARGETPOS-FIX] target_positions has "
+                f"{num_tokens} elements but the resident buffer holds {buffer.shape[0]} "
+                "(capacity = self.max_num_tokens); refusing to truncate"
+            )
+        buffer[:num_tokens].copy_(target_positions)
+        return buffer[:num_tokens]
+
     def _propose(
         self,
         num_speculative_tokens: int,
@@ -1065,6 +1153,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        # [TARGETPOS-FIX] Rebind the per-step tensor to the resident buffer before
+        # its first consumer (``set_inputs_first_pass``, which feeds the DSpark /
+        # DFlash input-expansion kernel through ``target_positions_ptr``) and keep
+        # the token count for the graph input rebound further below.
+        num_target_positions = target_positions.shape[-1]
+        target_positions = self._stage_target_positions(target_positions)
+
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -1087,9 +1182,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
 
-        if self.use_cuda_graph:
+        _use_graph_rt = bool(getattr(self, "use_cuda_graph", False))
+        # The draft consumes only ``num_query_per_req`` tokens per request while
+        # the dispatcher buckets by ``uniform_decode_query_len`` (= 1 +
+        # num_speculative_tokens); dispatching the raw count selects a bucket
+        # whose implied request count is too small (40 tokens -> bucket 42 ->
+        # 7 < 8 requests) and trips ``assert num_reqs <= num_reqs_padded`` at
+        # >= 7 concurrent requests. Convert to the per-request-equivalent
+        # token count so the replay bucket matches the capture bucket.
+        _dispatch_num_tokens = num_tokens
+        if _use_graph_rt and uniform_decode:
+            _udql = int(getattr(self.runner.cudagraph_dispatcher, "uniform_decode_query_len", 0) or 0)
+            _nqr = int(getattr(self, "num_query_per_req", 0) or 0)
+            _nreq = int(common_attn_metadata.num_reqs or 0)
+            if _udql > 0 and _nqr > 0 and _udql != _nqr and _nreq > 0 and num_tokens == _nreq * _nqr:
+                _dispatch_num_tokens = _nreq * _udql
+        if _use_graph_rt:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+                num_tokens=_dispatch_num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
@@ -1101,12 +1211,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
-        if self.use_cuda_graph:
+        if _use_graph_rt:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
+            # Eager draft path: same shape as graph mode disabled entirely.
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
 
@@ -1221,7 +1332,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._pad_draft_buffers(num_tokens, num_input_tokens)
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
-            common_attn_metadata, num_input_tokens, num_tokens
+            common_attn_metadata, num_input_tokens, num_tokens, batch_descriptor=batch_descriptor
         )
 
         # Merged step 0 is the draft model's first-pass/prefill forward, not a
@@ -1345,9 +1456,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata,
             )
 
-        active_device_metadata_executor = (
-            getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
-        )
+        active_device_metadata_executor = self._dspark_device_metadata_executor() if self.method == "dspark" else None
         if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
             active_device_metadata_executor = None
         with set_ascend_forward_context(
@@ -1374,7 +1483,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "num_input_tokens": num_input_tokens,
                 "batch_size": batch_size,
                 "token_indices_to_sample": self.token_indices_to_sample[:token_indices_to_sample_len],
-                "target_positions": target_positions,
+                # [TARGETPOS-FIX] The draft ACL graph binds this input while it is
+                # captured, and both capture paths (``dummy_run`` here and
+                # ``AscendDSparkProposer.dummy_run``) bind
+                # ``self._get_positions(...)`` - a slice of this drafter's own
+                # persistent positions buffer.  Replay does not re-run Python, so
+                # hand out that same resident slice again: the declared input
+                # address is then invariant across every replay instead of being a
+                # fresh allocation from the target runner.  Under the graph the
+                # captured callable never dereferences this argument, so the
+                # values are inert; eager consumers below must get the *real*
+                # target positions (feeding them the drafter's own buffer
+                # measurably degraded the draft attention), hence the split.
+                "target_positions": (
+                    self._get_positions(num_target_positions) if self.use_cuda_graph else target_positions
+                ),
                 "inputs_embeds": inputs_embeds,
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
@@ -2548,11 +2671,42 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         return tensor, token_indices_to_sample
 
+    def _dspark_device_metadata_executor(self) -> DeviceMetadataExecutor | None:
+        """Executor-shaped *gate* for the DSpark draft metadata contract.
+
+        The per-step path (:meth:`build_draft_attn_metadata`) and the capture
+        path (``AscendDSparkProposer.dummy_run``) share one contract:
+
+        The draft metadata kernels run synchronously on the current stream -
+        no in-graph ExternalEvent waits, no dedicated metadata stream and *no
+        submission at all*. A dedicated executor instance is still returned
+        because it is the gate that makes the DSA builder defer its metadata
+        into tasks (``builder is DeviceMetadataTaskProvider``); nothing is ever
+        submitted to it, so it never arms an event and nothing has to be
+        released.
+
+        ``runner.device_metadata_executor`` is *never* returned. That instance is
+        the target model's: one ``_submission_in_flight`` flag plus a frontier
+        tuple per ``batch_descriptor``, both owned by the per-step target
+        submission. Submitting draft tasks to it either trips "The previous
+        device metadata submission has not been released" or rewrites the target's
+        frontier set ("Device metadata frontiers changed for an existing
+        full-graph batch descriptor").
+        """
+        if self.method != "dspark":
+            return None
+        executor = getattr(self, "_draft_device_metadata_executor", None)
+        if executor is None:
+            executor = DeviceMetadataExecutor()
+            self._draft_device_metadata_executor = executor
+        return executor
+
     def build_draft_attn_metadata(
         self,
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
+        batch_descriptor=None,
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
@@ -2579,7 +2733,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         dcp_manager = getattr(self.runner, "dcp_manager", None)
         device_metadata_tasks: list[DeviceMetadataTask] = []
         device_metadata_executor = (
-            getattr(self.runner, "device_metadata_executor", None)
+            self._dspark_device_metadata_executor()
             if (
                 self.method == "dspark"
                 and self.dcp_size == 1
@@ -2634,7 +2788,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         if device_metadata_executor is not None and device_metadata_tasks:
-            device_metadata_executor.submit(device_metadata_tasks)
+            # Run the deferred draft metadata kernels synchronously on the
+            # current stream: graph capture/replay are then stream-ordered
+            # after the metadata writes with no events at all. This costs one
+            # metadata kernel on the critical path but removes every async
+            # ordering variable (an async submit contract would need a
+            # draft-private executor plus per-descriptor submit/release).
+            for _task in device_metadata_tasks:
+                _task.run()
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         primary_group = self._get_primary_draft_attn_group()

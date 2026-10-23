@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+import os
 from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -14,10 +18,41 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+# ACL-graph capture for the DSpark draft model (DeepSeek V4.x MTP heads).
+#
+# Upstream runs the DSpark draft eager-only (``use_cuda_graph = False``), which
+# costs ~20% of end-to-end decode throughput.  Running the draft under ACL
+# graphs requires the capture to respect three invariants that the generic
+# dummy-run path violates; each was isolated with bidirectional A/B on a
+# single chip (same inputs, same metadata, identical kernel histograms):
+#
+# 1. Real capture metadata.  Without draft attention metadata the DSA
+#    attention falls into its ``no metadata`` branch during capture and the
+#    replayed graph contains no attention at all (acceptance length collapses
+#    to ~1.0 with no error raised).
+#
+# 2. Value-domain baking ("what is captured is what replays").  Python scalars
+#    and tensor *values* read during capture are baked into the graph; refresh
+#    buffer contents at replay does not fix them.  Concretely:
+#    ``seq_lens``-derived lengths must be representative at capture time
+#    (dummy values such as 0/5 bake a wrong value domain), and the context-KV
+#    write (``precompute_and_store_context_kv``) must be captured *inside* the
+#    graph against resident slot buffers so the replay writes to the right
+#    locations.
+#
+# 3. Bucket alignment.  The capture-side ``num_context`` must equal the
+#    replay-side value ``num_reqs * (1 + num_speculative_tokens)``; the
+#    bucket-aligned token count diverges from it for more than one request
+#    and bakes a wrong slice length into the graph.
+#
+# The feature is opt-in and disabled by default:
+#     VLLM_ASCEND_ENABLE_DSPARK_DRAFT_GRAPH=1
+_DSPARK_DRAFT_GRAPH_ENABLED = os.environ.get("VLLM_ASCEND_ENABLE_DSPARK_DRAFT_GRAPH", "0") == "1"
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -36,7 +71,9 @@ class AscendDSparkProposer(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
-        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
+        hf_config = self.draft_model_config.hf_config
+        hf_config = getattr(hf_config, "text_config", hf_config)
+        self.sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -69,10 +106,49 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 device=device,
             )
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        self.use_cuda_graph = False
+        # Upstream runs the DSpark draft eager-only.  With the three capture
+        # invariants documented at the top of this file handled, the draft can
+        # run under ACL graphs like the other drafters; keep it strictly
+        # opt-in so the default is bit-identical to upstream.
+        if _DSPARK_DRAFT_GRAPH_ENABLED:
+            _runner_use_aclgraph = getattr(runner, "_use_aclgraph", None)
+            self.use_cuda_graph = bool(
+                callable(_runner_use_aclgraph)
+                and _runner_use_aclgraph()
+                and not vllm_config.speculative_config.enforce_eager
+            )
+        else:
+            self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
-        self.max_query_tokens = self.max_batch_size * self.num_query_per_req
+        #
+        # [DRAFT-GRAPH-NUMINPUT-FIX] This attribute is a *capacity* for the
+        # per-query buffers (positions / query slot mappings), not the shape the
+        # draft graph computes: DSpark's real query block is
+        # `max_batch_size * num_query_per_req` (5 per request here, one row per
+        # speculative token — `copy_and_expand_dflash_and_dspark_inputs_kernel`
+        # loops `num_query_total = batch_size * num_query_per_req` and its
+        # SAMPLE_FROM_ANCHOR branch maps all of a request's rows onto that
+        # request's `num_speculative_tokens` samples), and `dummy_run` clamps the
+        # *capture* count to this capacity. Under ACLGraph, `_propose` however
+        # pads the draft to the runner's capture bucket
+        # (`cudagraph_dispatcher.dispatch(...).num_tokens`, always a multiple of
+        # `1 + num_speculative_tokens` — see
+        # `adjust_cudagraph_sizes_for_spec_decode`) and then indexes the per-query
+        # buffers with that padded count (`_pad_draft_buffers`,
+        # `build_draft_attn_metadata` -> `dsa_v1.build_for_drafting` ->
+        # `spec_slot_mapping[draft_index - 1][:num_input_tokens]`).
+        # A capacity below the bucket makes `_pad_draft_buffers` a silent no-op
+        # (its `buf[num_tokens:num_input_tokens].fill_(-1)` then covers nothing)
+        # while the padded slice still stays shorter than the assignment target —
+        # that is the `[6, 2] = [5, 2]` crash. Size it like DFlash, i.e. for the
+        # largest bucket the runner can dispatch a draft step to; the extra rows
+        # stay inert (slot -1 / position 0 / parallel-drafting token id) and are
+        # never read by the captured graph, which is captured with the *unpadded*
+        # count, so FIA never computes a junk row.
+        self.max_query_tokens = max(
+            self.max_batch_size * self.num_query_per_req,
+            self.max_batch_size * (1 + self.num_speculative_tokens),
+        )
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
@@ -367,6 +443,102 @@ class AscendDSparkProposer(AscendDflashProposer):
         for buf in self._per_group_context_slot_mapping_buffers.values():
             buf.fill_(-1)
 
+    def _build_capture_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_input_tokens: int,
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
+        """Build the draft attention metadata that FULL-graph capture bakes in.
+
+        Only used from ``dummy_run`` while capturing. Every tensor referenced by
+        the returned metadata must be one of the persistent buffers that the
+        replay path (``set_inputs_first_pass`` + ``build_draft_attn_metadata``)
+        refreshes in place on every step: ``spec_slot_mapping``,
+        ``spec_sas_metadata``, ``dspark_swa_indices_buffer``, ``seq_lens_group``,
+        ``query_start_loc_group``, the per-group block tables / query slot
+        mappings and ``positions``. The construction therefore mirrors
+        ``build_draft_attn_metadata`` so capture and replay resolve to the exact
+        same device addresses.
+        """
+        batch_size = num_reqs
+        num_query_total = batch_size * self.num_query_per_req
+        num_actual_tokens = min(num_query_total, num_input_tokens)
+        primary_gid = getattr(self, "kv_cache_gid", 0)
+
+        if not self._per_group_block_table_buffers:
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                block_table = self._per_group_block_tables.get(gid)
+                if block_table is not None:
+                    self._per_group_block_table_buffers[gid] = block_table
+        if primary_gid not in self._per_group_block_table_buffers:
+            for gid, block_table in self._per_group_block_table_buffers.items():
+                primary_gid = gid
+                break
+        if primary_gid not in self._per_group_query_slot_mapping_buffers:
+            query_slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+        else:
+            query_slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_input_tokens]
+
+        query_start_loc = self.query_start_loc_group[0]
+        query_start_loc[: batch_size + 1].copy_(self.arange_dflash[: batch_size + 1] * self.num_query_per_req)
+        query_start_loc[batch_size + 1 :].fill_(0)
+        seq_lens = self.seq_lens_group[0]
+        seq_lens[:batch_size].copy_(self.runner.seq_lens[:batch_size] + self.num_query_per_req)
+        seq_lens[batch_size:].fill_(0)
+
+        cad = AscendCommonAttentionMetadata(
+            query_start_loc=query_start_loc[: batch_size + 1],
+            query_start_loc_cpu=(
+                torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
+            ).to(torch.int32),
+            seq_lens=seq_lens[:batch_size],
+            seq_lens_cpu=self.runner.optimistic_seq_lens_cpu[:batch_size],
+            num_reqs=batch_size,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            max_query_len=self.num_query_per_req,
+            max_seq_len=0,
+            decode_token_per_req=self.num_query_per_req,
+            slot_mapping=query_slot_mapping,
+            block_table_tensor=self._per_group_block_table_buffers[primary_gid][:batch_size],
+            positions=self.positions,
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            causal=False,
+            is_prefilling=torch.zeros(batch_size, dtype=torch.bool),
+        )
+
+        shared_cache: dict[str, Any] = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
+        per_layer_attn_metadata: dict[str, Any] = {}
+        captured_tasks: list[Any] = []
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            builder = attn_group.get_metadata_builder()
+            group_cad = copy.copy(cad)
+            block_table = self._per_group_block_table_buffers.get(gid)
+            if block_table is not None:
+                group_cad.block_table_tensor = block_table[:batch_size]
+            slot_mapping = self._per_group_query_slot_mapping_buffers.get(gid)
+            if slot_mapping is not None:
+                group_cad.slot_mapping = slot_mapping[:num_input_tokens]
+            if self.sliding_window is not None:
+                self.sliding_window.apply(group_cad)
+            attn_metadata = builder.build_for_drafting(group_cad, draft_index=1, **dict(shared_cache))
+            take_tasks = getattr(builder, "take_device_metadata_tasks", None)
+            if callable(take_tasks):
+                captured_tasks.extend(take_tasks())
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        logger.info(
+            "[dspark-graph-capture] built capture metadata: %d layers, "
+            "num_reqs=%d num_input_tokens=%d num_query_total=%d",
+            len(per_layer_attn_metadata),
+            num_reqs,
+            num_input_tokens,
+            num_query_total,
+        )
+        return [per_layer_attn_metadata], captured_tasks
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -397,8 +569,48 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.token_indices_to_sample.fill_(0)
         self._clear_dummy_slot_mappings()
 
+        multi_steps_attn_metadata: list[dict[str, Any]] = []
+        if (
+            _DSPARK_DRAFT_GRAPH_ENABLED
+            and self.use_cuda_graph
+            and aclgraph_runtime_mode == CUDAGraphMode.FULL
+            and not is_profile
+            and num_reqs > 0
+        ):
+            # Invariant 2 (see module docstring) must be applied *before* the
+            # capture metadata is built: the builder reads ``runner.seq_lens``
+            # and ``optimistic_seq_lens_cpu``, and building the metadata with
+            # dummy values bakes a wrong value domain into the graph.  Running
+            # this block after the builder was verified to make the capture
+            # completely ineffective (same config, only the order differs).
+            # (a) Representative value domain: ``max_num_tokens`` is the upper
+            #     bound of ``num_context``; verified to replay correctly for
+            #     sequence lengths from 6 to 262144 (small values such as 6
+            #     bake a wrong domain and break replay).
+            # (b) Restore the in-graph context-KV write: point
+            #     ``_context_slot_mapping_buffers`` at the resident per-group
+            #     buffers so ``precompute_and_store_context_kv`` is captured
+            #     against stable addresses that ``set_inputs_first_pass``
+            #     refreshes in place on every replayed step.
+            self._context_slot_mapping_buffers = [
+                self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
+            ]
+            try:
+                _cap_len = int(getattr(self, "max_num_tokens", 0) or 0) or 8192
+                self.runner.seq_lens[:num_reqs].fill_(_cap_len)
+                self.runner.optimistic_seq_lens_cpu[:num_reqs].fill_(_cap_len)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("[dspark-graph-capture] failed to set representative seq_lens: %r", e)
+            multi_steps_attn_metadata, _capture_tasks = self._build_capture_draft_attn_metadata(
+                num_reqs, num_input_tokens
+            )
+            # The deferred draft metadata tasks are intentionally NOT run here:
+            # the per-step path (llm_base_proposer.build_draft_attn_metadata)
+            # executes them synchronously before every replay, which keeps the
+            # graph free of device-metadata waits.
+
         with set_ascend_forward_context(
-            None,
+            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
@@ -408,7 +620,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             model_instance=self.model,
-            draft_attn_metadatas=[],
+            draft_attn_metadatas=multi_steps_attn_metadata,
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
@@ -422,13 +634,27 @@ class AscendDSparkProposer(AscendDflashProposer):
                 )
 
             else:
-                self._dflash_num_context = num_input_tokens
+                # Invariant 3 (bucket alignment): the capture-side
+                # ``num_context`` must equal the replay-side value
+                # ``num_reqs * (1 + num_speculative_tokens)`` computed by
+                # ``set_inputs_first_pass``.  The bucket-aligned token count
+                # diverges from it for more than one request and would bake a
+                # wrong slice length (too few context-KV rows) into the graph.
+                self._dflash_num_context = int(num_reqs) * (1 + int(self.num_speculative_tokens))
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,
                     token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
                     target_positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
+                    multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
                 )
+            if multi_steps_attn_metadata:
+                forward_context = get_forward_context()
+                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not getattr(
+                    forward_context, "capturing", False
+                ):
+                    # Mirror DFlash: refresh per-step graph params after a real replay
+                    # (a no-op for DSA, kept for parity with the other draft backends).
+                    self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
