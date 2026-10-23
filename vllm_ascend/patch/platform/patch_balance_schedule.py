@@ -663,7 +663,6 @@ class BalanceScheduler(Scheduler):
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
-                request = request_queue.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
