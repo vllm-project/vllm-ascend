@@ -27,7 +27,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 
 try:
-    from vllm_ascend.spec_decode.method import resolve_spec_decode_family
+    from vllm_ascend.worker.spec_decode_family import resolve_spec_decode_family
 except ImportError:
     # The benchmark harness is also imported from the pre-refactor checkout.
     resolve_spec_decode_family = None

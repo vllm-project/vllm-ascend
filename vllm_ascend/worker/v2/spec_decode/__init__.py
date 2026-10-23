@@ -21,7 +21,7 @@ import copy
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
-from vllm_ascend.worker.v1.spec_decode.method import (
+from vllm_ascend.worker.spec_decode_family import (
     SpecDecodeFamily,
     resolve_spec_decode_family,
     uses_ascend_mtp_speculator,

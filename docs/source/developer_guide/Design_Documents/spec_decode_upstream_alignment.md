@@ -29,7 +29,7 @@ The default rule is:
    runner grows method-specific dispatch.
 
 The two runners must select the same speculative method family even when their
-implementation classes differ. `vllm_ascend.spec_decode.method` owns that
+implementation classes differ. `vllm_ascend.worker.spec_decode_family` owns that
 runner-independent classification. MRV1 dispatch, MRV2 dispatch, the 310P MRV2
 router, and the MRV2 readiness gate all consume that result.
 
@@ -37,7 +37,7 @@ router, and the MRV2 readiness gate all consume that result.
 
 | Path | Shared or upstream owner | Ascend-specific boundary | Current action |
 | --- | --- | --- | --- |
-| Family selection | `vllm_ascend.spec_decode.method` | N/A | Shared by MRV1, MRV2, 310P routing, and MRV2 readiness checks. |
+| Family selection | `vllm_ascend.worker.spec_decode_family` | N/A | Shared by MRV1, MRV2, 310P routing, and MRV2 readiness checks. |
 | MRV1 proposer lifecycle | `vllm/v1/spec_decode/*` | NPU model loading, attention metadata, ACL graph buffers, PCP/DCP coordination | Generic proposer and sampling methods delegate to upstream where their interfaces match. |
 | MRV1 DFlash | Upstream DFlash proposer | NPU copy/expand kernel and persistent slot-mapping buffers | Model-specific input preparation stays behind narrow overrides. |
 | MRV1 DSpark | Upstream DSpark proposer interfaces | NPU attention metadata, multi-group KV layout, and graph updates | Sampling and sequential draft generation remain upstream-owned. |

@@ -11,8 +11,8 @@ from vllm_ascend.models.qwen3_dflash2 import (
     _grouped_conv,
     _score_edges,
 )
+from vllm_ascend.worker.spec_decode_family import is_dflash2_draft
 from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer, greedy_select_path
-from vllm_ascend.worker.v1.spec_decode.method import is_dflash2_draft
 
 
 @pytest.fixture(autouse=True)
