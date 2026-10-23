@@ -16,8 +16,9 @@ startup, and the live-update lane has to reproduce its signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. The packed lane is currently skipped
-on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
+graph-captured storage of the first update. General packed model lanes remain
+skipped; the dedicated cross-chunk regression enables the validated four-layer
+Qwen3.5 MoE case with an explicit service memory budget.
 
 The trainer side keeps this backend's engine handshake: the trainer opens the
 rank-0 HCCL endpoint with ``HCCLWeightTransferEngine.trainer_init`` and the
@@ -28,6 +29,7 @@ test is START -> broadcast -> FINISH.
 import math
 import os
 import threading
+from dataclasses import replace
 
 import pytest
 import requests
@@ -63,6 +65,16 @@ UPDATE_TIMEOUT = 300
 PACKED_STRESS_UPDATE_TIMEOUT = 900
 CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.75
+# Functional regression: reserve 1 GiB KV and a small scheduler budget instead
+# of filling HBM with an automatic KV cache before attention graph capture.
+PACKED_REGRESSION_SERVE_ARGS = (
+    "--kv-cache-memory-bytes",
+    str(2**30),
+    "--max-num-seqs",
+    "4",
+    "--max-num-batched-tokens",
+    "1024",
+)
 
 
 def _log(message: str) -> None:
@@ -178,13 +190,20 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model))
+        pytest.param(
+            replace(
+                case,
+                id=f"{case.id}-packed-cross-chunk",
+                extra_server_args=(*case.extra_server_args, *PACKED_REGRESSION_SERVE_ARGS),
+            ),
+            id=case.id,
+            marks=pytest.mark.e2e_model(case.model),
+        )
         for case in MODEL_CASES
         if case.id == "qwen3.5-35b-a3b-moe-layout"
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2, 3])
-@pytest.mark.filterwarnings("ignore:Tensor .*exceeds buffer_size_bytes.*:UserWarning")
 def test_hccl_packed_cross_chunk_reload(case: WeightUpdateModelCase, num_buffers: int):
     """Force one nonempty tensor per chunk and repeat reload after generation.
 
@@ -213,6 +232,8 @@ def _run_weight_transfer_transaction(
     update_timeout: int = UPDATE_TIMEOUT,
     packed_regression: bool = False,
 ) -> None:
+    if update_rounds < 2:
+        raise ValueError("weight-transfer regression requires at least two update rounds")
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
     if packed and not packed_regression:
@@ -223,7 +244,10 @@ def _run_weight_transfer_transaction(
     if buffer_size_bytes == 1:
         # All BF16 weights exceed the threshold, so each is a separate chunk.
         # Require enough chunks to rotate through every slot more than twice.
-        assert sum(math.prod(meta.shape) * meta.dtype.itemsize > 1 for meta in source.metadata()) > 2 * num_buffers
+        chunk_count = sum(math.prod(meta.shape) * meta.dtype.itemsize > 1 for meta in source.metadata())
+        assert chunk_count > 2 * num_buffers, (
+            f"{case.id}: {chunk_count} chunks must rotate through {num_buffers} slots more than twice"
+        )
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),

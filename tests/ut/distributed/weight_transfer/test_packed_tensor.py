@@ -36,6 +36,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -506,6 +507,7 @@ def test_packed_npu_ipc_consumer_roundtrip():
             dtype_names=["float32", "float32"],
             tensor_sizes=[8, 12],
             device_index=2,
+            importer=NPUPackedBufferImporter(),
         )
 
     assert len(weights) == 2
@@ -528,6 +530,7 @@ def test_packed_npu_ipc_consumer_missing_uuid_raises():
             dtype_names=["float32"],
             tensor_sizes=[4],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
 
 
@@ -546,6 +549,7 @@ def test_packed_npu_ipc_consumer_overwrites_device_index():
             dtype_names=["float32"],
             tensor_sizes=[4],
             device_index=5,
+            importer=NPUPackedBufferImporter(),
         )
         # Capture the args passed to rebuild_npu_tensor while patch is active.
         fake_mod = sys.modules["torch_npu.multiprocessing.reductions"]
@@ -570,6 +574,7 @@ def test_packed_npu_ipc_consumer_clones_slices():
             dtype_names=["float32", "float32"],
             tensor_sizes=[4, 4],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
     # Each returned tensor must have its own storage (not a view into ``packed``).
     assert weights[0][1].storage().data_ptr() != weights[1][1].storage().data_ptr()
@@ -592,6 +597,7 @@ def test_packed_npu_ipc_consumer_truncates_to_content_size():
             dtype_names=["float32"],
             tensor_sizes=[4],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
     assert torch.equal(weights[0][1].cpu(), torch.tensor([1.0], dtype=torch.float32))
 
@@ -858,6 +864,7 @@ def test_packed_npu_ipc_consumer_restores_multi_dim_shape():
             dtype_names=["float32"],
             tensor_sizes=[24],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
 
     assert weights[0][1].shape == (2, 3)
@@ -880,6 +887,7 @@ def test_packed_npu_ipc_consumer_handles_bfloat16():
             dtype_names=["bfloat16"],
             tensor_sizes=[6],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
 
     assert weights[0][1].dtype == torch.bfloat16
@@ -905,6 +913,7 @@ def test_packed_npu_ipc_consumer_clones_each_slice_independently():
             dtype_names=["float32", "float32", "float32"],
             tensor_sizes=[4, 4, 4],
             device_index=0,
+            importer=NPUPackedBufferImporter(),
         )
 
     ptrs = [w[1].storage().data_ptr() for w in weights]
@@ -953,6 +962,7 @@ def _assert_packed_roundtrip(backend, tensors, buffer_size):
                 chunk["dtype_names"],
                 chunk["tensor_sizes"],
                 0,
+                importer=NPUPackedBufferImporter(),
             )
     for buffer in buffers:
         buffer.zero_()
@@ -1130,7 +1140,7 @@ def test_packed_ipc_consumer_rejects_invalid_metadata_before_rebuild(changes):
     with _install_fake_rebuild_npu_tensor(torch.zeros(8, dtype=torch.uint8)):
         rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
         with pytest.raises(ValueError):
-            packed_npu_ipc_consumer(**kwargs)
+            packed_npu_ipc_consumer(**kwargs, importer=NPUPackedBufferImporter())
         rebuild.assert_not_called()
 
 
@@ -1201,7 +1211,9 @@ def test_packed_ipc_consumer_rejects_payload_larger_than_rebuilt_buffer():
         _install_fake_rebuild_npu_tensor(torch.zeros(3, dtype=torch.uint8)),
         pytest.raises(ValueError, match="metadata declares 4 bytes, buffer has 3"),
     ):
-        packed_npu_ipc_consumer({"node-0": (0,) * 7}, "node-0", ["w"], [[1]], ["float32"], [4], 0)
+        packed_npu_ipc_consumer(
+            {"node-0": (0,) * 7}, "node-0", ["w"], [[1]], ["float32"], [4], 0, importer=NPUPackedBufferImporter()
+        )
 
 
 @pytest.mark.parametrize("backend", ["hccl-producer", "hccl-consumer", "ipc-producer"])
@@ -1379,61 +1391,36 @@ def test_packed_producer_waits_for_source_stream_before_packing():
 
 
 @pytest.mark.parametrize("num_buffers", [2, 3])
-def test_packed_consumer_chains_clone_readiness_and_records_all_streams(num_buffers):
+def test_packed_consumer_records_raw_storage_and_clones_on_supported_streams(num_buffers):
     streams = [MagicMock(wraps=_FakeNpuStream()) for _ in range(num_buffers)]
     caller = _FakeNpuStream()
-    events = []
-    phase = []
-    clone_tensor = torch.Tensor.clone
-
-    def clone(*args):
-        phase.append("clone")
-        return clone_tensor(*args)
-
-    def event():
-        ready = MagicMock()
-        ready.record.side_effect = lambda stream: phase.append("ready")
-        events.append(ready)
-        return ready
-
-    def load(weights):
-        assert phase[-2:] == ["clone", "ready"]
-
     chunks = 2 * num_buffers + 1
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(torch.npu, "current_stream", return_value=caller),
-        patch.object(torch.npu, "Event", side_effect=event),
+        patch.object(torch.npu, "Event", side_effect=AssertionError("unexpected event")),
         patch.object(torch.Tensor, "record_stream") as record,
-        patch.object(torch.Tensor, "clone", new=clone),
     ):
         packed_broadcast_consumer(
-            iter((str(i), ([1], torch.float32)) for i in range(chunks)), _make_group_mock(), 0, load, 1, num_buffers
+            iter((str(i), ([1], torch.float32)) for i in range(chunks)),
+            _make_group_mock(),
+            0,
+            MagicMock(),
+            1,
+            num_buffers,
         )
-    assert len(events) == chunks
-    for index, ready in enumerate(events):
-        ready.record.assert_called_once_with(streams[index % num_buffers])
-    for index, stream in enumerate(streams):
-        assert stream.wait_event.call_args_list == [
-            ((events[i - 1],), {}) for i in range(1, chunks) if i % num_buffers == index
-        ]
     assert [call.args[0] for call in record.call_args_list] == [*streams, caller] * (2 * chunks)
 
 
-@pytest.mark.parametrize("failure_at", ["record_stream", "event"])
-def test_packed_consumer_drains_after_tracking_failure(failure_at):
+def test_packed_consumer_drains_after_tracking_failure():
     drained = []
     streams = [MagicMock(wraps=_FakeNpuStream()) for _ in range(2)]
     for index, stream in enumerate(streams):
         stream.synchronize.side_effect = lambda index=index: drained.append(index)
     failure = RuntimeError("tracking failed")
-    event = MagicMock()
-    if failure_at == "event":
-        event.record.side_effect = failure
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
-        patch.object(torch.npu, "Event", return_value=event),
-        patch.object(torch.Tensor, "record_stream", side_effect=failure if failure_at == "record_stream" else None),
+        patch.object(torch.Tensor, "record_stream", side_effect=failure),
         pytest.raises(RuntimeError, match="tracking failed") as error,
     ):
         packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), _make_group_mock(), 0, MagicMock(), 8, 2)
@@ -1454,7 +1441,9 @@ def test_npu_ipc_importer_reuses_mapping_replaces_exports_and_closes():
         rebuild = sys.modules["torch_npu.multiprocessing.reductions"].rebuild_npu_tensor
 
         def consume(handle=args):
-            return packed_npu_ipc_consumer({"node-0": handle}, "node-0", ["w"], [[1]], ["float32"], [4], 0, importer)
+            return packed_npu_ipc_consumer(
+                {"node-0": handle}, "node-0", ["w"], [[1]], ["float32"], [4], 0, importer=importer
+            )
 
         first = consume()[0][1]
         packed.copy_(torch.tensor([9.0]).view(torch.uint8))
@@ -1551,13 +1540,11 @@ def test_packed_consumer_orders_retained_inputs_and_layer_processing(num_buffers
 
 
 @pytest.mark.parametrize("num_buffers", [2, 3])
-def test_packed_consumer_deferred_read_waits_for_earlier_chunk_clones(num_buffers):
-    """Adapt vLLM #62555: a later slot reads every retained earlier chunk.
+def test_packed_consumer_host_wait_orders_deferred_cross_chunk_reads(num_buffers):
+    """The host barrier completes clones before a later slot reads them.
 
-    Receives complete before unpacking, as required by HCCL. Owning clones
-    remain queued on their slot stream. Run the later callback immediately:
-    without a dependency it reads zeros from an unfinished earlier clone.
-    No sleeps or allocator placement are needed to expose the race.
+    Removing the post-load wait exposes an unfinished earlier clone. This
+    regression needs neither events, sleeps nor allocator placement.
     """
     active = None
 
@@ -1569,9 +1556,6 @@ def test_packed_consumer_deferred_read_waits_for_earlier_chunk_clones(num_buffer
             while self.pending:
                 self.pending.pop(0)()
 
-        def wait_event(self, event):
-            self.pending.append(event.complete)
-
         def __enter__(self):
             nonlocal active
             self.previous, active = active, self
@@ -1580,17 +1564,6 @@ def test_packed_consumer_deferred_read_waits_for_earlier_chunk_clones(num_buffer
         def __exit__(self, *exc):
             nonlocal active
             active = self.previous
-
-    class ReadyEvent:
-        def record(self, stream):
-            self.ready = False
-            self.stream = stream
-            stream.pending.append(lambda: setattr(self, "ready", True))
-
-        def complete(self):
-            # Wait only for the recorded point, not for later callbacks.
-            while not self.ready:
-                self.stream.pending.pop(0)()
 
     streams = [QueuedStream() for _ in range(num_buffers)]
     caller = QueuedStream()
@@ -1627,7 +1600,7 @@ def test_packed_consumer_deferred_read_waits_for_earlier_chunk_clones(num_buffer
     with (
         patch.object(torch.npu, "Stream", side_effect=streams),
         patch.object(torch.npu, "current_stream", return_value=caller),
-        patch.object(torch.npu, "Event", ReadyEvent),
+        patch.object(torch.npu, "Event", side_effect=AssertionError("unexpected event")),
         patch.object(torch.Tensor, "clone", new=delayed_clone),
     ):
         packed_broadcast_consumer(
