@@ -86,15 +86,17 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Read verified vLLM refs
+      - name: Prepare CI metadata
         id: vllm
         env:
           # The main2main label requests a dual-version run: full NPU tests on
           # both the verified vLLM main commit and the matched release tag.
           HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
         run: |
+          # =========== Read verified vLLM refs ===================
+          echo "::group::Read verified vLLM refs"
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
@@ -117,16 +119,21 @@ jobs:
           else
             echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
           fi
+          echo "::endgroup::"
 
-      - name: cp problem matchers
-        run: |
-          cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
-          cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
-          cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
+          # =========== Register problem matchers =================
+          echo "::group::Register problem matchers"
+          for matcher in actionlint markdownlint mypy; do
+            cp ".github/workflows/matchers/$matcher.json" "$RUNNER_TEMP/$matcher.json"
+            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
+          done
+          echo "::endgroup::"
 
-      - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
-      - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
+          # =========== Calculate pre-commit cache key ============
+          echo "::group::Calculate pre-commit cache key"
+          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -209,12 +216,6 @@ jobs:
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
 
-      - name: Get pre-commit config hash
-        id: get_hash
-        run: |
-          PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
-
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
         env:
@@ -225,7 +226,7 @@ jobs:
           AWS_REGION: ap-southeast-1
         with:
           path: /tmp/pre-commit-cache
-          key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
+          key: pre-commit-${{ steps.vllm.outputs.PRE_COMMIT_HASH }}
 
       - name: Run pre-commit
         env:
@@ -241,16 +242,12 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
-      - name: Run mypy
+      - name: Run mypy for Python 3.10, 3.11 and 3.12 in parallel
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          for python_version in "3.10" "3.11" "3.12"; do
-            echo "============================"
-            tools/mypy.sh 1 "$python_version"
-            echo "============================"
-          done
+          python3 .github/workflows/scripts/run_mypy_parallel.py
 
   cpu-ut:
     # Always run tests/ut twice in parallel: once on the verified vLLM main
@@ -286,7 +283,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
     env:
@@ -411,7 +408,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
