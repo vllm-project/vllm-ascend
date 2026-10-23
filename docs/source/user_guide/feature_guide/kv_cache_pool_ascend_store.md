@@ -35,14 +35,14 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35. |
+    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35.<br>• Layerwise support requires Mooncake >= 0.3.14. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
 
 === "Memcache backend"
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• Layerwise support requires `memcache_hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
@@ -751,6 +751,7 @@ ock.mmc.meta_service_url = tcp://<meta_service_ip>:5000
 ock.mmc.meta_service.config_store_url = tcp://<meta_service_ip>:6000
 ock.mmc.meta_service.metrics_url = http://<meta_service_ip>:8000
 ock.mmc.log_level = info
+ock.mmc.local_service.world_size = 256
 # Tune the following parameters when SSD is enabled to improve SSD cache hit rate
 ock.mmc.evict_threshold_high = 70
 ock.mmc.evict_threshold_low = 60
@@ -1656,7 +1657,7 @@ Public FAQ references:
 
 **Resolution Steps:**
 
-1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `1 - eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
+1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `--eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
 
