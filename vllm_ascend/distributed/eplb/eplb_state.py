@@ -145,7 +145,10 @@ def refresh_model_routing_tables(
     if hasattr(model_state, "_allgather_physical_map"):
         current_map = model_state.physical_to_logical_map
         if not torch.equal(current_map, model_state._allgather_physical_map):
-            model_state._allgather_physical_map.copy_(current_map)
+            if model_state._allgather_physical_map.shape == current_map.shape:
+                model_state._allgather_physical_map.copy_(current_map)
+            else:
+                model_state._allgather_physical_map = current_map.clone()
             model_state.expert_load_pass.zero_()
             model_state.expert_load_window.zero_()
             if hasattr(model_state, "_load_mapping_generation"):

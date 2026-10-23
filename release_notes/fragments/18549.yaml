@@ -1,0 +1,4 @@
+pr: 18549
+entries:
+  - category: bugfix
+    text: Fixed incorrect routing and load accounting with redundant experts when A5 uses AllGather with Model Runner V2 EPLB.

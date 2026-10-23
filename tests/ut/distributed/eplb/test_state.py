@@ -203,6 +203,24 @@ def test_a5_common_table_refreshes_in_place_and_invalidates_only_changed_layout(
     assert model_state._load_mapping_generation == 1
 
 
+@pytest.mark.parametrize("old_width,new_width", [(4, 6), (6, 4)])
+def test_allgather_history_snapshot_tracks_elastic_active_width(old_width, new_width):
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[]),
+        physical_to_logical_map=torch.zeros(1, new_width, dtype=torch.long),
+        _allgather_physical_map=torch.zeros(1, old_width, dtype=torch.long),
+        expert_load_pass=torch.ones(1, new_width),
+        expert_load_window=torch.ones(2, 1, new_width),
+        _load_mapping_generation=0,
+    )
+    eplb_state.refresh_model_routing_tables(model_state)
+    torch.testing.assert_close(model_state._allgather_physical_map, model_state.physical_to_logical_map)
+    assert not model_state.expert_load_pass.any() and not model_state.expert_load_window.any()
+    assert model_state._load_mapping_generation == 1
+    eplb_state.refresh_model_routing_tables(model_state)
+    assert model_state._load_mapping_generation == 1
+
+
 def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     sentinel = object()
     model_states = {"model": object()}
