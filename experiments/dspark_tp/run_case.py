@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-concurrency", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--sampling-seed", type=int)
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-prompts", type=int, default=16)
@@ -171,7 +172,7 @@ def serve_command(args: argparse.Namespace) -> list[str]:
 
 
 def benchmark_command(args: argparse.Namespace, output_dir: Path, filename: str, prompts: int) -> list[str]:
-    return [
+    command = [
         "vllm",
         "bench",
         "serve",
@@ -208,6 +209,9 @@ def benchmark_command(args: argparse.Namespace, output_dir: Path, filename: str,
         "--result-filename",
         filename,
     ]
+    if args.sampling_seed is not None:
+        command.extend(("--extra-body", json.dumps({"seed": args.sampling_seed})))
+    return command
 
 
 def terminate_process_group(process: subprocess.Popen) -> None:
@@ -288,6 +292,7 @@ def main() -> int:
         "output_len": args.output_len,
         "max_concurrency": args.max_concurrency,
         "temperature": args.temperature,
+        "sampling_seed": args.sampling_seed,
         "serve_command": command,
         "num_prompts": args.num_prompts,
         "runs": args.runs,

@@ -403,12 +403,12 @@ class NPUModelRunner(GPUModelRunner):
         if manager is not None:
             recommendation = getattr(manager, "_physical_k_recommendation", None)
             manager._physical_k_recommendation = None
+            cost_saving_k = getattr(manager, "_physical_k_cost_saving", None)
+            manager._physical_k_cost_saving = None
             output_container = getattr(output, "model_runner_output", output)
-            if output_container is not None and hasattr(
-                output_container,
-                "physical_k_recommendation",
-            ):
+            if output_container is not None and recommendation is not None:
                 output_container.physical_k_recommendation = recommendation
+                output_container.physical_k_cost_saving = cost_saving_k
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
