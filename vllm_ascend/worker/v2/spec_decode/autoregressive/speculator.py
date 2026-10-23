@@ -616,6 +616,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_sample: bool = False,
     ) -> None:
         attn_metadata, slot_mappings = self._prepare_replicated_prefill_attn(
             attn_metadata,
@@ -631,6 +632,9 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
+        # vLLM #62784 keeps draft KV updates but skips sampling for unused drafts.
+        # Omit the default keyword for older baselines without this argument.
+        prefill_kwargs: dict[str, Any] = {"skip_sample": True} if skip_sample else {}
         super()._prefill(
             num_reqs,
             num_tokens,
@@ -639,6 +643,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             num_tokens_across_dp,
             cudagraph_runtime_mode,
             mm_inputs,
+            **prefill_kwargs,
         )
 
     def _build_attn_metadata(  # type: ignore[misc]

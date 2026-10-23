@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
@@ -288,6 +289,45 @@ def test_prefill_filters_target_only_metadata():
         None,
         CUDAGraphMode.NONE,
         None,
+    )
+
+
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_prefill_forwards_skip_sample_after_metadata_preparation(has_metadata):
+    """K=0 still delegates prefill/KV updates while suppressing draft sampling."""
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    draft_metadata = object()
+    attn_metadata = {"draft": draft_metadata, "target": object()} if has_metadata else None
+    slot_mappings = object()
+    num_tokens_across_dp = object()
+    mm_inputs = ([], object())
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, slot_mappings))
+
+    with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(
+            2,
+            4,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            CUDAGraphMode.PIECEWISE,
+            mm_inputs,
+            skip_sample=True,
+        )
+
+    speculator._prepare_replicated_prefill_attn.assert_called_once_with(
+        attn_metadata, slot_mappings, 2, 4, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+    parent_prefill.assert_called_once_with(
+        2,
+        4,
+        {"draft": draft_metadata} if has_metadata else None,
+        slot_mappings,
+        num_tokens_across_dp,
+        CUDAGraphMode.PIECEWISE,
+        mm_inputs,
+        skip_sample=True,
     )
 
 
