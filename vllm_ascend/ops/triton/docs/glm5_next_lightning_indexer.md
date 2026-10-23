@@ -26,7 +26,7 @@ This page layout replaces the previous interleaved key/FP32-scale format;
 workers must start with fresh caches when changing versions.
 
 The scoring relation is
-score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k]))).
+`score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k])))`.
 Query quantization and the operator's FP16 scale/weight arithmetic introduce
 rounding, so model accuracy and throughput both require validation.
 
