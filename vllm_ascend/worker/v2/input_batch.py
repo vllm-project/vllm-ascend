@@ -25,6 +25,8 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 
+_BATCH_METADATA_ALIGNMENT_BYTES = 32
+
 
 class AscendInputBuffers(InputBuffers):
     """Input buffers for Ascend NPUs."""
@@ -42,15 +44,26 @@ class AscendInputBuffers(InputBuffers):
         )
         del self.query_start_loc
 
-        self.batch_metadata: torch.Tensor = torch.zeros(
-            3 * max_num_reqs + 3,
-            dtype = torch.int32,
-            device = device,
-        )
-        self.idx_mapping_buffer: torch.Tensor = self.batch_metadata[:max_num_reqs]
-        self.cu_num_logits_buffer: torch.Tensor = self.batch_metadata[max_num_reqs:2*max_num_reqs+1]
-        self.query_start_loc: torch.Tensor = self.batch_metadata[2*max_num_reqs+1:]
+        alignment_elements = _BATCH_METADATA_ALIGNMENT_BYTES // np.dtype(np.int32).itemsize
 
+        def align_up(size: int) -> int:
+            return (size + alignment_elements - 1) // alignment_elements * alignment_elements
+
+        # Keep every device view aligned, including standalone PCP H2D targets.
+        # The same slices define the host packing layout in the model runner.
+        self.query_start_loc_slice = slice(0, max_num_reqs + 2)
+        idx_offset = align_up(self.query_start_loc_slice.stop)
+        self.idx_mapping_slice = slice(idx_offset, idx_offset + max_num_reqs)
+        cu_offset = align_up(self.idx_mapping_slice.stop)
+        self.cu_num_logits_slice = slice(cu_offset, cu_offset + max_num_reqs + 1)
+        self.batch_metadata: torch.Tensor = torch.zeros(
+            align_up(self.cu_num_logits_slice.stop),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.idx_mapping_buffer: torch.Tensor = self.batch_metadata[self.idx_mapping_slice]
+        self.cu_num_logits_buffer: torch.Tensor = self.batch_metadata[self.cu_num_logits_slice]
+        self.query_start_loc: torch.Tensor = self.batch_metadata[self.query_start_loc_slice]
 
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.

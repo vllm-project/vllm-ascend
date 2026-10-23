@@ -807,20 +807,19 @@ class NPUModelRunner(GPUModelRunner):
         assert cu_num_logits_np.shape == (num_reqs + 1,)
         assert query_start_loc_np.shape == (capacity + 2,)
 
-        packed_np = np.zeros(3*capacity+3, dtype=np.int32)
-        packed_np[:num_reqs] = idx_mapping_np
-        packed_np[capacity:capacity+num_reqs+1] = cu_num_logits_np
-        packed_np[2*capacity+1:] = query_start_loc_np
-
         buffers = self.input_buffers
+        packed_np = np.zeros(buffers.batch_metadata.numel(), dtype=np.int32)
+        packed_np[buffers.idx_mapping_slice][:num_reqs] = idx_mapping_np
+        packed_np[buffers.cu_num_logits_slice][: num_reqs + 1] = cu_num_logits_np
+        packed_np[buffers.query_start_loc_slice] = query_start_loc_np
+
         async_copy_to_gpu(packed_np, out=buffers.batch_metadata)
 
         return (
             buffers.idx_mapping_buffer[:num_reqs],
-            buffers.cu_num_logits_buffer[:num_reqs+1],
-            buffers.query_start_loc
+            buffers.cu_num_logits_buffer[: num_reqs + 1],
+            buffers.query_start_loc,
         )
-
 
     def _prepare_inputs_impl(
         self,
@@ -856,10 +855,7 @@ class NPUModelRunner(GPUModelRunner):
         merge_metadata_upload = self.adaptive_verification is None
         idx_mapping = None
         if not merge_metadata_upload:
-            idx_mapping = async_copy_to_gpu(
-                idx_mapping_np,
-                device = self.device
-            )
+            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         num_valid_tokens = num_scheduled_tokens_np
         if scheduler_output.scheduled_spec_decode_tokens:
@@ -888,15 +884,17 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = None
-            
+
             if not merge_metadata_upload:
                 cu_num_logits = torch.arange(
-                    num_reqs+1,
+                    num_reqs + 1,
                     device=self.device,
                     dtype=torch.int32,
                 )
             expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device,
+                num_reqs,
+                dtype=torch.int32,
+                device=self.device,
             )
         else:
             num_draft_tokens_per_req = np.fromiter(
@@ -952,12 +950,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if merge_metadata_upload:
-            idx_mapping, cu_num_logits, query_start_loc = (
-                self._upload_batch_metadata(
-                    idx_mapping_np,
-                    cu_num_logits_np,
-                    query_start_loc_np
-                )
+            idx_mapping, cu_num_logits, query_start_loc = self._upload_batch_metadata(
+                idx_mapping_np, cu_num_logits_np, query_start_loc_np
             )
         else:
             query_start_loc = self.input_buffers.query_start_loc
