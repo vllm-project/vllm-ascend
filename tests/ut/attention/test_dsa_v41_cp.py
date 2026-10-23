@@ -1479,7 +1479,7 @@ class TestSharedPCPMetadata:
         addresses = []
         for ordered in (list(owners.values()), list(reversed(list(owners.values())))):
             batch = _batch(2, 0, "prefill")
-            shared = {}
+            shared: dict[tuple[str, int, int | None], Any] = {}
             results = [
                 builder.build(
                     0,
@@ -1577,7 +1577,7 @@ class TestSharedPCPMetadata:
     def test_shared_batch_signature_is_recorded_and_checked(self, builders):
         builder = builders(specialized=True)["swa"]
         batch = _batch(2, 0, "prefill")
-        shared = {}
+        shared: dict[tuple[str, int, int | None], Any] = {}
         kwargs = dict(
             pcp_context=batch.context,
             pcp_cache_group_idx=0,
