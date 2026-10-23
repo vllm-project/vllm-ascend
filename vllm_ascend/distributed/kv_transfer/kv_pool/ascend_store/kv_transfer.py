@@ -106,6 +106,62 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
+def _kv_shard_indices(num_keys: int, world_size: int, tp_rank: int) -> list[int]:
+    base, remainder = divmod(num_keys, world_size)
+    start = tp_rank * base + min(tp_rank, remainder)
+    end = start + base + (1 if tp_rank < remainder else 0)
+    return list(range(start, end))
+
+
+def _coalesced_kv_views(views: list[list[torch.Tensor]], indices: list[int]) -> list[torch.Tensor]:
+    """Return layer-major views, merging adjacent ranges backed by one storage."""
+    max_views = max((len(views[index]) for index in indices), default=0)
+    coalesced: list[torch.Tensor] = []
+    current_storage = None
+    current_device = None
+    current_start = 0
+    current_end = 0
+
+    def flush_current() -> None:
+        nonlocal current_storage, current_device
+        if current_storage is not None and current_end > current_start:
+            merged = torch.empty(0, dtype=torch.int8, device=current_device).set_(
+                current_storage,
+                current_start,
+                (current_end - current_start,),
+                (1,),
+            )
+            coalesced.append(merged)
+        current_storage = None
+        current_device = None
+
+    for view_index in range(max_views):
+        for key_index in indices:
+            if view_index >= len(views[key_index]):
+                continue
+            view = views[key_index][view_index]
+            if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
+                raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
+            if view.numel() == 0:
+                continue
+            storage = view.untyped_storage()
+            storage_offset = view.storage_offset()
+            if (
+                current_storage is not None
+                and current_storage.data_ptr() == storage.data_ptr()
+                and storage_offset == current_end
+            ):
+                current_end += view.numel()
+                continue
+            flush_current()
+            current_storage = storage
+            current_device = view.device
+            current_start = storage_offset
+            current_end = storage_offset + view.numel()
+    flush_current()
+    return coalesced
+
+
 def sharded_get_all_gather(
     m_store: Backend,
     tp_group: Any,
@@ -131,7 +187,7 @@ def sharded_get_all_gather(
         raise RuntimeError("KV read deduplication requires tensor views for all gathered ranges")
 
     world_size = tp_group.world_size
-    local_indices = list(range(tp_rank, len(keys), world_size))
+    local_indices = _kv_shard_indices(len(keys), world_size, tp_rank)
     local_keys = [keys[index] for index in local_indices]
     local_addrs = [addrs[index] for index in local_indices]
     local_sizes = [sizes[index] for index in local_indices]
@@ -141,6 +197,9 @@ def sharded_get_all_gather(
     ]
     local_bytes = shard_lengths[tp_rank]
     wire_bytes = max(shard_lengths, default=0)
+    status_word_count = (len(keys) + 31) // 32
+    status_bytes = status_word_count * 2 * 4
+    packet_bytes = wire_bytes + status_bytes
 
     ret = None
     local_missing: set[int] = set()
@@ -159,50 +218,84 @@ def sharded_get_all_gather(
             if isinstance(m_store, MemcacheBackend) and local_missing:
                 local_failed = True
 
-    status = torch.zeros(len(keys), dtype=torch.int32, device=device)
+    missing_words = [0] * status_word_count
+    failure_words = [0] * status_word_count
     for index in local_indices:
         if block_ids[index] in local_missing:
-            status[index] = 1
+            word_index, bit_index = divmod(index, 32)
+            missing_words[word_index] |= 1 << bit_index
     if local_failed:
-        status[local_indices] = 2
-    status = tp_group.all_reduce(status)
-    if status.numel() != len(keys):
-        raise RuntimeError(f"KV read status size mismatch: expected={len(keys)} actual={status.numel()}")
-    status_list = status.cpu().tolist()
+        for index in local_indices:
+            word_index, bit_index = divmod(index, 32)
+            missing_words[word_index] |= 1 << bit_index
+            failure_words[word_index] |= 1 << bit_index
 
+    payload = torch.empty(packet_bytes, dtype=torch.int8, device=device)
     if wire_bytes:
-        payload = torch.empty(wire_bytes, dtype=torch.int8, device=device)
+        local_views = _coalesced_kv_views(views, local_indices)
+        destinations: list[torch.Tensor] = []
         cursor = 0
-        for key_index in local_indices:
-            for view in views[key_index]:
-                if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
-                    raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
-                end = cursor + view.numel()
-                payload[cursor:end].copy_(view)
-                cursor = end
+        for view in local_views:
+            end = cursor + view.numel()
+            destinations.append(payload[cursor:end])
+            cursor = end
         if cursor != local_bytes:
             raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={cursor}")
+        if destinations:
+            torch._foreach_copy_(destinations, local_views)
+        if local_bytes < wire_bytes:
+            payload[local_bytes:wire_bytes].zero_()
 
-        gathered = tp_group.all_gather(payload, dim=0).flatten()
-        expected_numel = wire_bytes * world_size
-        if gathered.numel() != expected_numel:
-            raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
+    status = torch.tensor(missing_words + failure_words, dtype=torch.int32, device=device)
+    payload[wire_bytes:].copy_(status.view(torch.int8))
+    gathered = tp_group.all_gather(payload, dim=0).flatten()
+    expected_numel = packet_bytes * world_size
+    if gathered.numel() != expected_numel:
+        raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
 
+    if wire_bytes:
+        destinations = []
+        sources = []
         for owner in range(world_size):
-            shard_base = owner * wire_bytes
+            if owner == tp_rank:
+                continue
+            owner_indices = _kv_shard_indices(len(keys), world_size, owner)
+            owner_views = _coalesced_kv_views(views, owner_indices)
+            shard_base = owner * packet_bytes
             cursor = 0
-            for key_index in range(owner, len(keys), world_size):
-                for view in views[key_index]:
-                    end = cursor + view.numel()
-                    view.copy_(gathered[shard_base + cursor : shard_base + end])
-                    cursor = end
+            for view in owner_views:
+                end = cursor + view.numel()
+                destinations.append(view)
+                sources.append(gathered[shard_base + cursor : shard_base + end])
+                cursor = end
             if cursor != shard_lengths[owner]:
                 raise RuntimeError(
                     f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
                 )
+        if destinations:
+            torch._foreach_copy_(destinations, sources)
 
-    request_failed = any(code == 2 for code in status_list)
-    missing_block_ids = {block_ids[index] for index, code in enumerate(status_list) if code != 0}
+    aggregated_missing = [0] * status_word_count
+    aggregated_failure = [0] * status_word_count
+    for owner in range(world_size):
+        status_base = owner * packet_bytes + wire_bytes
+        owner_status = np.frombuffer(
+            gathered[status_base : status_base + status_bytes].cpu().numpy().tobytes(), dtype=np.int32
+        )
+        for word_index, word in enumerate(owner_status[:status_word_count]):
+            aggregated_missing[word_index] |= int(word)
+        for word_index, word in enumerate(owner_status[status_word_count:]):
+            aggregated_failure[word_index] |= int(word)
+
+    request_failed = any(aggregated_failure)
+    missing_block_ids: set[int] = set()
+    for word_index, word in enumerate(aggregated_missing):
+        for bit_index in range(32):
+            index = word_index * 32 + bit_index
+            if index >= len(keys):
+                break
+            if word & (1 << bit_index):
+                missing_block_ids.add(block_ids[index])
     return request_failed, missing_block_ids, len(local_keys)
 
 

@@ -49,6 +49,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    _coalesced_kv_views,
+    _kv_shard_indices,
     sharded_get_all_gather,
 )
 
@@ -1346,6 +1348,19 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 class TestShardedGetAllGather(unittest.TestCase):
+    def test_coalesces_adjacent_views_and_keeps_storage_boundaries(self):
+        first = torch.arange(24, dtype=torch.int8)
+        second = torch.arange(8, dtype=torch.int8) + 31
+        views = [
+            [first[0:8], second[0:4]],
+            [first[8:16], second[4:8]],
+            [first[16:24]],
+        ]
+        coalesced = _coalesced_kv_views(views, [0, 1, 2])
+        self.assertEqual(len(coalesced), 2)
+        torch.testing.assert_close(coalesced[0], first)
+        torch.testing.assert_close(coalesced[1], second)
+
     @staticmethod
     def _build_task_args(caches, payloads, context, failed_keys_by_rank=None):
         block_size = caches[0].shape[1]
@@ -1420,7 +1435,8 @@ class TestShardedGetAllGather(unittest.TestCase):
                 self.assertEqual(errors, [])
                 for tp_rank, (cache, store) in enumerate(zip(caches, stores)):
                     torch.testing.assert_close(cache, expected)
-                    self.assertEqual(store.get_calls[0][0], keys[tp_rank::tp_size])
+                    expected_indices = _kv_shard_indices(num_blocks, tp_size, tp_rank)
+                    self.assertEqual(store.get_calls[0][0], [keys[index] for index in expected_indices])
 
     def test_failed_shard_propagates_missing_block_to_every_rank(self):
         block_size = 8
