@@ -13,9 +13,11 @@ using the same execution mode.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -41,6 +43,10 @@ PROMPTS = [
 # Keep the graph parity window short enough that ACL Graph numerical drift does
 # not turn this refactor gate into a long-horizon model-quality test.
 MAX_TOKENS = 16
+ACCEPTANCE_TOLERANCE = 0.05
+GOLDEN_RESULTS = json.loads(Path(__file__).with_name("spec_decode_parity_goldens.json").read_text(encoding="utf-8"))[
+    "results"
+]
 
 
 @dataclass(frozen=True)
@@ -60,7 +66,7 @@ def _model_from_env(env_name: str, default: str) -> str:
 MTP_CASE = SpecDecodeCase(
     name="mtp",
     model=_model_from_env("SPEC_DECODE_MTP_MODEL", "Qwen/Qwen3.5-4B"),
-    speculative_config={"method": "qwen3_5_mtp", "num_speculative_tokens": 3},
+    speculative_config={"method": "mtp", "num_speculative_tokens": 3},
     runner_kwargs={
         "dtype": "bfloat16",
         "tensor_parallel_size": 1,
@@ -181,7 +187,6 @@ def _run(
     case: SpecDecodeCase,
     *,
     graph_mode: str,
-    speculative: bool,
     verify_family: bool = False,
 ) -> RunResult:
     compilation_config = None
@@ -194,7 +199,6 @@ def _run(
             cudagraph_capture_sizes=[capture_size],
         )
 
-    speculative_config = case.speculative_config if speculative else None
     with VllmRunner(
         case.model,
         disable_log_stats=False,
@@ -202,7 +206,7 @@ def _run(
         enforce_eager=enforce_eager,
         enable_prefix_caching=False,
         compilation_config=compilation_config,
-        speculative_config=speculative_config,
+        speculative_config=case.speculative_config,
         **case.runner_kwargs,
     ) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
@@ -234,14 +238,10 @@ def _run(
             assert resolve_spec_decode_family is not None
             family = resolve_spec_decode_family(vllm_model.model.llm_engine.vllm_config).value
 
-        if speculative:
-            acceptance_length, acceptance_per_pos = _read_spec_metrics(
-                vllm_model.model,
-                int(case.speculative_config["num_speculative_tokens"]),
-            )
-        else:
-            acceptance_length = 1.0
-            acceptance_per_pos = ()
+        acceptance_length, acceptance_per_pos = _read_spec_metrics(
+            vllm_model.model,
+            int(case.speculative_config["num_speculative_tokens"]),
+        )
 
     cleanup_dist_env_and_memory()
     return RunResult(
@@ -257,8 +257,8 @@ def _run(
 
 
 def _assert_family_parity(case: SpecDecodeCase) -> None:
-    eager = _run(case, graph_mode="eager", speculative=True, verify_family=True)
-    graph = _run(case, graph_mode="full_decode_only", speculative=True, verify_family=True)
+    eager = _run(case, graph_mode="eager", verify_family=True)
+    graph = _run(case, graph_mode="full_decode_only", verify_family=True)
 
     assert _cache_layout(eager) == _cache_layout(graph)
     assert eager.family == graph.family == case.expected_family
@@ -266,6 +266,9 @@ def _assert_family_parity(case: SpecDecodeCase) -> None:
     assert all(graph.token_ids)
     assert eager.acceptance_length > 1.0
     assert graph.acceptance_length > 1.0
+
+    _assert_matches_golden(case, eager, "eager")
+    _assert_matches_golden(case, graph, "full_decode_only")
 
     print(
         f"{case.name}: eager={eager.elapsed_seconds:.3f}s "
@@ -276,6 +279,22 @@ def _assert_family_parity(case: SpecDecodeCase) -> None:
         f"graph_acceptance={graph.acceptance_length:.4f}, "
         f"eager_hbm={eager.hbm_in_use_bytes}, graph_hbm={graph.hbm_in_use_bytes}"
     )
+
+
+def _assert_matches_golden(case: SpecDecodeCase, result: RunResult, graph_mode: str) -> None:
+    golden = GOLDEN_RESULTS[case.name][graph_mode]
+    assert result.token_ids == tuple(tuple(tokens) for tokens in golden["token_ids"])
+    assert dict(_cache_layout(result)) == golden["cache_layout"]
+
+    golden_acceptance = float(golden["acceptance_length"])
+    acceptance_delta = abs(result.acceptance_length - golden_acceptance) / golden_acceptance
+    assert acceptance_delta <= ACCEPTANCE_TOLERANCE
+
+    golden_rates = golden["acceptance_per_pos"]
+    assert len(result.acceptance_per_pos) == len(golden_rates)
+    for pos, (actual, expected) in enumerate(zip(result.acceptance_per_pos, golden_rates)):
+        rate_delta = abs(actual - expected) / max(abs(expected), 1e-12)
+        assert rate_delta <= ACCEPTANCE_TOLERANCE, f"acceptance position {pos} differs: {actual} vs {expected}"
 
 
 @pytest.mark.e2e_model(*MTP_CASE.e2e_models)
