@@ -2500,7 +2500,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "9",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2622,7 +2621,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "10",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2738,7 +2736,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "11",
                     "kv_port": "30300",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2992,7 +2989,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "12",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3106,7 +3102,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
-                    "engine_id": "13",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3219,7 +3214,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "14",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3331,7 +3325,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
-                    "engine_id": "15",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3627,7 +3620,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "16",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "connectors": [
@@ -3749,7 +3741,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "17",
         "kv_port": "30200",
         "kv_connector_extra_config": {
           "connectors": [

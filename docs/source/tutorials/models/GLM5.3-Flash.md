@@ -1434,7 +1434,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "6",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1467,7 +1466,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "7",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1631,7 +1629,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
-        "engine_id": "8",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1667,7 +1664,6 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
-        "engine_id": "9",
         "kv_connector_extra_config": {
           "connectors": [
             {
