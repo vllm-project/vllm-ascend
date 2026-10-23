@@ -92,8 +92,8 @@ class TestQuantizedAllReduce(unittest.TestCase):
         x = torch.randn(2, 3, dtype=torch.bfloat16)  # numel=6 < 8
         with (
             patch("torch.distributed.all_reduce") as mock_ar,
-            patch("torch_npu.npu_quantize") as mock_q,
-            patch("torch_npu.npu_anti_quant") as mock_aq,
+            patch("torch_npu.npu_quantize", create=True) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True) as mock_aq,
         ):
             out = wrapper.all_reduce(x)
             # small messages fall back to a plain bf16 all-reduce
@@ -110,8 +110,8 @@ class TestQuantizedAllReduce(unittest.TestCase):
         deq_fake = torch.randn_like(x)
         with (
             patch("torch.distributed.all_reduce") as mock_ar,
-            patch("torch_npu.npu_quantize", return_value=q_fake) as mock_q,
-            patch("torch_npu.npu_anti_quant", return_value=deq_fake) as mock_aq,
+            patch("torch_npu.npu_quantize", create=True, return_value=q_fake) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True, return_value=deq_fake) as mock_aq,
         ):
             out = wrapper.all_reduce(x)
             # two all-reduces happen: per-channel amax sync + int8 payload
@@ -154,9 +154,10 @@ class TestQuantizedAllReduce(unittest.TestCase):
         q_fake = torch.full((4, 8), wrapper.max_q, dtype=torch.int8)
         with (
             patch("torch.distributed.all_reduce", side_effect=fake_ar),
-            patch("torch_npu.npu_quantize", return_value=q_fake) as mock_q,
+            patch("torch_npu.npu_quantize", create=True, return_value=q_fake) as mock_q,
             patch(
                 "torch_npu.npu_anti_quant",
+                create=True,
                 return_value=torch.randn_like(x),
             ) as mock_aq,
         ):
