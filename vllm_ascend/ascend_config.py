@@ -1112,8 +1112,7 @@ class AscendConfig:
             architecture in ("DeepseekV4ForCausalLM", "DeepseekV4ForConditionalGeneration")
             for architecture in model_architectures
         ) or (
-            getattr(hf_text_config, "model_type", None) == "deepseek_v4"
-            and "DSparkDraftModel" in model_architectures
+            getattr(hf_text_config, "model_type", None) == "deepseek_v4" and "DSparkDraftModel" in model_architectures
         )
         # K3 projects the residual stream before the routed FFN. Other models
         # retain the existing hidden-size lookup and supported dimensions.
@@ -1161,7 +1160,9 @@ class AscendConfig:
         # MegaMoe against the target topology whenever it is available.
         parallel_config = vllm_config.parallel_config
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        target_parallel_config = getattr(speculative_config, "target_parallel_config", None)
+        target_parallel_config = None
+        if speculative_config is not None:
+            target_parallel_config = getattr(speculative_config, "target_parallel_config", None)
         if target_parallel_config is not None:
             parallel_config = target_parallel_config
         ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
