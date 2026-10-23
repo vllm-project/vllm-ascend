@@ -49,6 +49,19 @@ if _triton_available:
         if not hasattr(_tl_core, "_aggregate"):
             _tl_core._aggregate = lambda *a, **kw: None
 
+    # torch_npu's Inductor cache still imports triton_key from the old path.
+    # Alias the real function before compilation, including in spawned workers.
+    # Remove once supported torch_npu versions import it from runtime.cache.
+    try:
+        import triton.compiler.compiler as _triton_compiler  # type: ignore[import-untyped]
+    except ImportError:
+        pass  # Triton may be unavailable in CPU UT environments.
+    else:
+        if not hasattr(_triton_compiler, "triton_key"):
+            from triton.runtime.cache import triton_key as _triton_key  # type: ignore[import-untyped]
+
+            _triton_compiler.triton_key = _triton_key
+
 _GLOBAL_PATCH_APPLIED = False
 
 
