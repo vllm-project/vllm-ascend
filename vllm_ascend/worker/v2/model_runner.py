@@ -308,12 +308,12 @@ class NPUModelRunner(GPUModelRunner):
         if manager is not None:
             recommendation = getattr(manager, "_physical_k_recommendation", None)
             manager._physical_k_recommendation = None
+            cost_saving_k = getattr(manager, "_physical_k_cost_saving", None)
+            manager._physical_k_cost_saving = None
             output_container = getattr(output, "model_runner_output", output)
-            if output_container is not None and hasattr(
-                output_container,
-                "physical_k_recommendation",
-            ):
+            if output_container is not None and recommendation is not None:
                 output_container.physical_k_recommendation = recommendation
+                output_container.physical_k_cost_saving = cost_saving_k
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()

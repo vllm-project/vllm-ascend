@@ -16,6 +16,10 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
+from vllm.logger import logger
+
+from vllm_ascend import envs
+
 
 _ACCEPTANCE_EMA_ALPHA = 0.2
 _BUCKET_SWITCH_STEPS = 2
@@ -24,12 +28,18 @@ _MIN_K_DWELL_STEPS = 8
 # selection. This is important for RL, where a rollout can decay from a large
 # batch (for example 128) through 64/32/16 down to 8 or fewer requests.
 PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 1
-PHYSICAL_K_RECOMMEND_INTERVAL = 128
+PHYSICAL_K_RECOMMEND_INTERVAL = 16
 PHYSICAL_K_MAX_TP_SIZE = 8
 _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
 _PROBE_INTERVAL = 32
+_ACCEPTED_TAIL_THRESHOLD = 0.25
+
+
+def _trace_physical_k(message: str, *args: Any) -> None:
+    if envs.VLLM_ASCEND_PHYSICAL_K_TRACE:
+        logger.info("ASCEND_AV_PHYSICAL_K_TRACE " + message, *args)
 
 
 def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -79,6 +89,7 @@ class _BucketState:
     stable_k: int
     profile_k: int | None
     empirical_k: int
+    economic_k: int | None
     survival: list[float]
     survival_seen: list[bool]
     observations: int = 0
@@ -111,6 +122,7 @@ class AdaptiveDraftKController:
         self._pending_bucket: int | None = None
         self._pending_bucket_steps = 0
         self._single_request_id: str | None = None
+        self._last_traced_cap: dict[int, int] = {}
 
     def observe_single_request(self, request_id: str) -> None:
         """Do not carry a previous request's K decision into a new rollout.
@@ -135,6 +147,7 @@ class AdaptiveDraftKController:
                 stable_k=self.max_k,
                 profile_k=None,
                 empirical_k=self.max_k,
+                economic_k=None,
                 survival=[1.0] * self.max_k,
                 survival_seen=[False] * self.max_k,
             )
@@ -164,6 +177,13 @@ class AdaptiveDraftKController:
     def _desired_k(self, state: _BucketState) -> int:
         if self.auto_tune and state.profile_k is not None:
             desired = state.profile_k
+            if (
+                state.economic_k is not None
+                and state.observations >= 6
+                and all(state.survival_seen[state.economic_k :])
+                and sum(state.survival[state.economic_k :]) <= _ACCEPTED_TAIL_THRESHOLD
+            ):
+                desired = min(desired, state.economic_k)
         elif self.auto_tune and self.require_profile_for_downshift:
             # AV can price each captured draft width. Keep collecting fresh
             # full-width confidences until it has made that comparison;
@@ -199,10 +219,16 @@ class AdaptiveDraftKController:
         self,
         batch_size: int,
         physical_k: int,
+        cost_saving_k: int | None = None,
     ) -> None:
         physical_k = max(self.min_k, min(int(physical_k), self.max_k))
         state = self._state(self._batch_bucket(batch_size))
         state.profile_k = physical_k
+        state.economic_k = (
+            max(self.min_k, min(int(cost_saving_k), self.max_k - 1))
+            if cost_saving_k is not None
+            else None
+        )
 
     def advance_profile(self, batch_size: int) -> None:
         """Advance a profiled bucket without rebuilding per-request samples."""
@@ -225,18 +251,34 @@ class AdaptiveDraftKController:
             bucket = self._batch_bucket(batch_size)
             state = self._state(bucket)
             if state.profile_k == state.stable_k == self.max_k:
-                return min(state.stable_k, configured_k)
+                result = min(state.stable_k, configured_k)
+                if self._last_traced_cap.get(bucket) != result:
+                    _trace_physical_k(
+                        "cap bucket=%d batch=%d configured=%d profile=%s stable=%d result=%d",
+                        bucket, batch_size, configured_k, state.profile_k, state.stable_k, result,
+                    )
+                    self._last_traced_cap[bucket] = result
+                return result
             bucket = self._settled_bucket(batch_size)
             state = self._state(bucket)
             if (
                 _PROBE_INTERVAL
                 and state.observations
-                and state.observations % _PROBE_INTERVAL == 0
+                and state.observations
+                % (16 if state.economic_k is not None else _PROBE_INTERVAL)
+                == 0
                 and state.last_probe_observation != state.observations
             ):
                 state.last_probe_observation = state.observations
                 return configured_k
-            return min(state.stable_k, configured_k)
+            result = min(state.stable_k, configured_k)
+            if self._last_traced_cap.get(bucket) != result:
+                _trace_physical_k(
+                    "cap bucket=%d batch=%d configured=%d profile=%s stable=%d result=%d",
+                    bucket, batch_size, configured_k, state.profile_k, state.stable_k, result,
+                )
+                self._last_traced_cap[bucket] = result
+            return result
         return configured_k
 
     def observe(
@@ -252,7 +294,7 @@ class AdaptiveDraftKController:
                 return
             state = self._state(self._batch_bucket(active_batch_size))
             state.observations += 1
-            if state.profile_k is not None:
+            if state.profile_k is not None and state.economic_k is None:
                 self._advance_state(state)
                 return
         pairs = [(int(width), tokens) for width, tokens in zip(scheduled_widths, sampled_token_ids) if width > 0]
@@ -261,7 +303,7 @@ class AdaptiveDraftKController:
         widths = [width for width, _ in pairs]
         if len(widths) < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             return
-        if not (self.auto_tune and state.profile_k is None):
+        if not self.auto_tune:
             state = self._state(self._batch_bucket(len(widths)))
             state.observations += 1
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
@@ -332,6 +374,11 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
         controller.observe_single_request(req_ids[0])
     if recommendation is not None:
         recommended_batch_size, physical_k = recommendation
+        cost_saving_k = getattr(model_runner_output, "physical_k_cost_saving", None)
+        _trace_physical_k(
+            "recommend worker_batch=%d scheduler_batch=%d physical_k=%d",
+            recommended_batch_size, scheduler_batch_size, physical_k,
+        )
         if (
             scheduler_batch_size
             and controller._batch_bucket(recommended_batch_size)
@@ -341,13 +388,18 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
             # scheduled requests. Never apply a K priced for that smaller
             # subset to a different scheduler batch bucket.
             controller.recommend(scheduler_batch_size, controller.max_k)
+            _trace_physical_k(
+                "recommend_rejected worker_bucket=%d scheduler_bucket=%d",
+                controller._batch_bucket(recommended_batch_size),
+                controller._batch_bucket(scheduler_batch_size),
+            )
         else:
-            controller.recommend(*recommendation)
+            controller.recommend(recommended_batch_size, physical_k, cost_saving_k)
     if recommendation is None and scheduler_batch_size < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
         return
     if recommendation is None and controller.auto_tune and scheduler_batch_size:
         state = controller._state(controller._batch_bucket(scheduler_batch_size))
-        if state.profile_k is not None:
+        if state.profile_k is not None and state.economic_k is None:
             if state.profile_k != state.stable_k or state.stable_k < controller.max_k:
                 controller.advance_profile(scheduler_batch_size)
             return

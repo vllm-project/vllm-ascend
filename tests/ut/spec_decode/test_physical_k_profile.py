@@ -207,6 +207,7 @@ def test_worker_recommends_k_from_profile_cost_and_confidence():
     batch_size, physical_k = manager._physical_k_recommendation
     assert batch_size == 16
     assert physical_k == 3
+    assert manager._physical_k_cost_saving == 3
 
 
 def test_small_batch_gets_runtime_recommendation():

@@ -168,6 +168,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_profile_is_upstream = []
     manager._physical_k_draft_costs = None
     manager._physical_k_recommendation = None
+    manager._physical_k_cost_saving = None
     manager._physical_k_last_logged = {}
     manager._physical_k_score_steps = defaultdict(int)
     manager._physical_k_seen_narrow_draft = defaultdict(bool)
@@ -424,6 +425,18 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         if not scored:
             return None
         score, selected = max(scored)
+        full_cost = lookup_cost(self, max_k, batch_size)
+        self._physical_k_cost_saving = next(
+            (
+                k
+                for k in candidates
+                if k < max_k
+                and (cost := lookup_cost(self, k, batch_size)) is not None
+                and full_cost is not None
+                and cost <= 0.75 * full_cost
+            ),
+            None,
+        )
         bucket = _batch_bucket(batch_size)
         if self._physical_k_last_logged.get(bucket) != selected:
             logger.info(
@@ -447,6 +460,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         # continues to update the controller on every step.
         if len(num_tokens_per_req) < min_batch_size:
             self._physical_k_recommendation = None
+            self._physical_k_cost_saving = None
         else:
             if len(num_tokens_per_req) == 1:
                 request_id = next(iter(num_tokens_per_req))
@@ -484,6 +498,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 and len(draft_tokens.get(self._physical_k_single_request_id, ())) >= max_k
             )
             if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0 or probe_due or new_request_ready:
+                self._physical_k_cost_saving = None
                 self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
                 if self._physical_k_recommendation is not None:
                     self._physical_k_score_new_request = False
@@ -494,6 +509,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                     self._physical_k_seen_narrow_draft[bucket] = False
             else:
                 self._physical_k_recommendation = None
+                self._physical_k_cost_saving = None
         return result
 
     manager.batches_to_profile = MethodType(batches_to_profile, manager)
