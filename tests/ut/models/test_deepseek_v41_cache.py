@@ -12,6 +12,10 @@ pytest.importorskip(
     "vllm.transformers_utils.configs.deepseek_v41",
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
+pytest.importorskip(
+    "vllm.v1.core.kv_cache_config_builder",
+    reason="the pluggable KV cache builder is main-only",
+)
 
 import torch
 import torch_npu

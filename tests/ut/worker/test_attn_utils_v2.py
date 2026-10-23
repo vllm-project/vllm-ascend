@@ -44,7 +44,6 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadataBuilder
-from vllm_ascend.core.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -948,7 +947,10 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
     assert torch.all(raw[:128] == 37)
 
 
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="the pluggable KV cache builder is main-only")
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
+    from vllm_ascend.core.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
+
     small_name = "model.layers.0.self_attn.attn"
     large_name = "model.layers.1.self_attn.attn"
     aliased_large_name = "model.layers.2.self_attn.attn"

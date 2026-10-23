@@ -96,10 +96,12 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-#       Every other Ascend planning rule (grouping, materialization, memory
-#       accounting for DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and TurboQuant)
-#       lives in `vllm_ascend.core.kv_cache_config_builder`, which the platform
-#       selects through `NPUPlatform.get_kv_cache_config_builder_cls`.
+#       On main, every other Ascend planning rule (grouping, materialization,
+#       memory accounting for DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and
+#       TurboQuant) lives in `vllm_ascend.core.kv_cache_config_builder`, which
+#       the platform selects through
+#       `NPUPlatform.get_kv_cache_config_builder_cls`. The v0.31.0 lane, which
+#       has no pluggable builder, still applies the same rules from this file.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

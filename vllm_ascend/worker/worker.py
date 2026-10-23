@@ -56,11 +56,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -118,11 +118,19 @@ from vllm_ascend.utils import (
 )
 
 # vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
+# main; the v0.31.0 lane still ships them in `kv_cache_utils`. Main resolves
+# grouping through the platform's `KVCacheConfigBuilder`.
 if vllm_version_is("0.31.0"):
-    from vllm.v1.core.kv_cache_utils import unify_hybrid_kv_cache_specs
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 else:
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
     from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
+
+    def get_kv_cache_groups(
+        vllm_config: VllmConfig,
+        kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> list[KVCacheGroupSpec]:
+        return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -767,9 +775,7 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
-        kv_cache_groups = get_kv_cache_config_builder(self.vllm_config).get_kv_cache_groups(
-            self.vllm_config, kv_cache_spec
-        )
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
         # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared

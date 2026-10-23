@@ -8,7 +8,6 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,

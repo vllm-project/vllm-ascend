@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
@@ -41,9 +42,6 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
-from vllm_ascend.core.kv_cache_config_builder import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
@@ -2479,9 +2477,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="the pluggable KV cache builder is main-only")
     def test_dsv4_main_materializes_real_planner_geometry_once(
         self,
     ):
+        from vllm_ascend.core.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
+
         small_name = "model.layers.0.self_attn.attn"
         large_name = "model.layers.1.self_attn.attn"
         aliased_large_name = "model.layers.2.self_attn.attn"

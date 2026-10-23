@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 import math
 from dataclasses import replace
@@ -7,6 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
+pytest.importorskip(
+    "vllm.v1.core.kv_cache_config_builder",
+    reason="the pluggable KV cache builder is main-only",
+)
+
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_planning import _max_memory_usage_bytes_from_groups
 from vllm.v1.core.kv_cache_utils import (
