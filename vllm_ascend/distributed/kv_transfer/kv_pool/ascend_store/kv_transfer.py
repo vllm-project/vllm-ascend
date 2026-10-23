@@ -106,16 +106,6 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
-def _all_gather_python_value(tp_group: Any, value: Any) -> list[Any]:
-    gathered: list[Any] = [None] * tp_group.world_size
-    all_gather_object = getattr(tp_group, "all_gather_object", None)
-    if callable(all_gather_object):
-        all_gather_object(gathered, value)
-    else:
-        torch.distributed.all_gather_object(gathered, value, group=tp_group.cpu_group)
-    return gathered
-
-
 def sharded_get_all_gather(
     m_store: Backend,
     tp_group: Any,
@@ -132,17 +122,25 @@ def sharded_get_all_gather(
     if not keys:
         return False, set(), 0
 
-    world_size = tp_group.world_size
-    local_shape = (len(keys), tuple(sum(key_sizes) for key_sizes in sizes))
-    gathered_shapes = _all_gather_python_value(tp_group, local_shape)
-    if any(shape != local_shape for shape in gathered_shapes):
-        raise RuntimeError(f"KV read metadata diverged across TP ranks: {gathered_shapes}")
+    device = None
+    for key_views in views:
+        if key_views:
+            device = key_views[0].device
+            break
+    if device is None:
+        raise RuntimeError("KV read deduplication requires tensor views for all gathered ranges")
 
+    world_size = tp_group.world_size
     local_indices = list(range(tp_rank, len(keys), world_size))
     local_keys = [keys[index] for index in local_indices]
     local_addrs = [addrs[index] for index in local_indices]
     local_sizes = [sizes[index] for index in local_indices]
     local_block_ids = [block_ids[index] for index in local_indices]
+    shard_lengths = [
+        sum(sum(sizes[index]) for index in range(owner, len(keys), world_size)) for owner in range(world_size)
+    ]
+    local_bytes = shard_lengths[tp_rank]
+    wire_bytes = max(shard_lengths, default=0)
 
     ret = None
     local_missing: set[int] = set()
@@ -161,23 +159,18 @@ def sharded_get_all_gather(
             if isinstance(m_store, MemcacheBackend) and local_missing:
                 local_failed = True
 
-    local_bytes = sum(sum(sizes[index]) for index in local_indices)
-    gathered_meta = _all_gather_python_value(
-        tp_group,
-        (local_bytes, local_failed, sorted(local_missing)),
-    )
-    shard_lengths = [int(meta[0]) for meta in gathered_meta]
-    wire_bytes = max(shard_lengths, default=0)
+    status = torch.zeros(len(keys), dtype=torch.int32, device=device)
+    for index in local_indices:
+        if block_ids[index] in local_missing:
+            status[index] = 1
+    if local_failed:
+        status[local_indices] = 2
+    status = tp_group.all_reduce(status)
+    if status.numel() != len(keys):
+        raise RuntimeError(f"KV read status size mismatch: expected={len(keys)} actual={status.numel()}")
+    status_list = status.cpu().tolist()
 
     if wire_bytes:
-        device = None
-        for key_views in views:
-            if key_views:
-                device = key_views[0].device
-                break
-        if device is None:
-            raise RuntimeError("KV read deduplication requires tensor views for all gathered ranges")
-
         payload = torch.empty(wire_bytes, dtype=torch.int8, device=device)
         cursor = 0
         for key_index in local_indices:
@@ -208,10 +201,8 @@ def sharded_get_all_gather(
                     f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
                 )
 
-    request_failed = any(bool(meta[1]) for meta in gathered_meta)
-    missing_block_ids: set[int] = set()
-    for meta in gathered_meta:
-        missing_block_ids.update(int(block_id) for block_id in meta[2])
+    request_failed = any(code == 2 for code in status_list)
+    missing_block_ids = {block_ids[index] for index, code in enumerate(status_list) if code != 0}
     return request_failed, missing_block_ids, len(local_keys)
 
 
