@@ -326,6 +326,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.parallel_config.enable_expert_parallel = False
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
