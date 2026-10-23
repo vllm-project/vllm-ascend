@@ -10,29 +10,40 @@ Covers the three invariants the extraction must keep:
 3. Path resolution is env-driven and fail-closed (no home-directory
    fallbacks, no silent stale-vendor loading).
 """
-import os
-from unittest import mock
 
 import pytest
 
 
 def _clean_env() -> dict:
     keys = [
-        "OSCAR_INT2_ENABLED", "R218_INT2_SERVE",
-        "R109_TT_PREFIX", "R109_TT_RECENT",
-        "SGLANG_OSCAR_K_ROTATION_PATH", "SGLANG_OSCAR_V_ROTATION_PATH",
-        "R152_EAGER", "R161_BATCHED_MID", "R113_QUANT_CPP", "R174_INT2_MSD",
-        "R144_OPP_PATH", "OSCAR_OPP_PATH", "ASCEND_CUSTOM_OPP_PATH",
-        "R144_LAUNCHER_SRC", "OSCAR_LAUNCHER_SRC",
-        "OSCAR_LSE_BRIDGE_SRC", "OSCAR_DIAG", "OSCAR_DIAG_DIR",
+        "OSCAR_INT2_ENABLED",
+        "R218_INT2_SERVE",
+        "R109_TT_PREFIX",
+        "R109_TT_RECENT",
+        "SGLANG_OSCAR_K_ROTATION_PATH",
+        "SGLANG_OSCAR_V_ROTATION_PATH",
+        "R152_EAGER",
+        "R161_BATCHED_MID",
+        "R113_QUANT_CPP",
+        "R174_INT2_MSD",
+        "R144_OPP_PATH",
+        "OSCAR_OPP_PATH",
+        "ASCEND_CUSTOM_OPP_PATH",
+        "R144_LAUNCHER_SRC",
+        "OSCAR_LAUNCHER_SRC",
+        "OSCAR_LSE_BRIDGE_SRC",
+        "OSCAR_DIAG",
+        "OSCAR_DIAG_DIR",
     ]
     return {k: "" for k in keys}
 
 
 def _fresh_module(monkeypatch, env: dict):
     import importlib
+
     import vllm_ascend.oscar.config as cfg
     import vllm_ascend.oscar.paths as paths
+
     for k, v in env.items():
         if v == "":
             monkeypatch.delenv(k, raising=False)
@@ -66,13 +77,15 @@ class TestDefaultDisabled:
 class TestLegacyEnvMapping:
     def test_canonical_posture(self, monkeypatch):
         env = _clean_env()
-        env.update({
-            "R218_INT2_SERVE": "1",
-            "R109_TT_PREFIX": "128",
-            "R109_TT_RECENT": "896",
-            "SGLANG_OSCAR_K_ROTATION_PATH": "/rot/k.pt",
-            "SGLANG_OSCAR_V_ROTATION_PATH": "/rot/v.pt",
-        })
+        env.update(
+            {
+                "R218_INT2_SERVE": "1",
+                "R109_TT_PREFIX": "128",
+                "R109_TT_RECENT": "896",
+                "SGLANG_OSCAR_K_ROTATION_PATH": "/rot/k.pt",
+                "SGLANG_OSCAR_V_ROTATION_PATH": "/rot/v.pt",
+            }
+        )
         cfg, _ = _fresh_module(monkeypatch, env)
         c = cfg.get_oscar_config()
         assert c.enabled and c.prefix_window == 128 and c.recent_window == 896
@@ -113,7 +126,8 @@ class TestPathResolution:
     def test_no_home_directory_references(self, monkeypatch):
         env = _clean_env()
         _, paths = _fresh_module(monkeypatch, env)
-        src = open(paths.__file__).read()
+        with open(paths.__file__) as fh:
+            src = fh.read()
         assert "/home/" not in src
 
     def test_lse_bridge_missing_raises(self, monkeypatch, tmp_path):
@@ -127,6 +141,7 @@ class TestPathResolution:
 class TestGatedDiagnostics:
     def test_diag_write_off_by_default(self, monkeypatch, tmp_path):
         import vllm_ascend.oscar.diag as diag
+
         monkeypatch.delenv("OSCAR_DIAG", raising=False)
         monkeypatch.setenv("OSCAR_DIAG_DIR", str(tmp_path))
         diag.write("probe.txt", "should-not-land")
@@ -134,6 +149,7 @@ class TestGatedDiagnostics:
 
     def test_diag_write_gated(self, monkeypatch, tmp_path):
         import vllm_ascend.oscar.diag as diag
+
         monkeypatch.setenv("OSCAR_DIAG", "1")
         monkeypatch.setenv("OSCAR_DIAG_DIR", str(tmp_path))
         diag.write("probe.txt", "lands")

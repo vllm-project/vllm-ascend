@@ -14,12 +14,14 @@ Each resolves from the environment first (the variables the RC53 serve
 chain already sets), then falls back to repository-relative defaults.
 Nothing in here may reference a user's home directory.
 """
+
 from __future__ import annotations
 
 import os
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))  # vllm_ascend/oscar/ -> repo root
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)  # vllm_ascend/oscar/ -> repo root
 
 
 def opp_path() -> str:
@@ -34,8 +36,8 @@ def opp_path() -> str:
         if v:
             return v.split(os.pathsep)[0]
     raise FileNotFoundError(
-        "OSCAR vendor OPP path not set (expected R144_OPP_PATH / "
-        "OSCAR_OPP_PATH / ASCEND_CUSTOM_OPP_PATH)")
+        "OSCAR vendor OPP path not set (expected R144_OPP_PATH / OSCAR_OPP_PATH / ASCEND_CUSTOM_OPP_PATH)"
+    )
 
 
 def launcher_src() -> str:
@@ -48,14 +50,11 @@ def launcher_src() -> str:
         v = os.environ.get(var, "")
         if v:
             return v
-    return os.path.join(_REPO_ROOT, "csrc", "oscar",
-                        "int2_op_launch_lse_fast_r152.cpp")
+    return os.path.join(_REPO_ROOT, "csrc", "oscar", "int2_op_launch_lse_fast_r152.cpp")
 
 
 def launcher_name() -> str:
-    return os.environ.get("R144_LAUNCHER_NAME",
-                          os.environ.get("OSCAR_LAUNCHER_NAME",
-                                         "int2_lse_fast_r152"))
+    return os.environ.get("R144_LAUNCHER_NAME", os.environ.get("OSCAR_LAUNCHER_NAME", "int2_lse_fast_r152"))
 
 
 def runner_tmp(kind: str) -> str:
@@ -65,6 +64,7 @@ def runner_tmp(kind: str) -> str:
     os.makedirs(d, exist_ok=True)
     return d
 
+
 def lse_bridge_src() -> str:
     """Source of the R98 LSE bridge extension (int2_op_launch_lse_r98.cpp).
 
@@ -72,14 +72,13 @@ def lse_bridge_src() -> str:
     default is the in-repo csrc copy. Raises if neither exists.
     """
     import os
+
     env = os.environ.get("OSCAR_LSE_BRIDGE_SRC")
     if env:
         if not os.path.isfile(env):
             raise FileNotFoundError(f"OSCAR_LSE_BRIDGE_SRC={env} does not exist")
         return env
-    cand = os.path.join(_REPO_ROOT, "csrc", "oscar",
-                        "int2_op_launch_lse_r98.cpp")
+    cand = os.path.join(_REPO_ROOT, "csrc", "oscar", "int2_op_launch_lse_r98.cpp")
     if os.path.isfile(cand):
         return cand
-    raise FileNotFoundError(
-        "R98 LSE bridge source not found (set OSCAR_LSE_BRIDGE_SRC)")
+    raise FileNotFoundError("R98 LSE bridge source not found (set OSCAR_LSE_BRIDGE_SRC)")
