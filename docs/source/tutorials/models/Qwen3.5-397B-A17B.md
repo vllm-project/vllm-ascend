@@ -5,7 +5,7 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
 Qwen3.5-397B-A17B is a large-scale Qwen3.5 MoE model that combines multimodal capability, long-context inference, MTP speculative decoding, and W8A8 quantized deployment for production serving on Ascend hardware.
@@ -185,7 +185,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "950DT Products"
 
-    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single 950DT Products node, needs `--quantization ascend`.
+    Run the following script to execute online inference on 1 950DT Products (96GB x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single 950DT Products node, needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -242,7 +242,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
       --host 0.0.0.0 \
@@ -266,7 +266,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "A2 series"
 
-    For W8A8 deployment, 2 Atlas 800 A2 (64G x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
+    For W8A8 deployment, 2 Atlas 800 A2 (64GB x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
@@ -418,10 +418,10 @@ PD disaggregation separates Prefill and Decode into different service groups. Pr
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-For Atlas 800 A3 (64G x 16), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
+For Atlas 800 A3 (64GB x 16), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
 
-- 1 Prefill node: 1 Atlas 800 A3 (64G x 16).
-- 1 Decode node: 1 Atlas 800 A3 (64G x 16).
+- 1 Prefill node: 1 Atlas 800 A3 (64GB x 16).
+- 1 Decode node: 1 Atlas 800 A3 (64GB x 16).
 
 Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
 
@@ -583,10 +583,10 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 
 ### 5.5 Prefill-Decode Disaggregation (950DT Products)
 
-For 950DT Products (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
+For 950DT Products (96GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
 
-- 1 Prefill node: 1 950DT Products (96G x 8). Runs an independent service with DP=1, TP=8.
-- 1 Decode node: 1 950DT Products (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
+- 1 Prefill node: 1 950DT Products (96GB x 8). Runs an independent service with DP=1, TP=8.
+- 1 Decode node: 1 950DT Products (96GB x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
 
 The prefill service pushes KV cache to the decode node via the Mooncake p2p connector.
 
@@ -747,10 +747,10 @@ PD disaggregation separates Prefill and Decode into different service groups. Pr
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-For Atlas 800 A2 (64G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a8-mtp`:
+For Atlas 800 A2 (64GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a8-mtp`:
 
-- 1 Prefill node: 1 Atlas 800 A2 (64G x 8).
-- 1 Decode node: 1 Atlas 800 A2 (64G x 8).
+- 1 Prefill node: 1 Atlas 800 A2 (64GB x 8).
+- 1 Decode node: 1 Atlas 800 A2 (64GB x 8).
 
 Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
 

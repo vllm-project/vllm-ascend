@@ -5,7 +5,7 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
 DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
@@ -254,7 +254,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_RPC_TIMEOUT=1800000
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
@@ -696,7 +696,7 @@ Before you start, please:
         '{
           "kv_connector": "MooncakeConnectorV2",
           "kv_role": "kv_producer",
-          "kv_port": 14579,
+          "kv_port": 30000,
           "kv_connector_extra_config": {
             "prefill": {"dp_size": 1, "tp_size": 2, "pp_size": 2, "pcp_size": 8},
             "decode": {"dp_size": 16, "tp_size": 2, "pp_size": 1, "pcp_size": 1}
@@ -770,7 +770,7 @@ Before you start, please:
         '{
           "kv_connector": "MooncakeConnectorV2",
           "kv_role": "kv_consumer",
-          "kv_port": 14579,
+          "kv_port": 30100,
           "kv_connector_extra_config": {
             "prefill": {"dp_size": 1, "tp_size": 2, "pp_size": 2, "pcp_size": 8},
             "decode": {"dp_size": 16, "tp_size": 2, "pp_size": 1, "pcp_size": 1}
@@ -947,7 +947,7 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-0813-w4a8 \
             --host 0.0.0.0 \
@@ -1025,7 +1025,7 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-0813-w4a8 \
             --host 0.0.0.0 \
