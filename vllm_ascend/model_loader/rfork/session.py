@@ -197,8 +197,10 @@ class RForkSession:
         return True
 
     def _renew_seed_lease(self, lease: SeedLease, stop_event: threading.Event) -> None:
+        # The renewal thread starts only for expiring leases.
+        assert lease.lease_ttl_sec is not None
         interval = min(
-            max(float(lease.lease_ttl_sec) / 3, LEASE_RENEW_MIN_INTERVAL_SEC),
+            max(lease.lease_ttl_sec / 3, LEASE_RENEW_MIN_INTERVAL_SEC),
             LEASE_RENEW_MAX_INTERVAL_SEC,
         )
         try:
