@@ -25,6 +25,24 @@ def _flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default) == "1"
 
 
+def _int(name: str, default: int) -> int:
+    """Legacy-env integer knob.
+
+    Unset OR EMPTY falls back to the default: the RC53 docker whitelist
+    exports empty strings to defeat launcher setdefaults, so "" is an
+    established "not set" spelling here. A non-empty value that does not
+    parse fails closed with the variable name instead of a bare
+    ``ValueError: invalid literal``.
+    """
+    v = os.environ.get(name, "")
+    if v == "":
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        raise ValueError(f"{name}={v!r} is not a valid integer") from None
+
+
 @dataclass(frozen=True)
 class OscarInt2Config:
     """Semantic configuration for the OSCAR INT2 three-tier KV path.
@@ -89,8 +107,8 @@ def _from_legacy_env() -> OscarInt2Config:
     # behavior change on either side.
     return OscarInt2Config(
         enabled=_flag("OSCAR_INT2_ENABLED") or _flag("R218_INT2_SERVE"),
-        prefix_window=int(os.environ.get("R109_TT_PREFIX", "128")),
-        recent_window=int(os.environ.get("R109_TT_RECENT", "896")),
+        prefix_window=_int("R109_TT_PREFIX", 128),
+        recent_window=_int("R109_TT_RECENT", 896),
         k_rotation_path=os.environ.get("SGLANG_OSCAR_K_ROTATION_PATH", ""),
         v_rotation_path=os.environ.get("SGLANG_OSCAR_V_ROTATION_PATH", ""),
         eager=_flag("R152_EAGER", "0"),

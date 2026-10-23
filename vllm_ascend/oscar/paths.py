@@ -32,7 +32,7 @@ def opp_path() -> str:
     for var in ("R144_OPP_PATH", "OSCAR_OPP_PATH", "ASCEND_CUSTOM_OPP_PATH"):
         v = os.environ.get(var, "")
         if v:
-            return v.split(":")[0]
+            return v.split(os.pathsep)[0]
     raise FileNotFoundError(
         "OSCAR vendor OPP path not set (expected R144_OPP_PATH / "
         "OSCAR_OPP_PATH / ASCEND_CUSTOM_OPP_PATH)")
@@ -77,8 +77,8 @@ def lse_bridge_src() -> str:
         if not os.path.isfile(env):
             raise FileNotFoundError(f"OSCAR_LSE_BRIDGE_SRC={env} does not exist")
         return env
-    cand = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "csrc", "oscar", "int2_op_launch_lse_r98.cpp")
+    cand = os.path.join(_REPO_ROOT, "csrc", "oscar",
+                        "int2_op_launch_lse_r98.cpp")
     if os.path.isfile(cand):
         return cand
     raise FileNotFoundError(
