@@ -64,7 +64,7 @@ such as IP addresses according to your actual environment.
     ```bash
     # Execute the following command on each node, replacing x.x.x.x
     # with the target node's NPU card address.
-    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x; done
+    for i in {0..7}; do hccn_tool -i $i -ping -g x.x.x.x; done
     ```
 
 5. Check NPU TLS Configuration
