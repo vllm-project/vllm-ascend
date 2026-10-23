@@ -1,4 +1,0 @@
-pr: 19127
-entries:
-  - category: bugfix
-    text: Fixed packed HCCL weight reload ordering and tensor storage lifetime across chunks. NPU IPC now reuses packed buffer mappings across chunks and synchronizes updates on the assigned device.
