@@ -25,6 +25,33 @@ def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
         assert not (model_root / platform_neutral_dir).exists()
 
 
+def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
+    model = _source("vllm_ascend/models/qwen4_exp/model.py")
+    mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
+
+    assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
+    assert "class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer)" in model
+    assert "self.mlp = AscendQwen4ExpSparseMoeBlock(" in model
+    assert (
+        "upstream_model.Qwen4ExpDecoderLayer = AscendQwen4ExpDecoderLayer" in model
+    )
+    assert "reduce_results=not self.use_sequence_parallel" in model
+    assert "already_sequence_parallel=self.use_sequence_parallel" in model
+    assert "block_input = sp_all_gather(block_input)" in model
+    assert "attn_out = sp_reduce_scatter(attn_out)" in model
+    assert "conv_input = sp_all_gather(conv_input)" in model
+    assert "gated_output.add_(sp_shard(conv_output))" in model
+    assert "local_ngram_ids = sp_shard(ngram_ids)" in model
+    assert "qwen4_exp_amd_ple_ngram_embedding_pinned(" in model
+    assert "return ple_metadata.num_prefills > 0" in model
+    assert "embeddings = sp_shard(embeddings)" in model
+    assert "forward_context.is_padding = sp_padding_mask(" in model
+    assert "hidden_states = sp_shard(hidden_states)" in model
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in model
+    assert "hidden_states = sp_shard(hidden_states)" in mtp
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
+
+
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
     registry = _source("vllm_ascend/models/__init__.py")
     for architecture, wrapper in (

@@ -23,6 +23,8 @@ from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
 from . import model as _model  # noqa: F401
@@ -132,6 +134,8 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
+        if layer.use_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=None,
@@ -148,6 +152,15 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
+        if layer.use_sequence_parallel:
+            full_num_tokens = positions.shape[-1]
+            multi_hidden_size = multi_hidden.shape[-1]
+            gathered_hidden = sp_all_gather(
+                torch.cat((multi_hidden, sample_hidden_states), dim=-1)
+            )[:full_num_tokens]
+            multi_hidden, sample_hidden_states = gathered_hidden.split(
+                (multi_hidden_size, hidden_size), dim=-1
+            )
         return sample_hidden_states, multi_hidden
 
 
