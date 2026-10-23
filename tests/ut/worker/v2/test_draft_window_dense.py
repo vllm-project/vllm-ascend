@@ -10,6 +10,29 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_dense import gather_dense_dr
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource
 
 
+def test_frozen_eagle_anchor_does_not_follow_later_exact_lengths():
+    source = DirectPrefixSource(torch.tensor([[3, 1, 2, 4]], dtype=torch.int32), (0,), (4,), 4)
+    frozen = torch.tensor([4], dtype=torch.int32)  # E0=10,K3,W8,B4 -> H13,S4.
+    for end in (11, 12, 13):
+        read = prepare_dense_draft_read(
+            source,
+            exact_device=torch.tensor([end], dtype=torch.int32),
+            row_indices=torch.tensor([0]),
+            upper_cpu=torch.tensor([14]),
+            window_size=8,
+            anchor_span=4,
+            query_width=1,
+            causal=True,
+            retain=lambda *objects: None,
+            frozen_starts=frozen,
+        )
+        assert read.starts.tolist() == [4]
+        assert read.seq_lens.tolist() == [end - 4]
+        expected = [int(source.table[0, pos // 4]) * 4 + pos % 4 for pos in range(4, end)]
+        assert read.slots[0, : end - 4].tolist() == expected
+        assert not read.mask[0, 0, 0, : end - 4].any()
+
+
 @pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("query_width", [8, 9])

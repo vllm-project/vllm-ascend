@@ -329,6 +329,47 @@ def test_eagle_rejects_unsafe_window_at_startup(setup):
         DraftWindowRuntime(spec, policy)
 
 
+def test_eagle_later_ar_uses_current_device_exact_with_frozen_anchor(setup, monkeypatch):
+    _, spec, canonical, _ = setup
+    spec.input_buffers.positions = torch.tensor([6, 7, 8, 9, 23, 24, 25, 26])
+    spec.last_token_indices = torch.tensor([3, 7])
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    runtime._dense_device_reads = True  # Provider eligibility is tested separately.
+    original = runtime._host_metadata_callback
+
+    def legacy(step, *args, **kwargs):
+        callback = original(step, *args, **kwargs)
+        if step:
+
+            def forbidden(*args):
+                raise AssertionError("Later eager AR step fell back to a Host exact snapshot")
+
+            return forbidden
+        return callback
+
+    monkeypatch.setattr(runtime, "_host_metadata_callback", legacy)
+    state = batch(computed=(20, 30), prompt=(8, 8))
+    state.idx_mapping = torch.from_numpy(state.idx_mapping_np).long()
+    full = canonical.clone()
+    with runtime.proposal_context(spec, state):
+        first = common(exact=(10, 27), upper=(14, 30))
+        first.query_start_loc_cpu = torch.tensor([0, 4, 8, 8])
+        first.causal = True
+        runtime.metadata_callback(0, 2)(0, first)
+        for step, ends in enumerate(((11, 28), (12, 29)), 1):
+            metadata = common(exact=ends, upper=(14, 30))
+            metadata.query_start_loc_cpu = torch.tensor([0, 1, 2, 2])
+            metadata.causal = True
+            slots, positions, table = metadata.slot_mapping, metadata.positions, metadata.block_table_tensor
+            runtime.metadata_callback(step, 2)(0, metadata)
+            read = metadata._draft_window_device_read
+            assert read.query_width == 1 and read.starts.tolist() == [4, 20]
+            assert read.seq_lens.tolist() == [ends[0] - 4, ends[1] - 20]
+            assert metadata.slot_mapping is slots and metadata.positions is positions
+            assert metadata.block_table_tensor is table
+    torch.testing.assert_close(canonical, full, atol=0, rtol=0)
+
+
 def test_multiple_groups_project_same_logical_start_with_independent_backing(setup, monkeypatch):
     _, spec, canonical, _ = setup
     other_table = torch.arange(96, dtype=torch.int32).reshape(6, 16) + 100

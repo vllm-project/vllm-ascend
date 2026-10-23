@@ -60,6 +60,7 @@ def prepare_dense_draft_read(
     query_width: int,
     causal: bool,
     retain: Callable[..., None],
+    frozen_starts: torch.Tensor | None = None,
 ) -> DenseDraftRead:
     """Snapshot current device E and canonical addresses without Host exact.
 
@@ -67,6 +68,8 @@ def prepare_dense_draft_read(
     order. FullAttentionSpec residency retains all active pages. The Host
     upper must fit initialized columns, proving address capacity for every E
     in that preparation contract; it never chooses S or readable token count.
+    An Eagle AR caller may supply the current proposal's validated frozen
+    anchor. Its producer guarantees S<=E<=H; it must not follow later E-W.
     No device assertion is used: this torch_npu version implements even
     _assert_async through a synchronizing scalar copy.
     """
@@ -96,7 +99,16 @@ def prepare_dense_draft_read(
     if exact_device.device != source.table.device or row_indices.device != source.table.device:
         raise ValueError("Dense read operands must share their source device")
     exact = exact_device[:n].clone()
-    starts = torch.div(torch.clamp(exact - window_size, min=0), anchor_span, rounding_mode="floor") * anchor_span
+    if frozen_starts is None:
+        starts = torch.div(torch.clamp(exact - window_size, min=0), anchor_span, rounding_mode="floor") * anchor_span
+    else:
+        if (
+            frozen_starts.shape != (n,)
+            or frozen_starts.device != exact.device
+            or frozen_starts.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError("Frozen Draft anchors must match current request rows and device")
+        starts = frozen_starts.clone()
     visible = exact - starts
     # Both are allocation bounds: V <= E <= U and V <= W+B-1. Avoid
     # window-sized padding on short contexts without using U to choose S/V.

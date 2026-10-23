@@ -23,9 +23,9 @@ TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("geometry", [(192, 4, 4), (128, 32, 8)])
-@pytest.mark.parametrize("query_width", [8, 9])
+@pytest.mark.parametrize(("query_width", "future"), [(1, 0), (1, 2), (8, 0), (9, 0)])
 @pytest.mark.parametrize("causal", [False, True])
-def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, dtype):
+def test_dense_device_exact_reader(geometry, query_width, future, causal, page_layers, dtype):
     D, NQ, NK = geometry
     B, W = 128, 1024
     ends = (1151, 1152 if query_width == 8 else 1281)
@@ -43,7 +43,7 @@ def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, d
     query_cpu = (torch.randn(2 * query_width, NQ, D, generator=generator) * 0.2).to(dtype)
     reference, slots_reference = [], []
     for index, (row, end) in enumerate(zip(rows, ends)):
-        start = max(end - W, 0) // B * B
+        start = max(end + future - W, 0) // B * B
         k = keys_cpu[canonical[row].long()].flatten(0, 1)[start:end].float().repeat_interleave(NQ // NK, dim=1)
         v = values_cpu[canonical[row].long()].flatten(0, 1)[start:end].float().repeat_interleave(NQ // NK, dim=1)
         q = query_cpu[index * query_width : (index + 1) * query_width].float()
@@ -70,6 +70,12 @@ def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, d
     upper_cpu = torch.tensor(ends, dtype=torch.int32) + 1
     upper_device, rejected = upper_cpu.npu(), torch.ones(2, dtype=torch.int32, device="npu")
     device_rows = torch.tensor(rows, dtype=torch.int64, device="npu")
+    # E0=end-1, K=3 freezes H=end+2, independently of later current E.
+    frozen_starts = (
+        torch.div(torch.clamp(upper_device - rejected - 1 + 3 - W, min=0), B, rounding_mode="floor") * B
+        if future
+        else None
+    )
     retained = []
 
     def execute():
@@ -83,6 +89,7 @@ def test_dense_device_exact_reader(geometry, query_width, causal, page_layers, d
             query_width=query_width,
             causal=causal,
             retain=lambda *objects: retained.extend(objects),
+            frozen_starts=frozen_starts,
         )
         return read, dense_draft_attention(read, query, keys, values, 1 / math.sqrt(D))
 

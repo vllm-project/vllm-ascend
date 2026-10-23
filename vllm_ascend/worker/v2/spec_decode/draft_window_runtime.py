@@ -92,6 +92,7 @@ class DraftWindowRuntime:
         self._bypass = False
         self._build_count = 0
         self._eagle_plans = None
+        self._eagle_frozen_starts = None
         self._next_step = 0
         self._proposal_mapping = None
 
@@ -127,7 +128,7 @@ class DraftWindowRuntime:
         # padding and Full write coordinates; actual CP builders are excluded
         # by the provider inventory rather than a target-global CP switch.
         routes = require_direct_prefix_routes(speculator)
-        if self.method in ("dflash", "dspark") and all(
+        if self.method in ("eagle3", "dflash", "dspark") and all(
             route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes
         ):
             from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
@@ -185,6 +186,7 @@ class DraftWindowRuntime:
             self._input_batch = input_batch
             self._build_count = 0
             self._eagle_plans = None
+            self._eagle_frozen_starts = None
             self._next_step = 0
             self._proposal_mapping = None
             try:
@@ -200,6 +202,7 @@ class DraftWindowRuntime:
                 self._owner = None
                 self._input_batch = None
                 self._eagle_plans = None
+                self._eagle_frozen_starts = None
                 self._proposal_mapping = None
 
     def metadata_callback(
@@ -216,6 +219,14 @@ class DraftWindowRuntime:
             prepared_exact_cpu=prepared_exact_cpu,
             prepared_exact_device=prepared_exact_device,
         )
+        if self.method == "eagle3":
+            if legacy is not None and step > 0 and self._dense_device_reads:
+                if self._eagle_frozen_starts is None:
+                    raise RuntimeError("Eagle3 AR read has no current proposal anchor")
+                return self._dense_metadata_callback(num_reqs, legacy, eagle_step=step)
+            # Initial queries can be ragged or carry rejection padding. They
+            # retain the certified first-pass path and freeze the live anchor.
+            return legacy
         if (
             legacy is not None
             and getattr(self, "_dense_device_reads", False)
@@ -224,7 +235,7 @@ class DraftWindowRuntime:
             return self._dense_metadata_callback(num_reqs, legacy)
         return legacy
 
-    def _dense_metadata_callback(self, num_reqs: int, legacy):
+    def _dense_metadata_callback(self, num_reqs: int, legacy, *, eagle_step: int | None = None):
         from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
 
         owner = self._owner
@@ -233,6 +244,7 @@ class DraftWindowRuntime:
         full_exact = None
         use_device = None
         sources = None
+        query_width = 1 if eagle_step is not None else self.speculator.num_query_per_req
 
         def apply(gid: int, common: Any) -> None:
             nonlocal mapping, full_exact, use_device, sources
@@ -256,7 +268,7 @@ class DraftWindowRuntime:
                 widths = common.query_start_loc_cpu[: num_reqs + 1].diff()
                 # Keep the existing exact path when scheduling bounds do not
                 # prove allocated address capacity, or query widths are ragged.
-                use_device = bool((widths == self.speculator.num_query_per_req).all()) and all(
+                use_device = bool((widths == query_width).all()) and all(
                     all(
                         0 < int(bound) <= count * source.block_span for bound, count in zip(upper, source.valid_columns)
                     )
@@ -278,15 +290,18 @@ class DraftWindowRuntime:
                 upper_cpu=common.seq_lens_cpu_upper_bound[:num_reqs],
                 window_size=self.window_size,
                 anchor_span=self.anchor_block_span,
-                query_width=self.speculator.num_query_per_req,
+                query_width=query_width,
                 causal=common.causal,
                 retain=retain,
+                frozen_starts=self._eagle_frozen_starts if eagle_step is not None else None,
             )
             retain(common)
             read.apply(common)
             seen.add(gid)
             if len(seen) == len(self.gids):
                 self._build_count += 1
+                if eagle_step is not None:
+                    self._next_step += 1
 
         return apply
 
@@ -317,6 +332,19 @@ class DraftWindowRuntime:
         live_end = last_positions.to(dtype=torch.int32)
         self.pool.retain(owner, live_end)
         live_end.add_(1)
+        if self._dense_device_reads:
+            # Freeze from this preparation's last valid query, before the CPU
+            # validation below. Later AR inputs advance within this horizon;
+            # their device exact lengths must not move this proposal anchor.
+            self._eagle_frozen_starts = (
+                torch.div(
+                    torch.clamp(live_end + self.static_k - self.window_size, min=0),
+                    self.anchor_block_span,
+                    rounding_mode="floor",
+                )
+                * self.anchor_block_span
+            )
+            self.pool.retain(owner, self._eagle_frozen_starts)
         pair = torch.stack((native_extent[:num_reqs], live_end))
         self.pool.retain(owner, pair)
         snapshot = pair.to(device="cpu", dtype=torch.int32, copy=True)
