@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
@@ -147,6 +148,69 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         with disable_profiling_chunk_for_draft(self.vllm_config):
             return super().load_draft_model(target_model, target_attn_layer_names)
 
+    @contextmanager
+    def _reuse_full_graph_attn_metadata(self) -> Iterator[None]:
+        # The upstream proposer builds metadata before graph replay. Keep it
+        # only until this proposal's manager consumes it, including on errors.
+        self._pending_full_graph_attn_metadata = None
+        self._full_graph_attn_metadata_active = True
+        try:
+            yield
+        finally:
+            self._pending_full_graph_attn_metadata = None
+            self._full_graph_attn_metadata_active = False
+
+    def _build_uniform_attn_metadata(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        self._pending_full_graph_attn_metadata = None
+        metadata = super()._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=num_reqs,
+            num_query_per_req=num_query_per_req,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            causal=causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
+        if (
+            getattr(self, "_full_graph_attn_metadata_active", False)
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and metadata is not None
+            and num_query_per_req == self.num_query_per_req
+            and step == self.num_query_per_req
+            and causal == self._group_causal
+            and dcp_local_seq_lens is None
+        ):
+            self._pending_full_graph_attn_metadata = (batch_desc, num_reqs, seq_lens_cpu_upper_bound, metadata)
+        return metadata
+
+    def take_draft_attn_metadata(self, batch_desc: BatchExecutionDescriptor) -> dict[str, Any] | None:
+        pending = getattr(self, "_pending_full_graph_attn_metadata", None)
+        self._pending_full_graph_attn_metadata = None
+        if pending is None or not getattr(self, "_full_graph_attn_metadata_active", False):
+            return None
+        previous_desc, num_reqs, seq_lens, metadata = pending
+        if (
+            previous_desc != batch_desc
+            or num_reqs != self.input_batch.num_reqs
+            or seq_lens is not self.input_batch.seq_lens_cpu_upper_bound
+            or batch_desc.num_reqs is None
+            or batch_desc.num_tokens != batch_desc.num_reqs * self.num_query_per_req
+        ):
+            return None
+        # The upstream builder clamps padded query offsets to the real batch.
+        # FIA still needs the cumulative lengths to span all captured queries.
+        self._update_draft_attn_metadata(metadata, batch_desc.num_reqs)
+        return metadata
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -189,6 +253,10 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
+        self._pending_full_graph_attn_metadata: (
+            tuple[BatchExecutionDescriptor, int, torch.Tensor, dict[str, Any]] | None
+        ) = None
+        self._full_graph_attn_metadata_active = False
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -279,7 +347,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 # TODO: Remove this guard once main2main includes upstream vLLM
                 # #54856 (facd9a74a1), which resets the profiling DP counts.
                 sync_state = None
-            with build_attn_metadata_wrapper():
+            with self._reuse_full_graph_attn_metadata(), build_attn_metadata_wrapper():
                 return super().propose(
                     input_batch,
                     attn_metadata,
@@ -330,7 +398,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 # TODO: Remove this guard once main2main includes upstream vLLM
                 # #54856 (facd9a74a1), which resets the profiling DP counts.
                 sync_state = None
-            with build_attn_metadata_wrapper():
+            with self._reuse_full_graph_attn_metadata(), build_attn_metadata_wrapper():
                 return super().propose(
                     input_batch,
                     attn_metadata,

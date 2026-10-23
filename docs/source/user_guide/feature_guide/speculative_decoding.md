@@ -379,6 +379,13 @@ A few important things to consider when using DFlash2 draft models:
    to compare against eager drafting. Validate graph/eager equivalence and
    request reuse on the intended NPU configuration before deployment.
 
+   On V2, DFlash and DFlash2 reuse attention metadata built in the current
+   proposal for FULL ACL graph replay, avoiding a second metadata build.
+   Metadata is consumed once and discarded when the proposal exits; KV lengths,
+   block tables, and padded query lengths are still updated for every step.
+   The first successful reuse logs `DFlash FULL ACL graph replay reuses attention
+   metadata` with the captured request and token counts.
+
    Non-causal draft layers with sliding-window size `W` use FIA band mode
    (`sparse_mode=4`) with a cached compressed mask and
    `pre_tokens=next_tokens=W-1`, matching upstream FlashAttention's symmetric

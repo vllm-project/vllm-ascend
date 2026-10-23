@@ -5,6 +5,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -89,10 +90,21 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
-            desc.num_reqs,
-            self.speculator.input_batch.seq_lens_cpu_upper_bound,
-        )
+        # DSpark also uses this manager and retains its own metadata builder.
+        take_metadata = getattr(self.speculator, "take_draft_attn_metadata", None)
+        metadata = take_metadata(desc) if take_metadata is not None else None
+        if metadata is not None:
+            draft_attn_metadatas = [metadata]
+            logger.info_once(
+                "DFlash FULL ACL graph replay reuses attention metadata (requests=%d, tokens=%d).",
+                desc.num_reqs,
+                desc.num_tokens,
+            )
+        else:
+            draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+                desc.num_reqs,
+                self.speculator.input_batch.seq_lens_cpu_upper_bound,
+            )
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, draft_attn_metadatas)
         else:

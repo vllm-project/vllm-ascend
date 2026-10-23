@@ -6,3 +6,5 @@ entries:
     text: Fixed non-causal DFlash FIA attention in eager execution and ACL graphs to preserve configured symmetric sliding windows using band mode with a compressed mask. Layers without a window retain full attention.
   - category: bugfix
     text: Fixed DFlash2 candidate scoring running outside its required compilation context and QK/RoPE fusion registration using incompatible target/draft dimensions.
+  - category: performance
+    text: Reused DFlash and DFlash2 attention metadata within each Model Runner V2 FULL ACL graph proposal to avoid a second metadata build while preserving graph updates and padded query lengths.
