@@ -619,10 +619,12 @@ class MooncakePullRecvingThread(threading.Thread):
         """Check producer ownership after every transfer bucket has completed."""
         path = make_zmq_path("tcp", host, port)
         leases = tuple((meta.remote_request_id, meta.remote_lease_nonce) for meta in requests.values())
-        with zmq_ctx(zmq.REQ, path) as sock:
-            # One bounded exchange. An unavailable producer cannot prove a hold.
-            sock.setsockopt(zmq.SNDTIMEO, LEASE_CHECK_TIMEOUT_MS)
-            sock.setsockopt(zmq.RCVTIMEO, LEASE_CHECK_TIMEOUT_MS)
+        # Share the process context; keep each REQ socket local to one exchange.
+        with zmq.Context.instance().socket(zmq.REQ) as sock:  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.SNDTIMEO, LEASE_CHECK_TIMEOUT_MS)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, LEASE_CHECK_TIMEOUT_MS)  # type: ignore[attr-defined]
+            sock.connect(path)
             sock.send(self.encoder.encode((VERIFY_LEASE_MSG, leases)))
             response = msgspec.msgpack.decode(sock.recv(), type=list[bool])
         if len(response) != len(requests):
