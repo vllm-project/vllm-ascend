@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
+from vllm_ascend._310p.worker.v2.sample.logprob import gather_logprobs
 from vllm_ascend._310p.worker.v2.spec_utils import (
     get_num_sampled_and_rejected_cpu,
     probabilistic_rejection_sample_cpu,
@@ -62,6 +63,46 @@ class RejectionSampler310V2(RejectionSampler):
         self._copy_stream = torch.npu.Stream()
         self._copy_event = torch.npu.Event()
         self._copy_pending = False
+
+    def _build_logprobs_tensors(
+        self,
+        *,
+        logits: torch.Tensor,
+        sampled: torch.Tensor,
+        num_sampled: torch.Tensor,
+        cu_num_logits_np: np.ndarray,
+        idx_mapping_np: np.ndarray,
+    ):
+        """Raw logprobs for emitted tokens (aligned with ``cu_num_logits`` rows).
+
+        Triton-free stand-in for upstream ``RejectionSampler._get_logprobs_tensors``.
+        Emitted token ``j`` of request ``r`` uses logits row ``cu[r] + j``.
+        """
+        max_num_logprobs = self.sampler._batch_max_num_logprobs(idx_mapping_np)
+        if max_num_logprobs is None:
+            return None
+        num_reqs = int(num_sampled.shape[0])
+        num_sampled_np = num_sampled.detach().to("cpu").numpy()
+        sampled_cpu = sampled.detach().to("cpu")
+        row_indices: list[int] = []
+        token_ids: list[int] = []
+        for req_idx in range(num_reqs):
+            n = int(num_sampled_np[req_idx])
+            if n <= 0:
+                continue
+            start = int(cu_num_logits_np[req_idx])
+            for pos in range(n):
+                tok = int(sampled_cpu[req_idx, pos].item())
+                if tok < 0:
+                    break
+                row_indices.append(start + pos)
+                token_ids.append(tok)
+        if not token_ids:
+            return None
+        rows = torch.tensor(row_indices, device=logits.device, dtype=torch.int64)
+        tokens = torch.tensor(token_ids, device=logits.device, dtype=torch.int32)
+        raw = torch.log_softmax(logits.index_select(0, rows), dim=-1, dtype=torch.float32)
+        return gather_logprobs(raw, max_num_logprobs, tokens)
 
     def __call__(
         self,
@@ -116,9 +157,16 @@ class RejectionSampler310V2(RejectionSampler):
             self.num_sampled_cpu[:num_reqs].copy_(num_sampled_cpu)
             self.num_rejected_cpu[:num_reqs].copy_(num_rejected_cpu)
             self._copy_pending = False
+            logprobs_tensors = self._build_logprobs_tensors(
+                logits=logits,
+                sampled=sampled,
+                num_sampled=num_sampled,
+                cu_num_logits_np=cu_num_logits_np,
+                idx_mapping_np=idx_mapping_np,
+            )
             return SamplerOutput(
                 sampled_token_ids=sampled,
-                logprobs_tensors=None,
+                logprobs_tensors=logprobs_tensors,
                 num_nans=None,
                 num_sampled=num_sampled,
                 num_rejected=num_rejected,
@@ -182,6 +230,14 @@ class RejectionSampler310V2(RejectionSampler):
             num_logits.to(torch.int32) - num_sampled,
         )
 
+        logprobs_tensors = self._build_logprobs_tensors(
+            logits=logits,
+            sampled=sampled,
+            num_sampled=num_sampled,
+            cu_num_logits_np=cu_num_logits_np[: num_reqs + 1],
+            idx_mapping_np=idx_mapping_np,
+        )
+
         main_stream = torch.npu.current_stream()
         with torch.npu.stream(self._copy_stream):
             self._copy_stream.wait_stream(main_stream)
@@ -192,7 +248,7 @@ class RejectionSampler310V2(RejectionSampler):
             self._copy_pending = True
         return SamplerOutput(
             sampled_token_ids=sampled,
-            logprobs_tensors=None,
+            logprobs_tensors=logprobs_tensors,
             num_nans=None,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
