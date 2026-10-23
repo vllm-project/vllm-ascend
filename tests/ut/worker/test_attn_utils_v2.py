@@ -679,15 +679,15 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.fa_quant_layer = False
 
-    attn_module.impl.pcp_enabled = True
+    attn_module.impl.use_pcp = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.pcp_enabled = False
+    attn_module.impl.use_pcp = False
 
     attn_module.impl.is_pcp_decode_sharded = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl.is_pcp_decode_sharded = False
 
-    attn_module.impl.dcp_enabled = True
+    attn_module.impl.use_dcp = True
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: False
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
     attn_module.impl._dcp_current_kv_buffers = (
@@ -702,7 +702,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl._dcp_current_kv_buffers_are_sufficient = lambda: True
     attn_module.impl._dcp_current_kv_buffers = None
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
-    attn_module.impl.dcp_enabled = False
+    attn_module.impl.use_dcp = False
 
     attn_module.impl.enable_kv_nz = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)

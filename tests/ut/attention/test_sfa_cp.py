@@ -554,7 +554,7 @@ def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.decode_threshold = 1
-    builder.dcp_enabled = False
+    builder.use_dcp = False
     builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
     local_block_table = torch.tensor([[7]], dtype=torch.int32)
     global_block_table = torch.tensor([[7], [9]], dtype=torch.int32)
@@ -1099,7 +1099,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
         )
 
         with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp", return_value=True) as dcp,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True) as dcp,
             patch.object(
                 DCPMetadataBuilderMixin,
                 "__init__",
@@ -1118,7 +1118,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
             )
 
         dcp.assert_called_once_with()
-        assert builder.dcp_enabled
+        assert builder.use_dcp
         assert builder.dcp_local_seq_lens_buf.shape == (expected_num_reqs,)
         assert builder.block_table_replicated_view_buf.shape == (
             expected_num_reqs,
@@ -1198,7 +1198,7 @@ def test_sfa_dcp_updates_dsa_cp_local_slot_mapping_with_padding() -> None:
 @pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
 def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, is_producer, recompute, query_lens):
     builder = _make_builder()
-    builder.dcp_enabled = True
+    builder.use_dcp = True
     builder.decode_threshold = 3
     builder.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
@@ -1227,7 +1227,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
             return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp",
+            "vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled",
             side_effect=AssertionError("use cached DCP state"),
         ),
         patch.object(builder, "_get_dcp_local_block_table", return_value=blocks),
