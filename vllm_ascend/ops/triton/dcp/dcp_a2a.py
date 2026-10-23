@@ -8,7 +8,7 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type, is_950
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
@@ -419,19 +419,17 @@ def fused_dcp_lse_combine(
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # On A3, reduce the sixteen rank contributions in parallel. Keep the
-    # existing wire format and scalar path for other geometries and dtypes.
+    # Enable the measured A3 geometry only. T >= 16 bounds the qualified
+    # workload, not a proven performance crossover; other shapes keep scalar.
     rank_tiled = (
-        not is_950()
+        get_ascend_device_type() == AscendDeviceType.A3
         and recv.dtype == torch.bfloat16
         and dcp_size == 16
         and head_dim == 512
         and scatter_dim == 1
         and num_tokens >= 16
-        and num_heads > 0
         and local_output is not None
         and local_output.stride(-1) == 1
-        and not return_lse
     )
     if rank_tiled:
         assert local_output is not None and local_lse is not None

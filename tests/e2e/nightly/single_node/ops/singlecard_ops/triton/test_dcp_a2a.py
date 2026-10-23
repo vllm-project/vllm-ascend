@@ -490,8 +490,8 @@ def test_rank_tiled_combine_fp64_reference(monkeypatch, num_tokens, num_heads, l
     Parallel FP32 summation may cross BF16 rounding boundaries. Independently
     bound its mathematical error, then check the output's BF16 rounding exactly.
     """
-    if dcp_a2a.is_950():
-        pytest.skip("The rank-tiled combine path is not enabled on A5")
+    if dcp_a2a.get_ascend_device_type() != dcp_a2a.AscendDeviceType.A3:
+        pytest.skip("The rank-tiled combine path is qualified on A3 only")
     torch.manual_seed(7201 + num_tokens + num_heads)
     ranks, head_dim = 16, 512
     local_heads = num_heads // ranks
