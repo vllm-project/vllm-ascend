@@ -188,7 +188,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), apply the container adjustments below.
+Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), use the complete container command below.
 
 ```bash
 # Update the vllm-ascend image
@@ -233,27 +233,44 @@ docker run --rm \
 
 ### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
 
-Adapt the A3 command above as follows:
-
-- Use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5` (Ubuntu) or `{{ vllm_ascend_version }}-a5-openeuler` (openEuler), compatible with the host driver.
-- Map the actual host NPU nodes: for an eight-device host, keep `/dev/davinci0` through `/dev/davinci7` and remove `/dev/davinci8` through `/dev/davinci15`. Remove `/dev/devmm_svm`.
-- Replace the individual driver mounts with the complete `/usr/local/Ascend/driver` mount to include `driver/topo/950`.
-- Add the following options before the image name:
+For an eight-device 950PR/950DT host, use the following command. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
 
 ```bash
---privileged \
---ulimit memlock=-1:-1 \
---device /dev/ummu \
---device /dev/uburma \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
--v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+export NAME=vllm-ascend-950
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+docker run --rm \
+    --name "$NAME" \
+    --net=host \
+    --privileged \
+    --shm-size=1g \
+    --ulimit memlock=-1:-1 \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -e ASCEND_RT_VISIBLE_DEVICES \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+    -v /usr/local/dcmi:/usr/local/dcmi:ro \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+    -it "$IMAGE" bash
 ```
 
-Select the physical devices assigned to the service with `ASCEND_RT_VISIBLE_DEVICES` inside the container. Check that all host mount sources exist and have the expected file/directory type; `-v` creates a directory for a missing source path. Remove A3-specific mounts such as `/etc/hccn.conf` if they are not present or used on the host.
+Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`; `/dev/devmm_svm` is not needed. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
 
 For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
-For Host RoCE, also expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
+For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
 ```bash
 --device /dev/infiniband \
