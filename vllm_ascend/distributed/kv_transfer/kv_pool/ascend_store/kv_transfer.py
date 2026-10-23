@@ -106,11 +106,28 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
+_MLA_READ_DEDUP_TARGET_BYTES = 64 * 1024 * 1024
+_MLA_READ_DEDUP_MIN_BYTES = 8 * 1024 * 1024
+
+
+def _should_use_mla_read_dedup(total_bytes: int, tp_size: int) -> bool:
+    """Avoid fixed collective/copy overhead for small replicated KV loads."""
+    threshold = max(_MLA_READ_DEDUP_MIN_BYTES, _MLA_READ_DEDUP_TARGET_BYTES // max(tp_size, 1))
+    return total_bytes >= threshold
+
+
 def _kv_shard_indices(num_keys: int, world_size: int, tp_rank: int) -> list[int]:
     base, remainder = divmod(num_keys, world_size)
     start = tp_rank * base + min(tp_rank, remainder)
     end = start + base + (1 if tp_rank < remainder else 0)
     return list(range(start, end))
+
+
+def _kv_shard_lengths(sizes: list[list[int]], world_size: int) -> list[int]:
+    return [
+        sum(sum(sizes[index]) for index in _kv_shard_indices(len(sizes), world_size, owner))
+        for owner in range(world_size)
+    ]
 
 
 def _coalesced_kv_views(views: list[list[torch.Tensor]], indices: list[int]) -> list[torch.Tensor]:
@@ -192,9 +209,7 @@ def sharded_get_all_gather(
     local_addrs = [addrs[index] for index in local_indices]
     local_sizes = [sizes[index] for index in local_indices]
     local_block_ids = [block_ids[index] for index in local_indices]
-    shard_lengths = [
-        sum(sum(sizes[index]) for index in range(owner, len(keys), world_size)) for owner in range(world_size)
-    ]
+    shard_lengths = _kv_shard_lengths(sizes, world_size)
     local_bytes = shard_lengths[tp_rank]
     wire_bytes = max(shard_lengths, default=0)
     status_word_count = (len(keys) + 31) // 32

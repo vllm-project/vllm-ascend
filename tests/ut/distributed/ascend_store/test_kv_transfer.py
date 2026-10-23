@@ -51,6 +51,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     LayerBatchBuilder,
     _coalesced_kv_views,
     _kv_shard_indices,
+    _kv_shard_lengths,
+    _should_use_mla_read_dedup,
     sharded_get_all_gather,
 )
 
@@ -1348,6 +1350,19 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 class TestShardedGetAllGather(unittest.TestCase):
+    def test_read_dedup_threshold_scales_with_tp_size(self):
+        mib = 1024 * 1024
+        self.assertFalse(_should_use_mla_read_dedup(18 * mib, 2))
+        self.assertTrue(_should_use_mla_read_dedup(18 * mib, 4))
+        self.assertTrue(_should_use_mla_read_dedup(72 * mib, 2))
+        self.assertTrue(_should_use_mla_read_dedup(8 * mib, 16))
+        self.assertFalse(_should_use_mla_read_dedup(7 * mib, 16))
+
+    def test_shard_lengths_follow_contiguous_variable_sizes(self):
+        sizes = [[5], [7], [11], [13], [17]]
+        self.assertEqual(_kv_shard_lengths(sizes, 2), [23, 30])
+        self.assertEqual(_kv_shard_lengths(sizes, 4), [12, 11, 13, 17])
+
     def test_coalesces_adjacent_views_and_keeps_storage_boundaries(self):
         first = torch.arange(24, dtype=torch.int8)
         second = torch.arange(8, dtype=torch.int8) + 31
