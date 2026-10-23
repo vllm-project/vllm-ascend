@@ -34,7 +34,7 @@ From a technical view, vllm-ascend supports devices if TorchNPU is supported. Ot
 
 ### 2. How to get our docker containers?
 
-You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>cann</u>](https://quay.io/repository/ascend/cann?tab=tags).
+You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>CANN</u>](https://quay.io/repository/ascend/cann?tab=tags).
 
 If you are in China, you can use `daocloud` or some other mirror sites to accelerate your downloading:
 
@@ -170,37 +170,37 @@ There are several factors that affect output determinism:
 
 1. Sampler method: using **greedy sampling** by setting `temperature=0` in `SamplingParams`, e.g.:
 
-   ```python
-   from vllm import LLM, SamplingParams
+    ```python
+    from vllm import LLM, SamplingParams
 
-   prompts = [
+    prompts = [
       "Hello, my name is",
       "The president of the United States is",
       "The capital of France is",
       "The future of AI is",
-   ]
+      ]
 
-   # Create a sampling params object.
-   sampling_params = SamplingParams(temperature=0)
-   # Create an LLM.
-   llm = LLM(model="Qwen/Qwen3-0.6B")
+    # Create a sampling params object.
+    sampling_params = SamplingParams(temperature=0)
+    # Create an LLM.
+    llm = LLM(model="Qwen/Qwen3-0.6B")
 
-   # Generate texts from the prompts.
-   outputs = llm.generate(prompts, sampling_params)
-   for output in outputs:
+    # Generate texts from the prompts.
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
       prompt = output.prompt
       generated_text = output.outputs[0].text
       print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-   ```
+    ```
 
 2. Set the following environment parameters:
 
-   ```bash
-   export LCCL_DETERMINISTIC=1
-   export HCCL_DETERMINISTIC=true
-   export ATB_MATMUL_SHUFFLE_K_ENABLE=0
-   export ATB_LLM_LCOC_ENABLE=0
-   ```
+    ```bash
+    export LCCL_DETERMINISTIC=1
+    export HCCL_DETERMINISTIC=true
+    export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+    export ATB_LLM_LCOC_ENABLE=0
+    ```
 
 ### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models?
 
@@ -244,20 +244,20 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
 
-   ```bash
-   export IMAGE_TAG=v0.10.0rc1-310p
-   export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
-   # If in China region, uncomment to use a mirror:
-   # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+    ```bash
+    export IMAGE_TAG=v0.10.0rc1-310p
+    export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+    # If in China region, uncomment to use a mirror:
+    # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
 
-   # Pull the image for the ARM64 platform and save it
-   docker pull --platform linux/arm64 "${IMAGE_NAME}"
-   docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
-   ```
+    # Pull the image for the ARM64 platform and save it
+    docker pull --platform linux/arm64 "${IMAGE_NAME}"
+    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
+    ```
 
 2. Transfer the image archive
 
-Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
+   Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
 
 ### 20. Why am I getting an error when executing the script to start a Docker container? The error message is: "operation not permitted"
 
