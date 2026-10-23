@@ -30,39 +30,26 @@ class OscarRotationLoader:
         self.device = device
         self.dtype = dtype
 
-        logger.info(
-            f"[OSCAR] Loading rotation matrices:\n"
-            f"  K: {k_rotation_path}\n"
-            f"  V: {v_rotation_path}"
-        )
+        logger.info("[OSCAR] Loading rotation matrices:\n  K: %s\n  V: %s", k_rotation_path, v_rotation_path)
 
         k_data = torch.load(k_rotation_path, map_location="cpu", weights_only=True)
         v_data = torch.load(v_rotation_path, map_location="cpu", weights_only=True)
 
         # Handle OSCAR .pt format: dict with 'layers' key
-        self._R_k = self._extract_rotation(k_data, num_layers, head_dim).to(
-            dtype=dtype, device=device
-        )
-        self._R_v = self._extract_rotation(v_data, num_layers, head_dim).to(
-            dtype=dtype, device=device
-        )
+        self._R_k = self._extract_rotation(k_data, num_layers, head_dim).to(dtype=dtype, device=device)
+        self._R_v = self._extract_rotation(v_data, num_layers, head_dim).to(dtype=dtype, device=device)
 
         assert self._R_k.shape == (num_layers, head_dim, head_dim), (
-            f"K rotation shape mismatch: expected ({num_layers}, {head_dim}, {head_dim}), "
-            f"got {self._R_k.shape}"
+            f"K rotation shape mismatch: expected ({num_layers}, {head_dim}, {head_dim}), got {self._R_k.shape}"
         )
         assert self._R_v.shape == (num_layers, head_dim, head_dim), (
-            f"V rotation shape mismatch: expected ({num_layers}, {head_dim}, {head_dim}), "
-            f"got {self._R_v.shape}"
+            f"V rotation shape mismatch: expected ({num_layers}, {head_dim}, {head_dim}), got {self._R_v.shape}"
         )
 
         # Pre-compute R_v.T (inverse rotation for output)
         self._R_v_inv = self._R_v.transpose(-1, -2).contiguous()
 
-        logger.info(
-            f"[OSCAR] Rotation matrices loaded: "
-            f"R_k={self._R_k.shape}, R_v={self._R_v.shape}"
-        )
+        logger.info("[OSCAR] Rotation matrices loaded: R_k=%s, R_v=%s", self._R_k.shape, self._R_v.shape)
 
     @staticmethod
     def _extract_rotation(data, num_layers: int, head_dim: int) -> torch.Tensor:
@@ -75,9 +62,7 @@ class OscarRotationLoader:
             layers = data["layers"]
             for i in range(num_layers):
                 if i not in layers and str(i) not in layers:
-                    raise ValueError(
-                        f"rotation checkpoint is missing layer {i} of "
-                        f"{num_layers}")
+                    raise ValueError(f"rotation checkpoint is missing layer {i} of {num_layers}")
                 layer_data = layers[i] if i in layers else layers[str(i)]
                 if isinstance(layer_data, dict) and "rotation" in layer_data:
                     rotations.append(layer_data["rotation"])
@@ -91,8 +76,11 @@ class OscarRotationLoader:
 
     @classmethod
     def from_env(
-        cls, num_layers: int, head_dim: int,
-        device: str = "npu", dtype: torch.dtype = torch.bfloat16,
+        cls,
+        num_layers: int,
+        head_dim: int,
+        device: str = "npu",
+        dtype: torch.dtype = torch.bfloat16,
     ) -> Optional["OscarRotationLoader"]:
         """Create loader from environment variables.
 
@@ -106,7 +94,7 @@ class OscarRotationLoader:
         if not k_path or not v_path:
             return None
         if not os.path.exists(k_path) or not os.path.exists(v_path):
-            logger.warning(f"[OSCAR] Rotation files not found: k={k_path}, v={v_path}")
+            logger.warning("[OSCAR] Rotation files not found: k=%s, v=%s", k_path, v_path)
             return None
 
         requested = (num_layers, head_dim, device, dtype)
@@ -127,7 +115,8 @@ class OscarRotationLoader:
             raise RuntimeError(
                 "OscarRotationLoader.from_env already initialized with "
                 f"{cls._instance._from_env_signature}, refusing conflicting "
-                f"reconfiguration {requested}")
+                f"reconfiguration {requested}"
+            )
         return cls._instance
 
     def get_k_rotation(self, layer_idx: int) -> torch.Tensor:
@@ -191,23 +180,18 @@ def load_oscar_rotations(
     """
     state = torch.load(path, map_location="cpu", weights_only=True)
     if "layers" not in state:
-        raise ValueError(
-            f"Oscar rotation checkpoint at {path} missing 'layers' key"
-        )
+        raise ValueError(f"Oscar rotation checkpoint at {path} missing 'layers' key")
     layers = state["layers"]
     out = torch.empty((layer_num, head_dim, head_dim), dtype=dtype)
     for local in range(layer_num):
         global_lid = start_layer + local
         if global_lid not in layers and str(global_lid) not in layers:
-            raise ValueError(
-                f"Oscar rotation checkpoint at {path} missing layer {global_lid}"
-            )
+            raise ValueError(f"Oscar rotation checkpoint at {path} missing layer {global_lid}")
         ldata = layers.get(global_lid, layers.get(str(global_lid)))
         R = ldata["rotation"]
         if R.shape != (head_dim, head_dim):
             raise ValueError(
-                f"Oscar rotation layer {global_lid} has shape {tuple(R.shape)}, "
-                f"expected ({head_dim}, {head_dim})"
+                f"Oscar rotation layer {global_lid} has shape {tuple(R.shape)}, expected ({head_dim}, {head_dim})"
             )
         out[local] = R.to(dtype)
     logger.info(
