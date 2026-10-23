@@ -16,9 +16,20 @@ from .types import ExpertWeightView
 
 
 class OffloadState(Enum):
+    """Runner-owned resource lifetime; executions do not create a new state.
+
+    Registration succeeds once into READY. Loading, transfer or execution
+    failures enter FAILED, which cannot execute again. close() drains owned
+    work and releases resources into CLOSED; recovery needs a new manager.
+    """
+
+    # Layers are loading; no forward or graph capture may consume their slots.
     REGISTERING = auto()
+    # All layers and the shared pool are complete; `executing` prevents reentry.
     READY = auto()
+    # Outputs/residency are no longer trustworthy; only cleanup is allowed.
     FAILED = auto()
+    # Resources have been released. Repeated close() is safe.
     CLOSED = auto()
 
 
@@ -28,13 +39,16 @@ class LayerOffloadBinding:
     def __init__(self, layer, scheme, config):
         config.validate_layer(layer.local_num_experts, layer.top_k)
         if layer.moe_config.is_sequence_parallel or layer.moe_config.has_bias:
-            raise ValueError("expert offload PR01 does not support sequence-parallel or biased experts")
+            raise ValueError(
+                "expert offload has no slot transfer/dispatch support for sequence-parallel or biased experts"
+            )
         self.layer_name = layer.layer_name
         self.num_experts = layer.local_num_experts
         self.num_slots = config.num_device_experts
         self.top_k = layer.top_k
         self.device = torch.device(layer.moe_config.device)
         self.adapter = MXFP4ExpertAdapter(layer, scheme)
+        self.adapter.validate_layer(layer)
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.residency = ExpertResidency(self.num_experts, self.num_slots)
         self.manager: ExpertOffloadManager | None = None
@@ -113,7 +127,7 @@ class LayerOffloadBinding:
 
 
 class ExpertOffloadManager:
-    """V2 runner-owned serialized eager/graph lifecycle without global state."""
+    """MRV2 runner-owned serialized eager/graph lifecycle without global state."""
 
     def __init__(self):
         self.state = OffloadState.REGISTERING

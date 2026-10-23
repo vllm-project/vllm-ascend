@@ -11,11 +11,56 @@ class MXFP4ExpertAdapter:
 
     tensor_names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
 
+    @staticmethod
+    def validate_scheme(scheme) -> None:
+        if getattr(scheme, "group_size", None) != 32:
+            raise ValueError("expert offload requires MXFP group_size=32 for packed weight scales")
+        if not callable(getattr(scheme, "process_weights_after_loading", None)):
+            raise ValueError("expert offload requires native quantization post-processing")
+
     def __init__(self, layer, scheme):
-        if scheme.group_size != 32:
-            raise ValueError("expert offload PR01 requires MXFP group_size=32")
+        self.validate_scheme(scheme)
         self.scheme = scheme
         self.activation = layer.activation
+
+    def validate_layer(self, layer) -> None:
+        """Check the raw checkpoint contract before allocating owned host storage.
+
+        Model names do not establish these capabilities. All routed layers must
+        expose the same packed gate/up/down tensors and the expert/shard loader.
+        Native NZ storage is validated separately when preparing each expert.
+        """
+        prefix = f"expert offload layer {layer.layer_name}"
+        if not callable(getattr(layer, "weight_loader", None)):
+            raise ValueError(f"{prefix} requires an expert/shard weight_loader")
+        activation = getattr(self.activation, "value", self.activation)
+        if activation not in ("silu", "situ"):
+            raise ValueError(f"{prefix} requires a gated silu or situ activation; got {activation}")
+        tensors = {name: getattr(layer, name, None) for name in self.tensor_names}
+        for name, tensor in tensors.items():
+            if not isinstance(tensor, torch.Tensor) or tensor.ndim != 3:
+                raise ValueError(f"{prefix} requires a rank-3 {name} expert tensor")
+        w13, w2 = tensors["w13_weight"], tensors["w2_weight"]
+        experts, hidden = layer.local_num_experts, w2.shape[1]
+        intermediate = w13.shape[1] // 2
+        alignment = 2 * self.scheme.group_size
+        if hidden <= 0 or intermediate <= 0 or hidden % alignment or intermediate % alignment:
+            raise ValueError(f"{prefix} requires hidden and intermediate sizes divisible by {alignment}")
+        expected_shapes = {
+            "w13_weight": (experts, 2 * intermediate, hidden // 2),
+            "w2_weight": (experts, hidden, intermediate // 2),
+            "w13_weight_scale": (experts, 2 * intermediate, hidden // self.scheme.group_size),
+            "w2_weight_scale": (experts, hidden, intermediate // self.scheme.group_size),
+        }
+        for name, tensor in tensors.items():
+            allowed_dtypes = (torch.uint8,)
+            if name.endswith("_scale"):
+                allowed_dtypes += (getattr(torch, "float8_e8m0fnu", None),)
+            if tensor.dtype not in allowed_dtypes or tuple(tensor.shape) != expected_shapes[name]:
+                raise ValueError(
+                    f"{prefix} has unsupported {name}: expected shape={expected_shapes[name]} "
+                    f"with packed byte weights/E8M0 scales; got shape={tuple(tensor.shape)}, dtype={tensor.dtype}"
+                )
 
     def materialize(self, host_store, expert_ids, device) -> dict[str, torch.Tensor]:
         if host_store.prepared:

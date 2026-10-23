@@ -30,6 +30,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import LayerOffloadBinding
+from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
@@ -284,7 +285,11 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def configure_expert_offload(self, config: ExpertOffloadConfig) -> None:
         if config.enabled:
             if self.quant_method.quant_type != QuantType.W4A8MXFP:
-                raise ValueError("expert offload PR01 requires W4A8 MXFP routed expert weights")
+                raise ValueError(
+                    "expert offload requires W4A8 MXFP routed expert weights; no adapter exists for this format"
+                )
+            # Reject incompatible schemes before creating a complete CPU layer.
+            MXFP4ExpertAdapter.validate_scheme(self.quant_method)
             # The upstream loader otherwise moves the complete CPU expert
             # Parameters to the NPU before calling our bounded post-processing.
             self.requires_device_loading = False

@@ -34,8 +34,16 @@ class ExpertLayer(torch.nn.Module):
         self.top_k = 2
         self.activation = "silu"
         self.moe_config = SimpleNamespace(device="cpu", is_sequence_parallel=False, has_bias=False)
-        for tensor_name in MXFP4ExpertAdapter.tensor_names:
-            self.register_parameter(tensor_name, torch.nn.Parameter(torch.zeros(6, 4, 3), requires_grad=False))
+        shapes = {
+            "w13_weight": (6, 128, 32),
+            "w2_weight": (6, 64, 32),
+            "w13_weight_scale": (6, 128, 2),
+            "w2_weight_scale": (6, 64, 2),
+        }
+        for tensor_name, shape in shapes.items():
+            self.register_parameter(
+                tensor_name, torch.nn.Parameter(torch.zeros(shape, dtype=torch.uint8), requires_grad=False)
+            )
         self._expert_offload_binding = LayerOffloadBinding(
             self, LayoutScheme(), ExpertOffloadConfig(enabled=True, num_device_experts=2)
         )
@@ -57,8 +65,10 @@ class ExpertLayer(torch.nn.Module):
             for name in MXFP4ExpertAdapter.tensor_names:
                 shards = ("w1", "w3") if name.startswith("w13") else ("w2",)
                 for shard in shards:
-                    rows = 2 if name.startswith("w13") else 4
-                    tensor = torch.full((rows, 3), float(eid + (0.5 if shard == "w3" else 1)))
+                    shape = list(getattr(self, name).shape[1:])
+                    if name.startswith("w13"):
+                        shape[0] //= 2
+                    tensor = torch.full(shape, eid + (2 if shard == "w3" else 1), dtype=torch.uint8)
                     getattr(self, name).weight_loader(getattr(self, name), tensor, name, shard, eid)
 
 

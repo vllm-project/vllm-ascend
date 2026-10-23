@@ -114,6 +114,13 @@ def test_defaults_and_disabled_validation():
     cfg.validate_layer(0, 0)
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "qwen3_moe", "other_moe", None])
+def test_target_model_name_does_not_replace_layer_capability_checks(model_type):
+    vc, ac = make_configs()
+    vc.model_config.hf_text_config.model_type = model_type
+    ExpertOffloadConfig(enabled=True, num_device_experts=4).validate(vc, ac)
+
+
 @pytest.mark.parametrize("mode", ["NONE", "FULL_DECODE_ONLY"])
 def test_explicit_eager_or_decode_graph_configuration(mode):
     from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -173,7 +180,6 @@ def test_layer_capacity_bounds(experts, top_k):
     [
         ("use_v2_model_runner", False, "Runner V2"),
         ("model_config.enable_sleep_mode", True, "sleep mode"),
-        ("model_config.hf_text_config.model_type", "qwen3_moe", "DeepSeek V4"),
         ("parallel_config.tensor_parallel_size", 2, "tensor_parallel_size"),
         ("parallel_config.data_parallel_size", 2, "data_parallel_size"),
         ("parallel_config.pipeline_parallel_size", 2, "pipeline_parallel_size"),

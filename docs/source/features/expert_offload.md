@@ -1,4 +1,7 @@
-# Exact MoE expert offload: V2 eager and decode ACL graph
+# Exact MoE expert offload: MRV2 eager and decode ACL graph
+
+Model Runner V2 (MRV2) owns expert loading, execution and cleanup. The configuration
+field remains `use_v2_model_runner`.
 
 Status: single-worker implementation snapshot. Prepared native H2D and checkpoint-native DSpark numerical and performance acceptance are recorded below. Decode ACL graph adds replayed expert loading and capacity filtering. Both scheduler modes are accepted; current asynchronous scheduling evidence is bounded as described below.
 
@@ -27,9 +30,53 @@ Expert offload is disabled by default. Enable the draft using the existing Ascen
 
 The slot count must satisfy `top_k <= num_device_experts < num_experts` for every target and enabled draft routed expert layer. Unknown keys, string booleans, non-integral slot counts, and invalid capacities fail early.
 
-The implementation targets the DeepSeek V4 W4A8 MXFP model contract with group size 32. Acceptance uses the locally stored DeepSeek-V4-Flash-0731 checkpoint. Every routed expert layer must use a supported quantization adapter; shared and dense model weights follow their existing paths.
+Model compatibility is checked per routed-expert layer, not by a target model-name
+allowlist. The current adapter requires W4A8 MXFP with group size 32, packed gate/up
+and down weights, complete E8M0 scales, an expert/shard checkpoint loader, native
+post-processing and gated SiLU or SITU activation. All routed layers must be
+offloaded, and their layouts must be compatible with the single shared pool.
+Raw tensor shapes and dtypes are checked before allocating owned host storage;
+native physical NZ storage is checked during preparation and transfer. Shared and
+dense model weights follow their existing paths.
 
-Required settings are V2 and single-worker execution with TP/DP/PP/PCP/DCP sizes equal to one. Use `enforce_eager=True` for eager, or compilation mode `NONE` with `FULL_DECODE_ONLY` for ACL graph. Compiled/piecewise or mixed graphs, expert parallelism, EPLB, dual batch overlap, LoRA, sleep mode, online weight reload, generic CPU weight offload, and PD disaggregation are unsupported. Biased experts and sequence-parallel expert execution are also rejected. Use normal `auto`, `safetensors`, or `pt` checkpoint loading; dummy and preprocessed weight-cache loaders are unsupported.
+Full-model acceptance recorded below covers the locally stored
+DeepSeek-V4-Flash-0731 checkpoint. Passing the capability checks for another model
+does not establish full-model hardware or accuracy acceptance for that model.
+
+Required settings are MRV2 and single-worker execution with TP/DP/PP/PCP/DCP sizes equal to one. Use `enforce_eager=True` for eager, or compilation mode `NONE` with `FULL_DECODE_ONLY` for ACL graph. Compiled/piecewise or mixed graphs, expert parallelism, EPLB, dual batch overlap, LoRA, sleep mode, online weight reload, generic CPU weight offload, and PD disaggregation are unsupported. Biased experts and sequence-parallel expert execution are also rejected. Use normal `auto`, `safetensors`, or `pt` checkpoint loading; dummy and preprocessed weight-cache loaders are unsupported.
+
+### Why configurations are restricted
+
+The following checks describe the current implementation. They are not claims
+that a combination is fundamentally impossible. A capability failure is an
+implementation constraint; a missing hardware result is a validation boundary.
+
+| Area | Current requirement and reason | Extension work |
+| --- | --- | --- |
+| Expert format | W4A8 MXFP, group size 32, complete packed tensors and supported gated activation | Add an adapter and loader/physical-copy/GEMM tests for each new format |
+| Worker ownership | TP/DP/PP/PCP/DCP equal one; slots and maps are worker-local | Define distributed ownership, communication and failure recovery |
+| EP/EPLB and mixed placement | Other expert placement/remapping must not invalidate the residency map | Coordinate placement changes with resident slots and host bytes |
+| DBO, shared-expert overlap and alternate fused dispatch | One pool and one execution scope are reused; alternate dispatch integration is absent | Add independently owned execution buffers and overlap/dispatch acceptance |
+| Sleep and online/RL reload | Captured addresses and prepared bytes have no sleep/wake or rebuild protocol | Drain, rebuild and recapture resources before reuse |
+| Generic CPU offload and PD | Parameter ownership and split-worker lifecycle are not integrated | Define one ownership and cleanup protocol |
+| LoRA, expert bias and sequence parallel | Their slot/weight-view integration is not implemented | Add composition, numerical and lifecycle coverage before enabling |
+| Checkpoint loader | `auto`, `safetensors` or `pt` must report every expert/shard | Adapt completeness tracking for other loaders |
+| Shared full-expert pool | All adopted target/draft layers require homogeneous specifications | Introduce bounded pools for distinct layout families |
+| DSpark | Same checkpoint, DeepSeek V4 draft architecture, eager draft, fixed verification, one request | Validate other draft architectures and concurrent drafting separately |
+| Other target model names | Accepted only when every layer satisfies the adapter contract | Run matching checkpoint, eager/graph and offload-disabled acceptance |
+
+The generic DSpark physical/kernel KV block-size correction is independent of
+expert offload. Each draft group uses its own physical block size and preserves
+kernel-addressed block tables, including when expert offload is disabled.
+
+### Manager lifecycle
+
+`REGISTERING` collects loaded layer bindings. Successful `finalize_loading` adopts
+target/draft layers and initializes the shared pool, then enters `READY`.
+The separate `executing` flag prevents overlapping execution in `READY`.
+Loading, transfer or forward failure enters `FAILED`; execution cannot resume on
+that manager. `close()` drains owned work, releases bindings, staging and the pool,
+and enters `CLOSED`. Cleanup is repeatable; recovery constructs a new manager.
 
 ### Asynchronous scheduling
 
@@ -93,7 +140,7 @@ Prefill, mixed batches, profiling, and decode batches with more unique experts t
 
 The kernels receive an explicit weight view and a private all-gather dispatcher with the matching physical expert count. Both GEMMs see the same view. Original routing and prepare/finalize behavior are retained, and temporary communication context is restored in `finally`. Prefill does not rebind resident Parameters or change their addresses.
 
-The manager is owned by the runner. V2 batch metadata determines prefill versus decode. Executions are serialized; a failed copy or forward invalidates the manager so stale or partially replaced experts cannot be used by another request. Worker shutdown drains and closes offload resources while preserving parent shutdown behavior.
+The manager is owned by the runner. MRV2 batch metadata determines prefill versus decode. Executions are serialized; a failed copy or forward invalidates the manager so stale or partially replaced experts cannot be used by another request. Worker shutdown drains and closes offload resources while preserving parent shutdown behavior.
 
 ## Decode ACL graph
 

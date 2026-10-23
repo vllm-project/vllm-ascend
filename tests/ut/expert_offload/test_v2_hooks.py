@@ -19,6 +19,7 @@ import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
+from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -473,6 +474,7 @@ def test_quant_wrapper_preserves_disabled_allocation_and_bounds_enabled_loading(
             "set_weight_attrs": set_attrs,
             "ExpertOffloadConfig": ExpertOffloadConfig,
             "LayerOffloadBinding": binding_factory,
+            "MXFP4ExpertAdapter": MXFP4ExpertAdapter,
             "QuantType": SimpleNamespace(W4A8MXFP="mxfp4"),
             "FusedMoeWeightScaleSupported": SimpleNamespace(
                 CHANNEL=SimpleNamespace(value="channel"),

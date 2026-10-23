@@ -431,7 +431,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         vllm_config = get_current_vllm_config()
         self.n_shared_experts = n_shared_experts
         if ascend_config.expert_offload_config.enabled and getattr(self, "_expert_offload_binding", None) is None:
-            raise ValueError("expert offload PR01 requires W4A8 MXFP for every target-model routed expert layer")
+            raise ValueError("expert offload requires a W4A8 MXFP offload binding for every routed expert layer")
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
@@ -591,7 +591,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         offload_config = get_ascend_config().expert_offload_config
         if quant_config is None:
             if offload_config.enabled:
-                raise ValueError("expert offload PR01 requires W4A8 MXFP quantized routed experts")
+                raise ValueError(
+                    "expert offload requires W4A8 MXFP quantized routed experts; unquantized experts have no adapter"
+                )
             return super()._get_quant_method(prefix, quant_config, moe_config)
         method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
         if offload_config.enabled:

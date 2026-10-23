@@ -52,7 +52,9 @@ class ExpertOffloadConfig:
                     "(or NONE for eager); compiled/piecewise and mixed graphs are unsupported"
                 )
         if vllm_config.model_config.enable_sleep_mode:
-            raise ValueError("expert offload PR01 does not support sleep mode")
+            raise ValueError(
+                "expert offload has no sleep/wake protocol for resident slots and graph buffers; disable sleep mode"
+            )
         parallel = vllm_config.parallel_config
         for name in (
             "tensor_parallel_size",
@@ -62,13 +64,21 @@ class ExpertOffloadConfig:
             "decode_context_parallel_size",
         ):
             if getattr(parallel, name) != 1:
-                raise ValueError(f"expert offload PR01 requires {name}=1")
-        for name in ("enable_expert_parallel", "enable_eplb", "enable_dbo"):
+                raise ValueError(f"expert offload uses worker-local expert ownership and requires {name}=1")
+        conflicts = {
+            "enable_expert_parallel": "expert slots do not implement distributed expert ownership",
+            "enable_eplb": "external expert remapping is not coordinated with the residency map",
+            "enable_dbo": "overlapping forwards cannot share the serialized expert pool",
+        }
+        for name, reason in conflicts.items():
             if getattr(parallel, name, False):
-                raise ValueError(f"expert offload PR01 does not support {name}")
-        for name in ("lora_config", "kv_transfer_config"):
+                raise ValueError(f"expert offload does not support {name}: {reason}; disable {name}")
+        for name, reason in {
+            "lora_config": "LoRA composition with prepared expert weights is not implemented",
+            "kv_transfer_config": "split-worker loading and offload lifecycle coordination is not implemented",
+        }.items():
             if getattr(vllm_config, name, None) is not None:
-                raise ValueError(f"expert offload PR01 does not support {name}")
+                raise ValueError(f"expert offload does not support {name}: {reason}; remove {name}")
         speculative = vllm_config.speculative_config
         if speculative is not None:
             draft = getattr(speculative, "draft_model_config", None)
@@ -90,13 +100,16 @@ class ExpertOffloadConfig:
         if offload.uva.cpu_offload_gb or offload.prefetch.offload_group_size:
             raise ValueError("expert offload cannot be combined with generic CPU weight offload")
         if str(vllm_config.load_config.load_format) not in ("auto", "safetensors", "pt"):
-            raise ValueError("expert offload PR01 supports auto, safetensors, or pt checkpoint loading only")
-        if getattr(vllm_config.model_config.hf_text_config, "model_type", None) != "deepseek_v4":
-            raise ValueError("expert offload PR01 supports the DeepSeek V4 W4A8 MXFP model contract only")
+            raise ValueError(
+                "expert offload requires per-expert checkpoint loading and completeness tracking; "
+                "use auto, safetensors, or pt checkpoint loading"
+            )
         for name in ("mix_placement", "enable_force_eplb", "enable_fused_mc2", "multistream_overlap_shared_expert"):
             if getattr(ascend_config, name):
-                raise ValueError(f"expert offload PR01 does not support {name}")
+                raise ValueError(f"expert offload has no slot/pool integration for {name}; disable {name}")
         if ascend_config.eplb_config.dynamic_eplb:
-            raise ValueError("expert offload PR01 does not support dynamic EPLB")
+            raise ValueError(
+                "expert offload does not coordinate dynamic EPLB with resident slots; disable dynamic EPLB"
+            )
         if ascend_config.rl_config.enabled:
-            raise ValueError("expert offload PR01 does not support RL weight reloading")
+            raise ValueError("expert offload cannot rebuild prepared host bytes and graphs during RL weight reloading")

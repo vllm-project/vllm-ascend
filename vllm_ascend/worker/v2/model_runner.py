@@ -304,7 +304,9 @@ class NPUModelRunner(GPUModelRunner):
 
         manager = self.expert_offload_manager
         if manager is not None and load_dummy_weights:
-            raise ValueError("expert offload PR01 does not support dummy checkpoint loading")
+            raise ValueError(
+                "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
+            )
         try:
             try:
                 # Keep upstream warmups overlapped with checkpoint loading.

@@ -17,7 +17,9 @@ class PrefillExpertPool:
         signature = binding.adapter.signature(binding.host_store)
         if self.signature is not None:
             if signature != self.signature:
-                raise ValueError("expert offload PR01 requires homogeneous expert layouts for the shared prefill pool")
+                raise ValueError(
+                    "expert offload requires homogeneous expert layouts for its single shared prefill pool"
+                )
             return
         # Allocate in the scheme's native format, including scale strides.
         self.tensors = binding.adapter.allocate_pool(binding.host_store, binding.num_experts, binding.device)
