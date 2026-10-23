@@ -206,14 +206,14 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
 
 def test_patch_is_registered_with_upstream_signature():
     registered = scheduler_module.Scheduler._mamba_block_aligned_split
-    # The producer/standalone EAGLE-backoff suppression is applied inline
+    # The producer EAGLE-backoff suppression is applied inline
     # inside _mamba_block_aligned_split; no separate wrapper remains.
     assert registered is _mamba_block_aligned_split
     assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)
 
 
 # ---------------------------------------------------------------------------
-# Inline producer/standalone suppression: the drop knobs are cleared for the
+# Inline producer suppression: the drop knobs are cleared for the
 # duration of the upstream call and restored afterwards. The original is
 # monkeypatched so the observed knobs are version-independent.
 # ---------------------------------------------------------------------------
@@ -241,13 +241,13 @@ def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
     assert scheduler.use_eagle_block_drop is True
 
 
-def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
+def test_standalone_keeps_drop_knobs_around_upstream_call(monkeypatch):
     observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=None)
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
     assert result == 42
-    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
     assert scheduler.use_eagle is True
     assert scheduler.use_eagle_block_drop is True
 
@@ -298,3 +298,18 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(("standalone", "expected"), [(True, 36), (False, 100)])
+def test_sparse_prefill_respects_standalone_drop(standalone, expected):
+    scheduler = _scheduler(
+        is_kv_consumer=None if standalone else False,
+        is_kv_producer=None if standalone else True,
+        uses_sparse_index_kpool=True,
+    )
+    result = _mamba_block_aligned_split(
+        scheduler,
+        _request(num_computed_tokens=220, num_prompt_tokens=500, num_tokens=500),
+        num_new_tokens=100,
+    )
+    assert result == expected
