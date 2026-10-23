@@ -96,10 +96,13 @@ def test_uses_ascend_mtp_speculator(family, expected):
 
 def test_310p_mtp_routing_uses_family_helper(monkeypatch):
     import vllm_ascend.worker.v2.spec_decode as base_spec_decode
+    from vllm_ascend.worker.v2 import model_runner as base_model_runner
 
     original_init = base_spec_decode.init_speculator
+    original_model_runner_init = base_model_runner.init_speculator
     patch_module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310")
     monkeypatch.setattr(base_spec_decode, "init_speculator", original_init)
+    monkeypatch.setattr(base_model_runner, "init_speculator", original_model_runner_init)
 
     module = ModuleType("vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator")
     speculator_cls = MagicMock()
@@ -125,10 +128,13 @@ def test_310p_mtp_routing_uses_family_helper(monkeypatch):
 
 def test_310p_non_mtp_routing_uses_parent_factory(monkeypatch):
     import vllm_ascend.worker.v2.spec_decode as base_spec_decode
+    from vllm_ascend.worker.v2 import model_runner as base_model_runner
 
     original_init = base_spec_decode.init_speculator
+    original_model_runner_init = base_model_runner.init_speculator
     patch_module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310")
     monkeypatch.setattr(base_spec_decode, "init_speculator", original_init)
+    monkeypatch.setattr(base_model_runner, "init_speculator", original_model_runner_init)
     monkeypatch.setattr(patch_module, "uses_ascend_mtp_speculator", lambda _family: False)
     fallback = MagicMock()
     monkeypatch.setattr(patch_module, "_orig_init_speculator", fallback)

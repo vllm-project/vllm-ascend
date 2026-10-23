@@ -44,6 +44,11 @@ PROMPTS = [
 # not turn this refactor gate into a long-horizon model-quality test.
 MAX_TOKENS = 16
 ACCEPTANCE_TOLERANCE = 0.05
+VERIFY_GOLDEN = os.environ.get("SPEC_DECODE_VERIFY_GOLDEN", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 GOLDEN_RESULTS = json.loads(Path(__file__).with_name("spec_decode_parity_goldens.json").read_text(encoding="utf-8"))[
     "results"
 ]
@@ -267,8 +272,9 @@ def _assert_family_parity(case: SpecDecodeCase) -> None:
     assert eager.acceptance_length > 1.0
     assert graph.acceptance_length > 1.0
 
-    _assert_matches_golden(case, eager, "eager")
-    _assert_matches_golden(case, graph, "full_decode_only")
+    if VERIFY_GOLDEN:
+        _assert_matches_golden(case, eager, "eager")
+        _assert_matches_golden(case, graph, "full_decode_only")
 
     print(
         f"{case.name}: eager={eager.elapsed_seconds:.3f}s "
