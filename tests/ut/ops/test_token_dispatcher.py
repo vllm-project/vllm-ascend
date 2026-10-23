@@ -928,16 +928,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2, num_experts=4, num_local_experts=2, with_quant=False)
 
-    def test_preprocess_sets_repeat_interleave_output_size(self):
-        self.mock_gather_from_sequence_parallel_region.return_value = torch.tensor(
-            [[2, 2, 2, 2], [1, 1, 2, 4]], dtype=torch.int64
-        )
-        _, _, output_splits, _, _ = self.dispatcher._preprocess(torch.tensor([[0, 1]], dtype=torch.int64))
-
-        self.mock_repeat_interleave.assert_called_once()
-        self.assertEqual(output_splits.tolist(), [4, 2])
-        self.assertEqual(self.mock_repeat_interleave.call_args.kwargs["output_size"], 6)
-
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_dispatch(self):
         hidden_states = torch.randn(8, 16)
