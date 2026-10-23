@@ -180,7 +180,7 @@ To use the tool_calls feature, please ensure that your transformers version is 4
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on one A5 server.
 
 While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
 
