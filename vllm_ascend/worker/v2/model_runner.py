@@ -808,12 +808,23 @@ class NPUModelRunner(GPUModelRunner):
         assert query_start_loc_np.shape == (capacity + 2,)
 
         buffers = self.input_buffers
-        packed_np = np.zeros(buffers.batch_metadata.numel(), dtype=np.int32)
+        copy_done = buffers.batch_metadata_copy_done
+        if copy_done is not None:
+            # Stream ordering cannot protect host writes from an in-flight DMA.
+            copy_done.synchronize()
+        else:
+            copy_done = torch.npu.Event()
+        packed_np = buffers.batch_metadata_cpu_np
+        packed_np.fill(0)
         packed_np[buffers.idx_mapping_slice][:num_reqs] = idx_mapping_np
         packed_np[buffers.cu_num_logits_slice][: num_reqs + 1] = cu_num_logits_np
         packed_np[buffers.query_start_loc_slice] = query_start_loc_np
 
-        async_copy_to_gpu(packed_np, out=buffers.batch_metadata)
+        # Copy directly from the pinned mirror on the current stream, so the
+        # completion event guards exactly this transfer without extra staging.
+        buffers.batch_metadata.copy_(buffers.batch_metadata_cpu, non_blocking=True)
+        copy_done.record(torch.npu.current_stream())
+        buffers.batch_metadata_copy_done = copy_done
 
         return (
             buffers.idx_mapping_buffer[:num_reqs],

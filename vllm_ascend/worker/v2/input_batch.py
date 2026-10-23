@@ -20,6 +20,7 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -61,6 +62,15 @@ class AscendInputBuffers(InputBuffers):
             dtype=torch.int32,
             device=device,
         )
+        self.batch_metadata_cpu = torch.zeros(
+            self.batch_metadata.numel(),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
+        self.batch_metadata_cpu_np = self.batch_metadata_cpu.numpy()
+        # Created on the first upload; CPU writers must wait before reusing it.
+        self.batch_metadata_copy_done = None
         self.idx_mapping_buffer: torch.Tensor = self.batch_metadata[self.idx_mapping_slice]
         self.cu_num_logits_buffer: torch.Tensor = self.batch_metadata[self.cu_num_logits_slice]
         self.query_start_loc: torch.Tensor = self.batch_metadata[self.query_start_loc_slice]
