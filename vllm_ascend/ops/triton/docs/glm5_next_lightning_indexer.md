@@ -3,12 +3,35 @@
 ## Description
 
 - **Function**: `glm5_next_lightning_indexer_triton` selects compressed KeyPools for each query, expands the selected pools into original token indices, and appends the visible incomplete pool as a causal tail. GLM-5.3-Flash uses 32 query heads, head dimension 128, pool size 4, and `index_topk = 2048`, producing 2051 output columns.
-- **Formula**: For query token `t`, head `h`, dimension `d`, and pool `j`, `qbar[t, d] = sum_h(weights[t, h] * query[t, h, d])` and `score[t, j] = sum_d(qbar[t, d] * cache[j, d])`. This preserves the existing head-weighted-query scoring semantics. Only pools before `min((positions[t] + 1) // P, indexer_seq_lens[r])` are visible. Select up to `index_topk // P` pools by descending score, then expand pool `j` to `[j * P, ..., j * P + P - 1]`. Tail positions range from `((positions[t] + 1) // P) * P` through `positions[t]`.
+- **Legacy BF16 helper formula**: For query token `t`, head `h`, dimension `d`, and pool `j`, `qbar[t, d] = sum_h(weights[t, h] * query[t, h, d])` and `score[t, j] = sum_d(qbar[t, d] * cache[j, d])`. This preserves the existing head-weighted-query scoring semantics. Only pools before `min((positions[t] + 1) // P, indexer_seq_lens[r])` are visible. Select up to `index_topk // P` pools by descending score, then expand pool `j` to `[j * P, ..., j * P + P - 1]`. Tail positions range from `((positions[t] + 1) // P) * P` through `positions[t]`.
 - **Algorithm flow**:
     1. Split the token batch into chunks targeting a 256 MiB score-buffer budget. Compute the head-weighted query with the existing FP32 multiplication and reduction.
     2. For larger batches, a bounded Triton gather reuses paged keys in a contiguous scratch cache. A Triton kernel maps tokens to requests, computes FP32 dot products with the head-weighted query, writes all score cells, and maps invisible, NaN, and negative-infinite scores to the lowest finite FP32 value. Positive infinity maps to the largest finite value. This avoids separate score initialization and sanitization passes.
     3. Apply `torch.topk` and convert its IDs once to int32. A Triton kernel expands pools, writes the causal tail, clears graph padding and alignment columns, and optionally writes directly into the SFA output buffer. The result contains logical token indices, not physical cache slots.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay with Triton-Ascend.
+
+## INT8 model execution
+
+GLM-5.3-Flash enables the packed INT8 pooled cache with
+`--attention_config.indexer_kv_dtype int8`. Each row stores `D` signed bytes
+and a four-byte FP32 scale. INT8 scoring uses
+`sum_h(weights[t, h] * relu(dot(query[t, h], key[j])))`; the per-head ReLU
+must precede head reduction to match CANN.
+
+For eager prefill batches with at least 32 query tokens, the model calls
+`glm5_next_c8_dequant_pool_key` and scores the resulting BF16 keys with CANN
+PoolKeyIndexer. The helper reads only complete pools available to each request,
+folds each row's scale into its keys, and zeroes the padding. It preserves
+physical cache page strides and returns an identity page table. This keeps
+INT8 persistent storage while avoiding repeated unpacking for each query.
+
+The BF16 working set is bounded by 256 MiB and reused between layers within
+one eager forward. It is not a persistent BF16 copy of the full KV cache.
+If the working set exceeds the budget, the model uses the paged Triton scorer.
+Small query batches and FULL graph capture/replay also keep that scorer;
+no device-to-host reduction or global mutable scratch cache is introduced.
+Dequantization rounds keys to BF16 before CANN scoring, so validation must
+include model accuracy as well as throughput.
 
 ## Parameters
 

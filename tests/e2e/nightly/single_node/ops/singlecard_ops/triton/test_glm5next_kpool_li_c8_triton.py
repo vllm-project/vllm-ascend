@@ -41,6 +41,58 @@ def _dequantize_rows(packed: torch.Tensor) -> torch.Tensor:
     return quantized * scale
 
 
+@pytest.mark.parametrize("page_rows", [8, 32])
+@pytest.mark.parametrize("padded", [False, True])
+@torch.inference_mode()
+def test_c8_cann_working_set_masks_short_requests_and_page_padding(page_rows, padded):
+    from vllm_ascend.ops.triton.glm5_next_lightning_indexer import glm5_next_c8_dequant_pool_key
+
+    generator = torch.Generator().manual_seed(83)
+    lengths = [257, 13, 0]
+    pages = (max(lengths) + page_rows - 1) // page_rows
+    blocks = len(lengths) * pages
+    storage = torch.full((blocks, page_rows * ROW_WIDTH + (16 if padded else 0)), SENTINEL, dtype=torch.int8)
+    cache = storage[:, : page_rows * ROW_WIDTH].view(blocks, page_rows, 1, ROW_WIDTH)
+    table = torch.randperm(blocks, generator=generator).view(len(lengths), pages).to(torch.int32)
+    expected = torch.zeros(len(lengths), 384, HEAD_DIM, dtype=torch.bfloat16)
+    for req, length in enumerate(lengths):
+        rows = _quantize_rows(torch.randn(length, HEAD_DIM, generator=generator))
+        expected[req, :length] = _dequantize_rows(rows).bfloat16()
+        for row in range(length):
+            cache[table[req, row // page_rows], row % page_rows, 0] = rows[row].view(torch.int8)
+        # Invalid pages must never be read, including the empty DSA-CP shard.
+        table[req, (length + page_rows - 1) // page_rows :] = 2**30
+    npu_storage = storage.npu()
+    npu_cache = npu_storage[:, : page_rows * ROW_WIDTH].view_as(cache)
+    args = (npu_cache, table.npu(), torch.tensor(lengths, device="npu"), max(lengths), HEAD_DIM)
+    workspace = glm5_next_c8_dequant_pool_key(*args)
+    assert workspace is not None
+    keys, identity = workspace
+    torch.testing.assert_close(keys.cpu().reshape_as(expected), expected, rtol=0, atol=0)
+    torch.testing.assert_close(identity.cpu(), torch.arange(9, dtype=torch.int32).view(3, 3))
+    keys.fill_(42)
+    reused = glm5_next_c8_dequant_pool_key(*args, workspace)
+    assert reused[0] is keys and reused[1] is identity
+    torch.testing.assert_close(keys.cpu().reshape_as(expected), expected, rtol=0, atol=0)
+    torch.testing.assert_close(npu_storage.cpu(), storage, rtol=0, atol=0)
+
+
+def test_c8_cann_working_set_budget_falls_back_without_allocating(monkeypatch):
+    import vllm_ascend.ops.triton.glm5_next_lightning_indexer as module
+
+    monkeypatch.setattr(module, "TRITON_PACKED_CACHE_BYTES", 1)
+    assert (
+        module.glm5_next_c8_dequant_pool_key(
+            torch.empty(1, 32, 1, ROW_WIDTH, dtype=torch.int8),
+            torch.zeros(1, 1, dtype=torch.int32),
+            torch.ones(1, dtype=torch.int32),
+            1,
+            HEAD_DIM,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("packing", ["paged", "packed"])
 @torch.inference_mode()
 def test_kpool_li_c8_score_dequantizes_rows(packing):

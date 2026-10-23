@@ -1,0 +1,10 @@
+pr: 18534
+entries:
+  - category: feature
+    text: Added INT8 pooled indexer cache support for GLM-5.3-Flash with attention_config.indexer_kv_dtype=int8.
+    model: GLM-5.3-Flash
+    hardware: [A3]
+  - category: performance
+    text: Accelerated GLM-5.3-Flash INT8 indexer prefill by dequantizing live pooled keys for the CANN scorer while retaining INT8 cache storage.
+    model: GLM-5.3-Flash
+    hardware: [A3]
