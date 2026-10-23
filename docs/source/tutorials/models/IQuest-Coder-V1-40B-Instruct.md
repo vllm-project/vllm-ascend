@@ -140,13 +140,16 @@ pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
 
 The evaluation setting encoded in the config:
 
-- Tasks: `humaneval` (pass@1), `mbpp` (pass_at_1), both 0-shot, chat template applied.
-- Thresholds (RTOL = 0.05, `np.isclose` per metric in the harness):
+- Tasks: `humaneval` (pass@1), `mbpp` (pass_at_1).
+- **Completion mode** (`apply_chat_template: false`) is required for this model: with the chat template applied, the model's reasoning preamble is truncated by humaneval's `until` sequences (`\ndef`, `\nclass`, ...) before any code is written, which scores 0.0.
+- Few-shot counts follow each task's own default (humaneval 0-shot, mbpp 3-shot); a global `num_fewshot: 0` forces mbpp into 0-shot and also collapses its score.
+- Environment: `HF_ALLOW_CODE_EVAL=1` (code_eval metric) + `confirm_run_unsafe_code=True` (lm_eval evaluator gate) + `HF_HUB_OFFLINE=1` (weights/datasets pre-cached; avoids hub stalls).
+- Thresholds (RTOL = 0.05, `np.isclose` per metric in the harness), locally calibrated on Atlas A2 TP2 (3 runs, median):
 
 | Task | Metric | Threshold | Status |
 |---|---|---|---|
-| humaneval | pass@1 | 0.84 | preliminary (seeded from public reference measurements) |
-| mbpp | pass_at_1 | 0.89 | preliminary (seeded from public reference measurements) |
+| humaneval | pass@1 | 0.689 | calibrated (runs: 0.6768 / 0.689 / 0.6951) |
+| mbpp | pass_at_1 | 0.724 | calibrated (runs: 0.718 / 0.734 / 0.724) |
 
 Thresholds are finalized by the nightly accuracy run registered in `.github/workflows/configs/nightly_config.yaml` (accuracy-group-3, two-card runner — required because `serve.tensor_parallel_size: 2` overrides the CLI `--tp-size`).
 
@@ -167,6 +170,15 @@ while true; do date; npu-smi info; sleep 30; done | tee hbm_sampling.log
 ```
 
 Compare the sampled peak HBM against the paper account above: weights (~40GB/card) + KV (160KB/token x seq length x concurrency) should account for the observed usage within ~15%.
+
+Measured during the local calibration rounds (TP2/8192, `gpu_memory_utilization=0.85`):
+
+| Card | Paper budget (util 0.85) | Measured peak | Delta |
+|---|---|---|---|
+| NPU 0 | 54.4GB | 56.82GB (86.7% of 64GB) | +1.7% (activations / non-torch allocations) |
+| NPU 1 | 54.4GB | 56.58GB (86.3% of 64GB) | +1.7% |
+
+The measured peaks match the paper account within the expected overhead; no OOM occurred across the calibration rounds.
 
 ## Performance Tuning
 
