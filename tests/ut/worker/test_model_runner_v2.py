@@ -34,8 +34,8 @@ def test_batch_metadata_waits_for_h2d_before_reusing_host_buffer(monkeypatch):
     capacity = 3
     host = torch.zeros(24, dtype=torch.int32)
     device = torch.zeros_like(host)
-    pending = []
-    completed = []
+    pending: list[torch.Tensor] = []
+    completed: list[torch.Tensor] = []
     stream = object()
 
     class DeferredCopy:
