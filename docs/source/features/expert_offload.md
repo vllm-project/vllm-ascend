@@ -158,15 +158,44 @@ In an installed Ascend/vLLM development environment:
 
 ```bash
 pytest -q tests/ut/expert_offload
+pytest -q tests/ut/spec_decode/test_dspark_kv_block_sizes.py
 pytest -q tests/ut/worker/test_model_runner_v2.py
 pytest -q tests/ut/quantization/test_method_adapters.py
 pytest -q tests/e2e/pull_request/one_card/expert_offload/test_expert_copy.py
+pytest -q tests/e2e/pull_request/one_card/expert_offload/test_runner_integration.py
 bash format.sh ci
 ```
 
 The Windows development workspace has CPU Torch and lacks installed vLLM and Torch NPU. Its isolated test launcher bypasses the plugin package initializer and parent UT bootstrap to run dependency-light tests. Full runner UTs and the repository-wide CI command require the matching development environment.
 
 The one-card 950DT tests use synthetic packed MXFP4 experts and the real quantization post-processing and GEMM operators. They verify physical expert blocks, both GEMM outputs, resident addresses, full-pool refill addresses, repeated graph eviction, inference-mode callback buffers, and injected callback failures. They do not replace full-model checkpoint acceptance.
+
+The MRV2 integration test writes a deterministic small Qwen3 MoE HF checkpoint
+with packed expert weights, then uses normal safetensors loading and the actual
+worker. It checks completed loader adoption, filtered padded graph sizes, prefill,
+graph decode, oversized decode fallback, stable slot addresses, cleanup and token/
+log-probability agreement with an offload-disabled eager reference. This tests a
+small generated checkpoint, not production Qwen3 MoE accuracy. A test-only worker
+extension observes actual dispatch decisions without replacing the loader or
+forcing manager state. Both acceptance files are registered in the curated A5
+suite and use the A5 directory routing.
+
+Full checkpoint-native DSpark acceptance is a separate, opt-in case:
+
+```bash
+pytest -q tests/e2e/pull_request/one_card/expert_offload/test_runner_integration.py \
+    -k checkpoint_native_dspark \
+    --expert-offload-model /models/DeepSeek-V4-Flash-0731
+```
+
+It verifies adopted target/draft bindings, one shared runner-owned manager,
+target graph replay, stable addresses and release of both models' resources.
+The case explicitly skips without a supplied checkpoint. It requires sufficient
+HBM and pinned host memory for the original prepared-pinned implementation;
+reducing resident slots does not reduce the full prepared host-weight allocation.
+No bounded staging or allocator workaround is installed by these tests. Report
+this case separately from the default small-checkpoint test and the historical
+acceptance snapshots below.
 
 ### October 12, 2026 acceptance snapshot
 
