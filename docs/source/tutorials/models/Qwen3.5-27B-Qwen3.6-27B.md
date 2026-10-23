@@ -263,7 +263,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --quantization ascend \
             --served-model-name qwen3.5 \
             --max-num-seqs 32 \
-            --max-model-len 131072 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --allowed-local-media-path / \
@@ -306,7 +306,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --quantization ascend \
             --served-model-name qwen3.6 \
             --max-num-seqs 32 \
-            --max-model-len 131072 \
+            --max-model-len 133120 \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --allowed-local-media-path / \

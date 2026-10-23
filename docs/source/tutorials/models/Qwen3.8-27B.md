@@ -255,7 +255,7 @@ Before starting the service:
         --kv-cache-dtype mxfp8 \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
-        --max-model-len 131072 \
+        --max-model-len 133120 \
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --allowed-local-media-path / \
@@ -389,7 +389,7 @@ Before starting the service:
         --quantization ascend \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
-        --max-model-len 131072 \
+        --max-model-len 133120 \
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
         --allowed-local-media-path / \
