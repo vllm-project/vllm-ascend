@@ -165,6 +165,13 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         assert kwargs.get("output_buffer") is None
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        assert state is layer.kv_cache[1]
+        expected_indices = metadata.spec_state_indices_tensor if speculative else metadata.non_spec_state_indices_tensor
+        assert indices is expected_indices
+        state_slots = indices[: starts.numel() - 1].reshape(-1)
+        state.index_fill_(0, state_slots, 2.0)
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
@@ -173,18 +180,36 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         assert q.shape[1] == 3
         assert chunk is metadata.non_spec_prefill_metadata.chunk
         torch.testing.assert_close(indices, metadata.prefill_state_indices)
+        torch.testing.assert_close(k, q + 8, rtol=0, atol=0)
+        torch.testing.assert_close(v, q + 16, rtol=0, atol=0)
+        assert state is layer.kv_cache[1]
+        state.index_fill_(0, indices, 3.0)
         return q * 3
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     monkeypatch.setattr(model_kda, "chunk_kda", prefill)
-    qkv = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None].expand(tokens, 384).clone()
+    # Distinguish tokens, channels and Q/K/V so swaps and partial writes fail.
+    query = torch.arange(1, tokens + 1, dtype=torch.bfloat16)[:, None]
+    query = query + torch.arange(128, dtype=torch.bfloat16)[None, :] / 128
+    qkv = torch.cat((query, query + 8, query + 16), dim=-1)
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
     layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
-    expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
-    expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
-    torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
+    expected = query * 3
+    recurrent_tokens = 2 if speculative else 1
+    expected[:recurrent_tokens] = query[:recurrent_tokens] * 2
+    torch.testing.assert_close(out[:, :tokens], expected[None, :, None, :], rtol=0, atol=0)
     # Rows outside the scheduled token groups are left untouched.
     assert torch.isnan(out[:, tokens:]).all()
+    expected_state = torch.zeros_like(layer.kv_cache[1])
+    recurrent_slots = (
+        metadata.spec_state_indices_tensor.reshape(-1)
+        if speculative
+        else metadata.non_spec_state_indices_tensor[: metadata.num_decodes]
+    )
+    expected_state.index_fill_(0, recurrent_slots, 2.0)
+    if not spec_only:
+        expected_state.index_fill_(0, metadata.prefill_state_indices, 3.0)
+    torch.testing.assert_close(layer.kv_cache[1], expected_state, rtol=0, atol=0)
     assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
