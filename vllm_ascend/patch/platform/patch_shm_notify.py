@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
-"""Bound SHM notification mailbox growth during sustained fast-path reads."""
+"""Backport the SHM notification fix merged in upstream vLLM PR #63165."""
 
 import time
-from contextlib import suppress
 
 from vllm.distributed.device_communicators.shm_broadcast import SpinCondition
-from zmq.constants import Flag, PollEvent
-from zmq.error import Again
+from zmq import Context
+from zmq.constants import Flag
 
-# Match upstream vLLM PR #63165.
-_NOTIFY_POLL_INTERVAL_S = 2.0
+SHM_NOTIFY_POLL_INTERVAL_S = 2.0
+_original_init = SpinCondition.__init__
+
+
+def init(
+    self: SpinCondition,
+    is_reader: bool,
+    context: Context,
+    notify_address: str,
+    busy_loop_s: float = 1,
+) -> None:
+    _original_init(self, is_reader, context, notify_address, busy_loop_s)
+    if is_reader:
+        self.last_notify_poll = self.last_read
 
 
 def record_read(self: SpinCondition) -> None:
-    now = time.monotonic()
-    self.last_read = now
-    if now - getattr(self, "_ascend_last_notify_poll", 0.0) < _NOTIFY_POLL_INTERVAL_S:
-        return
-
-    # CONFLATE bounds payloads, not the internal activate_read command queue.
-    # Service it on the owning reader thread even when SHM reads bypass wait().
-    if self.local_notify_socket.poll(timeout=0, flags=PollEvent.POLLIN):
-        with suppress(Again):
+    self.last_read = time.monotonic()
+    if self.last_read - self.last_notify_poll >= SHM_NOTIFY_POLL_INTERVAL_S:
+        self.last_notify_poll = self.last_read
+        # poll() makes libzmq process the queued commands; a bare recv()
+        # returns the pending message without doing so.
+        if self.local_notify_socket.poll(timeout=0):
             self.local_notify_socket.recv(flags=Flag.DONTWAIT, copy=False)
-    self._ascend_last_notify_poll = time.monotonic()
 
 
+SpinCondition.__init__ = init
 SpinCondition.record_read = record_read

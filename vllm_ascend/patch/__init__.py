@@ -1741,14 +1741,16 @@
 
 # ** File: platform/patch_shm_notify.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
 #    Why:
 #       Sustained SHM fast-path reads bypass notification polling. CONFLATE
 #       limits payloads but internal activate_read commands can accumulate.
 #    How:
-#       Service the notification socket on its reader thread at most once per
-#       second during successful reads, preserving SHM and cancellation logic.
+#       Backport upstream initialization and poll/recv behavior, servicing the
+#       notification socket every two seconds during successful reads.
+#       SHM and cancellation logic are unchanged.
 #    Related PR (if no, explain why):
-#       No upstream fix for this receiver-mailbox growth is included in v0.30.0.
+#       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
 #    Future Plan:
-#       Remove when upstream bounds notification mailbox growth during reads.
+#       Remove once the supported vLLM version includes upstream PR #63165.
