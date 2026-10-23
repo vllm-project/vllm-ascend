@@ -611,7 +611,7 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
     assert copies_arg is copies
 
 
-def test_sampler_accepts_temperature_min_p_penalties_rejects_logprobs() -> None:
+def test_sampler_accepts_temperature_min_p_penalties_allowed_bias_logprobs() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     _add_request(sampler, 0, 4, SamplingParams(temperature=0))
     _add_request(sampler, 1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
@@ -634,8 +634,8 @@ def test_sampler_accepts_temperature_min_p_penalties_rejects_logprobs() -> None:
     assert bool(sampler._use_allowed[0])
     _add_request(sampler, 1, 4, SamplingParams(temperature=0, logit_bias={3: 1.5}))
     assert bool(sampler._use_logit_bias[1])
-    with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        _add_request(sampler, 2, 4, SamplingParams(temperature=0, logprobs=5))
+    _add_request(sampler, 2, 4, SamplingParams(temperature=0, logprobs=5))
+    assert int(sampler._num_logprobs[2]) == 5
 
 
 def test_sampler_allowed_token_ids_restricts_argmax() -> None:
@@ -671,6 +671,21 @@ def test_sampler_bad_words_bans_token() -> None:
     logits = torch.tensor([[1.0, 5.0, 2.0, 0.0]], dtype=torch.float32)
     out = sampler(logits.clone(), _make_sampler_batch())
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 2
+
+
+def test_sampler_logprobs_returns_sampled_and_topk() -> None:
+    """raw_logprobs gather includes sampled token plus top-k (MRV1 layout)."""
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=4)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, logprobs=2))
+    sampler.apply_staged_writes()
+    logits = torch.tensor([[1.0, 5.0, 2.0, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    assert out.logprobs_tensors is not None
+    # Column 0 is the sampled token; remaining columns are top-k.
+    assert out.logprobs_tensors.logprob_token_ids.shape == (1, 3)
+    assert int(out.logprobs_tensors.logprob_token_ids[0, 0].item()) == 1
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
+    assert out.logprobs_tensors.logprobs.shape == (1, 3)
 
 
 def _make_penalty_req_states(

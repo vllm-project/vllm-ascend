@@ -5,9 +5,9 @@
 """Triton-free MRV2 sampler for Ascend 310P.
 
 Aligns temperature / top-k / top-p / min_p / penalties / allowed_token_ids /
-logit_bias / bad_words post-processing with MRV1's ``AscendSampler310``
-(inverse-CDF random sampling) while keeping the MRV2 ``sampling_states``
-surface required by MTP draft ``propose()``.
+logit_bias / bad_words / logprobs post-processing with MRV1's
+``AscendSampler310`` (inverse-CDF random sampling) while keeping the MRV2
+``sampling_states`` surface required by MTP draft ``propose()``.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from vllm.model_executor.layers.utils import apply_penalties as apply_penalties_vllm
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -162,6 +163,8 @@ class Ascend310PSampler:
         self._logit_bias: dict[int, dict[int, float]] = {}
         self._use_bad_words = np.zeros(max_num_reqs, dtype=bool)
         self._bad_words_token_ids: dict[int, list[list[int]]] = {}
+        # Per-request sampled logprobs count; -1 means unset / disabled.
+        self._num_logprobs = np.full(max_num_reqs, fill_value=-1, dtype=np.int32)
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
@@ -181,14 +184,11 @@ class Ascend310PSampler:
         sampling_params: SamplingParams,
     ) -> None:
         unsupported = []
-        if sampling_params.logprobs is not None or sampling_params.prompt_logprobs is not None:
-            unsupported.append("logprobs")
         bad_words = getattr(sampling_params, "bad_words", None) or []
         bad_words_token_ids = getattr(sampling_params, "bad_words_token_ids", None)
         if bad_words and not bad_words_token_ids:
             unsupported.append("bad_words (not tokenized)")
         if unsupported:
-            # TODO: Support logprobs in a later 310P MRV2 iteration.
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
@@ -252,6 +252,10 @@ class Ascend310PSampler:
         else:
             self._bad_words_token_ids.pop(req_idx, None)
             self._use_bad_words[req_idx] = False
+
+        # Sampled-token logprobs (prompt_logprobs is handled outside the sampler).
+        logprobs = sampling_params.logprobs
+        self._num_logprobs[req_idx] = -1 if logprobs is None else int(logprobs)
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
@@ -333,6 +337,32 @@ class Ascend310PSampler:
 
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self._temperature_np[idx_mapping_np] >= _SAMPLING_EPS))
+
+    def _batch_max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int | None:
+        vals = self._num_logprobs[idx_mapping_np]
+        active = vals[vals >= 0]
+        if active.size == 0:
+            return None
+        return int(active.max())
+
+    @staticmethod
+    def _gather_logprobs_pytorch(
+        logprobs: torch.Tensor,
+        num_logprobs: int,
+        token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        """MRV1-style top-k + sampled logprobs gather (raw_logprobs mode)."""
+        token_ids_i64 = token_ids.to(torch.int64).view(-1, 1)
+        token_logprobs = logprobs.gather(-1, token_ids_i64)
+        token_ranks = (logprobs > token_logprobs).sum(dim=-1).to(torch.int32)
+        if num_logprobs > 0:
+            topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
+            indices = torch.cat((token_ids_i64.to(torch.int32), topk_indices.to(torch.int32)), dim=1)
+            values = torch.cat((token_logprobs, topk_logprobs), dim=1)
+        else:
+            indices = token_ids_i64.to(torch.int32)
+            values = token_logprobs
+        return LogprobsTensors(indices, values, token_ranks)
 
     def _build_penalty_token_tensors(
         self,
@@ -570,14 +600,22 @@ class Ascend310PSampler:
         num_reqs = input_batch.num_reqs
         input_ids = getattr(input_batch, "input_ids", None)
         expanded_local_pos = getattr(input_batch, "expanded_local_pos", None)
+        max_num_logprobs = self._batch_max_num_logprobs(idx_mapping_np)
+        # MRV1 AscendSampler default: raw_logprobs from pre-penalty logits.
+        raw_logprobs = None
+        if max_num_logprobs is not None:
+            raw_logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float32)
 
         # Fast path: all greedy and no logits post-process → argmax.
         if not self._any_random(idx_mapping_np) and not self._batch_needs_logits_processing(idx_mapping_np):
             sampled = logits.argmax(dim=-1).to(torch.int32)
             num_sampled = input_batch.seq_lens.new_ones(num_reqs)
+            logprobs_tensors = None
+            if raw_logprobs is not None:
+                logprobs_tensors = self._gather_logprobs_pytorch(raw_logprobs, max_num_logprobs, sampled)
             return SamplerOutput(
                 sampled_token_ids=sampled.view(-1, 1),
-                logprobs_tensors=None,
+                logprobs_tensors=logprobs_tensors,
                 num_nans=None,
                 num_sampled=num_sampled,
                 num_rejected=torch.zeros_like(num_sampled),
@@ -607,11 +645,15 @@ class Ascend310PSampler:
             is_random = self.sampling_states.temperature.gpu[expanded_idx_mapping] >= _SAMPLING_EPS
             sampled = torch.where(is_random, random_sampled, greedy).to(torch.int32)
 
+        logprobs_tensors = None
+        if raw_logprobs is not None:
+            logprobs_tensors = self._gather_logprobs_pytorch(raw_logprobs, max_num_logprobs, sampled)
+
         num_sampled = input_batch.seq_lens.new_ones(num_reqs)
         sampled_2d = sampled.view(-1, 1)
         return SamplerOutput(
             sampled_token_ids=sampled_2d,
-            logprobs_tensors=None,
+            logprobs_tensors=logprobs_tensors,
             num_nans=None,
             num_sampled=num_sampled,
             num_rejected=torch.zeros_like(num_sampled),
