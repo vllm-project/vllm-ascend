@@ -261,17 +261,30 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         max_seq_len = getattr(common_attn_metadata, "max_seq_len", None)
-        if not max_seq_len and num_reqs > 0:
-            # Ascend's spec-decode proposer hardcodes max_seq_len=0 in draft
-            # (MTP) metadata, which the other attention backends never read.
-            # The KPool score kernel derives its pool bound from it, so recover
-            # the batch's longest sequence from the CPU lengths. seq_lens_cpu
-            # is host-side data, so this adds no device synchronization.
+        if num_reqs > 0:
+            # The KPool tile space is sized by the pool bound, so a bound that
+            # falls back to the block table (pages x cache_block) over-scores the
+            # whole prefix by 4x at 128K. seq_lens_cpu is host-side, so taking the
+            # batch maximum from it adds no device synchronisation; if it is
+            # missing, read the device lengths back once per forward instead of
+            # once per layer.
             seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
             if seq_lens_cpu is None:
                 seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
             if seq_lens_cpu is not None and seq_lens_cpu.numel() >= num_reqs:
-                max_seq_len = int(seq_lens_cpu[:num_reqs].max().item())
+                tight_len = int(seq_lens_cpu[:num_reqs].max().item())
+            else:
+                tight_len = int(common_attn_metadata.seq_lens[:num_reqs].max().item())
+            max_seq_len = tight_len if not max_seq_len else min(int(max_seq_len), tight_len)
+            _c8_bound_key = (num_reqs, max_seq_len)
+            if globals().get("_c8_bound_reported") != _c8_bound_key:
+                globals()["_c8_bound_reported"] = _c8_bound_key
+                pool_bound = (max_seq_len + self.compress_ratio - 1) // self.compress_ratio
+                print(
+                    f"C8BOUND reqs={num_reqs} max_seq_len={max_seq_len} pool_bound={pool_bound} "
+                    f"block_table_bound={int(common_attn_metadata.block_table_tensor.shape[1]) * self.logical_block_size}",
+                    flush=True,
+                )
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
@@ -787,6 +800,39 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 max_pools = int(indexer_metadata.block_table.shape[1] * indexer_cache.shape[1])
             else:
                 max_pools = known_max_pools
+            # Past a couple of tokens the score work is O(tokens x pools) while
+            # unpacking the live rows is O(pools), so hand the fused BF16
+            # operator a dequantised working set instead of scoring in Triton.
+            # Capture keeps the Triton path: its shapes are static.
+            if num_tokens >= 32 and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+                from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (
+                    glm5_next_c8_dequant_pool_key,
+                )
+
+                pool_key, page_table = glm5_next_c8_dequant_pool_key(
+                    indexer_cache,
+                    indexer_metadata.block_table,
+                    query_metadata.cum_query_lens,
+                    max_pools,
+                    self.head_dim,
+                )
+                indices, _ = self._pool_key_indexer(
+                    q_values.to(torch.bfloat16),
+                    pool_key,
+                    weights.to(torch.bfloat16),
+                    query_metadata.pool_tail,
+                    actual_seq_q=query_metadata.cum_query_lens,
+                    actual_seq_k=query_metadata.seq_lens,
+                    block_table=page_table,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    topk=self.topk_tokens,
+                    pool_size=self.index_kpool,
+                    mask_mode=3,
+                )
+                return self._pack_keypool_indices(
+                    indices, query_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
+                )
             indices = glm5_next_lightning_indexer_triton(
                 q_values,
                 indexer_cache,
