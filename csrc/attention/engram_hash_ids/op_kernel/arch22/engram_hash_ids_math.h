@@ -153,4 +153,176 @@ private:
     TBuf<TPosition::VECCALC> workBuffer_;
     TBuf<TPosition::VECCALC> indexBuffer_;
 };
+
+// A3 retains the scalar history selection and metadata reuse.
+template <typename InputT, typename MapT, typename PositionT, typename LookbackT>
+class HashSources {
+public:
+    __aicore__ inline void Init(
+        GM_ADDR inputIds, GM_ADDR tokenMap, GM_ADDR deadMask, GM_ADDR positions,
+        GM_ADDR blockTable, GM_ADDR queryStartLoc, GM_ADDR reqIds, GM_ADDR cache,
+        GM_ADDR lookbackTokenIds, GM_ADDR lookbackDeadMask,
+        const EngramHashIdsTilingData &tiling, TPipe *pipe)
+    {
+        tiling_ = tiling;
+        inputIds_.SetGlobalBuffer(reinterpret_cast<__gm__ InputT *>(inputIds));
+        tokenMap_.SetGlobalBuffer(reinterpret_cast<__gm__ MapT *>(tokenMap));
+        deadMask_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(deadMask));
+        positions_.SetGlobalBuffer(reinterpret_cast<__gm__ PositionT *>(positions));
+        queryStartLoc_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(queryStartLoc));
+        reqIds_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(reqIds));
+        lookbackTokenIds_.SetGlobalBuffer(reinterpret_cast<__gm__ LookbackT *>(lookbackTokenIds));
+        lookbackDeadMask_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(lookbackDeadMask));
+        if (tiling_.hasCache != 0) {
+            blockTable_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(blockTable));
+            cache_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cache));
+        }
+        pipe->InitBuffer(requestBuffer_, TOKEN_TILE_ELEMENTS * sizeof(int32_t));
+        pipe->InitBuffer(positionBuffer_, TOKEN_TILE_ELEMENTS * sizeof(PositionT));
+        pipe->InitBuffer(chunkStartBuffer_, TOKEN_TILE_ELEMENTS * sizeof(int64_t));
+    }
+
+    __aicore__ inline void Prepare(int64_t begin, uint32_t count, HashArithmetic &arithmetic)
+    {
+        CacheMetadata(begin, count);
+        for (uint32_t lane = 0; lane < count; ++lane) {
+            blocked_[lane] = false;
+            arithmetic.ResetLane(lane);
+        }
+    }
+
+    __aicore__ inline void HashShift(HashArithmetic &arithmetic, int64_t begin, uint32_t count,
+                                    int64_t shift, uint64_t multiplier)
+    {
+        const auto requests = requestBuffer_.Get<int32_t>();
+        const auto positions = positionBuffer_.Get<PositionT>();
+        const auto starts = chunkStartBuffer_.Get<int64_t>();
+        for (uint32_t lane = 0; lane < count; ++lane) {
+            const int64_t lookback = WrapSub(static_cast<int64_t>(positions.GetValue(lane)), shift);
+            const int64_t source = ReadSource(begin + lane, requests.GetValue(lane), starts.GetValue(lane),
+                                              lookback, shift);
+            blocked_[lane] = blocked_[lane] || lookback < 0 || source == tiling_.deadId;
+            const int64_t value = blocked_[lane] ? tiling_.padId : source;
+            arithmetic.Accumulate(lane, value, multiplier);
+        }
+        arithmetic.FinishShift(multiplier, count);
+    }
+
+private:
+    template <HardEvent event>
+    __aicore__ inline void Sync()
+    {
+        SetFlag<event>(COPY_EVENT_ID);
+        WaitFlag<event>(COPY_EVENT_ID);
+    }
+
+    __aicore__ inline int64_t WrapAdd(int64_t left, int64_t right) const
+    {
+        return static_cast<int64_t>(static_cast<uint64_t>(left) + static_cast<uint64_t>(right));
+    }
+
+    __aicore__ inline int64_t WrapMul(int64_t left, int64_t right) const
+    {
+        return static_cast<int64_t>(static_cast<uint64_t>(left) * static_cast<uint64_t>(right));
+    }
+
+    __aicore__ inline int64_t WrapSub(int64_t left, int64_t right) const
+    {
+        return static_cast<int64_t>(static_cast<uint64_t>(left) - static_cast<uint64_t>(right));
+    }
+
+    __aicore__ inline int64_t Clamp(int64_t value, int64_t low, int64_t high) const
+    {
+        return value < low ? low : (value > high ? high : value);
+    }
+
+    __aicore__ inline void CacheMetadata(int64_t begin, uint32_t count)
+    {
+        Sync<HardEvent::S_MTE2>();
+        const auto requests = requestBuffer_.Get<int32_t>();
+        const auto positions = positionBuffer_.Get<PositionT>();
+        const auto starts = chunkStartBuffer_.Get<int64_t>();
+        const DataCopyExtParams requestCopy{
+            COPY_BLOCK_COUNT, count * static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
+        DataCopyPad(requests, reqIds_[begin], requestCopy, DataCopyPadExtParams<int32_t>{false, 0, 0, 0});
+        if (tiling_.positionStride == 1) {
+            const DataCopyExtParams positionCopy{
+                COPY_BLOCK_COUNT, count * static_cast<uint32_t>(sizeof(PositionT)), 0, 0, 0};
+            DataCopyPad(positions, positions_[begin], positionCopy, DataCopyPadExtParams<PositionT>{false, 0, 0, 0});
+        }
+        Sync<HardEvent::MTE2_S>();
+        int64_t previousRequest = UNKNOWN_TOKEN_ID;
+        int64_t chunkStart = 0;
+        for (uint32_t lane = 0; lane < count; ++lane) {
+            if (tiling_.positionStride != 1) {
+                positions.SetValue(lane, positions_.GetValue(WrapMul(begin + lane, tiling_.positionStride)));
+            }
+            const int64_t request = requests.GetValue(lane);
+            if (request != previousRequest) {
+                const int64_t index = queryStartLoc_.GetValue(WrapMul(request, tiling_.queryStride));
+                const int64_t chunkIndex = index < tiling_.numTokens ? index : tiling_.numTokens - 1;
+                chunkStart = positions_.GetValue(WrapMul(chunkIndex, tiling_.positionStride));
+                previousRequest = request;
+            }
+            starts.SetValue(lane, chunkStart);
+        }
+    }
+
+    __aicore__ inline int64_t ReadSource(
+        int64_t token, int64_t request, int64_t chunkStart, int64_t lookback, int64_t shift)
+    {
+        if (lookback >= chunkStart) {
+            const int64_t batchIndex = token > shift ? token - shift : 0;
+            const int64_t tokenId = inputIds_.GetValue(WrapMul(batchIndex, tiling_.inputStride));
+            const int64_t source = tokenMap_.GetValue(tokenId);
+            return deadMask_.GetValue(WrapMul(batchIndex, tiling_.maskStride)) != 0 ? tiling_.deadId : source;
+        }
+
+        // Triton subtracts one in the positions dtype before promotion to int64.
+        const PositionT previous = static_cast<PositionT>(static_cast<uint64_t>(chunkStart) - 1);
+        const int64_t col = WrapSub(static_cast<int64_t>(previous), lookback);
+        if (col >= 0 && col < tiling_.lookbackDepth) {
+            const int64_t tokenId = lookbackTokenIds_.GetValue(
+                WrapAdd(WrapMul(request, tiling_.lookbackRowStride), WrapMul(col, tiling_.lookbackColStride)));
+            if (tokenId > UNKNOWN_TOKEN_ID) {
+                const int64_t source = tokenMap_.GetValue(tokenId);
+                const bool dead = lookbackDeadMask_.GetValue(
+                    WrapAdd(WrapMul(request, tiling_.lookbackMaskRowStride),
+                            WrapMul(col, tiling_.lookbackMaskColStride))) != 0;
+                return dead ? tiling_.deadId : source;
+            }
+        }
+        if (tiling_.hasCache == 0) {
+            // Only the no-cache fallback is int32 in Triton; blocked padding stays int64.
+            return static_cast<int64_t>(static_cast<int32_t>(tiling_.padId));
+        }
+
+        // Cache entries already contain mapped token IDs (including dead_id).
+        const uint64_t extent = static_cast<uint64_t>(tiling_.maxBlocks) * tiling_.cacheBlockSize;
+        const int64_t position = Clamp(lookback, 0, static_cast<int64_t>(extent - 1));
+        const int64_t blockRow = request < tiling_.numTableRows ? request : tiling_.numTableRows - 1;
+        const int64_t block = blockTable_.GetValue(
+            WrapAdd(WrapMul(blockRow, tiling_.tableRowStride),
+                    WrapMul(position / tiling_.cacheBlockSize, tiling_.tableColStride)));
+        const int64_t cacheIndex = WrapAdd(WrapMul(block, tiling_.cacheBlockSize), position % tiling_.cacheBlockSize);
+        const int64_t slot = Clamp(cacheIndex, 0, tiling_.numSlots - 1);
+        return cache_.GetValue(slot);
+    }
+
+    EngramHashIdsTilingData tiling_;
+    GlobalTensor<InputT> inputIds_;
+    GlobalTensor<MapT> tokenMap_;
+    GlobalTensor<uint8_t> deadMask_;
+    GlobalTensor<PositionT> positions_;
+    GlobalTensor<int32_t> blockTable_;
+    GlobalTensor<int32_t> queryStartLoc_;
+    GlobalTensor<int32_t> reqIds_;
+    GlobalTensor<int32_t> cache_;
+    GlobalTensor<LookbackT> lookbackTokenIds_;
+    GlobalTensor<uint8_t> lookbackDeadMask_;
+    TBuf<TPosition::VECCALC> requestBuffer_;
+    TBuf<TPosition::VECCALC> positionBuffer_;
+    TBuf<TPosition::VECCALC> chunkStartBuffer_;
+    bool blocked_[TOKEN_TILE_ELEMENTS];
+};
 } // namespace EngramHashIds
