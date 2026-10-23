@@ -97,7 +97,8 @@ class SparseHCCLWeightTransferEngine(SparseNCCLWeightTransferEngine):
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            # NOTE: HCCL needs explicit destruction; clearing the Python reference does not call hcclCommDestroy.
+            # NOTE: Upstream sparse engines only clear the communicator reference; explicitly destroy
+            # the HCCL communicator here to release native resources before dropping the reference.
             self.model_update_group.close()
             self.model_update_group = None
 
@@ -148,14 +149,12 @@ class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngin
             super()._broadcast_chunk(patches)
 
     def _post_send_sync(self) -> None:
-        """Wait for the broadcasts to land before returning, so a caller may
-        rebuild or free the patch tensors as soon as a send method returns rather
-        than relying on same-stream ordering."""
         if torch.npu.is_available():
             torch.npu.current_stream().synchronize()
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            # NOTE: HCCL needs explicit destruction; clearing the Python reference does not call hcclCommDestroy.
+            # NOTE: Upstream sparse engines only clear the communicator reference; explicitly destroy
+            # the HCCL communicator here to release native resources before dropping the reference.
             self.model_update_group.close()
             self.model_update_group = None
