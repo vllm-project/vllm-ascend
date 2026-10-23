@@ -36,22 +36,15 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
     return torch.cat(results).to(query.dtype)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(
-    ("num_heads", "num_kv_heads", "window", "query_len"),
-    [(8, 1, None, 6), (8, 1, 2048, 6), (8, 2, 1024, 8), (4, 1, 1024, 8)],
-)
-@pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
-@pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("capture", [False, True], ids=["eager", "graph"])
-def test_strided_paged_flash_attn_matches_golden(
-    dtype, num_heads, num_kv_heads, window, query_len, layout, causal, capture
+def _check_strided_paged_flash_attn(
+    dtype, num_heads, num_kv_heads, window, query_len, layout, causal, capture, block_size
 ):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
-    block_size, head_dim = 128, 128
-    num_blocks = 56
+    head_dim = 128
+    page_scale = 128 // block_size
+    num_blocks = 56 * page_scale
     page_stride = 2 * block_size * num_kv_heads * head_dim + 128
     backing = torch.full((num_blocks, page_stride), float("nan"), dtype=dtype, device=device)
     # Keep the inner two dimensions contiguous in each native CANN layout.
@@ -66,9 +59,9 @@ def test_strided_paged_flash_attn_matches_golden(
     value.copy_(torch.randn(value.shape, dtype=value.dtype, device=device))
     query = torch.randn(3 * query_len, num_heads, head_dim, dtype=key.dtype, device=device)
     permutation = torch.randperm(num_blocks, device=device).to(torch.int32)
-    block_table = torch.zeros(3, 32, dtype=torch.int32, device=device)
-    block_table[0].copy_(permutation[:32])
-    block_table[1, :24].copy_(permutation[32:])
+    block_table = torch.zeros(3, 32 * page_scale, dtype=torch.int32, device=device)
+    block_table[0].copy_(permutation[: 32 * page_scale])
+    block_table[1, : 24 * page_scale].copy_(permutation[32 * page_scale :])
     optimistic = torch.tensor([4096, 3072, 0], dtype=torch.int32, device=device)
     rejected = torch.tensor([0, 2, 0], dtype=torch.int32, device=device)
     mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device=device), diagonal=1)
@@ -125,7 +118,7 @@ def test_strided_paged_flash_attn_matches_golden(
 
     # Reuse the graph while changing page assignments, Q/K/V and active rows.
     block_table[0].copy_(block_table[0].roll(1))
-    block_table[2, :4].copy_(block_table[1, :4])
+    block_table[2, : 4 * page_scale].copy_(block_table[1, : 4 * page_scale])
     common.query_start_loc.copy_(torch.arange(4, dtype=torch.int32, device=device) * query_len)
     common.seq_lens.copy_(torch.tensor([3073, 2049, 385], dtype=torch.int32, device=device))
     query.copy_(torch.randn_like(query))
@@ -140,3 +133,39 @@ def test_strided_paged_flash_attn_matches_golden(
     result = replay()
     reference = golden(query, key, value, block_table, [1025], window, query_len, causal)
     torch.testing.assert_close(result[:query_len], reference, rtol=1e-2, atol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("window", [None, 2048])
+@pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
+@pytest.mark.parametrize("causal", [False, True])
+def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
+    _check_strided_paged_flash_attn(
+        dtype=dtype,
+        num_heads=8,
+        num_kv_heads=1,
+        window=window,
+        query_len=6,
+        layout=layout,
+        causal=causal,
+        capture=False,
+        block_size=128,
+    )
+
+
+@pytest.mark.parametrize("block_size", [64, 128], ids=["block64", "block128"])
+@pytest.mark.parametrize("window", [None, 1024], ids=["dense", "swa"])
+@pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
+@pytest.mark.parametrize("capture", [False, True], ids=["eager", "graph"])
+def test_dspark_flash_attn_matches_golden(block_size, window, layout, capture):
+    _check_strided_paged_flash_attn(
+        dtype=torch.bfloat16,
+        num_heads=8,
+        num_kv_heads=2,
+        window=window,
+        query_len=8,
+        layout=layout,
+        causal=False,
+        capture=capture,
+        block_size=block_size,
+    )

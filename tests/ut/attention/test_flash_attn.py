@@ -15,6 +15,14 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlash
 from vllm_ascend.worker.v2 import attn_utils
 
 
+def test_flash_attn_preserves_m3_fp8_target_kernel_pages(monkeypatch):
+    from vllm_ascend.attention import attention_v1
+
+    monkeypatch.setattr(attention_v1, "is_minimax_m3_fp8_kv_cache", lambda _config: True)
+    assert attention_v1.AscendAttentionBackend.get_supported_kernel_block_sizes() == [64, 128]
+    assert AscendFlashAttentionBackend.get_supported_kernel_block_sizes() == [64, 128]
+
+
 @pytest.fixture
 def dflash2_config():
     return SimpleNamespace(

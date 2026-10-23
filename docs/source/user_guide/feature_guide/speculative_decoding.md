@@ -451,7 +451,8 @@ MiniMax-M3 supports `Qwen3DSparkModel` drafts such as
 configuration to use CANN FlashAttn for the draft's dense and sliding-window
 attention with full draft graph capture. Use `enforce_eager: true` to run the
 same draft backend eagerly. The target model retains its existing attention
-backends and may use FP8 KV cache independently.
+backends and required host-length synchronization, and may use FP8 KV cache
+independently.
 
 ```shell
 export VLLM_USE_V2_MODEL_RUNNER=1
