@@ -517,8 +517,8 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                     pcp_context, full_graph_mode=full_graph_mode
                 )
                 shared["pcp_context"] = prepared_context
-            assert prepared_context is not None
             pcp_context = prepared_context
+            assert pcp_context is not None
             global_common = shared.get("global_common")
             if global_common is None:
                 global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(

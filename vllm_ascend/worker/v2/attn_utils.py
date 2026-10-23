@@ -462,7 +462,7 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
-    common_v41_batch_metadata: dict[str, Any] = {}
+    common_v41_batch_metadata: dict[str | tuple[str, int], Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     batch_tq_slots = uses_turboquant_groups(kv_cache_groups)
     formatted_slot_mappings = None
