@@ -48,6 +48,7 @@ env_common: &env_common
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_MODELSCOPE: true
+  ASCEND_LAUNCH_BLOCKING: "1"
 env_prefill: &env_prefill
   <<: *env_common
 
