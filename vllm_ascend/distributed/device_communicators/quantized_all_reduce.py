@@ -13,119 +13,62 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Quantized all-reduce for Atlas A2 TP inference.
+"""Quantized all-reduce for large bf16 TP collectives on Atlas A2/A3.
 
-Large bf16 all-reduces (prefill o_proj / MoE combine, typically tens of MiB)
-are bandwidth-bound on HCCS. Quantizing the payload to int8 halves the
-communication volume with a negligible compute cost on the Vector cores.
+Halves the all-reduce payload (bf16 -> int8 -> reduce -> bf16). It is opt-in
+and only pays off for large messages, so it is gated by a payload threshold.
 
-Scheme (integer-safe by construction; no clamp kernel is needed):
-  1. per-channel symmetric scale with an exact world-size bound:
-        max_q    = 127 // world_size      (ws=2 -> 63, ws=4 -> 31, ws=8 -> 15)
-        scale[c] = global_amax(channel c) / max_q
-     |x| <= global_amax implies |x / scale| <= max_q, and rounding a value
-     that is already <= max_q can never exceed max_q, so every rank stays
-     within +/-max_q and the element-wise sum over `ws` ranks is bounded by
-     ws * max_q <= 127. The int8 reduce therefore cannot wrap (HCCL wraps
-     modulo 256 instead of saturating) for any input distribution, including
-     the same-sign worst case where every rank holds x == amax on every
-     channel.
-     Note: the headroom form scale = global_amax * ws / 127 does NOT give
-     this guarantee, because round(127/ws) can land above 127/ws (ws=4:
-     round(31.75) == 32, and 4 * 32 == 128 wraps to -128). That is why an
-     extra clamp was previously needed; the exact-bound scale above removes
-     the need for it entirely.
-  2. quantize bf16 -> int8, all-reduce in int8 (half payload)
-  3. dequantize the reduced sum back to bf16
+Configuration
+-------------
+VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1
+    Enable the feature. Default 0 (off); only "0"/"1" are accepted.
+    Supported on Atlas A2/A3 with 1 < TP <= 8. The switch is read when the
+    TP communicator is created, so restart the server after changing it.
+    It is active when every TP worker logs
+    "Quantized all-reduce enabled (min_numel=..., max_q=...)".
 
-The per-channel scale needs a tiny fp32 sync (numel == hidden_size, a few KB)
-before the payload all-reduce; it is an order of magnitude cheaper than the
-bandwidth saved on large messages.
+VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL=<elements>    (default 33554432)
+    Smallest all-reduce that may take the int8 path, in elements. The
+    reduced tensor is the batch hidden state, numel = step_tokens *
+    hidden_size, so this is really a payload threshold:
 
-Measured on 4x Atlas 910B3 (TP=4, hidden=2048, 16k-token prefill -> 64 MiB
-payload per collective, HCCL_OP_EXPANSION_MODE=AIV, HCCL_BUFFSIZE=1024):
-  - per-AR latency: 1.73 ms (bf16) -> 1.21 ms (int8, including the amax sync,
-    quantize, reduce and dequantize) => -30%
-  - e2e (16k in / 64 out, 32 prompts @ 2 qps): output throughput +3.2%,
-    mean TTFT -9%, mean TPOT -25%
-  - accuracy (64 MiB payload vs an exact bf16 reduce): rel-L2 3.9%,
-    cosine 0.9993; no int8 wrap on i.i.d., same-sign correlated or
-    worst-case (all elements == amax) data
-  - the win only materialises for large payloads: the pipeline has a fixed
-    per-call cost of ~0.75 ms, so the break-even payload is ~36 MiB and
-    smaller messages lose (see the min_numel note below)
+        payload = MIN_NUMEL * 2 bytes (bf16)
+        default 33554432 elements = 64 MiB = 16384 tokens at hidden 2048
 
-WARNING: do not bound the int8 payload with torch's clamp family here.
-On Ascend, int8 clamp_/clamp/hardtanh fall back to a very slow path
-(32 MiB int8: 14.2 ms for clamp_ vs 0.056 ms for minimum/maximum, i.e.
-~250x), which turns the -30% win into a +800% regression. This scheme is
-safe without any clamp; if a bound is ever required, use
-torch.minimum(torch.maximum(q, lo_i8), hi_i8) with preallocated int8
-scalars instead.
+    A collective is quantized only when one scheduler step holds at least
+    MIN_NUMEL / hidden_size tokens, i.e. normally a full
+    max_num_batched_tokens chunk. Concurrency matters only through
+    batching: 16 concurrent 1k-token requests pack into one 16k-token step
+    and qualify, while a single 1k-token request does not. Decode steps
+    (a few thousand elements) never qualify and stay on bf16.
 
-Enable with VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1.
+    Small messages lose: each collective carries a fixed ~0.75 ms cost
+    (amax sync + quantize + dequantize) and the measured break-even is
+    ~36 MiB of payload:
 
-VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL (optional, unit: elements):
-  Payload threshold for the int8 path, expressed in elements:
+        payload    4 MiB   16 MiB   32 MiB   64 MiB   128 MiB
+        vs bf16    +359%    +67%     +8%      -23%     -23%
 
-      payload at the threshold = MIN_NUMEL * 2 bytes          (bf16)
-      33,554,432 elements      = 64 MiB = 16,384 tokens at hidden_size 2048
+    Guidelines:
+      * keep the default (64 MiB) unless your collectives are larger;
+      * do not go below 16777216 (32 MiB);
+      * if max_num_batched_tokens * hidden_size * 2 < 64 MiB the threshold
+        is unreachable, so leave the feature disabled instead of tuning it.
 
-  The reduced tensor is the batch hidden state, so
-  numel == step_tokens * hidden_size, where step_tokens is:
-
-    - prefill: min(tokens scheduled in this step, max_num_batched_tokens).
-      Long prompts are chunked at that bound, so the payload of one
-      collective is capped by max_num_batched_tokens * hidden_size * 2.
-    - decode: the running batch size, i.e. the concurrency. That is orders
-      of magnitude below the threshold (e.g. 128 * 2048 * 2 = 512 KiB), so
-      decode stays on the bf16 path by design.
-
-  Concurrency therefore matters only through batching: 16 concurrent
-  1k-token requests pack into one 16k-token step and do trigger the int8
-  path, while a single 1k-token request does not. The arrival rate (e.g.
-  --request-rate) does not enter the formula; it only decides how quickly
-  a step can be filled.
-
-  Measured on 4x Atlas 910B3, per collective, versus a plain bf16
-  all-reduce (positive = slower):
-
-      bf16 payload   MIN_NUMEL    delta
-      4 MiB          2,097,152    +359%   (old default, always a loss)
-      8 MiB          4,194,304    +217%
-      16 MiB         8,388,608     +67%
-      32 MiB         16,777,216     +8%   (still a loss)
-      64 MiB         33,554,432    -23%   (default)
-      128 MiB        67,108,864    -23%
-
-  How to set it:
-    - keep the default (33,554,432 == 64 MiB) unless your collectives are
-      larger;
-    - do not go below 16,777,216 (32 MiB): the measured break-even is
-      ~36 MiB, below which the halved transfer cannot pay for the fixed
-      ~0.75 ms per-call cost;
-    - if max_num_batched_tokens * hidden_size * 2 < 64 MiB, the payload can
-      never reach the threshold: leave VLLM_ASCEND_QUANTIZED_ALL_REDUCE
-      disabled instead of tuning this variable.
-
-  Token counts that trigger the default, by hidden_size:
-
-      hidden_size   tokens to trigger the int8 path
-      1024          32768
-      2048          16384   (e.g. Qwen3.6-35B-A3B: 16k-token prefill)
-      4096           8192
-      8192           4096
-
-  Notes:
-  - For a single-sequence prefill, num_tokens == sequence length; for
-    batched requests it is the summed token count of the batch, so
-    several short prompts together can still exceed the threshold.
-  - Decode steps usually have num_tokens == batch size (a few to a few
-    hundred, far below the threshold) and keep the plain bf16 path by
-    design: small messages are latency-bound and cannot amortize the
-    extra per-channel scale sync.
-  - Lower the value to quantize smaller messages, or raise it to leave
-    only the very large prefill collectives on the int8 path.
+Implementation notes
+--------------------
+  * Integer safety without a clamp: max_q = 127 // TP and
+    scale = per-channel global amax / max_q. Rounding a value that is
+    already <= max_q cannot exceed max_q, so the TP-way sum is bounded by
+    TP * max_q <= 127 and int8 cannot wrap (HCCL wraps instead of
+    saturating), for any input distribution.
+  * Do not bound the int8 payload with torch's clamp family: int8
+    clamp_/clamp/hardtanh are ~250x slower than minimum/maximum on Ascend
+    (see Ascend/pytorch#178), and one such call made this pipeline ~8x
+    slower than the plain bf16 all-reduce it is meant to replace.
+  * Measured on 4x 910B3, TP=4, 64 MiB payload: 1.73 ms (bf16) -> 1.21 ms
+    (-30%); end to end (16k in / 1k out, 32 concurrent): +3.6% output
+    throughput and -6% mean TTFT.
 """
 
 import os
@@ -188,13 +131,10 @@ class QuantizedAllReduce:
         # most ws * max_q <= 127 and int8 cannot wrap: no clamp is needed.
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
         self.max_q = 127 // self.world_size
-        # Messages smaller than this stay on the bf16 path: they are
-        # latency-bound, and the fixed per-call cost of the scheme (~0.75 ms
-        # for the local amax, the small fp32 MAX all-reduce and the
-        # quantize/dequantize pair) outweighs the halved transfer. Default
-        # 32 Mi elements == 64 MiB of bf16 payload, i.e. the measured
-        # break-even (~36 MiB) rounded up; maps to
-        # min_tokens = 33,554,432 / hidden_size (2048 -> 16384).
+        # Payload gate: only messages with >= MIN_NUMEL elements
+        # (MIN_NUMEL * 2 bytes of bf16 payload) take the int8 path. The
+        # default is 64 MiB, the measured break-even rounded up; see the
+        # module docstring for the sizing table and configuration guide.
         self.min_numel = _env_int(
             "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 32 * 1024 * 1024
         )
