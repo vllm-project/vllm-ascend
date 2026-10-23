@@ -36,8 +36,8 @@ class OscarRotationLoader:
             f"  V: {v_rotation_path}"
         )
 
-        k_data = torch.load(k_rotation_path, map_location="cpu")
-        v_data = torch.load(v_rotation_path, map_location="cpu")
+        k_data = torch.load(k_rotation_path, map_location="cpu", weights_only=True)
+        v_data = torch.load(v_rotation_path, map_location="cpu", weights_only=True)
 
         # Handle OSCAR .pt format: dict with 'layers' key
         self._R_k = self._extract_rotation(k_data, num_layers, head_dim).to(
@@ -74,6 +74,10 @@ class OscarRotationLoader:
             rotations = []
             layers = data["layers"]
             for i in range(num_layers):
+                if i not in layers and str(i) not in layers:
+                    raise ValueError(
+                        f"rotation checkpoint is missing layer {i} of "
+                        f"{num_layers}")
                 layer_data = layers[i] if i in layers else layers[str(i)]
                 if isinstance(layer_data, dict) and "rotation" in layer_data:
                     rotations.append(layer_data["rotation"])
@@ -105,6 +109,7 @@ class OscarRotationLoader:
             logger.warning(f"[OSCAR] Rotation files not found: k={k_path}, v={v_path}")
             return None
 
+        requested = (num_layers, head_dim, device, dtype)
         if cls._instance is None:
             cls._instance = cls(
                 k_rotation_path=k_path,
@@ -114,6 +119,15 @@ class OscarRotationLoader:
                 device=device,
                 dtype=dtype,
             )
+            cls._instance._from_env_signature = requested
+        elif getattr(cls._instance, "_from_env_signature", None) != requested:
+            # The loader is a singleton: silently ignoring conflicting
+            # parameters would hand one model a rotation stack sized for
+            # another. Fail closed instead.
+            raise RuntimeError(
+                "OscarRotationLoader.from_env already initialized with "
+                f"{cls._instance._from_env_signature}, refusing conflicting "
+                f"reconfiguration {requested}")
         return cls._instance
 
     def get_k_rotation(self, layer_idx: int) -> torch.Tensor:
@@ -175,7 +189,7 @@ def load_oscar_rotations(
     ``[start_layer, start_layer + layer_num)`` is missing or has mismatched
     head_dim.
     """
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=True)
     if "layers" not in state:
         raise ValueError(
             f"Oscar rotation checkpoint at {path} missing 'layers' key"
