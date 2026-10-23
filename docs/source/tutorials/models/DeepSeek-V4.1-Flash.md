@@ -1646,6 +1646,8 @@ Key pooling parameters:
 - `backend: "mooncake"` selects Mooncake as the KV Cache Pool backend.
 - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable layerwise pooling for this model because its CED hybrid-attention structure is not supported by the layerwise path.
 
+For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
+
 ### 5.5 Multi-Node Colocated Deployment
 
 === "A2 series"
