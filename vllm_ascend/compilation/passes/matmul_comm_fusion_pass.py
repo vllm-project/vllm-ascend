@@ -20,7 +20,7 @@ import torch
 import torch.fx as fx
 import torch_npu
 from torch._inductor.pattern_matcher import Match, PatternMatcherPass
-from vllm.compilation.passes.inductor_pass import enable_fake_mode
+from vllm.compilation.passes.inductor_pass import enable_fake_mode, get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.compilation import Range
@@ -62,10 +62,33 @@ class _MatmulCommPattern(BasePattern):
     topology -- not by dtype, which is constrained via ``get_extra_check``.
     """
 
+    def __init__(self, vllm_config: VllmConfig, min_tokens: int, **kwargs):
+        super().__init__(vllm_config, **kwargs)
+        self.min_tokens = min_tokens
+
     @enable_fake_mode
     def register(self, pattern_match_passes: PatternMatcherPass) -> None:
         # Fake mode keeps the example operands below from allocating real NPU memory.
         super().register(pattern_match_passes)
+
+    def _meets_min_tokens(self, node: fx.Node | None) -> bool:
+        """Reject matches whose token count is below ``min_tokens``."""
+        val = node.meta.get("val") if node is not None else None
+        if val is None or val.dim() < 1:
+            return False
+
+        num_tokens = val.shape[0]
+        if isinstance(num_tokens, int):
+            return num_tokens >= self.min_tokens
+
+        try:
+            compile_range = get_pass_context().compile_range
+        except AssertionError:
+            logger.debug_once(
+                "Matmul-comm fusion declined for a symbolic token dim: no compile range in scope."
+            )
+            return False
+        return compile_range.start >= self.min_tokens
 
 
 class _QuantMatmulCommPattern(_MatmulCommPattern):
@@ -73,8 +96,8 @@ class _QuantMatmulCommPattern(_MatmulCommPattern):
     A pattern that fuses a quantized matmul with a communication operation (reduce-scatter or all-reduce).
     """
 
-    def __init__(self, vllm_config: VllmConfig, group_name: str, hcomm_info: str, group_size: int):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, group_name: str, hcomm_info: str, group_size: int, min_tokens: int):
+        super().__init__(vllm_config, min_tokens=min_tokens)
         self.group_name = group_name
         self.hcomm_info = hcomm_info
         self.group_size = group_size
@@ -85,7 +108,7 @@ class _QuantMatmulCommPattern(_MatmulCommPattern):
         return [1, 1, self.group_size]
 
     def pattern_key(self) -> str:
-        return f"{self.__class__.__name__}_{self.group_size}_{self.tp_size}"
+        return f"{self.__class__.__name__}_{self.group_size}_{self.tp_size}_{self.min_tokens}"
 
     def _example_mxfp8_operands(self, m: int, k: int, n: int) -> list[torch.Tensor]:
         k_dim = k // self.group_size
@@ -120,7 +143,7 @@ class _QuantMatmulCommPattern(_MatmulCommPattern):
                 val = node.meta.get("val")
                 if val is None or val.dtype is not _SUPPORTED_OUTPUT_DTYPE:
                     return False
-            return True
+            return self._meets_min_tokens(matmuls[0])
 
         return supported
 
@@ -290,14 +313,14 @@ class AllGatherDualQuantMatmulPattern(_AllGatherQuantMatmulPattern):
 class MatmulAllReducePattern(_MatmulCommPattern):
     _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
-    def __init__(self, vllm_config: VllmConfig, group_name: str, hcomm_info: str):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, group_name: str, hcomm_info: str, min_tokens: int):
+        super().__init__(vllm_config, min_tokens=min_tokens)
         self.group_name = group_name
         self.hcomm_info = hcomm_info
         self.tp_size = get_tensor_model_parallel_world_size()
 
     def pattern_key(self) -> str:
-        return f"{self.__class__.__name__}_{self.tp_size}"
+        return f"{self.__class__.__name__}_{self.tp_size}_{self.min_tokens}"
 
     def get_extra_check(self):
         def supported(match: Match) -> bool:
@@ -312,7 +335,9 @@ class MatmulAllReducePattern(_MatmulCommPattern):
                 return False
             if x_val.dim() != 2 or weight_val.dim() != 2:
                 return False
-            return x_val.dtype in self._SUPPORTED_DTYPES and x_val.dtype == weight_val.dtype
+            if x_val.dtype not in self._SUPPORTED_DTYPES or x_val.dtype is not weight_val.dtype:
+                return False
+            return self._meets_min_tokens(x)
 
         return supported
 
@@ -406,6 +431,7 @@ class MatmulCommFusionPass(VllmInductorPass):
             "group_name": tp_group.unique_name,
             "hcomm_info": hcomm_info,
             "group_size": group_size,
+            "min_tokens": self.min_tokens,
         }
 
         registered: list[str] = []
@@ -425,6 +451,7 @@ class MatmulCommFusionPass(VllmInductorPass):
                 vllm_config,
                 group_name=tp_group.unique_name,
                 hcomm_info=hcomm_info,
+                min_tokens=self.min_tokens,
             ).register(self.pattern_match_passes)
             registered.append("matmul_all_reduce")
 
