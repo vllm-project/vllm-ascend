@@ -83,7 +83,7 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -153,7 +153,7 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'

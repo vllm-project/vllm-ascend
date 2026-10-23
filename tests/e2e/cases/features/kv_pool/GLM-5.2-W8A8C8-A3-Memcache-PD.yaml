@@ -111,7 +111,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--tensor-parallel-size"
   - "${TP_SIZE}"
   - --prefill-context-parallel-size
-  - "16"
+  - ${CP_SIZE}
   - "--enable-expert-parallel"
   - "--speculative-config"
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'

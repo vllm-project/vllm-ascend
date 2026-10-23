@@ -88,7 +88,7 @@ templates:
       - "--tensor-parallel-size"
       - "${TP_SIZE}"
       - --prefill-context-parallel-size
-      - "4"
+      - ${CP_SIZE}
       - "--enable-expert-parallel"
       - "--seed"
       - "1024"

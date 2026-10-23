@@ -92,7 +92,7 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
@@ -149,7 +149,7 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"

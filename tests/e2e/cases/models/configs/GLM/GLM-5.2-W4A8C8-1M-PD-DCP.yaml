@@ -104,7 +104,7 @@ templates:
       - --pipeline-parallel-size
       - "1"
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --decode-context-parallel-size
       - "8"
       - --cp-kv-cache-interleave-size
@@ -162,7 +162,7 @@ templates:
       - --pipeline-parallel-size
       - "1"
       - --prefill-context-parallel-size
-      - "8"
+      - ${CP_SIZE}
       - --decode-context-parallel-size
       - "8"
       - --cp-kv-cache-interleave-size
@@ -220,7 +220,7 @@ templates:
       - --pipeline-parallel-size
       - "1"
       - --prefill-context-parallel-size
-      - "1"
+      - ${CP_SIZE}
       - --decode-context-parallel-size
       - "8"
       - --cp-kv-cache-interleave-size
@@ -279,7 +279,7 @@ templates:
       - --pipeline-parallel-size
       - "1"
       - --prefill-context-parallel-size
-      - "1"
+      - ${CP_SIZE}
       - --decode-context-parallel-size
       - "8"
       - --cp-kv-cache-interleave-size
