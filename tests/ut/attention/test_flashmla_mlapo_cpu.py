@@ -390,6 +390,7 @@ def test_forward_routes_token_fused_decode_with_real_eligibility_helper(case, ex
     namespace = scope() | {
         "_EXTRA_CTX": SimpleNamespace(num_tokens=tokens),
         "maybe_save_kv_layer_to_connector": Mock(),
+        "wait_for_kv_layer_from_connector": Mock(),
     }
     bind(impl, namespace, "forward")
     output = torch.empty(tokens, 12 * 128)
