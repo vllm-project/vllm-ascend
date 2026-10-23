@@ -29,8 +29,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
+from vllm.platforms import current_platform
 
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -92,6 +94,7 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
             sliding_window=spec.sliding_window,
             cache_dtype_str=spec.cache_dtype_str,
             model_version=spec.model_version,
+            bounded_replay=spec.bounded_replay,
         )
 
     def get_attn_backend(self):
@@ -173,6 +176,13 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 for idx in range(self.num_dspark_layers)
             }
         )
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers.values():
+            impl = layer.self_attn.dsa_attn.dsa_attn.impl
+            if not isinstance(impl, AscendDSAImpl):
+                continue
+            impl._oproj_buffer_pool = self._oproj_buffer_pool
+            impl.reserve_oproj_buffers(torch.device(current_platform.device_type), vllm_config.model_config.dtype)
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
@@ -344,6 +354,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
+    draft_id_to_target_id = None
+
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, *, vllm_config, prefix="") -> None:

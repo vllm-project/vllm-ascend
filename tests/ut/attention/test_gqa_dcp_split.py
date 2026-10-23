@@ -438,6 +438,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        use_v2_model_runner=False,
     )
     builder.kv_cache_spec = object()
     builder.device = torch.device("cpu")
@@ -445,6 +446,8 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
     advanced = torch.tensor([12, 13, 14, 15], dtype=torch.int32)
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=16,
         num_actual_tokens=4,
         max_query_len=1,

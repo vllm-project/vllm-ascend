@@ -32,6 +32,7 @@ from tests.e2e.common.multi_node.external_dp.utils import (
     wait_http_unready,
 )
 from tests.e2e.common.multi_node.utils import get_net_interface
+from tools.profiling.capture import ProfileSpec, ServeInstance, configure_profiler_command
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,13 @@ def create_kv_pool_manager(
     raise TypeError(f"Unsupported KV pool config: {type(config.kv_pool).__name__}")
 
 
+def profile_instance_for_rank(rank: RankInfo) -> ServeInstance:
+    """Use the same target identity for server configuration and capture."""
+    role = {"prefiller": "prefill", "decoder": "decode"}.get(rank.role, "unified")
+    name = f"{role}-{rank.dp_rank}" if role != "unified" else f"dp-{rank.dp_rank}"
+    return ServeInstance.from_endpoint(name, f"http://{rank.host}:{rank.port}", node_index=rank.node_index)
+
+
 class ServerCommandBuilder:
     """Render rank templates into vLLM serve commands."""
 
@@ -341,6 +349,9 @@ class ServerCommandBuilder:
             for arg in template.server_cmd_template
         ]
         cmd = ["vllm", "serve", self.config.model, *rendered_args]
+        spec = ProfileSpec.from_env()
+        if spec.enabled:
+            cmd = configure_profiler_command(cmd, profile_instance_for_rank(rank), spec)
 
         env = {key: str(value) for key, value in rendered_env.items()}
         display_cmd = format_server_cmd(cmd, env)
@@ -374,6 +385,12 @@ class ServerCommandBuilder:
             "VISIBLE_DEVICES": rank.visible_devices,
             "NODE_INDEX": str(rank.node_index),
             "CONFIG_INDEX": str(rank.node_index),
+            "PP_LAYER_PARTITION": rank.pp_layer_partition,
+            "NNODES": str(rank.nnodes),
+            "NODE_RANK": str(rank.node_rank),
+            "MASTER_ADDR": rank.master_addr,
+            "MASTER_PORT": str(rank.master_port),
+            "DISTRIBUTED_EXECUTOR_BACKEND": rank.distributed_executor_backend,
         }
 
     def _render_envs(
@@ -581,8 +598,8 @@ def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> l
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        prefiller_ranks = [r for r in ranks if r.role == "prefiller" and not r.is_headless]
+        decoder_ranks = [r for r in ranks if r.role == "decoder"]
         if not prefiller_ranks or not decoder_ranks:
             raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
         cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
@@ -650,6 +667,11 @@ def wait_ranks_ready(
 ) -> None:
     ranks = list(ranks)
     rank_ready = {rank: False for rank in ranks}
+    http_ranks = [rank for rank in ranks if not rank.is_headless]
+    for rank in ranks:
+        if rank.is_headless:
+            rank_ready[rank] = True
+
     deadline = time.monotonic() + timeout
     last_log_time = 0.0
 
@@ -659,7 +681,7 @@ def wait_ranks_ready(
         all_ready = True
         unhealthy_after_ready = []
 
-        for rank in ranks:
+        for rank in http_ranks:
             is_ready = is_http_ready(rank_health_url(rank), timeout=1.0)
             if is_ready:
                 if not rank_ready[rank]:

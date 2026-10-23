@@ -42,7 +42,12 @@ from vllm_ascend.ops.rope_dsv4 import (
     get_full_cos_and_sin_dsa_for_layer,
 )
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import (
+    get_potential_max_tokens,
+    npu_stream_switch,
+    oproj_tp_enable,
+    vllm_version_is,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -86,6 +91,50 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
     if isinstance(config, dict):
         return config.get(name, default)
     return getattr(config, name, default)
+
+
+def build_replay_swa_visible_lens(
+    window_size: int,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    replay_start: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """How many ori KV entries each query token may actually see.
+
+    Upstream's SWA kernels clamp the window per request (``start_pos =
+    max(start_pos, replay_start)``), and the clamp is a correctness requirement
+    rather than a refinement: a replayed request recomputes the hit's last
+    window, so the sliding-window group holds no KV of its own below
+    ``replay_start``. Those blocks were retired and replaced by the null block,
+    whose KV upstream documents as all-zero -- the window would not read another
+    request's data, it would read phantom keys that score zero and take weight
+    in the replayed token's softmax.
+
+    This operator bounds a window with one scalar for the whole call
+    (``ori_win_left``), which cannot express a per-token floor, so the floor
+    travels through ``ori_topk_length`` in band mode: "the number of ori KV
+    entries this query token may see". Entries are counted back from the token's
+    own right edge, so a count of ``position - floor + 1`` is exactly "keep the
+    window ending here, but not past the floor".
+
+    Positions are derived the way the operator derives its own, from
+    ``seqused_ori_kv - actS1Size + s1``, so the two coordinate systems cannot
+    drift. Device-side only: no ``.item()``, no host round trip. The caller
+    guarantees ``num_tokens`` is the sum of the query lengths, as
+    :func:`build_dspark_swa_indices` does for the other user of this channel.
+    """
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    req_ids = torch.repeat_interleave(
+        torch.arange(query_lens.shape[0], device=query_start_loc.device, dtype=torch.long),
+        query_lens,
+        output_size=num_tokens,
+    )
+    token_offsets = torch.arange(num_tokens, device=query_start_loc.device) - query_start_loc[req_ids]
+    positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
+    lower = replay_start[: query_lens.shape[0]].to(positions.dtype)[req_ids]
+    start_positions = torch.maximum(positions - int(window_size) + 1, lower).clamp_min(0)
+    return (positions - start_positions + 1).to(torch.int32).unsqueeze(1)
 
 
 @dataclass
@@ -136,6 +185,10 @@ class AscendDSAV41Metadata(AttentionMetadata):
     ori_mask_mode: int = 4
     ori_win_left: int = 0
     ori_win_right: int = 0
+    replay_seq_lens: torch.Tensor | None = None
+    replay_block_table: torch.Tensor | None = None
+    replay_cache_blocks: torch.Tensor | None = None
+    replay_cache_offsets: torch.Tensor | None = None
     smla_metadata: torch.Tensor | None = None
     qli_metadata: torch.Tensor | None = None
     cmp_residual: torch.Tensor | None = None
@@ -654,9 +707,17 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if metadata.swa.replay_block_table is not None:
+            # Rebase only SWA: A3 CSA cannot mask its missing prefix with
+            # sparse ori indices. Compressed KV retains its causal coordinates.
+            swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
+            ori_block_table = metadata.swa.replay_block_table
+            seq_lens = metadata.swa.replay_seq_lens
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
-            ori_kv=attn.dsa_attn.swa_cache_layer.kv_cache[0],
+            ori_kv=swa_cache,
             cmp_kv=source_cache,
             ori_sparse_indices=metadata.swa.ori_sparse_indices,
             ori_topk_length=metadata.swa.ori_topk_length,
@@ -695,7 +756,22 @@ class AscendDSAV41Impl:
             output = torch.empty_like(hidden_states)
         forward_context = get_forward_context()
         if forward_context.attn_metadata is None:
+            projector = attn.dsa_attn.dsa_attn.impl
             output.zero_()
+            if oproj_tp_enable():
+                capacity = (
+                    projector._oproj_send_buf.shape[1]
+                    if hasattr(projector, "_oproj_send_buf")
+                    else get_potential_max_tokens()
+                )
+                profile_tokens = min(hidden_states.shape[0], capacity)
+                o_proj_input = hidden_states.new_zeros((profile_tokens, attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output[:profile_tokens])
+            elif getattr(projector, "enable_pcp_o_proj_weight_sharding", False):
+                # Match V4 profiling: exercise OTP communication buffers or
+                # PCP resident weight shards before graph capture.
+                o_proj_input = hidden_states.new_zeros((hidden_states.shape[0], attn.n_local_heads, attn.head_dim))
+                projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
         q, qr, prepared_indexer = self._prepare_inputs_and_caches(
@@ -1059,6 +1135,19 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cos, sin = rope
         text_config = self.vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
+        if cache_kind == "swa":
+            # The window the mask floors on (this one) and the window the replay
+            # padding writes out (the spec's, through ``prefix_replay_tokens``)
+            # have to be the same number: the padding decides which slots the
+            # replayed tokens skip, and the floor decides which positions they can
+            # see. A drift between the two sources -- the text config here, the
+            # cache spec there -- pads one window and bounds another, which is a
+            # silent precision loss rather than a failure, so it is checked.
+            spec_window = int(getattr(spec, "sliding_window", window_size))
+            assert spec_window == window_size, (
+                "SWA bounded replay pads the spec's sliding_window "
+                f"({spec_window}) while the mask floors on the text config's ({window_size})."
+            )
         n_local_heads = (
             int(_config_value(text_config, "num_attention_heads"))
             // self.vllm_config.parallel_config.tensor_parallel_size
@@ -1068,6 +1157,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
         ori_topk_length = None
+        replay_start = kwargs.get("replay_start")
+        replay_seq_lens = replay_block_table = replay_cache_blocks = replay_cache_offsets = None
+        max_ori_seq_len = int(getattr(common, "max_seq_len", 0))
+        if replay_start is not None:
+            replay_seq_lens = (seq_lens - replay_start).clamp_min(0)
+            max_ori_seq_len = kwargs["replay_max_seq_len"]
+            if cache_kind == "swa":
+                blocks_per_req = (max_ori_seq_len + storage_block_size - 1) // storage_block_size
+                capacity = blocks_per_req * storage_block_size
+                cache_positions = replay_start[:, None] + torch.arange(capacity, device=seq_lens.device)
+                cache_positions = torch.minimum(cache_positions, kwargs["replay_seq_lens"][:, None] - 1).clamp_min(0)
+                replay_cache_blocks = (
+                    common.block_table_tensor[:num_reqs]
+                    .gather(1, cache_positions.div(storage_block_size, rounding_mode="floor").long())
+                    .long()
+                )
+                replay_cache_offsets = cache_positions.remainder(storage_block_size).long()
+                replay_block_table = torch.arange(
+                    num_reqs * blocks_per_req, dtype=torch.int32, device=seq_lens.device
+                ).view(num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and ori_sparse_indices is None:
             ori_sparse_indices, ori_topk_length = build_dspark_swa_indices(
@@ -1114,6 +1223,36 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_sparse_indices, ori_topk_length = cached_window
         if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
             ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
+
+        # SWA bounded replay (vLLM #56227): a prefill admission that hit the
+        # prefix cache recomputes the hit's last window, and only the
+        # sliding-window group is rebuilt by it. That group's window is the one
+        # that can reach below ``replay_start`` into the region it does not hold,
+        # so the floor rides ``ori_topk_length``, the operator's per-token
+        # channel for "how many ori KV entries this query may see". The window's
+        # width stays a scalar (``ori_win_left``) and still bounds it from above,
+        # so this only ever narrows the mask, and only for the requests that are
+        # replaying.
+        #
+        # Only the sliding-window group carries it, because
+        # ``_forward_attention`` reads the mask and this length from
+        # ``metadata.swa`` whichever group's loop ranges it was handed, and those
+        # ranges come from the same band -- so they stay a superset of the window.
+        replay_start = getattr(common, "replay_start", None)
+        replay_visible_lens = None
+        if replay_start is not None and cache_kind == "swa":
+            replay_visible_lens = build_replay_swa_visible_lens(
+                window_size,
+                common.query_start_loc[: num_reqs + 1],
+                seq_lens,
+                replay_start,
+                num_actual_tokens,
+            )
+        # In band mode this tensor is the per-token visible length; the sparse
+        # path above is its other producer, and that one pairs it with an index
+        # list. The operator's mask mode is therefore the band in both cases.
+        if replay_visible_lens is not None:
+            ori_topk_length = replay_visible_lens
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
@@ -1178,12 +1317,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     1,
                     head_dim,
                     cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int(),
-                    seqused_ori_kv=seq_lens,
+                    seqused_ori_kv=replay_seq_lens if replay_seq_lens is not None else seq_lens,
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=num_reqs,
                     max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=int(getattr(common, "max_seq_len", 0)),
+                    max_seqlen_ori_kv=max_ori_seq_len,
                     max_seqlen_cmp_kv=(coordinates["max_cache_seq_len"] if has_compressed else 0),
                     ori_topk=ori_sparse_indices.shape[-1] if ori_sparse_indices is not None else 0,
                     ori_topk_length=ori_topk_length,
@@ -1411,6 +1550,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ori_mask_mode=ori_mask_mode,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
+            replay_seq_lens=replay_seq_lens,
+            replay_block_table=replay_block_table,
+            replay_cache_blocks=replay_cache_blocks,
+            replay_cache_offsets=replay_cache_offsets,
             smla_metadata=smla_metadata,
             qli_metadata=qli_metadata,
             cmp_residual=cmp_residual_buffer,
@@ -1430,6 +1573,12 @@ class DeepseekV41CacheBackend(AttentionBackend):
     @staticmethod
     def get_name():
         return "ASCEND_DSA_V41_CACHE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_impl_cls():

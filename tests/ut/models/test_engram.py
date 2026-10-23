@@ -20,7 +20,15 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
+from vllm_ascend.utils import vllm_version_is
+
+# Upstream #59327 (4c2d277643) moved the Engram module from `nvidia.engram` to
+# `common.engram` on main; the release lane (v0.31.0) still ships it under
+# `nvidia.engram`.
+if vllm_version_is("0.31.0"):
+    from vllm.models.deepseek_v41.nvidia import engram as upstream_engram  # type: ignore[import-not-found]
+else:
+    from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
@@ -114,7 +122,7 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(

@@ -164,11 +164,12 @@ class YuanrongBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", failed_keys_for_log)
             return None
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool:
         assert self.store is not None
         failed_keys_for_log = keys
         try:
             self.store.mset_d2h_from_multi_buffers(keys, addrs, sizes, self._ds_set_param)
+            return True
         except Exception as exc:
             logger.error(
                 "Failed to put %d keys out of %d. type=%s, error=%s. Check network and yuanrong service.",
@@ -178,3 +179,4 @@ class YuanrongBackend(Backend):
                 exc,
             )
             logger.debug("Failed to put key details. keys=%s", failed_keys_for_log)
+            return False

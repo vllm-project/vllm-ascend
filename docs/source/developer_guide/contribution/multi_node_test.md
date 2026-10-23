@@ -188,8 +188,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -200,9 +200,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
         workerTemplate:
           spec:
             containers:
@@ -235,8 +235,8 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                 volumeMounts:
                   - mountPath: /root/.cache
                     name: shared-volume
-                  - mountPath: /usr/local/Ascend/driver/tools
-                    name: driver-tools
+                  - mountPath: /usr/local/Ascend/driver
+                    name: ascend-driver
                   - mountPath: /dev/shm
                     name: dshm
             volumes:
@@ -247,9 +247,9 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
               - name: shared-volume
                 persistentVolumeClaim:
                   claimName: nv-action-vllm-benchmarks-v2
-              - name: driver-tools
+              - name: ascend-driver
                 hostPath:
-                  path: /usr/local/Ascend/driver/tools
+                  path: /usr/local/Ascend/driver
     ---
     apiVersion: v1
     kind: Service
@@ -378,13 +378,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260912-master"
+export AIS_BENCH_TAG="v3.1-20260330-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -461,13 +461,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260912-master"
+export AIS_BENCH_TAG="v3.1-20260330-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -552,4 +552,5 @@ tail -F /tmp/external_dp_logs/node-0/rank-0.log \
 # node 1: ranks
 tail -F /tmp/external_dp_logs/node-1/rank-0.log \
         /tmp/external_dp_logs/node-1/rank-1.log
+        
 ```

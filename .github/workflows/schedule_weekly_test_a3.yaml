@@ -48,26 +48,16 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
         default: false
         type: boolean
-      build_type:
-        description: 'Build type: daily or release.'
-        required: false
-        default: 'release'
-        type: choice
-        options:
-          - release
-          - daily
-      base_image_tag:
-        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
-        required: false
-        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
-        type: string
-      bisect_good_commit:
-        description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
@@ -188,15 +178,11 @@ jobs:
     with:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: 'a3'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   multi-node-tests:
     name: multi-node
@@ -225,6 +211,7 @@ jobs:
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -277,6 +264,7 @@ jobs:
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -336,6 +324,7 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}

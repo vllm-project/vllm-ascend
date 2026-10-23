@@ -56,11 +56,16 @@ def test_ring_lifetime_reuse_and_external_tokens():
         manager.cache_blocks(
             SimpleNamespace(request_id="a"),
             tokens,
-            **({} if vllm_version_is("0.29.0") else {"replay_boundaries": [tokens - 1]}),
+            **{"replay_boundaries": [tokens - 1]},
         )
         assert manager.req_to_blocks["a"] == a
     assert manager.take_new_block_ids() == []
-    assert manager.get_num_common_prefix_blocks("a") == manager.get_num_skipped_tokens(65536) == 0
+    if vllm_version_is("0.31.0"):
+        assert manager.get_num_common_prefix_blocks("a") == manager.get_num_skipped_tokens(65536) == 0
+    else:
+        # vLLM main moved the prefix-block query up to ``KVCacheManager`` and
+        # dropped it from single-type managers, so check the ring's own view.
+        assert manager.get_num_skipped_tokens(65536) == 0
     manager.free("a")  # Finish or preempt, then resume under a new allocation.
     manager.free("b")
     assert pool.get_num_free_blocks() == free
