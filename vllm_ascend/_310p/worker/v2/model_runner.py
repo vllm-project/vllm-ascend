@@ -414,6 +414,14 @@ class NPUModelRunner310V2(NPUModelRunner):
             attn_state=attn_state,
             input_ids_cpu=self.input_ids_cpu[:num_tokens_after_padding],
             logits_indices_np=logits_indices_np,
+            expanded_idx_mapping_np=(
+                self._expanded_idx_mapping.np[:total_num_logits] if draft_tokens_map else idx_mapping_np
+            ),
+            expanded_local_pos_np=(
+                self._expanded_local_pos.np[:total_num_logits]
+                if draft_tokens_map
+                else np.zeros(num_reqs, dtype=np.int32)
+            ),
         )
         input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch_kwargs["decode_graph_eligible"] = decode_graph_eligible

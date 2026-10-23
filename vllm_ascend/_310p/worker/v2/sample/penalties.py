@@ -26,17 +26,16 @@ def build_penalty_token_tensors(
     expanded_idx_mapping_np: np.ndarray,
     vocab_size: int,
     device: torch.device,
-    input_ids: torch.Tensor | None = None,
-    expanded_local_pos: torch.Tensor | None = None,
+    input_ids_cpu: torch.Tensor | None = None,
+    expanded_local_pos_np: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build padded prompt/output ids from CPU req_states (MRV1 pad=vocab_size)."""
+    """Build padded prompt/output ids from CPU req_states (no NPU→CPU sync)."""
     vocab_size = max(int(vocab_size), 1)
     num_rows = int(expanded_idx_mapping_np.shape[0])
     all_token_ids_cpu = req_states.all_token_ids.cpu
     prompt_lens = req_states.prompt_len.np
     total_lens = req_states.total_len.np
-    local_pos_np = None if expanded_local_pos is None else expanded_local_pos.detach().to("cpu").numpy()
-    input_ids_cpu = None if input_ids is None else input_ids.detach().to("cpu")
+    input_ids_np = None if input_ids_cpu is None else input_ids_cpu.numpy()
 
     prompt_lists: list[list[int]] = []
     output_lists: list[list[int]] = []
@@ -52,12 +51,11 @@ def build_penalty_token_tensors(
         total_len = int(total_lens[req_idx])
         prompt = all_token_ids_cpu[req_idx, :prompt_len].tolist()
         output = all_token_ids_cpu[req_idx, prompt_len:total_len].tolist()
-        if local_pos_np is not None and input_ids_cpu is not None:
-            pos = int(local_pos_np[row_idx])
+        if expanded_local_pos_np is not None and input_ids_np is not None:
+            pos = int(expanded_local_pos_np[row_idx])
             if pos > 0:
                 start_idx = row_idx - pos
-                for prev_pos in range(pos):
-                    output.append(int(input_ids_cpu[start_idx + prev_pos + 1].item()))
+                output.extend(input_ids_np[start_idx + 1 : start_idx + 1 + pos].tolist())
         prompt_lists.append(prompt)
         output_lists.append(output)
         max_prompt = max(max_prompt, len(prompt))

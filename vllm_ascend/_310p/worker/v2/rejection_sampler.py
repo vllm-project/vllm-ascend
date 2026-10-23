@@ -64,37 +64,23 @@ class RejectionSampler310V2(RejectionSampler):
         logits: torch.Tensor,
         sampled: torch.Tensor,
         num_sampled: torch.Tensor,
-        cu_num_logits_np: np.ndarray,
+        cu_num_logits: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ):
-        """Raw logprobs for emitted tokens (aligned with ``cu_num_logits`` rows).
-
-        Triton-free stand-in for upstream ``RejectionSampler._get_logprobs_tensors``.
-        Emitted token ``j`` of request ``r`` uses logits row ``cu[r] + j``.
-        """
+        """Device-side raw logprobs; avoids NPU→CPU sync (see #16489)."""
         max_num_logprobs = self.sampler._batch_max_num_logprobs(idx_mapping_np)
         if max_num_logprobs is None:
             return None
         num_reqs = int(num_sampled.shape[0])
-        num_sampled_np = num_sampled.detach().to("cpu").numpy()
-        sampled_cpu = sampled.detach().to("cpu")
-        row_indices: list[int] = []
-        token_ids: list[int] = []
-        for req_idx in range(num_reqs):
-            n = int(num_sampled_np[req_idx])
-            if n <= 0:
-                continue
-            start = int(cu_num_logits_np[req_idx])
-            for pos in range(n):
-                tok = int(sampled_cpu[req_idx, pos].item())
-                if tok < 0:
-                    break
-                row_indices.append(start + pos)
-                token_ids.append(tok)
-        if not token_ids:
+        max_steps = int(sampled.shape[1])
+        pos = torch.arange(max_steps, device=sampled.device, dtype=torch.int64).unsqueeze(0)
+        pos = pos.expand(num_reqs, -1)
+        valid = (pos < num_sampled.to(torch.int64).unsqueeze(1)) & (sampled != PLACEHOLDER_TOKEN_ID)
+        starts = cu_num_logits[:num_reqs].to(torch.int64).unsqueeze(1)
+        rows = (starts + pos)[valid]
+        tokens = sampled[valid]
+        if tokens.numel() == 0:
             return None
-        rows = torch.tensor(row_indices, device=logits.device, dtype=torch.int64)
-        tokens = torch.tensor(token_ids, device=logits.device, dtype=torch.int32)
         raw = torch.log_softmax(logits.index_select(0, rows), dim=-1, dtype=torch.float32)
         return gather_logprobs(raw, max_num_logprobs, tokens)
 
@@ -108,12 +94,14 @@ class RejectionSampler310V2(RejectionSampler):
         num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        # Post-process for verify; raw logits kept for logprobs. Prefer CPU mirrors (#16489).
         processed = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
-            input_ids=getattr(input_batch, "input_ids", None),
-            expanded_local_pos=getattr(input_batch, "expanded_local_pos", None),
+            input_ids_cpu=getattr(input_batch, "input_ids_cpu", None),
+            expanded_idx_mapping_np=getattr(input_batch, "expanded_idx_mapping_np", None),
+            expanded_local_pos_np=getattr(input_batch, "expanded_local_pos_np", None),
         )
 
         temperature_np = getattr(self.sampler, "_temperature_np", None)
@@ -153,7 +141,7 @@ class RejectionSampler310V2(RejectionSampler):
                 logits=logits,
                 sampled=sampled,
                 num_sampled=num_sampled,
-                cu_num_logits_np=cu_num_logits_np,
+                cu_num_logits=input_batch.cu_num_logits[: num_reqs + 1],
                 idx_mapping_np=idx_mapping_np,
             )
             return SamplerOutput(
@@ -180,8 +168,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
-        target_logits = logits.index_select(0, target_rows)
-        bonus_token_ids = logits.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
+        # Verify against post-processed logits (allowed / penalties / …).
+        target_logits = processed.index_select(0, target_rows)
+        bonus_token_ids = processed.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
 
         target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
         sampled = torch.full(
@@ -220,14 +209,7 @@ class RejectionSampler310V2(RejectionSampler):
             num_logits.to(torch.int32) - num_sampled,
         )
 
-        logprobs_tensors = self._build_logprobs_tensors(
-            logits=logits,
-            sampled=sampled,
-            num_sampled=num_sampled,
-            cu_num_logits_np=cu_num_logits_np[: num_reqs + 1],
-            idx_mapping_np=idx_mapping_np,
-        )
-
+        # Kick async H2D first (#16489), then gather logprobs on the main stream.
         main_stream = torch.npu.current_stream()
         with torch.npu.stream(self._copy_stream):
             self._copy_stream.wait_stream(main_stream)
@@ -236,6 +218,14 @@ class RejectionSampler310V2(RejectionSampler):
             self.num_rejected_cpu[:num_reqs].copy_(num_rejected, non_blocking=True)
             self._copy_event.record()
             self._copy_pending = True
+
+        logprobs_tensors = self._build_logprobs_tensors(
+            logits=logits,
+            sampled=sampled,
+            num_sampled=num_sampled,
+            cu_num_logits=cu_num_logits,
+            idx_mapping_np=idx_mapping_np,
+        )
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
