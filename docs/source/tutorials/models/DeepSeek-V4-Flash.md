@@ -1130,12 +1130,13 @@ two A3 servers (16 NPU dies per server), using a Memcache KV Cache Pool:
 
 | Role | DP | TP | PCP | NPU dies | HTTP ports |
 | --- | --- | --- | --- | --- | --- |
-| Prefill | 4 | 1 | 4 | 16 | 7100-7103 |
+| Prefill | 2 | 1 | 8 | 16 | 7100-7101 |
 | Decode | 16 | 1 | 1 | 16 | 7100-7115 |
 
 The deployment follows the same Memcache service setup as
 [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#531-prepare-the-memcache-services),
-with the model options and parallel layout below. `MooncakeHybridConnector`
+while all non-pooling options and the parallel layout follow the
+`A3 series with dspark` example in Section 5.2.1. `MooncakeHybridConnector`
 continues to transfer KV
 cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
 cache in Memcache. Both connectors are configured as children of
@@ -1267,56 +1268,53 @@ set -e
 
 unset https_proxy http_proxy
 
-NIC_NAME="<NETWORK_INTERFACE>"
-LOCAL_IP="<PREFILL_NODE_IP>"
-MODEL_PATH="<MODEL_PATH>/DeepSeek-V4-Flash-0731-w8a8"
-MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<PREFILL_NODE_IP>"
 
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=120
-export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_RT_VISIBLE_DEVICES="$1"
-export ACL_OP_INIT_MODE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1800
 export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
 # Parameters required by the Memcache KV Cache Pool.
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 export PYTHONHASHSEED=0
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
-vllm serve "$MODEL_PATH" \
+# Ensure the model path matches the directory recorded during download
+vllm serve "<MODEL_PATH>/DeepSeek-V4-Flash-0731-w8a8" \
     --host 0.0.0.0 \
-    --port "$2" \
-    --data-parallel-size "$3" \
-    --data-parallel-rank "$4" \
-    --data-parallel-address "$5" \
-    --data-parallel-rpc-port "$6" \
-    --tensor-parallel-size "$7" \
-    --prefill-context-parallel-size "$8" \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv4 \
     --max-model-len 1048576 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 16384 \
     --max-num-seqs 16 \
     --no-disable-hybrid-kv-cache-manager \
-    --model-loader-extra-config \
-    '{"enable_multithread_load":true,"num_threads":128}' \
-    --speculative-config \
-    '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+    --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+    --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
     --trust-remote-code \
     --block-size 32 \
     --attention_config.indexer_kv_dtype int8 \
@@ -1324,12 +1322,11 @@ vllm serve "$MODEL_PATH" \
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \
     --reasoning-parser deepseek_v4 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.94 \
     --quantization ascend \
     --enforce-eager \
     --enable-prefix-caching \
-    --additional-config \
-    '{"enable_cpu_binding":true,"enable_fused_mc2":1}' \
+    --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
     --kv-transfer-config '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
@@ -1343,9 +1340,9 @@ vllm serve "$MODEL_PATH" \
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
                     "prefill": {
-                        "dp_size": 4,
+                        "dp_size": 2,
                         "tp_size": 1,
-                        "pcp_size": 4
+                        "pcp_size": 8
                     },
                     "decode": {
                         "dp_size": 16,
@@ -1379,65 +1376,63 @@ set -e
 
 unset https_proxy http_proxy
 
-NIC_NAME="<NETWORK_INTERFACE>"
-LOCAL_IP="<DECODE_NODE_IP>"
-MODEL_PATH="<MODEL_PATH>/DeepSeek-V4-Flash-0731-w8a8"
-MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
-MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<DECODE_NODE_IP>"
 
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export TASK_QUEUE_ENABLE=1
 export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_CONNECT_TIMEOUT=120
-export HCCL_BUFFSIZE=1800
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_RT_VISIBLE_DEVICES="$1"
-export ACL_OP_INIT_MODE=1
+export HCCL_BUFFSIZE=2400
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export VLLM_USE_V2_MODEL_RUNNER=1
 
 # Parameters required by the Memcache KV Cache Pool.
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 export PYTHONHASHSEED=0
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 
-vllm serve "$MODEL_PATH" \
+# Ensure the model path matches the directory recorded during download
+vllm serve "<MODEL_PATH>/DeepSeek-V4-Flash-0731-w8a8" \
     --host 0.0.0.0 \
-    --port "$2" \
-    --data-parallel-size "$3" \
-    --data-parallel-rank "$4" \
-    --data-parallel-address "$5" \
-    --data-parallel-rpc-port "$6" \
-    --tensor-parallel-size "$7" \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv4 \
     --max-model-len 1048576 \
-    --max-num-batched-tokens 360 \
+    --max-num-batched-tokens 480 \
     --max-num-seqs 60 \
     --async-scheduling \
     --block-size 32 \
     --attention_config.indexer_kv_dtype int8 \
-    --no-enable-prefix-caching \
     --no-disable-hybrid-kv-cache-manager \
-    --model-loader-extra-config \
-    '{"enable_multithread_load":true,"num_threads":128}' \
+    --no-enable-prefix-caching \
     --trust-remote-code \
     --tokenizer-mode deepseek_v4 \
+    --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \
     --reasoning-parser deepseek_v4 \
     --gpu-memory-utilization 0.95 \
     --quantization ascend \
-    --speculative-config \
-    '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
-    --compilation-config \
-    '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --kv-transfer-config '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_consumer",
@@ -1451,9 +1446,9 @@ vllm serve "$MODEL_PATH" \
                 "kv_port": "30100",
                 "kv_connector_extra_config": {
                     "prefill": {
-                        "dp_size": 4,
+                        "dp_size": 2,
                         "tp_size": 1,
-                        "pcp_size": 4
+                        "pcp_size": 8
                     },
                     "decode": {
                         "dp_size": 16,
@@ -1472,7 +1467,16 @@ vllm serve "$MODEL_PATH" \
             }
         ]
     }
-}'
+}' \
+    --additional-config '{
+        "ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+        },
+        "enable_cpu_binding":true,
+        "multistream_overlap_shared_expert":true,
+        "recompute_scheduler_enable":true
+    }'
 ```
 
 #### 5.3.4 Startup and Verification
@@ -1494,30 +1498,30 @@ start Prefill on the Prefill node:
 
 ```shell
 python launch_online_dp.py \
-    --dp-size 4 --tp-size 1 --pcp-size 4 --dp-size-local 4 --dp-rank-start 0 \
+    --dp-size 2 --tp-size 1 --pcp-size 8 --dp-size-local 2 --dp-rank-start 0 \
     --dp-address "<PREFILL_NODE_IP>" --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
-Each Prefill DP rank uses four consecutive NPU dies: 0-3, 4-7, 8-11, and 12-15.
+Each Prefill DP rank uses eight consecutive NPU dies: 0-7 and 8-15.
 Each Decode DP rank uses one die. `--dp-address` is the master IP of its own
 role; Prefill and Decode use separate DP groups.
 
 After every Prefill engine is ready, start the proxy from
 [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)
-with all four Prefill endpoints and all sixteen Decode endpoints:
+with both Prefill endpoints and all sixteen Decode endpoints:
 
 ```shell
 PREFILL_IP="<PREFILL_NODE_IP>"
 DECODE_IP="<DECODE_NODE_IP>"
 prefiller_hosts=()
 decoder_hosts=()
-for ((i=0; i<4; i++)); do prefiller_hosts+=("$PREFILL_IP"); done
+for ((i=0; i<2; i++)); do prefiller_hosts+=("$PREFILL_IP"); done
 for ((i=0; i<16; i++)); do decoder_hosts+=("$DECODE_IP"); done
 
 python load_balance_proxy_server_example.py \
     --host "$PREFILL_IP" --port 1999 \
     --prefiller-hosts "${prefiller_hosts[@]}" \
-    --prefiller-ports {7100..7103} \
+    --prefiller-ports {7100..7101} \
     --decoder-hosts "${decoder_hosts[@]}" \
     --decoder-ports {7100..7115}
 ```
