@@ -2423,7 +2423,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.layer_name is not None
 
         if self.layerwise_kv_cache_hook is not None:
-            if num_actual_tokens > num_decode_tokens and getattr(self.layerwise_kv_cache_hook, "layerwise", False):
+            if getattr(self.layerwise_kv_cache_hook, "layerwise", False):
                 wait_for_kv_layer_from_connector(self.layer_name)
             self.layerwise_kv_cache_hook.wait_for_layer(self.layer_name)
 
