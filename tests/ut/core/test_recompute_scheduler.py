@@ -457,7 +457,7 @@ def test_normalize_encoder_schedule_result_preserves_contract(result):
 
 @pytest.mark.parametrize("with_connector", [False, True])
 def test_release_encoder_allocation_preserves_notifications(monkeypatch, with_connector):
-    monkeypatch.delattr(Scheduler, "_allocate_encoder_inputs", raising=False)
+    monkeypatch.setattr(Scheduler, "_allocate_encoder_inputs", None, raising=False)
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     scheduler.encoder_cache_manager = MagicMock()
     scheduler.ec_connector = MagicMock() if with_connector else None
@@ -481,7 +481,7 @@ def test_release_encoder_contract_in_both_schedule_paths(monkeypatch, running):
         return result[:4]
 
     monkeypatch.setattr(Scheduler, "_try_schedule_encoder_inputs", release_schedule)
-    monkeypatch.delattr(Scheduler, "_allocate_encoder_inputs", raising=False)
+    monkeypatch.setattr(Scheduler, "_allocate_encoder_inputs", None, raising=False)
     scheduler = _make_mm_recompute_scheduler()
     scheduler.max_num_scheduled_tokens = 2 if running else 8
     request = make_mm_request("mm", [("first", [True, True]), ("second", [True, True])])
