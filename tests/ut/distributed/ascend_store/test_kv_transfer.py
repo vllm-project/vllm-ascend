@@ -91,12 +91,10 @@ class ByteFakeStore(FakeStore):
 class FakeAllGatherContext:
     def __init__(self, world_size):
         self.world_size = world_size
-        self.lock = threading.Lock()
-        self.object_calls = 0
-        self.object_barriers = []
-        self.object_values = []
         self.tensor_barrier = threading.Barrier(world_size, timeout=10)
         self.payloads = [None] * world_size
+        self.reduce_barrier = threading.Barrier(world_size, timeout=10)
+        self.reduce_payloads = [None] * world_size
 
 
 class FakeAllGatherGroup:
@@ -104,24 +102,16 @@ class FakeAllGatherGroup:
         self.world_size = len(context.payloads)
         self.rank_in_group = rank
         self._context = context
-        self._object_call = 0
-
-    def all_gather_object(self, output, value):
-        context = self._context
-        call = self._object_call
-        self._object_call += 1
-        with context.lock:
-            while len(context.object_barriers) <= call:
-                context.object_barriers.append(threading.Barrier(context.world_size, timeout=10))
-                context.object_values.append([None] * context.world_size)
-        context.object_values[call][self.rank_in_group] = value
-        context.object_barriers[call].wait()
-        output[:] = context.object_values[call]
 
     def all_gather(self, value, dim=0):
         self._context.payloads[self.rank_in_group] = value.clone()
         self._context.tensor_barrier.wait()
         return torch.cat(self._context.payloads, dim=dim)
+
+    def all_reduce(self, value, op=None):
+        self._context.reduce_payloads[self.rank_in_group] = value.clone()
+        self._context.reduce_barrier.wait()
+        return torch.stack(self._context.reduce_payloads).sum(dim=0)
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
