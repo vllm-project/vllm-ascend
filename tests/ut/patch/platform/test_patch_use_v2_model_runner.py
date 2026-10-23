@@ -82,5 +82,5 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
     # Spec+PP is natively supported; unrelated upstream guards still apply.
     # vLLM main (#60517) dropped the PassConfig.enable_sp guard, so the V2
     # runner no longer rejects sequence parallelism there.
-    expected_sp = []
+    expected_sp: list[str] = []
     assert unsupported == expected_sp
