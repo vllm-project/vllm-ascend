@@ -24,6 +24,10 @@ tasks:
     value: 0.89
 
 num_fewshot: 0
-apply_chat_template: true
+# Completion mode, not chat: with apply_chat_template=true the reasoning
+# preamble of this model is truncated by humaneval's until sequences
+# ("\ndef", "\nclass", ...) before any code is written, yielding 0.0 pass@1.
+# Completion mode gives real code generations (verified: 3/3 pass@1 in probe).
+apply_chat_template: false
 fewshot_as_multiturn: true
 batch_size: "auto"
