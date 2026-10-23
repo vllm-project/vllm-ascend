@@ -16,11 +16,11 @@ serve:
 tasks:
 - name: "humaneval"
   metrics:
-  - name: "pass@1"
+  - name: "pass@1,create_test"
     value: 0.84
 - name: "mbpp"
   metrics:
-  - name: "pass_at_1"
+  - name: "pass_at_1,none"
     value: 0.89
 
 num_fewshot: 0
