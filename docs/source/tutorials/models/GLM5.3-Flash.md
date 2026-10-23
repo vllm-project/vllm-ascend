@@ -30,7 +30,7 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
 | `GLM-5.3-Flash-w8a8-mxfp8` | 950DT products (96GB × 8 per node) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache; no separate C8 checkpoint is required. |
-| `GLM-5.3-Flash-w8a8` | A3 series (128GB × 8 per node) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
+| `GLM-5.3-Flash-w8a8` | A3 series (16 logical devices × 64GB per node) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
 | `GLM-5.3-Flash-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | / |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
