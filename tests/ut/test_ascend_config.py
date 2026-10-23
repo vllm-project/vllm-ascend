@@ -1198,6 +1198,8 @@ class TestSparseKVOffloadConfig(TestBase):
                 "dram_size_per_dp_GB": "64",
                 "keep_device_kv_cache": "false",
                 "use_fused_overlap": "true",
+                "host_backend": "mooncake",
+                "lru_max_threads": 4,
             },
         )
 
@@ -1206,6 +1208,8 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertEqual(config.dram_size_per_dp_GB, 64)
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
+        self.assertEqual(config.host_backend, "mooncake")
+        self.assertEqual(config.lru_max_threads, 4)
 
     def test_v2_decode_offload_allows_p_side_pp(self):
         vllm_config = SimpleNamespace(
@@ -1300,6 +1304,113 @@ class TestSparseKVOffloadConfig(TestBase):
     def test_non_dict_config_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "sparse_kv_offload_config must be a dict"):
             SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), [])
+
+    def test_lru_max_threads_defaults_to_eight(self):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {})
+
+        self.assertEqual(config.lru_max_threads, 8)
+
+    def test_lru_max_threads_accepts_positive_integers(self):
+        for host_backend in ("memfabric", "mooncake"):
+            for value in (1, 4, 16):
+                with self.subTest(host_backend=host_backend, value=value):
+                    config = SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(),
+                        {"host_backend": host_backend, "lru_max_threads": value},
+                    )
+
+                    self.assertEqual(config.lru_max_threads, value)
+
+    def test_lru_max_threads_rejects_invalid_values(self):
+        for enabled in (False, True):
+            for value in (0, -1, True, False, "8", 8.0, 8.5, None):
+                with (
+                    self.subTest(enabled=enabled, value=value, value_type=type(value).__name__),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        r"sparse_kv_offload_config\.lru_max_threads must be a positive integer",
+                    ),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(),
+                        {"enabled": enabled, "lru_max_threads": value},
+                    )
+
+    def test_use_fused_overlap_validation_precedes_lru_max_threads(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                with self.assertRaises(ValueError) as caught:
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(),
+                        {"enabled": enabled, "use_fused_overlap": "invalid", "lru_max_threads": 0},
+                    )
+                self.assertEqual(caught.exception.errors()[0]["loc"], ("use_fused_overlap",))
+
+    def test_sparse_kv_host_backend_defaults_to_memfabric(self):
+        config = SparseKVOffloadConfig.from_additional_config(
+            SimpleNamespace(),
+            {"enabled": "false"},
+        )
+        self.assertEqual(config.host_backend, "memfabric")
+
+    def test_invalid_sparse_kv_host_backend_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {"enabled": "false", "host_backend": "unknown"},
+            )
+
+    def test_mooncake_host_backend_requires_fused_overlap(self):
+        with self.assertRaisesRegex(ValueError, "requires use_fused_overlap"):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {"enabled": "true", "host_backend": "mooncake"},
+            )
+
+    def test_mooncake_host_backend_rejects_colocate_staging(self):
+        with self.assertRaisesRegex(ValueError, "keep_device_kv_cache"):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {
+                    "enabled": "true",
+                    "host_backend": "mooncake",
+                    "use_fused_overlap": "true",
+                    "keep_device_kv_cache": "true",
+                },
+            )
+
+    def test_mooncake_host_backend_valid_config_passes_validation(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_consumer"),
+            use_v2_model_runner=False,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {
+                "enabled": "true",
+                "host_backend": "mooncake",
+                "use_fused_overlap": "true",
+                "keep_device_kv_cache": "false",
+            },
+        )
+
+        self.assertEqual(config.host_backend, "mooncake")
+        self.assertEqual(config.lru_max_threads, 8)
+
+    def test_mooncake_validation_skipped_when_disabled(self):
+        config = SparseKVOffloadConfig.from_additional_config(
+            SimpleNamespace(),
+            {"enabled": "false", "host_backend": "mooncake"},
+        )
+
+        self.assertEqual(config.host_backend, "mooncake")
 
 
 class TestSchedulerConfig(TestBase):
@@ -1501,7 +1612,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             ),
             scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=max_num_seqs),
             speculative_config=speculative_config,
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_consumer"),
             model_config=SimpleNamespace(is_moe=True),
         )
 
@@ -1529,7 +1640,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             with self.assertRaisesRegex(ValueError, "TP=1, PCP=1 and PP=1"):
                 FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
-        vc.kv_transfer_config.is_kv_consumer = False
+        vc.kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_producer")
         with self.assertRaisesRegex(ValueError, "PD decode node"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()

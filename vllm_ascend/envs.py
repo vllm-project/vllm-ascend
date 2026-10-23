@@ -92,6 +92,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Skip process-wide NUMA page migration for backend-owned host memory.
+    # CPU thread binding remains enabled.
+    "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
 }
 
 # end-env-vars-definition
