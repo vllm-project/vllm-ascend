@@ -175,7 +175,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 32 \
         --data-parallel-size 1 \
-        --tensor-parallel-size 8 \
+        --tensor-parallel-size 1 \
+        --prefill-context-parallel-size 8 \
         --enable-expert-parallel \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
@@ -195,7 +196,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
             "enable_static_kernel":false
             },
         "enable_cpu_binding": true,
-        "enable_dsa_cp": true,
         "multistream_overlap_shared_expert": true}'
     ```
 
@@ -300,7 +300,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
-        --tensor-parallel-size 4 \
+        --tensor-parallel-size 1 \
+        --prefill-context-parallel-size 4 \
         --enable-expert-parallel \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
@@ -319,7 +320,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
                 "enable_static_kernel": false
             },
             "enable_cpu_binding": true,
-            "enable_dsa_cp": true,
             "multistream_overlap_shared_expert": true
         }'
     ```
@@ -337,7 +337,7 @@ Key Parameter Descriptions:
 - `--kv-cache-dtype turboquant_4bit_nc` enables 4-bit TurboQuant quantization for DeepSeek-V4's Compress-4 attention KV cache to reduce memory usage. It is suited to ultra-long-context workloads such as AI coding, especially when KV cache memory limits concurrency. It is independent of weight and indexer cache quantization and requires compatible TurboQuant and fused attention operators. P/D disaggregated deployments are not currently supported.
 - `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_dsa_cp` enables DSA context parallelism, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
+- `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
@@ -542,6 +542,7 @@ Before you start, please:
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
+            --prefill-context-parallel-size $8 \
             --enable-expert-parallel \
             --seed 1024 \
             --served-model-name dsv4 \
@@ -561,7 +562,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -569,7 +570,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
-                                "tp_size": 4
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -637,7 +638,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 4,
-                                "tp_size": 4
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -719,8 +720,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
-                                "tp_size": 1,
-                                "pcp_size": 8
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -752,7 +752,6 @@ Before you start, please:
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_USE_V2_MODEL_RUNNER=1
-        
         # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
@@ -790,8 +789,7 @@ Before you start, please:
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
-                                "tp_size": 1,
-                                "pcp_size": 8
+                                "tp_size": 1
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -814,11 +812,11 @@ Before you start, please:
 
     1. Prefill node
 
-        For MTP (`A3 series`), keep DP4 and TP4:
+        For MTP (`A3 series`), use DP4, TP1 and PCP4:
 
         ```shell
         # change ip to your own
-        python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        python launch_online_dp.py --dp-size 4 --tp-size 1 --pcp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
         For DSpark (`A3 series with dspark`), use PCP8, DP2, and TP1:
@@ -1103,7 +1101,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--kv-cache-dtype turboquant_4bit_nc` is not currently supported in P/D disaggregated deployments.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
-- `VLLM_USE_V2_MODEL_RUNNER=1`: Enables Model Runner V2. Set it with `export VLLM_USE_V2_MODEL_RUNNER=1` on both DSpark nodes in the A3 example. PCP requires Model Runner V2; DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
+- `VLLM_USE_V2_MODEL_RUNNER=1`: Enables Model Runner V2. Set it with `export VLLM_USE_V2_MODEL_RUNNER=1` on both DSpark nodes in the A3 example.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.

@@ -32,6 +32,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 )
 
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+from vllm_ascend.utils import vllm_version_is
 
 
 @triton.jit
@@ -313,6 +314,15 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
+    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
+    # kernels to `num_logits` and moved bonus-token detection into
+    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
+    # count. Passing `num_speculative_steps` there makes the kernels treat every
+    # logit after the first one as a bonus token and return early, leaving the
+    # `new_empty` block-statistics buffers uninitialized. v0.31.0 still expects
+    # `num_speculative_steps`.
+    stats_num_logits = num_speculative_steps if vllm_version_is("0.31.0") else num_logits
+
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
         # kernel signatures receive valid pointers/strides. The kernels
@@ -354,7 +364,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        stats_num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         # TODO: Remove this workaround after the Triton Ascend AutoBlockify
@@ -413,7 +423,7 @@ def rejection_sample(
                     expanded_local_pos,
                     temperature,
                     vocab_size,
-                    num_speculative_steps,
+                    stats_num_logits,
                     vocab_num_blocks,
                     BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                     PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,

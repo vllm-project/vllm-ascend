@@ -508,7 +508,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     Use two nodes with eight devices each: Prefill DP1/TP8 and Decode DP8/TP1.
     Both nodes use the same GLM-5.3-Flash W8A8-MXFP8 checkpoint and software build.
     Set the local IP, network interface and checkpoint path in each script.
-    Set `PROFILE_DIR` to a writable profiling directory on each node.
 
     ##### Prepare the Scripts
 
@@ -525,8 +524,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
             local_ip="<P0_IP>"
             nic_name="<NETWORK_INTERFACE>"
             MODEL_PATH="<MODEL_PATH>/GLM-5.3-Flash-W8A8-MXFP8-0918"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -561,7 +558,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --enable-prefix-caching \
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.9 \
-              --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": true}" \
               --compilation-config '{"cudagraph_capture_sizes":[1, 2, 4, 8, 16, 32, 64, 128, 256, 512]}' \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
@@ -591,8 +587,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
             local_ip="<D0_IP>"
             nic_name="<NETWORK_INTERFACE>"
             MODEL_PATH="<MODEL_PATH>/GLM-5.3-Flash-W8A8-MXFP8-0918"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -627,7 +621,6 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --enable-prefix-caching \
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.95 \
-              --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": true}" \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{

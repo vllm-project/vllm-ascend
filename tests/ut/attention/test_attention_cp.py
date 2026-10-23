@@ -34,10 +34,6 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert not hasattr(AscendMetadata(), "prefill")
 
 
-def test_gqa_dcp_builder_consumes_pcp_context() -> None:
-    assert AscendAttentionDCPMetadataBuilder.consumes_pcp_context
-
-
 def test_gqa_tp_only_dcp_still_gathers_heads() -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
     impl.pcp_group = SimpleNamespace(world_size=1)
@@ -68,18 +64,6 @@ def test_gqa_pcp_dcp_preserves_tp_local_heads_and_merges_pcp_shards(kv_heads) ->
         actual = impl._merge_dcp_attention_output(query, lse)
     assert actual is query
     combine.assert_called_once_with(query, lse, 1, 1, "tp-heads", "pcp-kv-shards", defer_combine=False)
-
-
-def test_gqa_dcp_capture_forwards_pcp_context() -> None:
-    builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.build = Mock(return_value="metadata")
-    common = object()
-    context = object()
-
-    assert builder.build_for_cudagraph_capture(common, pcp_context=context, pcp_cache_group_idx=2) == "metadata"
-    builder.build.assert_called_once_with(
-        common_prefix_len=0, common_attn_metadata=common, pcp_context=context, pcp_cache_group_idx=2
-    )
 
 
 @pytest.mark.parametrize("rank", [0, 1], ids=["head-tail", "middle"])

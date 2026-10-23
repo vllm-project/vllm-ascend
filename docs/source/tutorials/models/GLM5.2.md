@@ -1074,7 +1074,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
             ```
 
         2. Prefill node 1
@@ -1179,7 +1179,7 @@ layerwise setting and topology.
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}' \
               --headless
             ```
 
@@ -1411,8 +1411,6 @@ layerwise setting and topology.
     GLM-5.3 W8A8C8 A3 checkpoint; these settings are not a GLM-5.2 validation.
     Local weight/Python paths are placeholders, and API port 8000 and model
     name `glm` are retained for consistency with the launcher and proxy.
-    The source's optional profiler output path is omitted from normal serving.
-    To profile, add `--profiler-config` with a writable directory on each node.
 
     The HCCS-only `ASCEND_GLOBAL_RESOURCE_CONFIG` and communication resource
     version `1.2` are retained from the source. Confirm that the target CANN
@@ -4172,8 +4170,7 @@ Select the tab that matches your deployment hardware.
     2. Set `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and `PYTHON_LIB_DIR` on each
        node. `PYTHON_LIB_DIR` is the library directory of the Python installation
        used by vLLM. Install `fastokens` on both Prefill nodes.
-       Set `P0_IP` to P0's address on both Prefill nodes. `PROFILE_DIR` selects
-       a writable profiler directory and defaults to `./profiling`.
+       Set `P0_IP` to P0's address on both Prefill nodes.
     3. Reserve PP master port 7060, Decode DP RPC port 16600, P0 API port 8077,
        Decode API ports 8000-8003, and Mooncake ports derived from the base
        ports 30000 and 30100. Run the proxy on a separate host at port 8000.
@@ -4243,8 +4240,6 @@ Select the tab that matches your deployment hardware.
             MODEL_PATH="<YOUR_MODEL_PATH>"
             PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
             P0_IP="<PREFILL_NODE0_IP>"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -4312,7 +4307,6 @@ Select the tab that matches your deployment hardware.
                 --node-rank 0 \
                 --enable-chunked-prefill \
                 --async-scheduling \
-                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
@@ -4343,8 +4337,6 @@ Select the tab that matches your deployment hardware.
             MODEL_PATH="<YOUR_MODEL_PATH>"
             PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
             P0_IP="<PREFILL_NODE0_IP>"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -4413,7 +4405,6 @@ Select the tab that matches your deployment hardware.
                 --headless \
                 --enable-chunked-prefill \
                 --async-scheduling \
-                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
@@ -4443,8 +4434,6 @@ Select the tab that matches your deployment hardware.
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
             PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -4510,7 +4499,6 @@ Select the tab that matches your deployment hardware.
                 --attention_config.indexer_kv_dtype int8 \
                 --enable-chunked-prefill \
                 --no-enable-prefix-caching \
-                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
@@ -4540,8 +4528,6 @@ Select the tab that matches your deployment hardware.
             NIC_NAME="<NETWORK_INTERFACE>"
             MODEL_PATH="<YOUR_MODEL_PATH>"
             PYTHON_LIB_DIR="<PYTHON_LIBRARY_DIRECTORY>"
-            PROFILE_DIR="${PROFILE_DIR:-$PWD/profiling}"
-            mkdir -p "$PROFILE_DIR"
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
@@ -4607,7 +4593,6 @@ Select the tab that matches your deployment hardware.
                 --attention_config.indexer_kv_dtype int8 \
                 --enable-chunked-prefill \
                 --no-enable-prefix-caching \
-                --profiler-config "{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$PROFILE_DIR\", \"torch_profiler_with_stack\": false}" \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",

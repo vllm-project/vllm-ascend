@@ -7,8 +7,8 @@ from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_offsets_310,
 )
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 fla_index.prepare_chunk_indices = prepare_chunk_indices_310
 fla_index.prepare_chunk_offsets = prepare_chunk_offsets_310
