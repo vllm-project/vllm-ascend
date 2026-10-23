@@ -905,10 +905,10 @@ def lease_control_server(request):
     host = getattr(request, "param", "127.0.0.1")
 
     def serve():
-        with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:
-            socket.setsockopt(zmq.RCVTIMEO, 50)
+        with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:  # type: ignore[attr-defined]
+            socket.setsockopt(zmq.RCVTIMEO, 50)  # type: ignore[attr-defined]
             if host == "::1":
-                socket.setsockopt(zmq.IPV6, 1)
+                socket.setsockopt(zmq.IPV6, 1)  # type: ignore[attr-defined]
             ports.append(socket.bind_to_random_port(f"tcp://[{host}]" if host == "::1" else f"tcp://{host}"))
             port_ready.set()
             producer._run_busy_loop(socket)
@@ -927,7 +927,7 @@ def lease_control_server(request):
 @pytest.fixture
 def lease_client_sockets(monkeypatch):
     """Track real per-exchange sockets while sharing one live context."""
-    context = zmq.Context.instance()
+    context = zmq.Context.instance()  # type: ignore[attr-defined]
     sockets = []
     create_socket = context.socket
 
@@ -940,7 +940,7 @@ def lease_client_sockets(monkeypatch):
     yield sockets
     assert sockets and all(socket.closed for socket in sockets)
     assert not context.closed
-    assert zmq.Context.instance() is context
+    assert zmq.Context.instance() is context  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("released", [False, True])
@@ -983,10 +983,10 @@ def test_late_completion_protocol_preserves_new_attempt(lease_control_server):
 def test_unresponsive_lease_peer_fails_instead_of_waiting_forever():
     worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
     worker.encoder = msgspec.msgpack.Encoder()
-    with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:  # type: ignore[attr-defined]
         port = socket.bind_to_random_port("tcp://127.0.0.1")
         start = time.monotonic()
-        with pytest.raises(zmq.Again):
+        with pytest.raises(zmq.Again):  # type: ignore[attr-defined]
             worker._verify_remote_leases(
                 "127.0.0.1", port, {"d": SimpleNamespace(remote_request_id="p", remote_lease_nonce="lease")}
             )
@@ -1053,7 +1053,7 @@ def test_read_inflight_expiry_reaches_worker_failure(
     scheduler._recving_thread.add_request.side_effect = (
         lambda _host, _port, req_id, hold: producer._handle_finished_request(req_id, hold)
     )
-    observed_results = []
+    observed_results: list[int] = []
     verified_results = []
 
     def transfer(_pp, _pcp, tp, *_args):
@@ -1093,7 +1093,7 @@ def test_read_inflight_expiry_reaches_worker_failure(
                     second_observed.set()
                 return result
 
-            future.result = observe_result
+            monkeypatch.setattr(future, "result", observe_result)
             return future
 
         worker.executor = SimpleNamespace(submit=submit)
@@ -1153,7 +1153,7 @@ def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(
     def verify(host, port, requests):
         try:
             result = verify_remote_leases(host, port, requests)
-        except zmq.Again:
+        except zmq.Again:  # type: ignore[attr-defined]
             verification_outcomes.append((set(requests), "timeout"))
             raise
         verification_outcomes.append((set(requests), result))
@@ -1173,7 +1173,7 @@ def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(
         finally:
             run_finished.set()
 
-    with zmq.Context() as context, context.socket(zmq.ROUTER) as silent_peer:
+    with zmq.Context() as context, context.socket(zmq.ROUTER) as silent_peer:  # type: ignore[attr-defined]
         silent_port = silent_peer.bind_to_random_port("tcp://127.0.0.1")
         stalled = replace(
             make_req_meta(local=([10],)),
@@ -1203,7 +1203,7 @@ def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(
         assert not run_errors, run_errors
         # Prove the silent endpoint received a real VERIFY request, not a
         # synthetic exception or a failure before the protocol was reached.
-        assert silent_peer.poll(1000, zmq.POLLIN)
+        assert silent_peer.poll(1000, zmq.POLLIN)  # type: ignore[attr-defined]
         message = msgspec.msgpack.decode(silent_peer.recv_multipart()[-1])
         assert message == [pull_scheduler.VERIFY_LEASE_MSG, [[stalled.remote_request_id, "silent-hold"]]]
 

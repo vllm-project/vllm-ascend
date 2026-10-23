@@ -1923,7 +1923,7 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
     assert result == expected
 
 
-def test_read_lease_is_checked_after_all_transfer_tasks_complete() -> None:
+def test_read_lease_is_checked_after_all_transfer_tasks_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = make_thread()
     events = []
     remote = make_metadata_groups(pp_metadata=make_pp_metadata())
@@ -1931,7 +1931,7 @@ def test_read_lease_is_checked_after_all_transfer_tasks_complete() -> None:
     thread.remote_tp_rank_groups = {"engine-p": {0: {}}}
     thread.remote_layer_index_pairs = {"engine-p": {0: []}}
     thread._build_transfer_block_buckets = MagicMock(return_value=({(0, 0): {}}, {(0, 0): {"r"}}))
-    future = Future()
+    future: Future[None] = Future()
     future.set_result(None)
     original_result = future.result
 
@@ -1939,7 +1939,7 @@ def test_read_lease_is_checked_after_all_transfer_tasks_complete() -> None:
         events.append("read completed")
         return original_result()
 
-    future.result = finish
+    monkeypatch.setattr(future, "result", finish)
     thread.executor = MagicMock()
     thread.executor.submit.return_value = future
 
