@@ -279,7 +279,12 @@ docker run --rm \
 
 Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` inside the container to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
 
-For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
+For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. The `/lib/route.conf` mount depends on the CANN version:
+
+- **CANN 9.2.0 and later:** This file is no longer a dependency; omit the mount.
+- **CANN 9.1.0 and earlier:** Workloads involving device-to-host memory transfers may optionally mount this file, but it is not mandatory.
+
+If you choose to mount it for CANN 9.1.0 or earlier, generate the file on the host first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
 For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
