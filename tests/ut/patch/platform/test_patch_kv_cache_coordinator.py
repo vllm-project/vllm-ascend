@@ -49,6 +49,7 @@ from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 HASH_BLOCK_SIZE = 128
 
@@ -214,6 +215,10 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
         SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
         None,
     ],
+)
+@pytest.mark.skipif(
+    vllm_version_is("0.31.0"),
+    reason="the pluggable KV cache builder is main-only",
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(kv_transfer_config):
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
