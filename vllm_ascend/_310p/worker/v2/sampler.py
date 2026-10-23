@@ -4,10 +4,10 @@
 
 """Triton-free MRV2 sampler for Ascend 310P.
 
-Aligns temperature / top-k / top-p / min_p / penalties / allowed_token_ids
-post-processing with MRV1's ``AscendSampler310`` (inverse-CDF random sampling)
-while keeping the MRV2 ``sampling_states`` surface required by MTP draft
-``propose()``.
+Aligns temperature / top-k / top-p / min_p / penalties / allowed_token_ids /
+logit_bias post-processing with MRV1's ``AscendSampler310`` (inverse-CDF
+random sampling) while keeping the MRV2 ``sampling_states`` surface required
+by MTP draft ``propose()``.
 """
 
 from __future__ import annotations
@@ -157,6 +157,8 @@ class Ascend310PSampler:
         self._allowed_token_ids: dict[int, list[int]] = {}
         # True = disallowed (masked to -inf), matching MRV1 allowed_token_ids_mask.
         self._allowed_mask: torch.Tensor | None = None
+        self._use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
+        self._logit_bias: dict[int, dict[int, float]] = {}
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
@@ -178,10 +180,10 @@ class Ascend310PSampler:
         unsupported = []
         if sampling_params.logprobs is not None or sampling_params.prompt_logprobs is not None:
             unsupported.append("logprobs")
-        if getattr(sampling_params, "bad_words", None) or getattr(sampling_params, "logit_bias", None):
-            unsupported.append("logits processors")
+        if getattr(sampling_params, "bad_words", None):
+            unsupported.append("bad_words")
         if unsupported:
-            # TODO: Support logprobs / logit_bias / bad_words in a later 310P MRV2 iteration.
+            # TODO: Support logprobs / bad_words in a later 310P MRV2 iteration.
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
@@ -230,6 +232,14 @@ class Ascend310PSampler:
             self._use_allowed[req_idx] = False
             if self._allowed_mask is not None:
                 self._allowed_mask[req_idx].fill_(False)
+
+        logit_bias = getattr(sampling_params, "logit_bias", None)
+        if logit_bias:
+            self._logit_bias[req_idx] = {int(k): float(v) for k, v in logit_bias.items()}
+            self._use_logit_bias[req_idx] = True
+        else:
+            self._logit_bias.pop(req_idx, None)
+            self._use_logit_bias[req_idx] = False
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
@@ -305,6 +315,7 @@ class Ascend310PSampler:
             or np.any(self._min_p_np[idx_mapping_np] != 0.0)
             or np.any(self._use_penalty[idx_mapping_np])
             or np.any(self._use_allowed[idx_mapping_np])
+            or np.any(self._use_logit_bias[idx_mapping_np])
         )
 
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
@@ -401,6 +412,27 @@ class Ascend310PSampler:
         row_mask = self._allowed_mask[expanded_idx_mapping]
         logits.masked_fill_(row_mask, float("-inf"))
 
+    def _apply_logit_bias(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        """Add per-token logit biases (MRV1 LogitBiasLogitsProcessor)."""
+        if not np.any(self._use_logit_bias[idx_mapping_np]):
+            return
+        expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+        for row_idx, req_idx in enumerate(expanded_np.tolist()):
+            req_idx = int(req_idx)
+            if req_idx < 0 or not self._use_logit_bias[req_idx]:
+                continue
+            bias_map = self._logit_bias.get(req_idx)
+            if not bias_map:
+                continue
+            for token_id, bias in bias_map.items():
+                if 0 <= token_id < logits.shape[-1]:
+                    logits[row_idx, token_id] += bias
+
     def _apply_postprocess(
         self,
         logits: torch.Tensor,
@@ -409,8 +441,9 @@ class Ascend310PSampler:
         input_ids: torch.Tensor | None = None,
         expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Allowed-ids → penalties → temperature → min_p → top-k/top-p."""
+        """Allowed-ids → logit_bias → penalties → temperature → min_p → top-k/top-p."""
         self._apply_allowed_token_ids(logits, expanded_idx_mapping, idx_mapping_np)
+        self._apply_logit_bias(logits, expanded_idx_mapping, idx_mapping_np)
         self._apply_penalties_pytorch(
             logits,
             expanded_idx_mapping,

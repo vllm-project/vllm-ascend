@@ -632,8 +632,10 @@ def test_sampler_accepts_temperature_min_p_penalties_rejects_logprobs() -> None:
     assert sampler.sampling_states.repetition_penalty.gpu[3].item() == pytest.approx(1.2)
     _add_request(sampler, 0, 4, SamplingParams(temperature=0, allowed_token_ids=[1, 2]))
     assert bool(sampler._use_allowed[0])
+    _add_request(sampler, 1, 4, SamplingParams(temperature=0, logit_bias={3: 1.5}))
+    assert bool(sampler._use_logit_bias[1])
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        _add_request(sampler, 1, 4, SamplingParams(temperature=0, logprobs=5))
+        _add_request(sampler, 2, 4, SamplingParams(temperature=0, logprobs=5))
 
 
 def test_sampler_allowed_token_ids_restricts_argmax() -> None:
@@ -645,6 +647,16 @@ def test_sampler_allowed_token_ids_restricts_argmax() -> None:
     logits = torch.tensor([[1.0, 5.0, 2.0, 0.0]], dtype=torch.float32)
     out = sampler(logits.clone(), _make_sampler_batch())
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 2
+
+
+def test_sampler_logit_bias_can_change_argmax() -> None:
+    """Positive logit_bias must be able to override the raw argmax token."""
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=4)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, logit_bias={0: 10.0}))
+    sampler.apply_staged_writes()
+    logits = torch.tensor([[1.0, 5.0, 2.0, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
 def _make_penalty_req_states(
