@@ -68,10 +68,9 @@ def _write_keypool_caches_kernel(
             quantized = tl.extra.cann.libdevice.nearbyint(tl.div_rn(values, scale))
             quantized = tl.minimum(tl.maximum(quantized, -127.0), 127.0).to(tl.int8)
             tl.store(row_base + cols, quantized, valid & (cols < HEAD_DIM))
-            scale_bits = tl.where(abs_max > 0, scale, 0.0).to(tl.float16).to(tl.int16, bitcast=True)
             scale_base = page_base + BLOCK_SIZE * HEAD_DIM + slot % BLOCK_SIZE * 2
-            for byte in tl.static_range(2):
-                tl.store(scale_base + byte, ((scale_bits >> (8 * byte)) & 0xFF).to(tl.int8), valid)
+            scale_ptr = scale_base.to(tl.pointer_type(tl.float16))
+            tl.store(scale_ptr, tl.where(abs_max > 0, scale, 0.0), valid)
         else:
             tl.store(row_base + cols, pool_value, valid & (cols < HEAD_DIM))
 

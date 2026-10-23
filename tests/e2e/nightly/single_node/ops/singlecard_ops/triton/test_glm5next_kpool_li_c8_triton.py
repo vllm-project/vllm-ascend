@@ -14,16 +14,13 @@ POOL_SIZE = 4
 SENTINEL = 0x55
 
 
-def _quantize_rows(rows: torch.Tensor) -> torch.Tensor:
-    """CPU mirror of the write kernel's packed-row quantization."""
+def _quantize_rows(rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """CPU reference for the writer's per-row INT8 keys and FP16 scales."""
     abs_max = rows.abs().amax(dim=-1, keepdim=True)
     scale = torch.where(abs_max > 0, abs_max / 127.0, torch.zeros_like(abs_max))
     normalized = rows / torch.where(abs_max > 0, scale, torch.ones_like(scale))
     quantized = torch.round(normalized).clamp(-127.0, 127.0).to(torch.int8)
-    packed = torch.zeros(rows.shape[0], ROW_WIDTH, dtype=torch.uint8)
-    packed[:, :HEAD_DIM] = quantized.view(torch.uint8)
-    packed[:, HEAD_DIM:] = scale.view(torch.uint8)
-    return packed
+    return quantized, scale.squeeze(-1).half()
 
 
 @pytest.mark.parametrize("quant", [False, True])
@@ -81,10 +78,10 @@ def test_cann_pooled_cache_writer_preserves_tail_and_padded_pages(quant, specula
 
         expected_keys, expected_scales = view_quant_kpool_cache(expected_cache[:, :32])
         actual_keys, actual_scales = view_quant_kpool_cache(actual_cache[:, :32])
-        rows = _quantize_rows(pooled.float()).view(torch.int8)
+        quantized, scales = _quantize_rows(pooled.float())
         for block, row, source_row in ((0, 0, 0), (1, 1, 1)):
-            expected_keys[block, row, 0] = rows[source_row, :dim]
-            expected_scales[block, row, 0] = rows[source_row, dim:].contiguous().view(torch.float32).half()
+            expected_keys[block, row, 0] = quantized[source_row]
+            expected_scales[block, row, 0] = scales[source_row]
             actual = actual_keys[block, row, 0]
             expected = expected_keys[block, row, 0]
             assert (actual.to(torch.int16) - expected.to(torch.int16)).abs().max() <= 1

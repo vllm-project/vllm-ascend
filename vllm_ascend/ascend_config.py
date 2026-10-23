@@ -944,10 +944,7 @@ class AscendConfig:
         # while matching no layer and would silently turn LI C8 off.
         self._kpool_li_c8_enabled = use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "int8"
         if use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "fp8":
-            # The KPool score kernel unpacks quantized rows from INT16 word
-            # pairs (Ascend Triton cannot lower 1-byte tile loads in this
-            # kernel shape), which only supports int8 payloads. Fall back to
-            # the bf16 pooled cache for fp8 instead of failing startup.
+            # The KPool integer scorer supports INT8 payloads only.
             logger.warning(
                 "attention_config.indexer_kv_dtype='fp8' is not supported for the GLM-Next KPool indexer "
                 "yet; falling back to the bf16 pooled cache. Use 'int8' for KPool LI C8."
