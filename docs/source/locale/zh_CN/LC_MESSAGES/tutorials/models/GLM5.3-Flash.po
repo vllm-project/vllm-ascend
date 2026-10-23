@@ -214,7 +214,7 @@ msgid "Save the following `run_d1.sh` on D1:"
 msgstr "将以下 `run_d1.sh` 保存到 D1："
 
 msgid ""
-"Start four TP2 engines(total DP8) on each Decode node. `--dp-rank-start` is\n"
+"Start four TP2 engines on each Decode node(total DP8). `--dp-rank-start` is\n"
 "    `0` on D0 and `4` on D1. `--dp-address` is D0's IP on both nodes, and\n"
 "    the launcher assigns API ports `9900-9903` on each node."
 msgstr ""

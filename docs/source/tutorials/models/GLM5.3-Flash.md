@@ -1203,7 +1203,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     exec bash ./run_d.sh "$@"
     ```
 
-    Start four TP2 engines(total DP8) on each Decode node. `--dp-rank-start` is
+    Start four TP2 engines on each Decode node(total DP8). `--dp-rank-start` is
     `0` on D0 and `4` on D1. `--dp-address` is D0's IP on both nodes, and
     the launcher assigns API ports `9900-9903` on each node.
 
