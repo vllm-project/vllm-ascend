@@ -62,6 +62,48 @@ class TestCanonicalRead(unittest.TestCase):
         self.assertEqual(view.seq_lens.tolist(), [9, 7, 0])
         self.assertEqual(view.seq_lens_cpu_upper_bound.tolist(), [19, 11, 0])
 
+    def test_current_prepared_rows_preserve_reorder_and_strided_sources(self):
+        for strided in (False, True):
+            with self.subTest(strided=strided):
+                table = self.table if not strided else torch.arange(48, dtype=torch.int32).reshape(3, 16)[:, ::2]
+                before = table.clone()
+                source = DirectPrefixSource(table, (2, 0), (8, 8), 4)
+                exact = torch.tensor([21, 11], dtype=torch.int32)
+                view = materialize_direct_prefix(
+                    source,
+                    exact_cpu=exact,
+                    exact_device=exact,
+                    upper_cpu=torch.tensor([24, 15]),
+                    starts_cpu=torch.tensor([12, 4]),
+                    padded_rows=3,
+                    row_indices=torch.tensor([2, 0]),
+                )
+                expected = torch.stack(
+                    (
+                        before[2, 3:6],
+                        torch.cat((before[0, 1:3], torch.zeros(1, dtype=table.dtype))),
+                        torch.zeros(3, dtype=table.dtype),
+                    )
+                )
+                torch.testing.assert_close(view.block_table, expected, rtol=0, atol=0)
+                torch.testing.assert_close(table, before, rtol=0, atol=0)
+                self.assertEqual(view.seq_lens.tolist(), [9, 7, 0])
+
+    def test_prepared_row_mapping_requires_integer_current_request_extent(self):
+        source = DirectPrefixSource.from_block_tables(self.owner, 0, self.mapping)
+        exact = torch.tensor([21, 11], dtype=torch.int32)
+        for rows in (torch.tensor([2]), torch.tensor([2.0, 0.0])):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "Prepared Draft row mapping"):
+                materialize_direct_prefix(
+                    source,
+                    exact_cpu=exact,
+                    exact_device=exact,
+                    upper_cpu=exact + 3,
+                    starts_cpu=torch.tensor([12, 4]),
+                    padded_rows=3,
+                    row_indices=rows,
+                )
+
     def test_typed_application_preserves_query_and_write_identity(self):
         slots, positions, query = object(), object(), object()
         common = SimpleNamespace(slot_mapping=slots, positions=positions, query_start_loc=query)

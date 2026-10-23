@@ -82,12 +82,16 @@ def materialize_direct_prefix(
     upper_cpu: torch.Tensor,
     starts_cpu: torch.Tensor,
     padded_rows: int,
+    row_indices: torch.Tensor | None = None,
 ) -> DraftReadView:
     """Gather from canonical rows, validating every column that can be read.
 
-    CPU/device exact coherence is established by the preparation caller. This
-    function performs no device-to-host transfer. Zero padding is only outside
-    the exact readable extent; missing source columns are an error.
+    CPU/device exact and row-mapping coherence is established by the current
+    preparation caller. Reuse its device row mapping when available. Transfer
+    S once and derive column bounds on device instead of copying those same
+    values separately. This function performs no device-to-host transfer.
+    Zero padding is only outside the exact readable extent; missing source
+    columns are an error.
     """
     n = len(source.request_rows)
     cpu_values = (exact_cpu, upper_cpu, starts_cpu)
@@ -103,6 +107,10 @@ def materialize_direct_prefix(
         raise ValueError("Draft source and exact lengths must be on the same device")
     if len(source.valid_columns) != n:
         raise ValueError("Missing canonical valid-column counts")
+    if row_indices is not None and (
+        row_indices.shape != (n,) or row_indices.dtype != torch.int64 or row_indices.device != source.table.device
+    ):
+        raise ValueError("Prepared Draft row mapping must match the source device and request extent")
     if any(row < 0 or row >= source.table.shape[0] for row in source.request_rows):
         raise ValueError("Draft source row is out of range")
     ends = exact_cpu.to(torch.int64)
@@ -116,25 +124,40 @@ def materialize_direct_prefix(
     valid = torch.tensor(source.valid_columns, dtype=torch.int64)
     if bool(((valid < end_columns) | (valid > source.table.shape[1])).any()):
         raise ValueError("Canonical source does not cover the exact readable extent")
-    start_columns = starts // source.block_span
-    counts = end_columns - start_columns
+    counts = end_columns - starts // source.block_span
     width = max(1, int(counts.max()) if n else 0)
+    starts_device = starts.to(exact_device.device)
     # Own only the read projection, never clone query/write/Target metadata.
     table = source.table.new_zeros((padded_rows, width))
     if n and source.table.shape[1]:
         offsets = torch.arange(width, device=source.table.device)
-        indices = start_columns.to(source.table.device)[:, None] + offsets
-        mask = offsets[None, :] < counts.to(source.table.device)[:, None]
+        start_columns = starts_device // source.block_span
+        end_columns_device = torch.div(
+            exact_device[:n].to(torch.int64) + source.block_span - 1, source.block_span, rounding_mode="floor"
+        )
+        indices = start_columns[:, None] + offsets
+        mask = offsets[None, :] < (end_columns_device - start_columns)[:, None]
         # Masked columns are not readable; clamp only their gather address.
         indices = indices.clamp(max=source.table.shape[1] - 1)
-        rows = torch.tensor(source.request_rows, device=source.table.device)[:, None]
-        table[:n] = torch.where(mask, source.table[rows, indices], 0)
+        rows = row_indices
+        if rows is None:
+            rows = torch.tensor(source.request_rows, dtype=torch.int64, device=source.table.device)
+        if source.table.is_contiguous():
+            # Current CANN lowers advanced indexing to an AICPU path. A flat
+            # index_select reads just the projected columns of this layout.
+            flat_indices = rows[:, None] * source.table.shape[1] + indices
+            selected = source.table.view(-1).index_select(0, flat_indices.reshape(-1)).view(n, width)
+        else:
+            # Preserve the original strided-table contract without flattening
+            # or copying the canonical table into contiguous storage.
+            selected = source.table[rows[:, None], indices]
+        table[:n] = torch.where(mask, selected, 0)
     lengths_cpu = torch.zeros(padded_rows, dtype=exact_cpu.dtype)
     lengths_cpu[:n] = ends - starts
     upper_out = torch.zeros(padded_rows, dtype=upper_cpu.dtype)
     upper_out[:n] = upper - starts
     lengths = exact_device.new_zeros(padded_rows)
-    lengths[:n] = exact_device[:n] - starts.to(exact_device.device)
+    lengths[:n] = exact_device[:n] - starts_device
     return DraftReadView(
         table,
         lengths,

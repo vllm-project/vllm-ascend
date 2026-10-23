@@ -487,6 +487,9 @@ class DraftWindowRuntime:
                 upper_cpu=common_metadata.seq_lens_cpu_upper_bound[:num_reqs],
                 starts_cpu=starts,
                 padded_rows=common_metadata.num_reqs,
+                row_indices=(
+                    self._input_batch.idx_mapping[:num_reqs] if hasattr(self._input_batch, "idx_mapping") else None
+                ),
             )
             # Retain before a builder or native reader can receive the view.
             self.pool.retain(owner, view, common_metadata)
