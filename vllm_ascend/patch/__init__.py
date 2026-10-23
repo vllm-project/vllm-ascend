@@ -987,7 +987,11 @@
 #       and attention backend/builder wiring.
 #    How:
 #       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
-#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
+#       GDN attention backend. The common-device branch also binds the
+#       speculative-row adapter for #62962, preserving upstream GDNSpecRows
+#       dispatch while exposing Ascend's strided convolution-state view.
+#       The independent 310P chain core rejects verification extensions.
+#       RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
 #
 #   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`

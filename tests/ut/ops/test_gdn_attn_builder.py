@@ -163,6 +163,7 @@ def _make_vllm_config(
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            method="eagle3",
         )
 
     model_config = SimpleNamespace(max_model_len=max_model_len, hf_text_config=SimpleNamespace())
@@ -1507,3 +1508,16 @@ def test_host_conv_indices_are_shared_and_refreshed(monkeypatch):
     refreshed = builder.build(0, common).non_spec_prefill_metadata.causal_conv1d.cache_indices
     assert refreshed.data_ptr() == indices.data_ptr()
     assert indices.tolist() == [40, 50]
+
+
+def test_verify_extension_is_preserved_in_ascend_metadata():
+    builder = _make_builder(device=torch.device("cpu"), num_heads=32, num_speculative_tokens=0)
+    extension = object()
+    builder.verify_extension = extension
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[2], query_lens=[1], name="verify_extension"),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata = builder.build(0, common)
+    assert metadata.verify_extension is extension
