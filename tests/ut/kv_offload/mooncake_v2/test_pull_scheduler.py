@@ -898,16 +898,19 @@ def test_stale_done_cannot_release_a_reused_request_id() -> None:
 
 
 @pytest.fixture
-def lease_control_server():
+def lease_control_server(request):
     """Exercise the actual control protocol over loopback, without NPU IO."""
     producer = make_sending_thread()
     port_ready = threading.Event()
     ports = []
+    host = getattr(request, "param", "127.0.0.1")
 
     def serve():
         with zmq.Context() as context, context.socket(zmq.ROUTER) as socket:
             socket.setsockopt(zmq.RCVTIMEO, 50)
-            ports.append(socket.bind_to_random_port("tcp://127.0.0.1"))
+            if host == "::1":
+                socket.setsockopt(zmq.IPV6, 1)
+            ports.append(socket.bind_to_random_port(f"tcp://[{host}]" if host == "::1" else f"tcp://{host}"))
             port_ready.set()
             producer._run_busy_loop(socket)
 
@@ -1241,3 +1244,13 @@ def test_rank_failure_survives_cross_step_aggregation_before_done(failure_first)
         else:
             assert result.finished_recving == {"r"} and result.failed_recving == {"r"}
             scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", 6000, "p", "hold-1")
+
+
+@pytest.mark.parametrize("lease_control_server", ["::1"], indirect=True)
+def test_lease_verification_preserves_ipv6(lease_control_server, lease_client_sockets):
+    producer, port = lease_control_server
+    nonce = producer.add_delayed_request("p", time.time())
+    worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+    worker.encoder = msgspec.msgpack.Encoder()
+    meta = SimpleNamespace(remote_request_id="p", remote_lease_nonce=nonce)
+    assert worker._verify_remote_leases("::1", port, {"d": meta}) == set()
