@@ -194,7 +194,6 @@ from one model to the other. Keep thinking enabled for GLM-5.3.
 For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
 image tag and container mounts from Section 4. Use the same image on every
 node in a deployment.
-The 950DT products W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
 
 <a id="glm-common-parameters"></a>
 
@@ -4780,7 +4779,7 @@ settings when comparing results. Scores are specific to the model shown.
 ### 7.3 W4A4C8 950DT products Validation Records
 
 Both records below use one 950DT products (96GB × 8), the 2026-10-08 950DT products
-image in Section 5.1.1, TP8/DP1/EP, eager mode, a configured maximum
+image, TP8/DP1/EP, eager mode, a configured maximum
 context of 135000, 16384 batched tokens, 20 sequences and FP8 KV/indexer
 caches. On 2026-10-10, `/health`, `/v1/chat/completions` and
 `/v1/completions` returned HTTP 200 for both local checkpoints.
