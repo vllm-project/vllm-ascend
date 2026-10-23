@@ -2727,3 +2727,29 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+    def test_fix_incompatible_config_rejects_nvfp4_draft_lm_head(self):
+        from vllm_ascend.platform import _fix_incompatible_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = SimpleNamespace(
+            draft_lm_head_quantization="nvfp4",
+            quantization=None,
+        )
+        with self.assertRaisesRegex(ValueError, "nvfp4"):
+            _fix_incompatible_config(vllm_config)
+
+    def test_fix_incompatible_config_accepts_fp8_draft_lm_head(self):
+        from vllm_ascend.platform import _fix_incompatible_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.speculative_config = SimpleNamespace(
+            draft_lm_head_quantization="fp8",
+            quantization=None,
+        )
+        # fp8 is supported on Ascend and must pass through untouched.
+        _fix_incompatible_config(vllm_config)
+        self.assertEqual(
+            vllm_config.speculative_config.draft_lm_head_quantization,
+            "fp8",
+        )

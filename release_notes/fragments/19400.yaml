@@ -1,0 +1,4 @@
+pr: 19400
+entries:
+  - category: feature
+    text: Added support for the draft_lm_head_quantization feature with the fp8 method on Ascend NPU, enabling quantized online lm_head weight sharing for EAGLE/EAGLE3/MTP draft models on Model Runner V2. Requires an A5 (Ascend 950) class device for the native MXFP8 execution path.

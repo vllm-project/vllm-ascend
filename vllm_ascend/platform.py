@@ -921,6 +921,17 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             vllm_config.speculative_config.quantization = None
 
+        # NVFP4 draft lm_head quantization requires CUDA W4A16 kernels and is
+        # unsupported on Ascend; the FP8 variant runs on the platform FP8
+        # scaled-MM kernel and is supported.
+        if getattr(
+            vllm_config.speculative_config, "draft_lm_head_quantization", None
+        ) == "nvfp4":
+            raise ValueError(
+                "draft_lm_head_quantization='nvfp4' is not supported on Ascend. "
+                "Use 'fp8' instead, or leave it unset."
+            )
+
     # ==================== 7. KV Transfer Config ====================
     if vllm_config.kv_transfer_config:
         # Buffer size is primarily tied to NCCL (GPU) backends
