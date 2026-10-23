@@ -49,6 +49,7 @@ def _make_config(
         use_dspark=MagicMock(return_value=use_dspark),
         use_dflash=MagicMock(return_value=use_dflash),
         use_eagle=MagicMock(return_value=use_eagle),
+        uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
@@ -228,23 +229,25 @@ def test_init_speculator_unsupported_method():
         init_speculator(config, torch.device("cpu"))
 
 
-@pytest.mark.parametrize(
-    "use_gemma4_mtp,use_step3p5_mtp",
-    [
-        (True, False),
-        (False, True),
-    ],
-)
-def test_init_speculator_skips_special_mtp(
-    use_gemma4_mtp,
-    use_step3p5_mtp,
-):
-    """Test that Gemma4 and Step3.5 MTP bypass the regular MTP speculator."""
-    config = _make_config(
-        "mtp",
-        use_gemma4_mtp=use_gemma4_mtp,
-        use_step3p5_mtp=use_step3p5_mtp,
+def test_init_speculator_routes_gemma4_mtp(monkeypatch):
+    """Gemma4 MTP routes to AscendGemma4Speculator, not the regular MTP path."""
+    config = _make_config("mtp", use_gemma4_mtp=True)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.gemma4.speculator",
+        "AscendGemma4Speculator",
     )
+    device = torch.device("cpu")
+
+    result = init_speculator(config, device)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device)
+
+
+def test_init_speculator_skips_special_mtp():
+    """Step3.5 MTP bypasses the regular MTP speculator and stays unsupported."""
+    config = _make_config("mtp", use_step3p5_mtp=True)
 
     with pytest.raises(
         NotImplementedError,

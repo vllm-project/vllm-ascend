@@ -111,6 +111,7 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     use_contiguous_conv_indices = True
+    use_shared_conv_output = True
 
     head_dim: int
     num_heads: int
@@ -449,6 +450,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=1,
                 num_accepted_tokens=conv_meta.num_accepted_tokens,
+                output_buffer=conv_meta.output_buffer,
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -477,6 +479,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.query_start_loc,
                 conv_meta.cache_indices,
                 run_mode=1,
+                output_buffer=conv_meta.output_buffer,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
@@ -487,8 +490,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         direct_output = (
             not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
         )
-        if not direct_output:
-            core_attn_out.zero_()
+        # Prefill copies its output and speculative dispatch scatters both token
+        # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
             spec_output = recurrent_kda(
                 rearrange(q_spec),

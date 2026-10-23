@@ -41,7 +41,6 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -190,24 +189,6 @@ from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
-from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
-    AscendExtractHiddenStatesProposer,
-)
-from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
-from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
-from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
-from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.utils import (
-    correct_optimistic_seq_lens_cpu,
-    update_num_computed_tokens_for_batch_change,
-)
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
@@ -243,6 +224,10 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.spec_decode_utils import (
+    correct_optimistic_seq_lens_cpu,
+    update_num_computed_tokens_for_batch_change,
+)
 from vllm_ascend.worker.utils import (
     copy_kv_cache_blocks_inplace,
     disable_compilation,
@@ -252,6 +237,19 @@ from vllm_ascend.worker.utils import (
     row_major_strides,
 )
 from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
+from vllm_ascend.worker.v1.spec_decode import get_spec_decode_method
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
+    AscendExtractHiddenStatesProposer,
+)
+from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
+from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
+from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -267,6 +265,15 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+
+# vLLM #61701 removed Medusa/MLP speculator support on main; the v0.31.0 lane
+# still ships `AscendMedusaProposer`. Keep the name for the drafter type union
+# on both lanes, but on main never resolve it at runtime: the dispatch below
+# short-circuits on the version first, and the config rejects `method="medusa"`
+# before a proposer could be constructed.
+if vllm_version_is("0.31.0"):
+    from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer  # type: ignore[import-not-found]
+
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2067,7 +2074,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
-        elif isinstance(self.drafter, AscendMedusaProposer):
+        elif vllm_version_is("0.31.0") and isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
                 # maximum when the feature is disabled).
@@ -3584,7 +3591,16 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    # Keep PP intermediate tensors local to the sequence-parallel shard.
+    def _get_pp_intermediate_tensors(self, num_tokens: int) -> IntermediateTensors:
+        # MRV1 transports full PP intermediates. Internal MoE sequence
+        # parallelism does not imply a sharded PP boundary (e.g. DeepSeek/GLM
+        # explicitly disable layer SP when PP > 1).
+        if self.intermediate_tensors is None:
+            self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=self.max_num_tokens, dtype=self.dtype, device=self.device
+            )
+        return IntermediateTensors({k: v[:num_tokens] for k, v in self.intermediate_tensors.items()})
+
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,
@@ -3592,29 +3608,20 @@ class NPUModelRunner(GPUModelRunner):
         sync_self: bool,
     ) -> IntermediateTensors:
         assert self.intermediate_tensors is not None
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
 
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                 if k not in self.intermediate_tensors.tensors:
                     base_tensor = self.intermediate_tensors["hidden_states"]
                     self.intermediate_tensors[k] = v.new_empty(
                         (base_tensor.shape[0], *v.shape[1:])
                     )
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
+                self.intermediate_tensors[k][:num_tokens].copy_(
+                    v[:num_tokens], non_blocking=True
                 )
 
-        return IntermediateTensors(
-            {
-                k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
-        )
+        return self._get_pp_intermediate_tensors(num_tokens)
 
     def sync_and_gather_intermediate_tensors(
         self,
@@ -4520,24 +4527,7 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
-                # When PP and sequence parallelism are enabled, during dummy_run the estimated space should divide
-                # num_tokens by
-                # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
-                # to incorrect memory estimation and potentially causing OOM.
-                intermediate_tokens = num_tokens_padded
-                if enable_sp():
-                    tp_size = get_tensor_model_parallel_world_size()
-                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
-                if self.intermediate_tensors is None:
-                    max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
-                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                    self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                        batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
-                    )
-                intermediate_tensors = IntermediateTensors(
-                    {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
-                )
+                intermediate_tensors = self._get_pp_intermediate_tensors(num_tokens_padded)
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len

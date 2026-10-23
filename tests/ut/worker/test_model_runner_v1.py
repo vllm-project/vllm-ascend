@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -55,10 +56,76 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+
+
+class TestPPSequenceParallelLayout(unittest.TestCase):
+    def test_profile_allocates_full_pp_buffers(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=16, pipeline_parallel_size=2, use_sequence_parallel_moe=True
+            )
+        )
+        runner.max_num_tokens = 16384
+        runner.dtype = torch.float32
+        runner.device = torch.device("cpu")
+        runner.intermediate_tensors = None
+        factory = MagicMock(
+            side_effect=lambda batch_size, dtype, device: IntermediateTensors(
+                {"hidden_states": torch.zeros(batch_size, 4, dtype=dtype, device=device)}
+            )
+        )
+        runner.model = SimpleNamespace(make_empty_intermediate_tensors=factory)
+        for num_tokens in (17, runner.max_num_tokens):
+            dummy = runner._get_pp_intermediate_tensors(num_tokens)
+            self.assertEqual(dummy["hidden_states"].shape, (num_tokens, 4))
+            assert runner.intermediate_tensors is not None
+            self.assertEqual(runner.intermediate_tensors["hidden_states"].shape, (runner.max_num_tokens, 4))
+        factory.assert_called_once_with(batch_size=runner.max_num_tokens, dtype=runner.dtype, device=runner.device)
+
+    @patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("No current config"))
+    def test_full_pp_buffers_with_global_sp_enabled(self, _current_config):
+        max_tokens = 16384
+        tp_size = 16
+        for sp_enabled in (False, True):
+            capacity = max_tokens
+            for num_tokens in (1, 17, max_tokens):
+                rows = num_tokens
+                for sync_self in (False, True):
+                    with self.subTest(sp=sp_enabled, tokens=num_tokens, sync=sync_self):
+                        runner = NPUModelRunner.__new__(NPUModelRunner)
+                        runner.vllm_config = SimpleNamespace(
+                            parallel_config=SimpleNamespace(
+                                tensor_parallel_size=tp_size,
+                                pipeline_parallel_size=2,
+                                use_sequence_parallel_moe=sp_enabled,
+                            )
+                        )
+                        buffer = torch.full((capacity, 4), -1.0)
+                        runner.intermediate_tensors = IntermediateTensors({"hidden_states": buffer})
+                        received = IntermediateTensors(
+                            {
+                                "hidden_states": torch.arange(rows * 4).reshape(rows, 4).float(),
+                                "residual": torch.ones(rows, 4),
+                            }
+                        )
+                        result = runner.sync_and_slice_intermediate_tensors(
+                            num_tokens, received if sync_self else None, sync_self=sync_self
+                        )
+                        self.assertEqual(result["hidden_states"].shape, (rows, 4))
+                        self.assertEqual(result["hidden_states"].data_ptr(), buffer.data_ptr())
+                        if sync_self:
+                            for key, value in received.items():
+                                torch.testing.assert_close(result[key], value)
+                            self.assertEqual(runner.intermediate_tensors["residual"].shape, (capacity, 4))
+                        else:
+                            torch.testing.assert_close(result["hidden_states"], torch.full((rows, 4), -1.0))
+                        # Copying a shorter batch must leave the reusable buffer tail alone.
+                        torch.testing.assert_close(buffer[rows:], torch.full((capacity - rows, 4), -1.0))
 
 
 class DenseAttentionBackend(AscendAttentionBackend):
