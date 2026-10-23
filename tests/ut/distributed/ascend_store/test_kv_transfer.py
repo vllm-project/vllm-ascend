@@ -15,12 +15,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import ctypes
 import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import torch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -47,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    sharded_get_all_gather,
 )
 
 
@@ -69,6 +72,56 @@ class FakeStore:
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
         return [0] * len(keys)
+
+
+class ByteFakeStore(FakeStore):
+    def __init__(self, payloads):
+        super().__init__()
+        self.payloads = payloads
+
+    def get(self, keys, addrs, sizes):
+        self.get_calls.append((list(keys), list(addrs), list(sizes)))
+        for key, key_addrs, key_sizes in zip(keys, addrs, sizes):
+            payload = self.payloads[key]
+            for addr, size in zip(key_addrs, key_sizes):
+                ctypes.memmove(addr, payload[:size], size)
+        return [0] * len(keys)
+
+
+class FakeAllGatherContext:
+    def __init__(self, world_size):
+        self.world_size = world_size
+        self.lock = threading.Lock()
+        self.object_calls = 0
+        self.object_barriers = []
+        self.object_values = []
+        self.tensor_barrier = threading.Barrier(world_size, timeout=10)
+        self.payloads = [None] * world_size
+
+
+class FakeAllGatherGroup:
+    def __init__(self, context, rank):
+        self.world_size = len(context.payloads)
+        self.rank_in_group = rank
+        self._context = context
+        self._object_call = 0
+
+    def all_gather_object(self, output, value):
+        context = self._context
+        call = self._object_call
+        self._object_call += 1
+        with context.lock:
+            while len(context.object_barriers) <= call:
+                context.object_barriers.append(threading.Barrier(context.world_size, timeout=10))
+                context.object_values.append([None] * context.world_size)
+        context.object_values[call][self.rank_in_group] = value
+        context.object_barriers[call].wait()
+        output[:] = context.object_values[call]
+
+    def all_gather(self, value, dim=0):
+        self._context.payloads[self.rank_in_group] = value.clone()
+        self._context.tensor_barrier.wait()
+        return torch.cat(self._context.payloads, dim=dim)
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
@@ -1253,6 +1306,122 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
         self.assertEqual(t._invalid_block_ids, set())
+
+    def test_read_dedup_dispatches_to_worker(self):
+        cache = torch.zeros(2, 16, dtype=torch.uint8)
+        db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [16], None)
+        db.set_group_buffers(
+            {0: [cache.data_ptr()]},
+            {0: [16]},
+            {0: [16]},
+            group_num_layers={0: 1},
+            group_cache_storages={
+                0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
+            },
+        )
+        store = FakeStore()
+        worker = MagicMock()
+        worker.tp_mismatch = False
+        worker._load_kv_read_dedup.return_value = (False, {1}, 1)
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            tp_size=2,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            worker=worker,
+            read_dedup=True,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+        )
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        worker._load_kv_read_dedup.assert_called_once()
+        self.assertEqual(store.get_calls, [])
+        self.assertEqual(t._invalid_block_ids, {1})
+        self.assertIn("r1", t.get_and_clear_finished_requests())
+
+
+class TestShardedGetAllGather(unittest.TestCase):
+    def test_each_tp_rank_reads_disjoint_blocks_and_gathers_full_cache(self):
+        block_size = 8
+        num_blocks = 13
+        for tp_size in (2, 4, 8):
+            with self.subTest(tp_size=tp_size):
+                caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8) for _ in range(tp_size)]
+                keys = [f"k{index}" for index in range(num_blocks)]
+                payloads = {key: bytes([index + 1]) * block_size for index, key in enumerate(keys)}
+                expected = torch.tensor(
+                    [index + 1 for index in range(num_blocks) for _ in range(block_size)],
+                    dtype=torch.uint8,
+                ).view(num_blocks, block_size)
+                stores = []
+                groups = []
+                task_args = []
+                context = FakeAllGatherContext(tp_size)
+
+                for tp_rank, cache in enumerate(caches):
+                    database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [block_size], None)
+                    database.set_group_buffers(
+                        {0: [cache.data_ptr()]},
+                        {0: [block_size]},
+                        {0: [block_size]},
+                        group_num_layers={0: 1},
+                        group_cache_storages={
+                            0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
+                        },
+                    )
+                    addrs = []
+                    sizes = []
+                    block_ids = []
+                    views = []
+                    for block_id, key in enumerate(keys):
+                        addr, size, key_views, _ = database.prepare_value_with_views(
+                            block_id * block_size,
+                            (block_id + 1) * block_size,
+                            list(range(num_blocks)),
+                            block_id=block_id,
+                        )
+                        addrs.append(addr)
+                        sizes.append(size)
+                        block_ids.append(block_id)
+                        views.append(key_views)
+                    store = ByteFakeStore(payloads)
+                    stores.append(store)
+                    groups.append(FakeAllGatherGroup(context, tp_rank))
+                    task_args.append((store, groups[-1], tp_rank, keys, addrs, sizes, block_ids, views))
+
+                errors = []
+
+                def run(args, errors=errors):
+                    try:
+                        sharded_get_all_gather(*args)
+                    except Exception as exc:  # pragma: no cover - surfaced below
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=run, args=(args,)) for args in task_args]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                for tp_rank, (cache, store) in enumerate(zip(caches, stores)):
+                    torch.testing.assert_close(cache, expected)
+                    self.assertEqual(store.get_calls[0][0], keys[tp_rank::tp_size])
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
