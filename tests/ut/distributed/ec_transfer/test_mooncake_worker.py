@@ -8,32 +8,11 @@ import pytest
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
     worker as worker_module,
 )
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
-    _resolve_bounce_arena_size,
-    _TransferFragmentPlan,
-)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import PreparedStorePut
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
-    _AcquiredTransferWave,
     _resolve_ascend_config,
 )
-
-
-def _make_bounce_config(
-    *,
-    max_num_seqs: int = 128,
-    max_num_active_seqs: int | None = None,
-    extra_config: dict[str, object] | None = None,
-) -> SimpleNamespace:
-    resolved_extra_config = {} if extra_config is None else extra_config
-    return SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=max_num_seqs,
-            max_num_active_seqs=max_num_active_seqs,
-        ),
-        ec_transfer_config=SimpleNamespace(ec_connector_extra_config=resolved_extra_config),
-    )
 
 
 def _make_push(transfer_id: str, nbytes: int = 10) -> MagicMock:
@@ -82,7 +61,7 @@ def _make_lifecycle_worker() -> AscendECMooncakeWorker:
     return worker
 
 
-def test_write_transfer_wave_batches_fragments_once_per_session():
+def test_p2p_sends_whole_tensors_once_per_session():
     worker = object.__new__(AscendECMooncakeWorker)
     worker._transfer = MagicMock()
     worker._producer_pushes = MagicMock()
@@ -95,13 +74,10 @@ def test_write_transfer_wave_batches_fragments_once_per_session():
         (second, {"dst_session": "session-a", "dst_ptr": 2000}),
         (second, {"dst_session": "session-b", "dst_ptr": 3000}),
     ]
-    acquired = _AcquiredTransferWave(
-        fragments=[
-            _TransferFragmentPlan(0, 100, 0, 10),
-            _TransferFragmentPlan(1, 200, 0, 3),
-            _TransferFragmentPlan(1, 300, 3, 7),
-        ],
-    )
+    first_tensor, second_tensor = MagicMock(nbytes=10), MagicMock(nbytes=7)
+    first_tensor.data_ptr.return_value = 100
+    second_tensor.data_ptr.return_value = 200
+    staged = SimpleNamespace(tensors=[first_tensor, second_tensor])
     tracked_future = MagicMock()
 
     def run_fanout(tasks, on_submit):
@@ -111,11 +87,11 @@ def test_write_transfer_wave_batches_fragments_once_per_session():
 
     worker._run_fanout = MagicMock(side_effect=run_fanout)
 
-    worker._write_transfer_wave([first, second], ready, acquired)
+    worker._write_staged_sources([first, second], ready, staged, [], [])
 
     assert worker._transfer.write.call_args_list == [
-        call("session-a", [100, 200, 300], [1000, 2000, 2003], [10, 3, 7]),
-        call("session-b", [200, 300], [3000, 3003], [3, 7]),
+        call("session-a", [100, 200], [1000, 2000], [10, 7]),
+        call("session-b", [200], [3000], [7]),
     ]
     worker._producer_pushes.track_shard_futures.assert_called_once_with(
         [second],
@@ -211,161 +187,10 @@ def test_bind_push_source_uses_npu_event():
     worker._producer_pushes.bind_source.assert_called_once_with("image-hash", tensor, event)
 
 
-@pytest.mark.parametrize("cross_encoder_cache", [False, True])
-def test_worker_initializes_ascend_data_plane_without_factory_hooks(
-    cross_encoder_cache: bool,
-):
-    vllm_config = MagicMock()
-    vllm_config.ec_transfer_config.is_ec_producer = True
-    vllm_config.ec_transfer_config.ec_connector_extra_config = {}
-    config = MagicMock(
-        protocol="ascend",
-        buffer_device="npu",
-        pool_size=1024,
-        cross_encoder_cache=cross_encoder_cache,
-    )
-    transfer = MagicMock()
-    consumer = MagicMock()
-    producer = MagicMock()
-    reservations = MagicMock()
-    control_client = MagicMock()
-    push_manager = MagicMock()
-
-    with (
-        patch.dict(
-            worker_module.os.environ,
-            {
-                "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
-                "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}",
-            },
-            clear=True,
-        ),
-        patch.object(worker_module, "_resolve_ascend_config", return_value=config),
-        patch.object(worker_module, "_resolve_bounce_arena_size", return_value=4096),
-        patch.object(
-            worker_module,
-            "configure_non_fabric_transport",
-        ) as configure_transport,
-        patch.object(worker_module, "ensure_mooncake_available") as ensure_available,
-        patch.object(worker_module, "get_ip", return_value="127.0.0.1"),
-        patch.object(worker_module, "build_embedding_namespace", return_value="namespace"),
-        patch.object(worker_module.torch.npu, "current_device", return_value=3),
-        patch.object(worker_module, "AscendMooncakeTransfer", return_value=transfer) as transfer_class,
-        patch.object(worker_module, "AscendConsumerMemoryPool", return_value=consumer) as consumer_class,
-        patch.object(worker_module, "AscendProducerMemoryPool", return_value=producer) as producer_class,
-        patch.object(worker_module, "ConsumerReservationManager", return_value=reservations) as reservations_class,
-        patch.object(worker_module, "ControlClient", return_value=control_client),
-        patch.object(worker_module, "ProducerPushManager", return_value=push_manager),
-        patch.object(worker_module, "ThreadPoolExecutor"),
-        patch.object(worker_module.threading.Thread, "start"),
-    ):
-        lifecycle = MagicMock()
-        lifecycle.attach_mock(configure_transport, "configure_transport")
-        lifecycle.attach_mock(ensure_available, "ensure_mooncake")
-        lifecycle.attach_mock(transfer_class, "create_transfer")
-        worker = AscendECMooncakeWorker(vllm_config)
-
-    assert lifecycle.mock_calls[:3] == [
-        call.configure_transport(),
-        call.ensure_mooncake(),
-        call.create_transfer("127.0.0.1", 3),
-    ]
-    ensure_available.assert_called_once_with()
-    transfer_class.assert_called_once_with("127.0.0.1", 3)
-    consumer_class.assert_called_once()
-    producer_class.assert_called_once()
-    reservations_class.assert_called_once_with(
-        consumer,
-        worker_module._RESERVATION_TTL_SECONDS,
-        worker_module._MAX_CANCELLED_TRANSFER_IDS,
-    )
-    assert worker._buffer_device == "npu"
-    assert worker._transfer is transfer
-    assert worker._consumer_memory is consumer
-    assert worker._producer_memory is producer
-    assert worker._reservations is reservations
-    assert (worker._store_config is not None) == cross_encoder_cache
-    assert worker._output_store is None
-
-
-@pytest.mark.parametrize(
-    ("max_num_seqs", "max_num_active_seqs", "expected_mib"),
-    [
-        (5, None, 10),
-        (256, None, 256),
-        (128, 16, 32),
-        (128, 128, 256),
-        (72, 36, 72),
-        (5, 16, 10),
-    ],
-)
-def test_resolve_default_bounce_arena_size(
-    max_num_seqs: int,
-    max_num_active_seqs: int | None,
-    expected_mib: int,
-):
-    config = _make_bounce_config(
-        max_num_seqs=max_num_seqs,
-        max_num_active_seqs=max_num_active_seqs,
-    )
-
-    result = _resolve_bounce_arena_size(config)
-
-    assert result == expected_mib * 1024 * 1024
-
-
-def test_resolve_default_bounce_arena_size_without_active_field():
-    config = _make_bounce_config(max_num_seqs=5)
-    del config.scheduler_config.max_num_active_seqs
-
-    assert _resolve_bounce_arena_size(config) == 10 * 1024 * 1024
-
-
-@pytest.mark.parametrize(
-    ("configured_size", "expected_size"),
-    [(2 * 1024 * 1024 + 1, 4 * 1024 * 1024), (0, 0)],
-    ids=("align-up", "disabled"),
-)
-def test_resolve_explicit_bounce_arena_size(configured_size, expected_size):
-    config = _make_bounce_config(
-        max_num_active_seqs=1,
-        extra_config={
-            "ascend_mooncake_bounce_arena_size": configured_size,
-        },
-    )
-
-    assert _resolve_bounce_arena_size(config) == expected_size
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        True,
-        -1,
-        2 * 1024 * 1024 - 1,
-        2.0,
-    ],
-)
-def test_resolve_explicit_bounce_arena_size_rejects_invalid_values(
-    value: object,
-):
-    config = _make_bounce_config(
-        extra_config={
-            "ascend_mooncake_bounce_arena_size": value,
-        },
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="ascend_mooncake_bounce_arena_size",
-    ):
-        _resolve_bounce_arena_size(config)
-
-
 @pytest.mark.parametrize("store_first", [False, True])
 def test_ec_notification_does_not_wait_for_put_but_memory_does(store_first):
     worker = _make_lifecycle_worker()
-    worker._deferred_store = MagicMock()
+    worker._output_store = MagicMock()
     worker._validate_push_source = MagicMock()
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
@@ -375,9 +200,9 @@ def test_ec_notification_does_not_wait_for_put_but_memory_does(store_first):
     shard = _make_writable_shard("session", 1000)
     worker._producer_pushes.resolve_reservations.return_value = [shard]
     ticket = MagicMock(identifier=push.spec.mm_hash, tensor=push.source_tensor)
-    worker._deferred_store.prepare_save.return_value = ticket
+    worker._output_store.prepare_save.return_value = ticket
     pending = Future()
-    worker._deferred_store.submit_prepared.return_value = pending
+    worker._output_store.submit_prepared.return_value = pending
     payload = MagicMock(nbytes=10)
     payload.data_ptr.return_value = 500
     header = MagicMock(nbytes=24)
@@ -390,14 +215,13 @@ def test_ec_notification_does_not_wait_for_put_but_memory_does(store_first):
     worker._notify_completions.assert_called_once_with([(push, shard)])
     worker._producer_pushes.complete.assert_called_once_with([push])
     worker._transfer.write.assert_called_once_with("session", [500], [1000], [10])
-    prepared = worker._deferred_store.submit_prepared.call_args.args[0]
+    prepared = worker._output_store.submit_prepared.call_args.args[0]
     assert prepared.addresses == [476, 500]
     assert prepared.owners == [staged]
     if not store_first:
         worker._producer_memory.release.assert_not_called()
         pending.set_result(None)
     worker._producer_memory.release.assert_called_once_with(staged)
-    worker._transfer.acquire_registration_ranges.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -405,13 +229,12 @@ def test_ec_notification_does_not_wait_for_put_but_memory_does(store_first):
 )
 def test_all_put_readers_must_finish_before_release(error):
     worker = _make_lifecycle_worker()
-    worker._deferred_store = MagicMock()
+    worker._output_store = MagicMock()
     a, b = Future(), Future()
-    acquired = _AcquiredTransferWave([], store_futures=[a, b])
     staged = MagicMock()
     retained = len(worker_module._PROCESS_LIFETIME_EC_OWNERS)
     try:
-        worker._release_after_store(acquired, staged)
+        worker._release_after_store(staged, [a, b])
         a.set_result(None)
         worker._producer_memory.release.assert_not_called()
         if error is None:
@@ -427,23 +250,9 @@ def test_all_put_readers_must_finish_before_release(error):
         del worker_module._PROCESS_LIFETIME_EC_OWNERS[retained:]
 
 
-def test_plain_p2p_uses_waiting_staging_and_never_dynamic_fallback():
-    worker = _make_lifecycle_worker()
-    worker._deferred_store = None
-    push = _make_push("plain")
-    ready = [(push, _make_writable_shard("session", 1000))]
-    worker._resolve_writable_pushes = MagicMock(return_value=(ready, [push]))
-    worker._push_staged_sources = MagicMock()
-    worker._notify_completions = MagicMock()
-    worker._push_batch([push])
-    worker._producer_memory.stage_wait.assert_called_once_with([push.source_tensor])
-    worker._producer_memory.stage.assert_not_called()
-    worker._transfer.acquire_sources.assert_not_called()
-
-
 @pytest.mark.parametrize("topology", ["shared", "independent", "fabric"])
 def test_all_store_topologies_bind_fixed_pool_before_services(topology):
-    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import store_setup
+    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import store_backend
 
     worker = _make_lifecycle_worker()
     client = MagicMock()
@@ -454,10 +263,10 @@ def test_all_store_topologies_bind_fixed_pool_before_services(topology):
     retained = len(worker_module._PROCESS_LIFETIME_EC_OWNERS)
     with (
         patch.dict(worker_module.os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": str(int(topology == "fabric"))}),
-        patch.object(store_setup, "use_store_independent_te", return_value=topology == "independent"),
-        patch.object(store_setup, "ensure_mooncake_store_imported"),
+        patch.object(store_backend, "use_store_independent_te", return_value=topology == "independent"),
+        patch.object(store_backend, "ensure_mooncake_store_imported"),
         patch.object(worker_module.torch, "device", return_value=SimpleNamespace(type="npu")),
-        patch.object(store_setup, "create_ascend_mooncake_embedding_store_client", return_value=client) as factory,
+        patch.object(store_backend, "create_ascend_mooncake_embedding_store_client", return_value=client) as factory,
         patch.object(worker_module, "AscendDeferredStoreBackend", return_value=backend),
         patch.object(worker_module.ECMooncakeWorker, "start_services") as start,
     ):
@@ -472,7 +281,7 @@ def test_all_store_topologies_bind_fixed_pool_before_services(topology):
                 else ["prepare", "factory", "bind", "services"]
             )
             factory.assert_called_once_with(worker._producer_memory, worker._transfer, read_buffer_bytes=256)
-            assert worker._deferred_store is backend
+            assert worker._output_store is backend
         finally:
             del worker_module._PROCESS_LIFETIME_EC_OWNERS[retained:]
 
@@ -498,9 +307,7 @@ def test_store_shutdown_joins_memory_reclamation_callbacks_before_close():
     client = MagicMock()
     client.exists.return_value = False
     backend = worker_module.AscendDeferredStoreBackend(client, "namespace", max_pending_items=1, max_pending_bytes=128)
-    worker._deferred_store = backend
     worker._output_store = backend
-    worker._retain_producer_slab = True
     put_started, put_gate, reclaim_started, reclaim_gate = Event(), Event(), Event(), Event()
 
     def put(*_):
@@ -520,12 +327,11 @@ def test_store_shutdown_joins_memory_reclamation_callbacks_before_close():
     ticket = backend.prepare_save("first")
     store_put = PreparedStorePut(ticket, [500], [10], [tensor])
     future = backend.submit_prepared(store_put)
-    acquired = _AcquiredTransferWave([], [store_put], [future])
     retained = worker_module._PROCESS_LIFETIME_EC_OWNERS
     before = len(retained)
     try:
         assert put_started.wait(timeout=1)
-        worker._release_after_store(acquired, MagicMock())
+        worker._release_after_store(MagicMock(), [future])
         with ThreadPoolExecutor(max_workers=1) as executor:
             closing = executor.submit(worker.close)
             try:
@@ -542,7 +348,7 @@ def test_store_shutdown_joins_memory_reclamation_callbacks_before_close():
         worker._producer_memory.release.assert_called_once()
         worker._producer_memory.close.assert_not_called()
         worker._transfer.close.assert_not_called()
-        assert any(owner is worker._producer_memory for _, owner in retained[before:])
+        assert any(worker._producer_memory in owners for _, owners in retained[before:])
     finally:
         put_gate.set()
         reclaim_gate.set()
@@ -552,7 +358,7 @@ def test_store_shutdown_joins_memory_reclamation_callbacks_before_close():
 
 def test_unknown_ec_write_retains_staging_and_never_notifies_success():
     worker = _make_lifecycle_worker()
-    worker._deferred_store = None
+    worker._output_store = None
     worker._validate_push_source = MagicMock()
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
@@ -571,3 +377,94 @@ def test_unknown_ec_write_retains_staging_and_never_notifies_success():
         worker._producer_pushes.fail.assert_called_once()
     finally:
         del worker_module._PROCESS_LIFETIME_EC_OWNERS[retained:]
+
+
+def test_direct_get_waits_for_reservation_without_restaging_or_duplicate_dispatch():
+    from functools import partial
+
+    import torch
+    from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import ECMooncakePushSpec
+
+    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import AscendProducerPushManager
+
+    worker = _make_lifecycle_worker()
+    worker._output_store = None
+    manager = AscendProducerPushManager()
+    worker._producer_pushes = manager
+    payload = torch.arange(8, dtype=torch.float32).view(2, 4)
+    spec = ECMooncakePushSpec("hash", payload.nbytes, (2, 4), "float32", "consumer", "transfer", "request")
+    reservation = Future()
+    record, _ = manager.reserve(spec, lambda: reservation)
+    worker._notify_completions = MagicMock()
+    worker._run_session_writes = lambda by_session, records, write: [
+        write(session, items) for session, items in by_session.items()
+    ]
+    with ThreadPoolExecutor(1) as executor:
+        future = manager.submit_loaded("hash", payload, executor, partial(worker._push_batch, loaded_payload=payload))
+        assert future is not None
+        assert not future.done()
+        assert record.source_tensor is payload
+        assert manager.cancel_requests({"request"}) == []
+        # Later cache binding and normal dispatch must not submit it a second time.
+        manager.bind_source("hash", torch.zeros_like(payload), None)
+        duplicate_executor = MagicMock()
+        manager.submit_batches(duplicate_executor, worker._push_batch)
+        duplicate_executor.submit.assert_not_called()
+        reservation.set_result([_make_writable_shard("peer", 1234, payload.nbytes)])
+        future.result(timeout=3)
+    worker._transfer.write.assert_called_once_with("peer", [payload.data_ptr()], [1234], [payload.nbytes])
+    worker._producer_memory.stage_wait.assert_not_called()
+    worker._producer_memory.stage_with_headers.assert_not_called()
+    worker._notify_completions.assert_called_once()
+    assert record.source_tensor is None
+    manager.poll()
+    assert not manager.pending
+
+
+def test_direct_get_submission_failure_restores_waiters():
+    import torch
+    from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import ECMooncakePushSpec
+
+    from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import AscendProducerPushManager
+
+    manager = AscendProducerPushManager()
+    spec = ECMooncakePushSpec("hash", 4, (1,), "float32", "consumer", "transfer")
+    record, _ = manager.reserve(spec, Future)
+    executor = MagicMock()
+    executor.submit.side_effect = RuntimeError("executor stopped")
+    with pytest.raises(RuntimeError, match="executor stopped"):
+        manager.submit_loaded("hash", torch.zeros(1), executor, MagicMock())
+    assert record.source_tensor is None
+    assert record.batch_future is None
+    assert "transfer" in manager._source_waiters["hash"]
+
+
+def test_shutdown_drains_direct_get_tasks_before_returning():
+    worker = _make_lifecycle_worker()
+    worker._output_store = None
+    worker._retain_native_owners = MagicMock()
+    started, release, draining = Event(), Event(), Event()
+
+    def send():
+        started.set()
+        assert release.wait(3)
+
+    with ThreadPoolExecutor(1) as direct, ThreadPoolExecutor(1) as closing_executor:
+        worker._get_executor = direct
+        send_future = direct.submit(send)
+        assert started.wait(3)
+        original_shutdown = direct.shutdown
+
+        def shutdown(*args, **kwargs):
+            draining.set()
+            return original_shutdown(*args, **kwargs)
+
+        with patch.object(direct, "shutdown", side_effect=shutdown):
+            closing = closing_executor.submit(worker.close)
+            try:
+                assert draining.wait(3)
+                assert not closing.done()
+            finally:
+                release.set()
+            closing.result(timeout=3)
+        assert send_future.done()

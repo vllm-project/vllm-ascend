@@ -40,7 +40,6 @@ MAX_MODEL_LEN = 4096
 MAX_NUM_SEQS = 2
 NORMAL_STAGING_BYTES = 128 * 1024 * 1024
 CONSUMER_BUFFER_BYTES = 256 * 1024 * 1024
-BOUNCE_ARENA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
 STORE_LOG_TIMEOUT_SECONDS = 30
 STORE_MASTER_START_TIMEOUT_SECONDS = 30
@@ -51,6 +50,8 @@ STORE_GLOBAL_SEGMENT_SIZE = "1GB"
 STORE_LOCAL_BUFFER_SIZE = "512MB"
 STORE_ROCE_RESOURCE_CONFIG = json.dumps(
     {
+        # Both EC peers and the independently owned Store must select RoCE.
+        "comm_resource_config": {"protocol_desc": ["roce:device"]},
         "store": {
             "comm_resource_config": {
                 "protocol_desc": ["roce:device"],
@@ -442,7 +443,6 @@ def _producer_config(cache_prefix: str) -> dict[str, Any]:
         "ec_buffer_device": "npu",
         "ec_connector_extra_config": {
             "mooncake_protocol": "ascend",
-            "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
             "cross_encoder_cache": True,
             "embedding_cache_prefix": cache_prefix,
         },

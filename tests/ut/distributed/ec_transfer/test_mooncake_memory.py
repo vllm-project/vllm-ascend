@@ -1,4 +1,3 @@
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
@@ -11,8 +10,10 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
-    AscendProducerAllocator,
     AscendProducerMemoryPool,
+)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
+    AscendMooncakeTransfer,
 )
 
 
@@ -78,24 +79,11 @@ def test_consumer_records_npu_release_event():
 
 
 def _make_pool(capacity=1024):
-    allocator = AscendProducerAllocator(capacity, 0)
+    allocator = AscendContiguousAllocator(capacity)
     allocator.tensor = torch.empty(capacity, dtype=torch.uint8)
     pool = AscendProducerMemoryPool(capacity, MagicMock(), allocator)
     pool._copy_staged = MagicMock(side_effect=lambda sources, targets: [d.copy_(s) for s, d in zip(sources, targets)])
     return pool
-
-
-def test_legacy_bounce_bytes_are_available_to_staging():
-    allocator = AscendProducerAllocator(256, 512)
-    transfer = MagicMock()
-    transfer.register_memory.return_value = 0
-    pool = AscendProducerMemoryPool(256, transfer, allocator)
-    assert pool.capacity == 768
-    lease = pool.reserve_bytes([600], torch.device("cpu"))
-    assert lease is not None
-    assert lease.tensors[0].nbytes == 600
-    pool.release(lease)
-    assert allocator._free == [(0, 768)]
 
 
 def test_headers_and_payload_are_one_atomic_allocation():
@@ -109,21 +97,6 @@ def test_headers_and_payload_are_one_atomic_allocation():
     assert staged.tensors[0].data_ptr() == staged.headers[0].data_ptr() + 24
     pool.release(staged)
     assert pool._allocator._free == [(0, 512)]
-
-
-def test_waiting_stage_only_reuses_completed_lease():
-    pool = _make_pool(256)
-    source = torch.zeros(256, dtype=torch.uint8)
-    first = pool.stage_wait([source])
-    with ThreadPoolExecutor(1) as executor:
-        waiting = executor.submit(pool.stage_wait, [source])
-        try:
-            assert not waiting.done()
-        finally:
-            pool.release(first)
-        second = waiting.result(timeout=2)
-    assert second.regions == [(0, 256)]
-    pool.release(second)
 
 
 def test_poison_wakes_waiters_without_recycling_live_memory():
@@ -146,92 +119,6 @@ def test_oversized_batch_returns_without_waiting_or_partial_allocations():
     pool._copy_staged.assert_not_called()
 
 
-def _cache_get(pool):
-    lease = pool.reserve_bytes([152], torch.device("cpu"))
-    buffer = lease.tensors[0]
-    payload = buffer[24:].view(torch.float32)
-    payload.fill_(3)
-    output = payload.clone()
-    pool.cache_loaded(output, payload, buffer[:24], lease.regions[0])
-    return output, payload
-
-
-def test_get_to_p2p_transfers_lease_without_allocating_or_copying():
-    pool = _make_pool(256)
-    output, payload = _cache_get(pool)
-    staged = pool.stage_wait([output])
-    assert staged.tensors[0].data_ptr() == payload.data_ptr()
-    assert pool._loaded == {}
-    pool._copy_staged.assert_called_once_with([], [])
-    pool.release(staged)
-    assert pool._allocator._free == [(0, 256)]
-    assert torch.all(output == 3)
-
-
-def test_pressure_reclaims_completed_get_copy_without_changing_cache_tensor():
-    pool = _make_pool(256)
-    output, _ = _cache_get(pool)
-    next_lease = pool.reserve_bytes([256], torch.device("cpu"))
-    assert next_lease is not None
-    next_lease.tensors[0].zero_()
-    assert torch.all(output == 3)
-    pool.release(next_lease)
-    staged = pool.stage_wait([output])
-    assert torch.equal(staged.tensors[0], output)
-    pool.release(staged)
-
-
-def test_cache_eviction_returns_optional_get_lease():
-    import gc
-
-    pool = _make_pool(256)
-    output, _ = _cache_get(pool)
-    del output
-    gc.collect()
-    assert pool._loaded == {}
-    assert pool._allocator._free == [(0, 256)]
-
-
-def test_borrowed_get_lease_cannot_be_reclaimed_during_wait():
-    pool = _make_pool(512)
-    output, payload = _cache_get(pool)
-    active = pool.reserve_bytes([256], torch.device("cpu"))
-    other = torch.ones(64, dtype=torch.uint8)
-    entered = threading.Event()
-    original = pool._space_available.wait
-
-    def wait():
-        entered.set()
-        return original()
-
-    with patch.object(pool._space_available, "wait", side_effect=wait), ThreadPoolExecutor(1) as executor:
-        future = executor.submit(pool.stage_wait, [output, other])
-        try:
-            assert entered.wait(2)
-            assert pool.reserve_bytes([256], torch.device("cpu")) is None
-        finally:
-            pool.release(active)
-        staged = future.result(timeout=2)
-    assert staged.tensors[0].data_ptr() == payload.data_ptr()
-    pool.release(staged)
-    assert pool._allocator._free == [(0, 512)]
-
-
-def test_get_header_overhead_does_not_reject_payload_batch_that_fits():
-    pool = _make_pool(512)
-    lease = pool.reserve_bytes([280], torch.device("cpu"))
-    buffer = lease.tensors[0]
-    payload = buffer[24:]
-    output = payload.clone()
-    pool.cache_loaded(output, payload, buffer[:24], lease.regions[0])
-    other = torch.zeros(256, dtype=torch.uint8)
-    staged = pool.stage_wait([output, other])
-    assert staged is not None
-    assert len(staged.regions) == 2
-    pool.release(staged)
-    assert pool._allocator._free == [(0, 512)]
-
-
 def test_copy_exception_retains_sources_and_lease_without_reuse():
     pool = _make_pool(256)
     source = torch.zeros(128, dtype=torch.uint8)
@@ -252,7 +139,48 @@ def test_staging_copy_synchronizes_its_own_stream_before_return():
     ordered = MagicMock()
     ordered.attach_mock(destination.copy_, "copy")
     ordered.attach_mock(stream.synchronize, "synchronize")
-    with patch.object(memory_module.torch.npu, "Stream", return_value=stream):
+    with (
+        patch.object(memory_module.torch.npu, "Stream", return_value=stream),
+        patch.object(memory_module.torch.npu, "stream") as stream_context,
+    ):
         AscendProducerMemoryPool._copy_staged(pool, [source], [destination])
     assert [call[0] for call in ordered.mock_calls] == ["copy", "synchronize"]
     destination.copy_.assert_called_once_with(source, non_blocking=True)
+    stream_context.assert_called_once_with(stream)
+
+
+def test_transfer_lazily_reuses_process_ascend_engine():
+    transfer = AscendMooncakeTransfer("producer-host", 3)
+    engine = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer.global_te.get_transfer_engine",
+            return_value=engine,
+        ) as get_transfer_engine,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer.torch.npu.set_device") as set_device,
+    ):
+        assert transfer._ensure_engine() is engine
+        assert transfer._ensure_engine() is engine
+
+    set_device.assert_called_once_with(3)
+    get_transfer_engine.assert_called_once_with(
+        "producer-host",
+        device_name=None,
+    )
+
+
+def test_fixed_registrations_never_deregister_on_pool_or_transfer_close():
+    transfer = AscendMooncakeTransfer("host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    tensor = MagicMock(nbytes=128)
+    tensor.data_ptr.return_value = 2097152
+    transfer._engine = engine
+    assert transfer.register_memory(tensor) == 0
+    assert not transfer.unregister_memory(tensor)
+    transfer.close()
+    engine.unregister_memory.assert_not_called()
+    engine.batch_unregister_memory.assert_not_called()
+    engine.close.assert_not_called()
+    assert any(owner is tensor for owner in transfer._retained_owners)

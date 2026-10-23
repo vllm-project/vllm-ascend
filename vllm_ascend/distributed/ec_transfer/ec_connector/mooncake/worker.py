@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -25,6 +25,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.control import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.producer import (
     ProducerPushManager,
     ProducerPushRecord,
+    ProducerPushState,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.reservation import (
     ConsumerReservationManager,
@@ -39,6 +40,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
     build_embedding_namespace,
+    make_embedding_key,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
     EmbeddingStoreOperationError,
@@ -46,22 +48,16 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
-    _resolve_bounce_arena_size,
-    _TransferFragmentPlan,
-)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
-    AscendProducerAllocator,
     AscendProducerMemoryPool,
+    AscendStagedSources,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
     AscendDeferredStoreBackend,
     PreparedStorePut,
     PreparedStoreSave,
-)
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_setup import (
     configure_non_fabric_transport,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
@@ -70,9 +66,6 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.backend import (
-        MooncakeEmbeddingStoreBackend,
-    )
 
 
 _TRANSFER_WORKERS = 4
@@ -110,11 +103,41 @@ def _resolve_ascend_config(vllm_config: VllmConfig) -> MooncakeECConfig:
     )
 
 
-@dataclass(frozen=True)
-class _AcquiredTransferWave:
-    fragments: list[_TransferFragmentPlan]
-    store_puts: list[PreparedStorePut] = field(default_factory=list)
-    store_futures: list[Future[None]] = field(default_factory=list, compare=False)
+class AscendProducerPushManager(ProducerPushManager):
+    """Claim GET sources before the normal cache-output dispatch can bind them."""
+
+    def submit_loaded(
+        self,
+        mm_hash: str,
+        payload: torch.Tensor,
+        executor: ThreadPoolExecutor,
+        run_batch: Callable[[list[ProducerPushRecord]], None],
+    ) -> Future[None] | None:
+        # Use the same lock and records as upstream dispatch/cancellation. A GET
+        # task may wait for remote reservations, but never for staging space.
+        with self._lock:
+            waiters = self._source_waiters.pop(mm_hash, {})
+            records = [
+                self._records[transfer_id]
+                for transfer_id in waiters
+                if self._records[transfer_id].state is ProducerPushState.WAITING_INPUTS
+                and self._records[transfer_id].source_tensor is None
+            ]
+            if not records:
+                return None
+            for record in records:
+                record.source_tensor = payload
+            try:
+                future = executor.submit(run_batch, records)
+            except BaseException:
+                for record in records:
+                    record.source_tensor = None
+                    self._source_waiters.setdefault(mm_hash, {})[record.spec.transfer_id] = None
+                raise
+            for record in records:
+                record.batch_future = future
+                self._batch_ids[record.spec.transfer_id] = None
+            return future
 
 
 class AscendECMooncakeWorker(ECMooncakeWorker):
@@ -136,11 +159,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             if config.cross_encoder_cache
             else None
         )
-        self._output_store: MooncakeEmbeddingStoreBackend | None = None
-        self._deferred_store: AscendDeferredStoreBackend | None = None
-
-        resolved_bounce_arena_size = _resolve_bounce_arena_size(vllm_config)
-        self._bounce_arena_size = resolved_bounce_arena_size if ec_config.is_ec_producer else 0
+        self._output_store: AscendDeferredStoreBackend | None = None
 
         if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
             configure_non_fabric_transport()
@@ -171,16 +190,19 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._producer_memory = AscendProducerMemoryPool(
             config.pool_size,
             transfer,
-            allocator=AscendProducerAllocator(
-                staging_capacity=config.pool_size,
-                bounce_capacity=self._bounce_arena_size,
-            ),
+            allocator=AscendContiguousAllocator(config.pool_size),
         )
         self._control_client = ControlClient(config.control_timeout_ms)
         self._shutdown_drain_timeout_s = config.control_timeout_ms / 1000
         self._io_executor = ThreadPoolExecutor(
             max_workers=_TRANSFER_WORKERS,
             thread_name_prefix="ec-mooncake-transfer",
+        )
+        # GET holds pool memory while sending. It must not queue behind normal
+        # transfer tasks blocked in stage_wait on that very memory.
+        self._get_executor = ThreadPoolExecutor(
+            max_workers=_TRANSFER_WORKERS,
+            thread_name_prefix="ec-mooncake-get",
         )
         self._control_executor = ThreadPoolExecutor(
             max_workers=_CONTROL_WORKERS,
@@ -189,7 +211,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._shard_pool = None
         self._shard_pool_lock = threading.Lock()
         self._push_ready = threading.Event()
-        self._producer_pushes = ProducerPushManager(self._push_ready.set)
+        self._producer_pushes = AscendProducerPushManager(self._push_ready.set)
         self._dispatch_stop = threading.Event()
         self._dispatcher = None
         self._failed_saves: set[str] = set()
@@ -198,7 +220,6 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         self._failed_loads: set[str] = set()
         self._shutdown = False
         self._use_store_independent_te = False
-        self._retain_producer_slab = True
         self._control_thread = threading.local()
         if self.is_producer:
             self._dispatcher = threading.Thread(
@@ -208,17 +229,47 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             )
             self._dispatcher.start()
 
-    def start_services(self) -> None:
+    def start_save_caches(
+        self, metadata: Any, encoder_cache: dict[str, torch.Tensor] | None = None, **kwargs: Any
+    ) -> None:
+        store = self._output_store
+        if store is None:
+            super().start_save_caches(metadata, encoder_cache, **kwargs)
+            return
+        identifiers = {
+            make_embedding_key(store.namespace, identifier): identifier for identifier in metadata.store_candidates
+        }
+
+        def send_loaded(key: str, payload: torch.Tensor) -> Future[None] | None:
+            return self._producer_pushes.submit_loaded(
+                identifiers[key],
+                payload,
+                self._get_executor,
+                partial(self._push_batch, loaded_payload=payload),
+            )
+
+        # resolve_inputs invokes this on the model thread. Reservations are
+        # already scheduled by upstream start_save_caches before the GET starts.
+        store.store_client.on_get_payload = send_loaded
+        try:
+            super().start_save_caches(metadata, encoder_cache, **kwargs)
+        finally:
+            store.store_client.on_get_payload = None
+
+    def _retain_native_owners(self) -> None:
         if not getattr(self, "_native_owners_retained", False):
             _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, (self._producer_memory, self._consumer_memory)))
             self._native_owners_retained = True
+
+    def start_services(self) -> None:
+        self._retain_native_owners()
         if not self.is_producer or self._store_config is None or self._output_store is not None:
             if self.is_producer:
                 self._producer_memory.ensure_prepared(torch.device(self._buffer_device))
             super().start_services()
             return
 
-        from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_setup import (
+        from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
             create_ascend_mooncake_embedding_store_client,
             ensure_mooncake_store_imported,
             use_store_independent_te,
@@ -237,45 +288,36 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             # Store factory enables the process-global RoCE selectors for its
             # separately owned engine.
             producer_memory.ensure_prepared(torch.device(self._buffer_device))
+        store_client = create_ascend_mooncake_embedding_store_client(
+            producer_memory,
+            cast(AscendMooncakeTransfer, self._transfer),
+            read_buffer_bytes=read_bytes,
+        )
         try:
-            store_client = create_ascend_mooncake_embedding_store_client(
-                producer_memory,
-                cast(AscendMooncakeTransfer, self._transfer),
-                read_buffer_bytes=read_bytes,
+            if use_shared_roce_engine:
+                # The validated RoCE topology attaches Store to the global
+                # engine before registering the shared NPU staging slab.
+                producer_memory.ensure_prepared(torch.device(self._buffer_device))
+            staging = producer_memory.tensor
+            if staging is None:
+                raise RuntimeError("Producer staging slab is unavailable")
+            store_client.bind_staging_buffer(staging)
+            output_store = AscendDeferredStoreBackend(
+                store_client,
+                namespace,
+                max_pending_items=max_items,
+                max_pending_bytes=max_bytes,
             )
-            try:
-                if use_shared_roce_engine:
-                    # The validated RoCE topology attaches Store to the global
-                    # engine before registering the shared NPU staging slab.
-                    producer_memory.ensure_prepared(torch.device(self._buffer_device))
-                staging = producer_memory.tensor
-                if staging is None:
-                    raise RuntimeError("Producer staging slab is unavailable")
-                store_client.bind_staging_buffer(staging)
-                self._retain_producer_slab = True
-                backend_type = AscendDeferredStoreBackend
-                output_store = backend_type(
-                    store_client,
-                    namespace,
-                    max_pending_items=max_items,
-                    max_pending_bytes=max_bytes,
-                )
-            except BaseException:
-                store_client.close()
-                raise
-
-            self._output_store = output_store
-            self._deferred_store = output_store
-            try:
-                super().start_services()
-            except BaseException:
-                self._output_store = None
-                self._deferred_store = None
-                output_store.shutdown()
-                raise
         except BaseException:
-            if not getattr(self, "_retain_producer_slab", False):
-                producer_memory.close()
+            store_client.close()
+            raise
+
+        self._output_store = output_store
+        try:
+            super().start_services()
+        except BaseException:
+            self._output_store = None
+            output_store.shutdown()
             raise
 
     def close(self) -> None:
@@ -297,6 +339,9 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 self._cancel_orphaned_reservation,
             )
         self._control_executor.shutdown(wait=True)
+        get_executor = getattr(self, "_get_executor", None)
+        if get_executor is not None:
+            get_executor.shutdown(wait=True)
         self._producer_pushes.submit_batches(
             self._io_executor,
             self._push_batch,
@@ -311,21 +356,16 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             # point. Drain Store before releasing its arena or shared engine.
             self._output_store.shutdown()
             self._output_store = None
-            self._deferred_store = None
         drained = True
         if self._control_server is not None:
             drained = self._reservations.wait_for_writers(self._shutdown_drain_timeout_s)
             self._control_server.close()
-        if drained:
-            _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, self._consumer_memory))
-        else:
-            _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, self._consumer_memory))
+        if not drained:
             logger.error("Timed out waiting for Mooncake EC writers; keeping the consumer receive pool registered")
-        if getattr(self, "_retain_producer_slab", False):
-            _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, self._producer_memory))
-        else:
-            self._producer_memory.close()
-            self._transfer.close()
+        self._retain_native_owners()
+        metrics = getattr(self._producer_memory, "metrics", None)
+        if metrics is not None:
+            metrics.emit(force=True)
 
     def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not getattr(self._control_thread, "device_set", False):
@@ -338,11 +378,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
     def _retain_transfer_owners(self, owners: list[Any]) -> None:
         """Keep uncertain native users alive and wake blocked allocators."""
         self._producer_memory.poison()
-        self._retain_producer_slab = True
         _PROCESS_LIFETIME_EC_OWNERS.append((self._transfer, (self._producer_memory, *owners)))
-        deferred_store = getattr(self, "_deferred_store", None)
+        deferred_store = getattr(self, "_output_store", None)
         if deferred_store is not None:
-            deferred_store.store_client.retain_fallback_owners(owners)
+            deferred_store.store_client._poison(owners)
 
     def _run_session_writes(
         self,
@@ -364,21 +403,19 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             track_write,
         )
 
-    def _write_transfer_wave(
+    def _write_staged_sources(
         self,
         pushes: list[ProducerPushRecord],
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
-        acquired: _AcquiredTransferWave,
+        staged: AscendStagedSources,
+        store_puts: list[PreparedStorePut],
+        store_futures: list[Future[None]],
     ) -> bool:
         """Submit Store work and wait only for EC writes, retaining PUT futures."""
         source_index = {push.spec.transfer_id: index for index, push in enumerate(pushes)}
-        fragments_by_source: list[list[_TransferFragmentPlan]] = [[] for _ in pushes]
-        for fragment in acquired.fragments:
-            fragments_by_source[fragment.source_index].append(fragment)
-
         by_session: dict[
             str,
-            list[tuple[_TransferFragmentPlan, int]],
+            list[tuple[torch.Tensor, int]],
         ] = {}
         session_records: dict[str, dict[str, ProducerPushRecord]] = {}
         for push, shard in ready:
@@ -388,28 +425,27 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
 
             session = str(shard["dst_session"])
             destination = int(shard["dst_ptr"])
-            for fragment in fragments_by_source[index]:
-                by_session.setdefault(session, []).append((fragment, destination))
+            by_session.setdefault(session, []).append((staged.tensors[index], destination))
             session_records.setdefault(session, {})[push.spec.transfer_id] = push
 
         def write(
             session: str,
-            items: list[tuple[_TransferFragmentPlan, int]],
+            items: list[tuple[torch.Tensor, int]],
         ) -> None:
             self._transfer.write(
                 session,
-                [fragment.source_address for fragment, _ in items],
-                [destination + fragment.destination_offset for fragment, destination in items],
-                [fragment.nbytes for fragment, _ in items],
+                [tensor.data_ptr() for tensor, _ in items],
+                [destination for _, destination in items],
+                [tensor.nbytes for tensor, _ in items],
             )
 
-        deferred_store = getattr(self, "_deferred_store", None)
-        assert deferred_store is not None or not acquired.store_puts
+        deferred_store = getattr(self, "_output_store", None)
+        assert deferred_store is not None or not store_puts
         error: BaseException | None = None
-        for store_put in acquired.store_puts:
+        for store_put in store_puts:
             assert deferred_store is not None
             try:
-                acquired.store_futures.append(deferred_store.submit_prepared(store_put))
+                store_futures.append(deferred_store.submit_prepared(store_put))
             except BaseException as exc:
                 error = exc
                 break
@@ -421,35 +457,33 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 error = exc
         if error is not None:
             owners: list[Any] = []
-            for store_put in acquired.store_puts:
+            for store_put in store_puts:
                 owners.extend(store_put.owners)
                 owners.append(store_put.ticket.tensor)
-            if deferred_store is not None and acquired.store_puts:
-                deferred_store.store_client.retain_fallback_owners(owners)
+            if deferred_store is not None and store_puts:
+                deferred_store.store_client._poison(owners)
             return False
         return True
 
-    def _release_after_store(self, acquired: _AcquiredTransferWave, staged: Any = None) -> None:
+    def _release_after_store(self, staged: AscendStagedSources, store_futures: list[Future[None]]) -> None:
         """After EC completes, hand memory ownership to the PUT callbacks.
 
         No callback acquires staging space. The publisher can release
-        a completed wave even while an EC thread waits for the next allocation.
+        a completed batch even while an EC thread waits for the next allocation.
         Executor shutdown joins publisher callbacks before Store/native teardown.
         """
 
         def release() -> None:
-            if staged is not None:
-                self._producer_memory.release(staged)
+            self._producer_memory.release(staged)
 
-        if not acquired.store_futures:
+        if not store_futures:
             release()
             return
 
         lock = threading.Lock()
-        futures = tuple(acquired.store_futures)
-        # Futures retain their callbacks. Move them out of the acquired wave
-        # so completed saves cannot form a cycle retaining original outputs.
-        acquired.store_futures.clear()
+        futures = tuple(store_futures)
+        # Callbacks own staged bytes; the caller no longer needs the futures.
+        store_futures.clear()
         remaining = len(futures)
         uncertain = False
 
@@ -469,14 +503,14 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 remaining -= 1
                 reusable = remaining == 0 and not uncertain
             if first_error:
-                self._retain_transfer_owners([staged, acquired])
-                logger.error("Store completion is unconfirmed; retaining EC/Store wave: %s", error)
+                self._retain_transfer_owners([staged])
+                logger.error("Store completion is unconfirmed; retaining EC/Store batch: %s", error)
             if reusable:
                 try:
                     release()
                 except BaseException:
-                    self._retain_transfer_owners([staged, acquired])
-                    logger.exception("Failed to reclaim completed EC/Store wave; retaining owners")
+                    self._retain_transfer_owners([staged])
+                    logger.exception("Failed to reclaim completed EC/Store batch; retaining owners")
 
         for future in futures:
             future.add_done_callback(completed)
@@ -520,22 +554,13 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 ordered.setdefault(push.spec.transfer_id, push)
         return ready, list(ordered.values())
 
-    def _acquire_staged_wave(
+    def _prepare_store_puts(
         self,
         stage_pushes: list[ProducerPushRecord],
-        staged: Any,
+        staged: AscendStagedSources,
         store_saves: dict[str, PreparedStoreSave],
-    ) -> _AcquiredTransferWave:
-        """Describe whole staged EC payloads and their coallocated Store headers."""
-        fragments = [
-            _TransferFragmentPlan(
-                source_index=index,
-                source_address=tensor.data_ptr(),
-                destination_offset=0,
-                nbytes=tensor.nbytes,
-            )
-            for index, tensor in enumerate(staged.tensors)
-        ]
+    ) -> list[PreparedStorePut]:
+        """Pair each prepared Store save with its staged header and payload."""
         staged_by_hash = {}
         for push, tensor, header in zip(stage_pushes, staged.tensors, staged.headers, strict=True):
             staged_by_hash.setdefault(push.spec.mm_hash, (tensor, header))
@@ -551,31 +576,31 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                     owners=[staged],
                 )
             )
-        return _AcquiredTransferWave(fragments, store_puts)
+        return store_puts
 
     def _push_staged_sources(
         self,
         pushes: list[ProducerPushRecord],
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
-        staged: Any,
+        staged: AscendStagedSources,
         store_saves: dict[str, PreparedStoreSave],
     ) -> None:
         """Notify EC independently; retain staged bytes through Store completion."""
-        acquired = None
+        store_futures: list[Future[None]] = []
         submitted = False
         reusable = False
         try:
-            acquired = self._acquire_staged_wave(pushes, staged, store_saves)
+            store_puts = self._prepare_store_puts(pushes, staged, store_saves)
             submitted = True
-            if not self._write_transfer_wave(pushes, ready, acquired):
+            if not self._write_staged_sources(pushes, ready, staged, store_puts, store_futures):
                 raise RuntimeError("EC/Store staging completion is unconfirmed")
-            self._release_after_store(acquired, staged)
+            self._release_after_store(staged, store_futures)
             reusable = True
         finally:
             if not submitted:
                 self._producer_memory.release(staged)
             elif not reusable:
-                self._retain_transfer_owners([staged, acquired])
+                self._retain_transfer_owners([staged])
 
     def _push_store_batch(
         self,
@@ -584,7 +609,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         ordered_pushes: list[ProducerPushRecord],
     ) -> None:
         """Stage whole payloads and headers atomically; publish asynchronously."""
-        deferred_store = cast(AscendDeferredStoreBackend, self._deferred_store)
+        deferred_store = cast(AscendDeferredStoreBackend, self._output_store)
         independent = getattr(self, "_use_store_independent_te", False)
         prepared: dict[str, PreparedStoreSave] = {}
         try:
@@ -621,9 +646,9 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             for ticket in prepared.values():
                 deferred_store.abort_prepared(ticket)
 
-    def _push_batch(self, pushes: list[ProducerPushRecord]) -> None:
+    def _push_batch(self, pushes: list[ProducerPushRecord], *, loaded_payload: torch.Tensor | None = None) -> None:
         started_at = time.monotonic()
-        deferred_store = getattr(self, "_deferred_store", None)
+        deferred_store = getattr(self, "_output_store", None)
         failure: Exception | None = None
         try:
             ready, ordered_pushes = self._resolve_writable_pushes(
@@ -631,7 +656,13 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 started_at,
             )
 
-            if deferred_store is not None:
+            if loaded_payload is not None:
+                # GET has already populated registered memory. The client owns
+                # this lease until both this future and its cache copy settle.
+                staged = AscendStagedSources([loaded_payload] * len(pushes), [], [None] * len(pushes))
+                if not self._write_staged_sources(pushes, ready, staged, [], []):
+                    raise RuntimeError("GET P2P completion is unconfirmed")
+            elif deferred_store is not None:
                 self._push_store_batch(pushes, ready, ordered_pushes)
             elif ready:
                 tensors = [cast(torch.Tensor, push.source_tensor) for push in ordered_pushes]
@@ -654,6 +685,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         finally:
             if failure is not None:
                 self._producer_pushes.fail(pushes, failure)
+                if loaded_payload is not None:
+                    # Propagate to the GET lease owner's callback. Normal
+                    # encoder sends retain their existing async reporting.
+                    raise failure
 
     def _bind_push_source(self, tensor: torch.Tensor, mm_hash: str) -> None:
         """Bind an NPU source using an NPU readiness event."""
@@ -669,11 +704,11 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         mm_hash: str,
         **kwargs: Any,
     ) -> None:
-        if self._deferred_store is None:
+        if self._output_store is None:
             super().save_caches(encoder_cache, mm_hash, **kwargs)
             return
         if not self.is_producer:
             return
         tensor = encoder_cache[mm_hash]
         self._bind_push_source(tensor, mm_hash)
-        self._deferred_store.save_output(mm_hash, tensor)
+        self._output_store.save_output(mm_hash, tensor)

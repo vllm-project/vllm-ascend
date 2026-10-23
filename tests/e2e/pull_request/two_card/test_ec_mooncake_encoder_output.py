@@ -31,7 +31,6 @@ MAX_MODEL_LEN = 4096
 MAX_NUM_SEQS = 2
 NORMAL_STAGING_BYTES = 128 * 1024 * 1024
 CONSUMER_BUFFER_BYTES = 256 * 1024 * 1024
-BOUNCE_ARENA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
 
 
@@ -284,7 +283,6 @@ def _run_epd(baseline_outputs: dict[str, str]) -> None:
         "ec_buffer_device": "npu",
         "ec_connector_extra_config": {
             "mooncake_protocol": "ascend",
-            "ascend_mooncake_bounce_arena_size": BOUNCE_ARENA_BYTES,
         },
     }
     consumer_config = {

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,15 +34,27 @@ class AscendMooncakeTransfer(MooncakeTransfer):
     def _ensure_engine(self) -> TransferEngine:
         with self._engine_lock:
             if self._engine is None:
+                from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
+                    configure_non_fabric_transport,
+                    log_transport_environment,
+                )
+
+                use_fabric = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
+                if not use_fabric:
+                    configure_non_fabric_transport()
+                    log_transport_environment("before_ec_engine")
                 torch.npu.set_device(self._device_index)
                 self._engine = global_te.get_transfer_engine(self._hostname, device_name=None)
+                if not use_fabric:
+                    # Both roles must leave selectors installed after native
+                    # initialization. Consumers have no later Store setup.
+                    log_transport_environment("after_ec_engine_before_restore")
+                    configure_non_fabric_transport()
+                    log_transport_environment("after_ec_engine")
             return self._engine
 
     def acquire_sources(self, tensors: list[torch.Tensor]) -> list[int]:
         raise RuntimeError("Ascend Mooncake requires sources in the fixed staging pool")
-
-    def acquire_registration_ranges(self, ranges: object) -> list[int]:
-        raise RuntimeError("Dynamic Ascend Mooncake registration is disabled")
 
     def retain_owners(self, owners: list[object]) -> None:
         self._retained_owners.extend(owners)
@@ -49,7 +62,17 @@ class AscendMooncakeTransfer(MooncakeTransfer):
     def register_memory(self, tensor: torch.Tensor) -> int:
         # Even an unconfirmed partial registration must keep its allocation.
         self.retain_owners([tensor])
-        return super().register_memory(tensor)
+        status = super().register_memory(tensor)
+        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
+            from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_backend import (
+                configure_non_fabric_transport,
+                log_transport_environment,
+            )
+
+            log_transport_environment("after_ec_registration_before_restore")
+            configure_non_fabric_transport()
+            log_transport_environment("after_ec_registration")
+        return status
 
     def unregister_memory(self, tensor: torch.Tensor) -> bool:
         # The shared engine has no public global channel-retirement barrier.

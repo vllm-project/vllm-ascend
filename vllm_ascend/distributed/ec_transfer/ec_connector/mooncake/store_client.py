@@ -1,15 +1,18 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend tensor I/O for the cross-encoder Mooncake Store."""
+"""NPU tensor I/O using upstream Store lookup, read grouping and poison bookkeeping."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future
 from typing import Any
 
 import torch
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import TensorSpec
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    TensorSpec,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
     _MOONCAKE_TENSOR_HEADER,
     _SAFE_PUT_REJECTIONS,
@@ -23,92 +26,73 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_cl
 from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import AscendProducerMemoryPool
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_memory import (
-    AscendStoreMemory,
-    AscendStoreTopology,
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
+    AscendProducerMemoryPool,
+    AscendStagedSources,
 )
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import AscendMooncakeTransfer
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.metrics import ECMetrics
 
-# Retain the native Store and its borrowed EC slab together until process exit.
-# Shared topology borrows one registration; independent topology adds a Store
-# registration. Retention is a lifetime policy, not transport validation.
 _PROCESS_LIFETIME_STORE_OWNERS: list[tuple[Any, Any]] = []
 
 
-class AscendMooncakeEmbeddingStoreClient:
-    """Ascend data plane with upstream object/lookup and poison semantics.
-
-    The upstream client is composed only for control and lifetime bookkeeping.
-    Its tensor registration, CPU buffers and close implementation are never used.
-    """
+class AscendMooncakeEmbeddingStoreClient(MooncakeEmbeddingStoreClient):
+    """Reuse upstream control/codec logic; override NPU I/O and fixed-pool lifetime."""
 
     def __init__(
         self,
         store: Any,
         staging_pool: AscendProducerMemoryPool,
-        registration_transfer: AscendMooncakeTransfer,
         replicate_config: Any | None = None,
         *,
         read_buffer_bytes: int = 128 * 1024**2,
         use_fabric_mem: bool = False,
         use_store_independent_te: bool = False,
     ) -> None:
-        self._control = MooncakeEmbeddingStoreClient(
+        super().__init__(
             store,
             replicate_config=replicate_config,
             read_buffer_bytes=read_buffer_bytes,
         )
         if use_fabric_mem and use_store_independent_te:
             raise ValueError("FabricMem and independent RoCE are different Store topologies")
-        self.store = store
-        self.replicate_config = replicate_config
-        self._read_buffer_bytes = read_buffer_bytes
-        topology = (
-            AscendStoreTopology.FABRIC_MEM
-            if use_fabric_mem
-            else AscendStoreTopology.INDEPENDENT
-            if use_store_independent_te
-            else AscendStoreTopology.SHARED
-        )
-        self._memory = AscendStoreMemory(store, registration_transfer, topology)
+        self._independent = use_store_independent_te
+        self._bound = False
         self._staging_pool = staging_pool
-        self._use_fabric_mem = use_fabric_mem
         self._closed = False
-
-    @property
-    def uses_store_independent_te(self) -> bool:
-        return self._memory.topology is AscendStoreTopology.INDEPENDENT
-
-    @property
-    def _poisoned(self) -> bool:
-        return self._control._poisoned
-
-    @property
-    def _unsafe_owners(self) -> list[Any]:
-        return self._control._unsafe_owners
+        self.metrics = ECMetrics("store_get")
+        # Called synchronously after GET validation, before submitting cache copy.
+        self.on_get_payload: Callable[[str, torch.Tensor], Future[None] | None] | None = None
 
     def _check_healthy(self) -> None:
-        self._control._check_healthy()
+        super()._check_healthy()
         if self._closed:
             raise EmbeddingStoreError("Ascend Mooncake Store client is closed")
 
     def _poison(self, owners: list[Any]) -> None:
-        # Upstream retains poisoned controls until process exit. Include this
-        # client so the native Store, registration policy and pool survive too.
-        self._control._poison([self, *owners])
+        super()._poison(owners)
         self._staging_pool.poison()
-
-    def exists(self, pool_key: str) -> bool:
-        return self.batch_exists([pool_key])[0]
-
-    def batch_exists(self, keys: list[str]) -> list[bool]:
-        self._check_healthy()
-        return self._control.batch_exists(keys)
 
     def bind_staging_buffer(self, tensor: torch.Tensor) -> None:
         self._check_healthy()
-        self._memory.bind_staging(tensor)
+        if tensor is not self._staging_pool.tensor:
+            raise ValueError("Store must bind the worker's fixed staging pool")
+        if self._bound:
+            return
+        if self._independent:
+            status = self.store.register_buffer(tensor.data_ptr(), tensor.nbytes)
+            if status != 0:
+                raise EmbeddingStoreOperationError(f"Failed to register Store staging pool: {status}")
+        self._bound = True
+
+    def _validate_buffers(self, addresses: list[int], sizes: list[int]) -> None:
+        pool = self._staging_pool.tensor
+        if not self._bound or pool is None:
+            raise EmbeddingStoreOperationError("Store staging pool is not bound")
+        start, end = pool.data_ptr(), pool.data_ptr() + pool.nbytes
+        if len(addresses) != len(sizes) or any(
+            size <= 0 or address < start or address + size > end for address, size in zip(addresses, sizes, strict=True)
+        ):
+            raise EmbeddingStoreOperationError("Store I/O must use the fixed staging pool")
 
     def put_tensor(self, pool_key: str, tensor: torch.Tensor) -> None:
         self.put_tensors([(pool_key, tensor)])
@@ -151,7 +135,7 @@ class AscendMooncakeEmbeddingStoreClient:
     ) -> None:
         """PUT buffers within the fixed pool; never register transient ranges."""
         self._check_healthy()
-        self._memory.validate_buffers(addresses, sizes)
+        self._validate_buffers(addresses, sizes)
         try:
             [result] = self.store.batch_put_from_multi_buffers(
                 [pool_key],
@@ -170,11 +154,7 @@ class AscendMooncakeEmbeddingStoreClient:
             raise EmbeddingStoreOperationError(f"failed to put embedding tensor for {pool_key}")
         logger.info("Stored encoder output in Mooncake Store")
 
-    def retain_fallback_owners(self, owners: list[Any]) -> None:
-        """Poison owners whose submitted transfer completion is uncertain."""
-        self._poison(owners)
-
-    def _load_chunk(self, expected: dict[str, TensorSpec], device: torch.device) -> dict[str, torch.Tensor]:
+    def _load_pool_chunk(self, expected: dict[str, TensorSpec], device: torch.device) -> dict[str, torch.Tensor]:
         self._check_healthy()
         if device.type != "npu":
             raise EmbeddingStoreOperationError("Ascend embedding target must be on an NPU")
@@ -183,24 +163,32 @@ class AscendMooncakeEmbeddingStoreClient:
         sizes = [header_size + spec.nbytes for spec in expected.values()]
         # GET runs on the model thread. Never wait here for work that the same
         # thread may still need to bind/dispatch; unavailable hits are computed.
+        self.metrics.add(
+            get_candidate_objects=len(expected), get_candidate_payload_bytes=sum(s.nbytes for s in expected.values())
+        )
         lease = self._staging_pool.reserve_bytes(sizes, device, wait=False)
         if lease is None:
+            self.metrics.add(
+                get_pool_unavailable_objects=len(expected),
+                get_pool_unavailable_payload_bytes=sum(s.nbytes for s in expected.values()),
+            )
+            self.metrics.emit()
             return {}
         confirmed = False
         copying = False
         targets: list[torch.Tensor] = []
+        sends: list[Future[None]] = []
         try:
             addresses = [buffer.data_ptr() for buffer in lease.tensors]
-            self._memory.validate_buffers(addresses, sizes)
+            self._validate_buffers(addresses, sizes)
             results = self.store.batch_get_into(list(expected), addresses, sizes)
             if not _batch_get_completed_safely(results, sizes):
                 raise EmbeddingStoreError("Unsafe batch GET results")
             confirmed = True
             loaded: dict[str, torch.Tensor] = {}
-            for (key, spec), buffer, region, size, result in zip(
+            for (key, spec), buffer, size, result in zip(
                 expected.items(),
                 lease.tensors,
-                list(lease.regions),
                 sizes,
                 results,
                 strict=True,
@@ -219,15 +207,20 @@ class AscendMooncakeEmbeddingStoreClient:
                 payload = buffer.narrow(0, header_size, spec.nbytes).view(dtype).view(spec.shape)
                 target = torch.empty(spec.shape, dtype=dtype, device=device)
                 targets.append(target)
+                if self.on_get_payload is not None:
+                    copying = True
+                    future = self.on_get_payload(key, payload)
+                    if future is not None:
+                        sends.append(future)
                 copying = True
                 target.copy_(payload, non_blocking=True)
                 torch.npu.current_stream(device).synchronize()
                 copying = False
-                # Cache owns independent HBM. Retain the completed staging copy
-                # opportunistically so the immediate P2P can take its lease.
-                self._staging_pool.cache_loaded(target, payload, buffer.narrow(0, 0, header_size), region)
-                lease.regions.remove(region)
                 loaded[key] = target
+                self.metrics.add(get_loaded_objects=1, get_loaded_payload_bytes=spec.nbytes)
+            if loaded:
+                logger.info("Loaded %d encoder output(s) from Mooncake Store", len(loaded))
+            self.metrics.emit()
             return loaded
         except BaseException as error:
             if not confirmed or copying:
@@ -236,18 +229,46 @@ class AscendMooncakeEmbeddingStoreClient:
             raise
         finally:
             if not self._poisoned:
+                self._release_get_after_sends(lease, sends)
+
+    def _release_get_after_sends(self, lease: AscendStagedSources, sends: list[Future[None]]) -> None:
+        """Cache copies are settled; P2P tasks hold the remaining read leases."""
+        if not sends:
+            self._staging_pool.release(lease)
+            return
+        lock = threading.Lock()
+        remaining = len(sends)
+
+        def completed(future: Future[None]) -> None:
+            nonlocal remaining
+            try:
+                error = future.exception()
+            except BaseException as exc:
+                error = exc
+            if error is not None:
+                # A failed send may have submitted native work. Keep the whole
+                # GET chunk until process exit rather than infer retirement.
+                self._poison([lease])
+            with lock:
+                remaining -= 1
+                last = remaining == 0
+            if last and not self._poisoned:
                 self._staging_pool.release(lease)
+
+        for future in sends:
+            future.add_done_callback(completed)
 
     def close(self) -> None:
         if self._closed:
             return
+        self.metrics.emit(force=True)
         self._check_healthy()
 
-        if self._memory.staging_owner is not None:
+        if self._bound:
             # Shared and independent registrations both borrow the EC slab.
             # Keep the native Store (including its Host segments) alive until
             # the EC owner exits; closing either side is not a retirement fence.
-            _PROCESS_LIFETIME_STORE_OWNERS.append((self.store, self._memory.staging_owner))
+            _PROCESS_LIFETIME_STORE_OWNERS.append((self.store, self._staging_pool))
             self._closed = True
             return
 
@@ -260,32 +281,20 @@ class AscendMooncakeEmbeddingStoreClient:
             raise
         self._closed = True
 
-    def load_tensors(
-        self,
-        expected: Mapping[str, TensorSpec],
-        device: torch.device | str,
-    ) -> dict[str, torch.Tensor]:
-        self._check_healthy()
-        device = torch.device(device)
+    def _load_chunk(self, expected: dict[str, TensorSpec], device: torch.device) -> dict[str, torch.Tensor]:
+        """Add only the aligned pool bound to upstream read-byte grouping."""
         loaded: dict[str, torch.Tensor] = {}
         chunk: dict[str, TensorSpec] = {}
-        chunk_bytes = 0
         allocated_bytes = 0
-        alignment = self._staging_pool._allocator.alignment
         for key, spec in expected.items():
-            size = _MOONCAKE_TENSOR_HEADER.size + spec.nbytes
-            allocated = round_up(size, alignment)
-            if size > self._read_buffer_bytes or allocated > self._staging_pool.capacity:
+            allocated = round_up(_MOONCAKE_TENSOR_HEADER.size + spec.nbytes, self._staging_pool._allocator.alignment)
+            if allocated > self._staging_pool.capacity:
                 continue
-            if chunk and (
-                chunk_bytes + size > self._read_buffer_bytes
-                or allocated_bytes + allocated > self._staging_pool.capacity
-            ):
-                loaded.update(self._load_chunk(chunk, device))
-                chunk, chunk_bytes, allocated_bytes = {}, 0, 0
+            if chunk and allocated_bytes + allocated > self._staging_pool.capacity:
+                loaded.update(self._load_pool_chunk(chunk, device))
+                chunk, allocated_bytes = {}, 0
             chunk[key] = spec
-            chunk_bytes += size
             allocated_bytes += allocated
         if chunk:
-            loaded.update(self._load_chunk(chunk, device))
+            loaded.update(self._load_pool_chunk(chunk, device))
         return loaded

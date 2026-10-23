@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import threading
-import weakref
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -21,9 +21,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
 )
 from vllm.utils.math_utils import round_up
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.bounce import (
-    ASCEND_DIRECT_MEMORY_ALIGNMENT,
-)
+from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.metrics import ECMetrics
+
+ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 
 
 class AscendContiguousAllocator(ContiguousAllocator):
@@ -57,23 +57,11 @@ class AscendContiguousAllocator(ContiguousAllocator):
         self._free = [(0, tensor.nbytes)]
 
 
-class AscendProducerAllocator(AscendContiguousAllocator):
-    """One fixed registration; legacy bounce bytes are staging capacity too."""
-
-    def __init__(self, staging_capacity: int, bounce_capacity: int) -> None:
-        self.staging_capacity = staging_capacity + bounce_capacity
-        self.registered_capacity = self.staging_capacity
-        super().__init__(self.staging_capacity)
-
-    def prepare(self, device: torch.device, transfer: MooncakeTransfer) -> None:
-        super().prepare(device, transfer)
-        if self.tensor is None:
-            raise RuntimeError("Could not initialize the fixed Ascend Mooncake staging pool")
-
-
 @dataclass
 class AscendStagedSources(StagedSources):
     headers: list[torch.Tensor | None] = field(default_factory=list)
+    acquired_at: float = 0.0
+    purpose: str = "unknown"
 
 
 class AscendConsumerMemoryPool(ConsumerMemoryPool):
@@ -107,53 +95,25 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         self,
         capacity: int,
         transfer: MooncakeTransfer,
-        allocator: AscendProducerAllocator,
+        allocator: AscendContiguousAllocator,
     ) -> None:
         # The exact #56242 baseline does not accept an injected allocator.
         super().__init__(capacity, transfer)
         self._allocator = allocator
-        self._producer_allocator = allocator
         self._space_available = threading.Condition(self._lock)
         self._poisoned = False
-        # GET results have independent cache tensors. These optional completed
-        # copies can be borrowed by P2P or reclaimed immediately under pressure.
-        self._loaded: dict[int, tuple[weakref.ReferenceType, AscendStagedSources]] = {}
+        self.metrics = ECMetrics("pool")
 
     @property
     def capacity(self) -> int:
-        return self._producer_allocator.staging_capacity
+        return self._allocator._capacity
 
     def ensure_prepared(self, device: torch.device) -> None:
         """Ensure that the shared producer slab is allocated and registered."""
         with self._lock:
-            self._producer_allocator.prepare(device, self._transfer)
-
-    def _discard_loaded(self, key: int) -> None:
-        with self._space_available:
-            if self._poisoned:
-                return
-            cached = self._loaded.pop(key, None)
-            if cached is not None:
-                self._free_regions(cached[1].regions)
-                self._space_available.notify_all()
-
-    def cache_loaded(
-        self,
-        tensor: torch.Tensor,
-        payload: torch.Tensor,
-        header: torch.Tensor,
-        region: tuple[int, int],
-    ) -> None:
-        """Take a completed GET lease; cache tensor owns independent storage."""
-        with self._space_available:
-            if self._poisoned:
-                raise RuntimeError("Ascend producer staging pool is poisoned")
-            key = id(tensor)
-            self._loaded[key] = (
-                weakref.ref(tensor),
-                AscendStagedSources([payload], [region], [header]),
-            )
-            weakref.finalize(tensor, self._discard_loaded, key)
+            self._allocator.prepare(device, self._transfer)
+            if self.tensor is None:
+                raise RuntimeError("Could not initialize the fixed Ascend Mooncake pool")
 
     def _allocate_bytes_locked(
         self,
@@ -164,7 +124,9 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
     ) -> list[tuple[int, int]] | None:
         if self._poisoned:
             raise RuntimeError("Ascend producer staging pool is poisoned")
-        self._producer_allocator.prepare(device, self._transfer)
+        self._allocator.prepare(device, self._transfer)
+        if self.tensor is None:
+            raise RuntimeError("Could not initialize the fixed Ascend Mooncake pool")
         required = sum(round_up(size, self._allocator.alignment) for size in sizes)
         if required > self.capacity:
             return None
@@ -178,15 +140,11 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 regions.append(region)
             else:
                 return regions
-            # Completed GET staging is optional, never a reason to block.
-            victim = next(iter(self._loaded), None)
-            if victim is not None:
-                _, staged = self._loaded.pop(victim)
-                self._free_regions(staged.regions)
-                continue
             if not wait:
                 return None
+            before = time.monotonic()
             self._space_available.wait()
+            self.metrics.duration("allocation_wait", time.monotonic() - before)
             if self._poisoned:
                 raise RuntimeError("Ascend producer staging pool is poisoned")
 
@@ -207,7 +165,8 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                     self._allocator.view(offset, size, (size,), torch.uint8)
                     for (offset, _), size in zip(regions, sizes, strict=True)
                 ]
-                return AscendStagedSources(views, regions)
+                self.metrics.add(get_leases_acquired=1)
+                return AscendStagedSources(views, regions, acquired_at=time.monotonic(), purpose="get")
             except BaseException:
                 self._free_regions(regions)
                 self._space_available.notify_all()
@@ -243,41 +202,16 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         with self._space_available:
             if self._poisoned:
                 raise RuntimeError("Ascend producer staging pool is poisoned")
-            borrowed = {
-                id(t): self._loaded[id(t)][1]
-                for t in tensors
-                if id(t) in self._loaded and self._loaded[id(t)][0]() is t
-            }
-            # Keep every selected cached lease out of pressure reclamation.
-            missing = [i for i, t in enumerate(tensors) if id(t) not in borrowed]
-            sizes = [tensors[i].nbytes + (headers[i].nbytes if headers[i] is not None else 0) for i in missing]
-            borrowed_bytes = sum(size for item in borrowed.values() for _, size in item.regions)
-            if borrowed_bytes + sum(round_up(n, self._allocator.alignment) for n in sizes) > self.capacity:
-                # Cached GET includes header/padding; copying only the payload
-                # can make an otherwise oversized combination fit.
-                for key, cached in borrowed.items():
-                    del self._loaded[key]
-                    self._free_regions(cached.regions)
-                borrowed = {}
-                sizes = [t.nbytes + (h.nbytes if h is not None else 0) for t, h in zip(tensors, headers, strict=True)]
-            taken = {key: self._loaded.pop(key) for key in borrowed}
-            try:
-                regions = self._allocate_bytes_locked(sizes, tensors[0].device, wait=wait)
-            except BaseException:
-                self._loaded.update(taken)
-                raise
+            sizes = [t.nbytes + (h.nbytes if h is not None else 0) for t, h in zip(tensors, headers, strict=True)]
+            regions = self._allocate_bytes_locked(sizes, tensors[0].device, wait=wait)
             if regions is None:
-                self._loaded.update(taken)
                 return None
             new_regions = iter(regions)
-            result = AscendStagedSources([], list(regions), [])
+            purpose = "p2p_put" if any(h is not None for h in headers) else "p2p"
+            result = AscendStagedSources([], list(regions), [], time.monotonic(), purpose)
+            self.metrics.add(**{purpose + "_leases_acquired": 1})
             try:
                 for tensor, header in zip(tensors, headers, strict=True):
-                    cached = borrowed.get(id(tensor))
-                    if cached is not None:
-                        result.tensors.append(cached.tensors[0])
-                        result.headers.append(cached.headers[0])
-                        continue
                     offset, _ = next(new_regions)
                     header_bytes = header.nbytes if header is not None else 0
                     header_view = (
@@ -295,10 +229,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                         destinations.append(header_view)
                     copies.append(tensor)
                     destinations.append(payload)
-                for key, cached in borrowed.items():
-                    result.regions.extend(cached.regions)
             except BaseException:
-                self._loaded.update(taken)
                 self._free_regions(regions)
                 self._space_available.notify_all()
                 raise
@@ -325,7 +256,11 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 return
             self._free_regions(staged.regions)
             staged.regions.clear()
+            if isinstance(staged, AscendStagedSources) and staged.acquired_at:
+                self.metrics.duration(staged.purpose + "_lease", time.monotonic() - staged.acquired_at)
+                staged.acquired_at = 0.0
             self._space_available.notify_all()
+        self.metrics.emit()
 
     def poison(self) -> None:
         with self._space_available:
