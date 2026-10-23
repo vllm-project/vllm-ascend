@@ -26,6 +26,7 @@ thread always releases its caller via ``ready_event``.
 import queue
 import threading
 import unittest
+from typing import Any
 from unittest.mock import MagicMock
 
 # isort: off
@@ -44,7 +45,7 @@ class _FakeTransferThread(KVTransferThread):
         threading.Thread.__init__(self, name="fake-transfer", daemon=True)
         self._stopping = threading.Event()
         self._request_submit_lock = threading.Lock()
-        self.request_queue = queue.Queue()
+        self.request_queue: queue.Queue[Any] = queue.Queue()
         self._fatal_error = None
         self.ready_event = threading.Event()
         self.m_store = MagicMock()
