@@ -49,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    _block_ids_are_contiguous,
     _coalesced_kv_views,
     _kv_shard_indices,
     _kv_shard_lengths,
@@ -1368,6 +1369,11 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 class TestShardedGetAllGather(unittest.TestCase):
+    def test_block_id_contiguity_guard(self):
+        self.assertTrue(_block_ids_are_contiguous([7, 8, 9, 10], [0, 1, 2, 3]))
+        self.assertFalse(_block_ids_are_contiguous([7, 9, 10, 12], [0, 1, 2, 3]))
+        self.assertTrue(_block_ids_are_contiguous([7], [0]))
+
     def test_read_dedup_threshold_scales_with_tp_size(self):
         mib = 1024 * 1024
         self.assertFalse(_should_use_mla_read_dedup(18 * mib, 2))
@@ -1390,6 +1396,19 @@ class TestShardedGetAllGather(unittest.TestCase):
             [first[16:24]],
         ]
         coalesced = _coalesced_kv_views(views, [0, 1, 2])
+        self.assertEqual(len(coalesced), 2)
+        torch.testing.assert_close(coalesced[0], first)
+        torch.testing.assert_close(coalesced[1], second)
+
+    def test_fast_coalescing_for_contiguous_uniform_layers(self):
+        first = torch.arange(24, dtype=torch.int8)
+        second = torch.arange(12, dtype=torch.int8) + 31
+        views = [
+            [first[0:8], second[0:4]],
+            [first[8:16], second[4:8]],
+            [first[16:24], second[8:12]],
+        ]
+        coalesced = _coalesced_kv_views(views, [0, 1, 2], assume_contiguous=True)
         self.assertEqual(len(coalesced), 2)
         torch.testing.assert_close(coalesced[0], first)
         torch.testing.assert_close(coalesced[1], second)
