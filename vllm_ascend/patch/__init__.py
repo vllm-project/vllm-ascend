@@ -283,6 +283,18 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_configs`
+#    Why:
+#       Qwen4Exp's shared backing allocations have fixed alignment overhead;
+#       upstream worker re-planning accounts only for per-block payload bytes.
+#    How:
+#       Dispatch Qwen4Exp to its model planner, retaining the alignment reserve
+#       when equalizing worker block counts. Other models use upstream logic.
+#    Related PR:
+#       vllm-project/vllm-ascend#16981 (Qwen3.8 Flash Next).
+#    Future Plan:
+#       Remove when upstream exposes a fixed allocation overhead planning hook.
+#
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`

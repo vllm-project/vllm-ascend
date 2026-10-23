@@ -1,0 +1,6 @@
+pr: 16981
+entries:
+  - category: performance
+    text: Reduced Qwen3.8-Flash-Next KV cache allocation on Ascend A3 by sharing backing storage across compatible cache groups.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

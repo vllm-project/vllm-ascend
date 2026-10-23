@@ -12,13 +12,87 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from tests.ut.models.qwen4_exp.test_cache_config import _config, _specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    _get_cache_layout,
+    allocate_qwen4_exp_kv_cache_tensors,
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
+    reshape_qwen4_exp_kv_cache_tensors,
+)
 
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
+
+
+def test_qwen_packed_cache_transfers_payloads_without_adjacent_groups(monkeypatch):
+    groups = get_qwen4_exp_kv_cache_groups(_config(), _specs())
+    rows = _get_cache_layout(groups)
+    model_config = _config()
+    model_config.kv_transfer_config = object()
+    alignment = 2 * 1024 * 1024
+    config = get_qwen4_exp_kv_cache_config(
+        model_config, groups, 2 * sum(page * slots for page, slots in rows) + 2 * alignment
+    )
+    backings = []
+
+    def allocator(size, alignment):
+        storage = torch.zeros(size + alignment, dtype=torch.int8)
+        start = (-storage.data_ptr()) % alignment
+        backing = storage[start : start + size]
+        backings.append(backing)
+        return backing
+
+    raw = allocate_qwen4_exp_kv_cache_tensors(config, allocator)
+    caches = reshape_qwen4_exp_kv_cache_tensors(config, raw)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.kv_cache_config = config
+    worker.engine_id, worker.te_rpc_port = "producer", 9000
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 128, "127.0.0.1", 5000
+    engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", engine)
+    worker.register_kv_caches(caches)
+    metadata = worker.xfer_handshake_metadata
+    index = metadata.layer_names.index("model.layers.3.self_attn.indexer.compressed_key_cache")
+    assert metadata.block_lens[index] == [8192]
+    assert metadata.block_strides[index] == [rows[3][0]]
+    index = metadata.layer_names.index("model.layers.3.self_attn.attn")
+    assert metadata.block_lens[index] == [65536, 65536]
+    regions = base_worker.collect_configured_register_regions(config, caches)
+    assert regions.ptrs == [backing.data_ptr() for backing in backings]
+    assert regions.lengths == [backing.numel() for backing in backings]
+    engine.register_buffer.assert_called_once()
+    # Execute the published ranges as a simulated remote block transfer. Copy
+    # only Full's effective payload, preserving every byte of padding and the
+    # independently owned state block 0 on the receiver.
+    destination_raw = allocate_qwen4_exp_kv_cache_tensors(config, allocator)
+    destinations = reshape_qwen4_exp_kv_cache_tensors(config, destination_raw)
+    for name in groups[1].layer_names:
+        for state in destinations[name]:
+            state[0].fill_(5)
+    expected = [backing.clone() for backing in backings[2:]]
+    for name in groups[0].layer_names:
+        index = metadata.layer_names.index(name)
+        for component, (source, destination) in enumerate(zip(raw[name], destination_raw[name], strict=True)):
+            source[0].fill_(9)
+            size = metadata.block_lens[index][component]
+            assert size == source.shape[1]
+            assert metadata.block_strides[index][component] == source.stride(0)
+            destination[1, :size].copy_(source[0, :size])
+            storage_index = next(
+                i
+                for i, backing in enumerate(backings[2:])
+                if backing.untyped_storage().data_ptr() == destination.untyped_storage().data_ptr()
+            )
+            offset = destination[1].data_ptr() - backings[storage_index + 2].data_ptr()
+            expected[storage_index][offset : offset + size].fill_(9)
+    assert all(torch.equal(actual, reference) for actual, reference in zip(backings[2:], expected, strict=True))
 
 
 @pytest.mark.parametrize(

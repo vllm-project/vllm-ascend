@@ -31,6 +31,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from tests.ut.models.qwen4_exp.test_cache_config import _config, _specs
 from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.attention_c8_mxfp import (
@@ -53,6 +54,12 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
+)
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    _get_cache_layout,
+    _iter_row_slots,
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
@@ -1299,6 +1306,26 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
+    def test_qwen_packed_cache_allocates_twice_and_materializes_components(self):
+        config = _config()
+        groups = get_qwen4_exp_kv_cache_groups(config, _specs())
+        rows = _get_cache_layout(groups)
+        cache_config = get_qwen4_exp_kv_cache_config(config, groups, 3 * sum(page * slots for page, slots in rows))
+        runner = self._build_runner()
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda size, alignment: torch.zeros(size, dtype=torch.int8)
+        )
+        raw = runner._allocate_kv_cache_tensors(cache_config)
+        caches = runner._reshape_kv_cache_tensors(cache_config, raw)
+        self.assertEqual(runner._allocate_int8_cache_tensor.call_count, 2)
+        self.assertEqual(len({view.untyped_storage().data_ptr() for tensors in raw.values() for view in tensors}), 2)
+        self.assertEqual(caches["model.layers.47.self_attn.attn"][0].shape, (3, 128, 1, 256))
+        self.assertEqual(caches["model.layers.47.self_attn.indexer.compressed_key_cache"].shape, (3, 1, 32, 128))
+        for row, _, name, component in _iter_row_slots(groups):
+            cache = caches[name]
+            view = cache[component] if isinstance(cache, tuple) else cache
+            self.assertEqual(view.stride(0) * view.element_size(), rows[row][0])
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")

@@ -55,6 +55,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.models.qwen4_exp.cache_config import is_qwen4_exp_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
@@ -279,9 +280,17 @@ class MooncakeBaseConnectorWorker:
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
         configured_layer_names: set[str] = set()
+        # Qwen overlays independently scheduled owners in shared row slots.
+        # Transfer only this owner's payload, never neighbouring groups/padding.
+        uses_component_views = is_qwen4_exp_cache(self.kv_cache_config.kv_cache_groups)
 
-        for tensor_config in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in get_kv_cache_tensor_layers(tensor_config):
+        layer_lists = (
+            [group.layer_names for group in self.kv_cache_config.kv_cache_groups]
+            if uses_component_views
+            else [get_kv_cache_tensor_layers(tensor) for tensor in self.kv_cache_config.kv_cache_tensors]
+        )
+        for configured_layers in layer_lists:
+            for layer_name in configured_layers:
                 if layer_name in configured_layer_names:
                     raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
                 if layer_name not in self.layer_name_to_group_index:
@@ -309,7 +318,7 @@ class MooncakeBaseConnectorWorker:
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
-                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) and not uses_component_views
                     else None
                 )
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):

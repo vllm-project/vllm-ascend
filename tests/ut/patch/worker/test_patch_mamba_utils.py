@@ -7,8 +7,16 @@ import numpy as np
 import torch
 from vllm.v1.utils import CpuGpuBuffer
 
+from tests.ut.models.qwen4_exp.test_cache_config import _allocate, _config, _specs
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
+    get_qwen4_exp_pool_bytes_per_block,
+)
 from vllm_ascend.patch.worker.patch_mamba_utils import (
+    _collect_mamba_copy_meta_torch,
     _do_mamba_copy_block_npu,
+    _do_mamba_copy_block_torch,
     preprocess_mamba,
 )
 
@@ -208,3 +216,33 @@ def test_layerwise_mamba_copy_is_grouped_by_layer():
     except RuntimeError:
         raised = True
     assert raised, "finish must raise when a loaded layer never executed its copy"
+
+
+def test_qwen_merged_gdn_ple_copies_each_state_with_its_own_stride():
+    model_config, specs = _config(cycles=1), _specs(1)
+    groups = get_qwen4_exp_kv_cache_groups(model_config, specs)
+    config = get_qwen4_exp_kv_cache_config(model_config, groups, 3 * get_qwen4_exp_pool_bytes_per_block(groups))
+    _, _, caches = _allocate(config)
+    state_names = groups[1].layer_names
+    for marker, name in enumerate(state_names, 1):
+        for state in caches[name]:
+            state[0].fill_(marker)
+
+    def copy_state(state, block_ids, source_index, token_bias):
+        source = state[block_ids[source_index]]
+        return SimpleNamespace(start_addr=source.data_ptr(), num_elements=source.numel())
+
+    copy_funcs = {specs[name].mamba_type: (copy_state,) * len(specs[name].shapes) for name in state_names}
+    num_states = sum(len(caches[name]) for name in state_names)
+    buffers = SimpleNamespace(offset=0, sizes=SimpleNamespace(np=np.zeros(num_states, dtype=np.int32)))
+    request = SimpleNamespace(block_ids=([0, 1, 2], [0, 1, 2], [0, 1, 2]))
+    context = {name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()}
+    _collect_mamba_copy_meta_torch(buffers, config, copy_funcs, [1], 0, 2, 0, request, context)
+    assert buffers.offset == 7  # Three Conv/SSM pairs and one PLE state.
+    assert buffers.sizes.np.tolist() == [2560, 32768] * 3 + [20480]
+    _do_mamba_copy_block_torch(buffers)
+    for marker, name in enumerate(state_names, 1):
+        for state in caches[name]:
+            assert torch.all(state[2] == marker)
+            assert not torch.count_nonzero(state[1])
+    assert not torch.count_nonzero(caches["model.layers.3.self_attn.indexer.compressed_key_cache"])
