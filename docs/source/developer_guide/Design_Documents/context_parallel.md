@@ -2,11 +2,11 @@
 
 The context parallel features include Prefill Context Parallel (PCP) and Decode Context Parallel (DCP).
 
-Prefill Context Parallel is supported with ModelRunner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). It splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
+Prefill Context Parallel splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
 
 Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
 
-This document describes PCP execution and DCP cache sharding. PCP uses ModelRunner V2 (MRV2); DCP is available in both MRV1 and MRV2. See the [MRV2 PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
+This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
 ## KV-cache layout
 
@@ -18,8 +18,8 @@ For a DCP size of `dcp_size`, a virtual block contains `block_size * dcp_size` t
 
 - `virtual_block_index = x // (block_size * dcp_size)`
 - `offset_in_virtual_block = x % (block_size * dcp_size)`
-- `local_block_index = offset_in_virtual_block // cp_kv_cache_interleave_size`
-- `target_rank = local_block_index % dcp_size`
+- `interleave_index = offset_in_virtual_block // cp_kv_cache_interleave_size`
+- `target_rank = interleave_index % dcp_size`
 
 The slot-mapping calculation uses this layout so each DCP rank stores only its local sequence shard. The current implementation requires `block_size % cp_kv_cache_interleave_size == 0`.
 
@@ -144,8 +144,8 @@ With DCP=PCP, Q heads are already identical within the group. The shared merge p
 GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP, the indexer needs a full-sequence view to select the same sparse top-k blocks as non-DCP SFA, while the much larger SFA KV cache should remain sharded to retain DCP's memory benefit:
 
 - The LightningIndexer cache is replicated on every DCP rank, so index selection uses the complete sequence.
-- The SFA KV cache remains DCP-local. Global indices from the replicated indexer view are remapped to local KV indices before SFA runs.
-- During prefill or a mixed batch, only KV blocks referenced by the sparse block table are compacted and all-gathered after the current layer writes its KV cache.
+- The SFA KV cache remains DCP-local. During decode, global indices from the replicated indexer view are remapped to local KV indices.
+- During prefill or a mixed batch, KV blocks referenced by the request block table are compacted and all-gathered after the current layer writes its KV cache.
 - Decode-only batches retain the DCP SFA Q-gather and result-merge path.
 
 This mode is selected automatically for sparse SFA models when DCP is enabled (`decode_context_parallel_size>1`).
@@ -190,7 +190,7 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - SFA DCP backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
 - DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
 - Upstream PCP groups and virtual batches: `vllm/distributed/parallel_state.py`, `vllm/v1/worker/gpu/pcp_manager.py`
-- MRV2 PCP batch and metadata: `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/v2/attn_utils.py`
-- MRV2 slot mapping: `vllm_ascend/worker/v2/block_table.py`
+- PCP batch and metadata: `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/v2/attn_utils.py`
+- PCP/DCP slot mapping: `vllm_ascend/worker/v2/block_table.py`
 - Backend selection and configuration: `vllm_ascend/platform.py`
 - DSA V4.1 PCP backend: `vllm_ascend/attention/context_parallel/dsa_v41_cp.py`

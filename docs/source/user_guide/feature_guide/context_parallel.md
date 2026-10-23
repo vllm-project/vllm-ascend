@@ -11,9 +11,9 @@ For a general introduction to these two strategies, see the upstream [vLLM Conte
 
 ## Supported Scenarios
 
-### Prefill Context Parallel
+### Prefill Context Parallel { #prefill-context-parallel }
 
-PCP support is experimental and available only with ModelRunner V2. The following table shows the basic backend support and whether each feature can be combined with PCP:
+PCP support is experimental. The following table shows the basic backend support and whether each feature can be combined with PCP:
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Graph Mode + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -43,15 +43,13 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
 - 🟠 **Partial compatibility**: Combining the feature with DCP is supported with the stated limitations.
 
-## Usage
+## Usage { #usage }
 
 ### Prefill Context Parallel
 
-Enable ModelRunner V2 and set `prefill_context_parallel_size` to the number of PCP ranks:
+Set `prefill_context_parallel_size` to the number of PCP ranks:
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <supported-model> \
     --tensor-parallel-size <tp-size> \
     --prefill-context-parallel-size <pcp-size> \
@@ -66,8 +64,8 @@ With PCP enabled, O-projection weight sharding is on by default for SFA-PCP O-pr
 
 #### Speculative Decoding
 
-MRV2 PCP supports MTP with MLA, SFA, and DeepSeek-V4 DSA models, Eagle3 with
-GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models. The target
+PCP supports MTP with MLA, SFA, and DeepSeek-V4 DSA models, Eagle3 with
+GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models. The target
 model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
 model.
@@ -77,8 +75,6 @@ For general speculative decoding configuration and model requirements, see [Spec
 ##### MTP with MLA
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <mtp-capable-mla-model> \
     --tensor-parallel-size 2 \
     --prefill-context-parallel-size 2 \
@@ -90,8 +86,6 @@ vllm serve <mtp-capable-mla-model> \
 ##### Eagle3 with GQA
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <gqa-target-model> \
     --tensor-parallel-size 2 \
     --prefill-context-parallel-size 2 \
@@ -108,13 +102,14 @@ For either method, remove `--enforce-eager` and add the following option to use 
 
 #### Constraints
 
-- PCP is supported only with ModelRunner V2.
 - In P/D disaggregation, enable PCP only on the prefill (`kv_producer`) engine; the decode (`kv_consumer`) engine must use `prefill_context_parallel_size=1`.
+- With PCP, `MooncakeConnectorV1` and `MooncakeHybridConnector` do not support PP. `MooncakeHybridConnector` does not support DCP.
+- For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
-  Eagle3 with GQA models, and DSpark with DeepSeek-V4 and DeepSeek-V4.1 DSA models.
+  Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
-- Encoder-decoder models and LoRA are not supported with MRV2 PCP.
+- Encoder-decoder models and LoRA are not supported with PCP.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
@@ -146,14 +141,14 @@ Standalone DCP reuses only the TP ranks and does not increase the world size.
     - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`
     - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`
 
-#### Combining PCP and DCP
+#### Combining PCP and DCP { #combining-pcp-and-dcp }
 
-When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode_context_parallel_size>1`), their supported sizes depend on the attention backend. The standalone TP constraints above do not apply to this topology. Here, `PCP_SIZE` is `prefill_context_parallel_size`, `DCP_SIZE` is `decode_context_parallel_size`, and `TP_SIZE` is `tensor_parallel_size`:
+When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode_context_parallel_size>1`), their supported sizes depend on the attention backend. The standalone DCP constraints above do not apply to this topology. Here, `PCP_SIZE` is `prefill_context_parallel_size`, `DCP_SIZE` is `decode_context_parallel_size`, and `TP_SIZE` is `tensor_parallel_size`:
 
 - **MLA and SFA**: Support `DCP_SIZE = PCP_SIZE` and `DCP_SIZE = PCP_SIZE * TP_SIZE`.
 - **GQA**: Supports only `DCP_SIZE = PCP_SIZE`. When `TP_SIZE > 1`, `DCP_SIZE = PCP_SIZE * TP_SIZE` is not supported.
 
-PCP still requires ModelRunner V2. DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
+DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
 
 #### KV-cache Transfer
 
