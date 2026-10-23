@@ -3,10 +3,10 @@
 
 import pytest
 import torch
+from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import VitMropeSetup, _vit_mrope_setup_kernel
 from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.patch.worker.patch_mrope_vit_setup import _vit_mrope_setup_kernel, vit_mrope_setup
 
 
 def _reference_positions(grids, merge):
@@ -38,7 +38,7 @@ def _reference_positions(grids, merge):
 @pytest.mark.parametrize("sections", [(21, 21, 21), (16, 24, 24), (0, 16, 16), (32, 32, 32)])
 @torch.inference_mode()
 def test_vit_mrope_setup(grids, merge, sections):
-    """Compile on NPU and compare both the kernel and patched public entry point."""
+    """Compile on NPU and compare both the kernel and registered pluggable layer."""
     init_device_properties_triton()
     inv_cpu = [torch.linspace(0.001, 1.0, size) for size in sections]
     inv = [freq.to("npu") for freq in inv_cpu]
@@ -68,7 +68,9 @@ def test_vit_mrope_setup(grids, merge, sections):
         BLOCK_D=triton.next_power_of_2(half_rot),
         num_warps=8,
     )
-    public_cos, public_sin = vit_mrope_setup(*inv, grids, merge)
+    setup = VitMropeSetup()
+    assert type(setup).__name__ == "AscendVitMropeSetup"
+    public_cos, public_sin = setup(*inv, grids, merge)
     cos, sin, public_cos, public_sin = [value.cpu() for value in (cos, sin, public_cos, public_sin)]
     start = 0
     for axis, size in enumerate(sections):

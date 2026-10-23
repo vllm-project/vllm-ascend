@@ -9,16 +9,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-class TestVitMropeSetupPatch(unittest.TestCase):
+class TestAscendVitMropeSetup(unittest.TestCase):
     def test_launch_grid_matches_block_size(self):
         target = "vllm.model_executor.layers.rotary_embedding.mrope_vit_setup"
         model = "vllm.models.minimax_m3.common.vision_tower"
         for n in (1, 16, 17, 32, 33, 65):
-            for model_loaded in (False, True):
-                with self.subTest(n=n, model_loaded=model_loaded):
+            for alias_loaded in (False, True):
+                with self.subTest(n=n, alias_loaded=alias_loaded):
                     modules = {}
                     names = [target, "vllm.triton_utils", "vllm.utils.torch_utils"]
-                    if model_loaded:
+                    if alias_loaded:
                         names.append(model)
                     for name in names:
                         parts = name.split(".")
@@ -34,24 +34,48 @@ class TestVitMropeSetupPatch(unittest.TestCase):
                     kernel = MagicMock()
                     upstream = modules[target]
                     upstream._vit_mrope_setup_kernel = kernel
+                    registry = {}
+
+                    class VitMropeSetup:
+                        def __new__(cls):
+                            return object.__new__(cls.registry.get(cls.__name__, cls))
+
+                        @classmethod
+                        def register_oot(cls, replacement):
+                            cls.registry[cls.__name__] = replacement
+                            return replacement
+
+                        def __call__(self, *args):
+                            return self.forward(*args)
+
+                    VitMropeSetup.registry = registry
+                    upstream.VitMropeSetup = VitMropeSetup
+                    original_wrapper = MagicMock()
+                    upstream.vit_mrope_setup = original_wrapper
+                    if alias_loaded:
+                        modules[model].VitMropeSetup = VitMropeSetup
                     modules["vllm.triton_utils"].triton = types.SimpleNamespace(
                         cdiv=lambda x, y: (x + y - 1) // y,
                         next_power_of_2=lambda x: 1 << (x - 1).bit_length(),
                     )
                     copy = MagicMock()
                     modules["vllm.utils.torch_utils"].async_tensor_h2d = copy
-                    path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_mrope_vit_setup.py"
-                    spec = importlib.util.spec_from_file_location("_test_vit_mrope_patch", path)
+                    path = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/mrope_vit_setup.py"
+                    spec = importlib.util.spec_from_file_location("_test_ascend_vit_mrope", path)
                     module = importlib.util.module_from_spec(spec)
                     with patch.dict(sys.modules, modules):
                         spec.loader.exec_module(module)
-                        self.assertIs(upstream.vit_mrope_setup, module.vit_mrope_setup)
+                        self.assertIs(upstream.vit_mrope_setup, original_wrapper)
+                        self.assertIs(registry["VitMropeSetup"], module.AscendVitMropeSetup)
                         self.assertIs(upstream._vit_mrope_setup_kernel, kernel)
-                        if model_loaded:
-                            self.assertIs(modules[model].vit_mrope_setup, module.vit_mrope_setup)
+                        if alias_loaded:
+                            self.assertIs(modules[model].VitMropeSetup, VitMropeSetup)
+                        setup_cls = modules[model].VitMropeSetup if alias_loaded else upstream.VitMropeSetup
+                        setup = setup_cls()
+                        self.assertIsInstance(setup, module.AscendVitMropeSetup)
                         inv = MagicMock()
                         inv.numel.return_value = 21
-                        upstream.vit_mrope_setup(inv, inv, inv, [[1, 1, n]], 1)
+                        setup(inv, inv, inv, [[1, 1, n]], 1)
                     kernel.__getitem__.assert_called_once_with(((n + 15) // 16,))
                     args, kwargs = kernel.__getitem__.return_value.call_args
                     self.assertEqual(args[7:9], (n, 1))
