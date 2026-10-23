@@ -108,6 +108,12 @@ change the default runner selection without a documented fallback.
 - No speculative-config or CLI surface is changed by the alignment refactor.
 - `VLLM_USE_V2_MODEL_RUNNER=0` remains the explicit rollback to MRV1.
 - Families without an Ascend V2 speculator continue to fall back to MRV1.
+- `custom_class` proposers are not supported by the Ascend V1 or V2 factories;
+  configurations using them fail explicitly rather than selecting another draft
+  implementation.
+- Plain standalone-AR drafting supports V2 eager execution and target ACL Graph
+  execution, while draft iterations remain eager because upstream standalone-AR
+  graph capture hooks are currently no-ops.
 - If a family-specific V2 regression is found, remove that family from the V2
   supported set and restore the previous V1 route. Do not revert unrelated
   families or shared slot-mapping fixes.
@@ -177,11 +183,12 @@ Current hardware verification uses an Ascend A3 device:
 
 The special `MULTI_KV_CACHE_GROUP_MTP` family is exercised by unit tests in this
 change. The 16-card GLM5.2 MTP-V2 nightly job now runs the family with
-`FULL_DECODE_ONLY`, while the non-V2 MTP job retains eager coverage. Public
-3-layer GLM5.2 test checkpoints are backbone-only and explicitly omit the MTP
-layer, so they are not valid substitutes for that runtime case. DFlash remains
-family-specific CI coverage. CPU-only unit tests are not acceptance evidence for
-NPU attention layouts or graph replay.
+`FULL_DECODE_ONLY`, while the GLM5.2 MRV1 job pins
+`VLLM_USE_V2_MODEL_RUNNER=0` for eager fallback coverage. Public 3-layer GLM5.2
+test checkpoints are backbone-only and explicitly omit the MTP layer, so they are
+not valid substitutes for that runtime case. DFlash remains family-specific CI
+coverage. CPU-only unit tests are not acceptance evidence for NPU attention
+layouts or graph replay.
 
 The nightly refactor gate runs the same fixed prompts against the target model and
 the speculative family in eager and `FULL_DECODE_ONLY` modes. Both paths must
@@ -194,6 +201,11 @@ tokens; ACL Graph numerical drift on the audited MTP model was observed after
 token 20. Each mode is also compared with checked-in baseline goldens
 (`spec_decode_parity_goldens.json`) for exact greedy token IDs and cache layout,
 plus acceptance length and per-position rates within five percent.
+
+Models changed through `SPEC_DECODE_*_MODEL` must still match the recorded
+baseline weights. Set `SPEC_DECODE_VERIFY_GOLDEN=0` when running a different
+compatible model, or refresh the golden file when that model becomes the new
+baseline.
 
 The baseline/candidate benchmark compares the same family in the same execution
 mode. Greedy token IDs over the fixed parity window, cache signature (including
