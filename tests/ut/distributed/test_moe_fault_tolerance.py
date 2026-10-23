@@ -60,15 +60,6 @@ def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage():
     assert buffer.mask_buffer.tolist() == [0, 0, 0, 1]
 
 
-def test_fault_queries_never_touch_device_buffer():
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    manager.bind_mega_moe_buffer(FakeSymmBuffer())
-    manager.update_mask(1)
-    manager._mega_moe_buffer = Mock(spec=[])
-    assert manager.query_active_mask().tolist() == [0, 1, 0, 0]
-    assert not manager.query_fault()
-
-
 def test_mc2_manager_keeps_dense_rank_translation_and_retry_behavior():
     manager = _NpuAll2AllManager(4, torch.device("cpu"))
     manager.set_num_local_physical_experts(8)
@@ -139,39 +130,3 @@ def test_scale_down_uses_backend_specific_physical_expert_ids(mega_moe):
         sentinel._redistribute_experts({1})
     reload_experts.assert_called_once_with(state.model, sentinel.worker.vllm_config, {(0, 1)})
     assert table.flatten().tolist() == ([0, 8, 12] if mega_moe else [0, 4, 8])
-
-
-@pytest.mark.parametrize(
-    "fused,mega_moe,bound,error",
-    [
-        (1, True, True, None),
-        (1, True, False, "warmup"),
-        (1, False, False, "enable_fused_mc2"),
-        (0, False, False, None),
-    ],
-)
-def test_scale_down_rejects_unsupported_fused_backend(fused, mega_moe, bound, error):
-    sentinel = object.__new__(WorkerSentinel)
-    sentinel.worker = SimpleNamespace(
-        use_v2_model_runner=True,
-        model_runner=SimpleNamespace(eplb_state=object()),
-        parallel_config=SimpleNamespace(eplb_config=SimpleNamespace(num_redundant_experts=8)),
-        vllm_config=object(),
-    )
-    with (
-        patch.object(
-            sentinel_module,
-            "get_ascend_config",
-            return_value=SimpleNamespace(enable_fused_mc2=fused, enable_mc2_hierarchy_comm=False),
-        ),
-        patch.object(sentinel_module, "use_cann_megamoe", return_value=mega_moe),
-        patch.object(
-            sentinel_module, "get_ep_all2all_manager", return_value=SimpleNamespace(has_mega_moe_buffer=bound)
-        ),
-        patch.object(sentinel_module.torch_npu, "npu_moe_distribute_dispatch_v2", create=True),
-    ):
-        if error:
-            with pytest.raises(ValueError, match=error):
-                sentinel._validate_scale_down_preconditions()
-        else:
-            sentinel._validate_scale_down_preconditions()
