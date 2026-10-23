@@ -71,6 +71,13 @@ ge::graphStatus Tiling(gert::TilingContext *context)
     tiling.set_lookbackMaskColStride(p[LOOKBACK_MASK_COL_STRIDE]);
     tiling.set_hasCache(has_cache);
     const platform_ascendc::PlatformAscendC platform(context->GetPlatformInfo());
+    if (platform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950) {
+        // Cover the fixed history/arithmetic buffers while leaving UB for SIMT DCache.
+        constexpr uint32_t SIMT_LOCAL_MEMORY_BYTES = 64U * 1024U;
+        if (context->SetLocalMemorySize(SIMT_LOCAL_MEMORY_BYTES) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    }
     const uint32_t cores = std::max<uint32_t>(platform.GetCoreNumAiv(), 1);
     const uint32_t tile_size = SelectTokenTileSize(p[NUM_TOKENS], p[NUM_LAYERS], cores);
     tiling.set_tokenTileSize(tile_size);

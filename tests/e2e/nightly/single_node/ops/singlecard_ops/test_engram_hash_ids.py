@@ -400,6 +400,22 @@ def correctness_cases():
         cases.append(entry(f"tokens-{tokens}-{history}", tokens=tokens, history=history))
     for layers, ngram, heads in itertools.product((1, 2, 5), (1, 2, 4, 7), (1, 3, 7, 8, 9, 17, 33)):
         cases.append(entry(f"shape-L{layers}-N{ngram}-H{heads}", layers=layers, ngram=ngram, heads=heads))
+    # Exercise full and partial SIMT history groups, including persistent blocked state.
+    for ngram, history in itertools.product((8, 9, 16, 17), ("none", "window_only", "cache", "mixed")):
+        cases.append(
+            entry(
+                f"history-groups-N{ngram}-{history}",
+                tokens=33,
+                ngram=ngram,
+                heads=1,
+                depth=ngram,
+                history=history,
+                pattern="window_dead",
+                layout="strided",
+                arithmetic=True,
+                repeats=2,
+            )
+        )
     for index, dtypes in enumerate(DTYPE_CONFIGURATIONS):
         for history, layout in itertools.product(("none", "window", "cache", "mixed"), ("contiguous", "strided")):
             cases.append(
