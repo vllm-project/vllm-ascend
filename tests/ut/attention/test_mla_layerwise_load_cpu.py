@@ -91,6 +91,19 @@ def make_forward(path, batch, wait):
     if path == "strided_fallback":
         cache = tuple(tensor.transpose(0, 1) for tensor in cache)
     writes = []
+    execution_order = []
+
+    def connector_wait(layer_name):
+        execution_order.append("connector_wait")
+        wait(layer_name)
+
+    def project(hidden):
+        execution_order.append("projection")
+        return (torch.zeros(hidden.shape[0], 6),)
+
+    def project_kv(hidden):
+        execution_order.append("projection")
+        return (torch.zeros(hidden.shape[0], 4),)
 
     def decode_result(q, pe, k, kr, **kwargs):
         return SimpleNamespace(ql_nope=q, q_pe=pe, k_nope=k, k_pe=kr, **kwargs)
@@ -100,6 +113,7 @@ def make_forward(path, batch, wait):
 
     def record_write(kind):
         assert wait.call_count == 1, "KV access must follow exactly one connector wait"
+        execution_order.append("cache_access")
         writes.append(kind)
 
     def decode(*_args):
@@ -119,7 +133,8 @@ def make_forward(path, batch, wait):
         "torch": torch,
         "_EXTRA_CTX": SimpleNamespace(num_tokens=tokens),
         "MLAPO_MAX_SUPPORTED_TOKENS": 16,
-        "wait_for_kv_layer_from_connector": wait,
+        "wait_for_kv_layer_from_connector": connector_wait,
+        "execution_order": execution_order,
         "notify_kv_cache_written": Mock(),
         "maybe_save_kv_layer_to_connector": Mock(),
         "DecodeMLAPreprocessResult": decode_result,
@@ -149,7 +164,8 @@ def make_forward(path, batch, wait):
         _prefill_requires_current_kv=lambda _: False,
         _cache_requires_prolog_v3_writer=lambda _: path == "prolog",
         _uses_strided_kv_adapter=lambda: path == "strided_fallback",
-        fused_qkv_a_proj=lambda hidden: (torch.zeros(hidden.shape[0], 6),),
+        fused_qkv_a_proj=project,
+        kv_a_proj_with_mqa=project_kv,
         q_a_layernorm=lambda x: x,
         q_proj=lambda x: (torch.zeros(x.shape[0], 4),),
         kv_b_proj=lambda x: (torch.zeros(x.shape[0], 4),),
@@ -204,15 +220,42 @@ def test_layer_load_consumed_once_before_any_mla_cache_access(path, has_load, ba
         if has_load:
             event.set()
         wait.reset_mock()
+        scope["execution_order"].clear()
         output = torch.empty(metadata.num_actual_tokens, 2)
         impl.forward(impl.layer_name, torch.zeros(metadata.num_actual_tokens, 2), cache, metadata, output)
         wait.assert_called_once_with(impl.layer_name)
+        order = scope["execution_order"]
+        assert order.index("connector_wait") < order.index("cache_access")
+        if path in ("native", "strided_fallback"):
+            assert order.index("projection") < order.index("connector_wait")
         assert not event.is_set()
         torch.testing.assert_close(output, torch.ones_like(output))
     assert writes
     assert tracked_event.wait.call_count == (2 if has_load else 0)
     assert tracked_event.clear.call_count == 2
     assert scope["maybe_save_kv_layer_to_connector"].call_count == 2
+
+
+@pytest.mark.parametrize("path", ["native", "strided_fallback"])
+@pytest.mark.parametrize("fused_projection", [False, True])
+@pytest.mark.parametrize("batch", ["decode", "prefill", "mixed"])
+def test_native_projections_stay_before_connector_and_kvpp_waits(path, fused_projection, batch):
+    wait = Mock()
+    impl, metadata, cache, _, scope = make_forward(path, batch, wait)
+    if not fused_projection:
+        impl.fused_qkv_a_proj = None
+    order = scope["execution_order"]
+    impl.layerwise_kv_cache_hook = SimpleNamespace(wait_for_layer=lambda _: order.append("kvpp_wait"))
+    impl.forward(
+        impl.layer_name,
+        torch.zeros(metadata.num_actual_tokens, 2),
+        cache,
+        metadata,
+        torch.empty(metadata.num_actual_tokens, 2),
+    )
+    assert order[:3] == ["projection", "connector_wait", "kvpp_wait"]
+    assert order[3:] == ["cache_access"] * (2 if batch == "mixed" else 1)
+    wait.assert_called_once_with(impl.layer_name)
 
 
 def test_profile_run_does_not_wait_for_connector():
