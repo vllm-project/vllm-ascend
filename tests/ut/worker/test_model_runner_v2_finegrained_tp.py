@@ -359,6 +359,8 @@ def test_execute_model_dummy_skips_join_when_gated_off():
 
     def _run(dummy_run, is_profile=False, lmhead=True, last_pp=True):
         runner.is_last_pp_rank = last_pp
+        scheduler = MagicMock()
+        scheduler.total_num_scheduled_tokens = 0
         with (
             patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=lmhead),
             patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
@@ -366,7 +368,7 @@ def test_execute_model_dummy_skips_join_when_gated_off():
             patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
             patch.object(NPUModelRunner.__bases__[0], "execute_model", side_effect=super_execute),
         ):
-            runner.execute_model(MagicMock(), dummy_run=dummy_run, is_profile=is_profile)
+            runner.execute_model(scheduler, dummy_run=dummy_run, is_profile=is_profile)
         runner.model.compute_logits.assert_not_called()
         runner.model.compute_logits.reset_mock()
 
@@ -1008,6 +1010,7 @@ def test_capture_clears_stashed_request_count():
     publish falls back to the raw synced max / static bound."""
     spec = _make_speculator(num_speculative_steps=1)  # early-return path
     spec.last_token_indices = torch.zeros(8, dtype=torch.int64)
+    spec.idx_mapping = torch.zeros(8, dtype=torch.int64)
     spec.prefill_cudagraph_manager = MagicMock()
     spec.prefill_cudagraph_manager.use_breakable_cg = False
     spec.model_state = MagicMock()
