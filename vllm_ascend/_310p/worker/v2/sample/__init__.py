@@ -1,15 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
-"""Triton-free MRV2 sample ops for Ascend 310P.
-
-API names mirror mainline ``vllm_ascend.worker.v2.sample`` / upstream MRV2 so
-``Ascend310PSampler`` stays thin. Implementations are PyTorch-only; do **not**
-import Triton kernels from mainline ``worker/v2/sample``.
-
-Reusable from mainline without modification:
-- ``apply_top_k_top_p_npu`` (PyTorch path under ``worker/v2/sample``)
-"""
+"""Triton-free MRV2 sample ops for 310P. Reuses ``apply_top_k_top_p_npu`` from mainline."""
 
 from vllm_ascend._310p.worker.v2.sample.logprob import gather_logprobs
 from vllm_ascend._310p.worker.v2.sample.min_p import apply_min_p

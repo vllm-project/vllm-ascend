@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Triton-free allowed_token_ids mask helpers for 310P MRV2."""
+"""Triton-free allowed_token_ids mask helpers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ def materialize_allowed_mask(
     allowed: list[int],
     vocab_size: int,
 ) -> None:
-    """Fill ``mask[req_idx]``: True = disallowed (masked to -inf)."""
     mask[req_idx] = True
     ids = torch.tensor(allowed, dtype=torch.int64, device=mask.device)
     ids = ids[(ids >= 0) & (ids < vocab_size)]
@@ -26,6 +25,4 @@ def apply_allowed_token_ids(
     allowed_mask: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
 ) -> None:
-    """Mask disallowed tokens to -inf (MRV1 allowed_token_ids_mask)."""
-    row_mask = allowed_mask[expanded_idx_mapping]
-    logits.masked_fill_(row_mask, float("-inf"))
+    logits.masked_fill_(allowed_mask[expanded_idx_mapping], float("-inf"))

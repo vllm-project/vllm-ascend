@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Triton-free logit_bias for 310P MRV2."""
+"""Triton-free logit_bias."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ def apply_logit_bias(
     logit_bias: dict[int, dict[int, float]],
     use_logit_bias: np.ndarray,
 ) -> None:
-    """Add per-token logit biases (MRV1 LogitBiasLogitsProcessor)."""
     expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
     for row_idx, req_idx in enumerate(expanded_np.tolist()):
         req_idx = int(req_idx)

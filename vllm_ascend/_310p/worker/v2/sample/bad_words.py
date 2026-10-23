@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
-"""Triton-free bad_words for 310P MRV2.
-
-Reuses ``vllm.v1.sample.ops.bad_words.apply_bad_words`` (same as MRV1).
-Does not import mainline Ascend MRV2 Triton ``worker/v2/sample/bad_words``.
-"""
+"""Triton-free bad_words; reuses ``vllm.v1.sample.ops.bad_words.apply_bad_words``."""
 
 from __future__ import annotations
 
@@ -26,7 +22,7 @@ def apply_bad_words(
     input_ids: torch.Tensor | None = None,
     expanded_local_pos: torch.Tensor | None = None,
 ) -> None:
-    """Ban completing bad-word sequences (MRV1 ``apply_bad_words``)."""
+    """Ban completing bad-word sequences (past tokens from CPU req_states)."""
     expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
     local_pos_np = None if expanded_local_pos is None else expanded_local_pos.detach().to("cpu").numpy()
     input_ids_cpu = None if input_ids is None else input_ids.detach().to("cpu")

@@ -2,12 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
 
-"""Triton-free MRV2 sampler for Ascend 310P.
-
-Post-process ops live under ``_310p/worker/v2/sample/`` (PyTorch-only) or are
-reused from mainline when already Triton-free (``apply_top_k_top_p_npu``,
-upstream ``use_penalty``). Random sampling reuses MRV1 ``_random_sample_310p``.
-"""
+"""Triton-free Ascend310PSampler: ``sample/`` ops + mainline ``apply_top_k_top_p_npu``."""
 
 from __future__ import annotations
 
@@ -51,14 +46,7 @@ _SAMPLING_EPS = 1e-5
 
 
 class Ascend310PSampler:
-    """Triton-free sampler for 310P MRV2 with MRV1-aligned post-processing.
-
-    Exposes ``sampling_states.temperature/seeds/top_k/top_p/min_p`` so MTP draft
-    ``propose()`` can read device buffers without UVA SamplingStates.
-    """
-
-    # TODO: Refactor this sampler to register 310P implementations through
-    # Triton Dispatcher after vLLM RFC #45133 lands.
+    """310P MRV2 sampler; exposes ``sampling_states.*`` for MTP draft propose()."""
 
     def __init__(
         self,

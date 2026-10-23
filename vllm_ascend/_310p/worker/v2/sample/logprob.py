@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
-"""Triton-free logprobs gather for 310P MRV2 (raw_logprobs mode).
-
-Mirrors ``vllm.v1.sample.sampler.Sampler.gather_logprobs`` layout without
-depending on CUDA/dynamo helpers used by the upstream staticmethod.
-Mainline Ascend MRV2 ``worker/v2/sample/logprob.py`` is Triton — not imported.
-"""
+"""Triton-free logprobs gather (MRV1 raw_logprobs layout)."""
 
 from __future__ import annotations
 
@@ -19,7 +14,6 @@ def gather_logprobs(
     num_logprobs: int,
     token_ids: torch.Tensor,
 ) -> LogprobsTensors:
-    """Gather sampled + top-k logprobs (MRV1 ``raw_logprobs`` layout)."""
     token_ids_i64 = token_ids.to(torch.int64).view(-1, 1)
     token_logprobs = logprobs.gather(-1, token_ids_i64)
     token_ranks = (logprobs > token_logprobs).sum(dim=-1).to(torch.int32)
