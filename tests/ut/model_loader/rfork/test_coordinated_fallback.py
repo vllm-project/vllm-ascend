@@ -26,12 +26,12 @@ def cluster(request, monkeypatch):
     values = [torch.zeros(1, dtype=torch.int32) for _ in range(size)]
     rendezvous = threading.Barrier(size, timeout=3)
     construction = threading.Barrier(size, timeout=3)
-    group = object()
-    world = SimpleNamespace(cpu_group=group, world_size=size)
+    cpu_group = object()
+    world = SimpleNamespace(cpu_group=cpu_group, world_size=size)
     monkeypatch.setattr(sys.modules["vllm.distributed.parallel_state"], "get_world_group", lambda: world, raising=False)
 
-    def reduce(tensor, op, process_group):
-        assert process_group is world.cpu_group
+    def reduce(tensor, op, group):
+        assert group is world.cpu_group
         values[local.rank] = tensor
         rendezvous.wait()
         numbers = [int(value.item()) for value in values]

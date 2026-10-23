@@ -138,7 +138,12 @@ def rfork_helpers(monkeypatch, local_weights):
     install("vllm.config", ModelConfig=object, VllmConfig=object)
     install("vllm.config.load", LoadConfig=object)
     install("vllm.distributed", get_tensor_model_parallel_rank=lambda: 0)
-    install("vllm.distributed.parallel_state", get_ep_group=lambda: None, get_pp_group=lambda: None)
+    install(
+        "vllm.distributed.parallel_state",
+        get_ep_group=lambda: None,
+        get_pp_group=lambda: None,
+        get_world_group=lambda: SimpleNamespace(world_size=1, cpu_group=None),
+    )
     install("vllm.logger", logger=logging.getLogger("rfork-restored-lifecycle-test"))
 
     package("vllm.model_executor")
