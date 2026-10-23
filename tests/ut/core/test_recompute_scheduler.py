@@ -381,34 +381,59 @@ def test_first_request_preserves_ascend_speculative_padding_without_cached_token
     assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
 
 
-@pytest.mark.parametrize("running", [False, True])
-def test_schedule_multimodal_inputs_with_duplicate_cache_tracking(running):
-    """Exercise the real upstream five-value API on waiting and running paths."""
+def _make_mm_recompute_scheduler():
     config = make_dyntra_test_config(block_size=16)
     config.kv_transfer_config = None
     config.cache_config.enable_prefix_caching = False
     scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
     config.model_config.hf_config.vision_config = SimpleNamespace(num_heads=1, hidden_size=1, intermediate_size=1)
     config.ec_manager_config.manager_config = {"cpu_cache_slots": 8}
-    manager = ScoreEncoderCacheManager(8, config)
-    scheduler.encoder_cache_manager = manager
+    scheduler.encoder_cache_manager = ScoreEncoderCacheManager(8, config)
     scheduler.max_num_encoder_input_tokens = 32
-    scheduler.max_num_scheduled_tokens = 2 if running else 8
-    second_identifier = "second" if running else "shared"
-    request = make_mm_request("mm", [("shared", [True, True]), (second_identifier, [True, True])])
+    return scheduler
+
+
+def test_waiting_multimodal_duplicate_cache_tracking():
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 8
+    request = make_mm_request("mm", [("shared", [True, True]), ("shared", [True, True])])
     scheduler.add_request(request)
+
     output = scheduler.schedule()
-    if running:
-        assert output.scheduled_encoder_inputs[request.request_id] == [0]
-        runner_output = create_model_runner_output([request])
-        runner_output.sampled_token_ids = [[]]
-        scheduler.update_from_output(output, runner_output)
-        assert request in scheduler.running
+
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+    manager = scheduler.encoder_cache_manager
+    assert manager.request_cached_ids[request.request_id] == {0, 1}
+    assert manager.cpu_num_free_slots == 6
+    assert output.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
+    manager._check_invariant()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in manager.request_cached_ids
+    assert not manager.cached["shared"]
+    manager._check_invariant()
+
+
+def test_running_multimodal_duplicate_cache_tracking():
+    scheduler = _make_mm_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 2
+    request = make_mm_request("mm", [("first", [True, True]), ("shared", [True, True]), ("shared", [True, True])])
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert first.scheduled_encoder_inputs[request.request_id] == [0]
+    runner_output = create_model_runner_output([request])
+    runner_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(first, runner_output)
+    assert request in scheduler.running
+    scheduler.max_num_scheduled_tokens = 4
+    with patch.object(scheduler, "_allocate_encoder_inputs", wraps=scheduler._allocate_encoder_inputs) as allocate:
         output = scheduler.schedule()
-    assert output.scheduled_encoder_inputs[request.request_id] == ([1] if running else [0])
-    assert 1 in manager.request_cached_ids[request.request_id]
-    if not running:
-        assert manager.request_cached_ids[request.request_id] == {0, 1}
-        assert manager.cpu_num_free_slots == 6
-        assert output.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
+
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+    allocate.assert_called_once_with(request, [1], [2])
+    manager = scheduler.encoder_cache_manager
+    assert {1, 2} <= manager.request_cached_ids[request.request_id]
+    manager._check_invariant()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in manager.request_cached_ids
+    assert not manager.cached["shared"]
     manager._check_invariant()

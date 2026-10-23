@@ -612,7 +612,7 @@ class RecomputeScheduler(Scheduler):
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
-                duplicate_encoder_inputs: list[int] = []
+                duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
 
