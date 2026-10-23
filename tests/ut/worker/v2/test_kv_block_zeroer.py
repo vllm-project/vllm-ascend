@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.worker.v2 import utils as v2_utils
 from vllm_ascend.worker.v2.attn_utils import _reshape_combined_mla_kv_cache
 
@@ -70,6 +71,37 @@ def test_nonempty_components_and_exclusions_are_preserved(zeroer_factory):
         groups = call.kwargs["attn_groups_iter"]
         assert groups[0].layer_names == ["live"]
         assert call.kwargs["static_forward_context"]["live"].kv_cache is tensor
+
+
+@pytest.mark.parametrize("outer", [tuple, list])
+@pytest.mark.parametrize("inner", [tuple, list])
+@pytest.mark.parametrize("case", ["allocated", "empty", "all_empty", "none", "alias"])
+def test_single_slot_cache_components_are_unwrapped(zeroer_factory, outer, inner, case):
+    cls, parent = zeroer_factory
+    raw = torch.ones(4, 1, 1, 8)
+    key, scale, empty = raw[..., :4], raw[..., 4:], raw[..., :0]
+    components, expected = {
+        "allocated": ([key, scale], [key, scale]),
+        "empty": ([key, empty], [key]),
+        "all_empty": ([empty, empty], []),
+        "none": ([None, scale], [scale]),
+        "alias": ([key, scale, raw], [key, scale, raw]),
+    }[case]
+    views = inner(components)
+    layer = SimpleNamespace()
+    DeepseekV41CacheLayer.bind_kv_cache(layer, views)
+    layer.kv_cache = outer(layer.kv_cache)
+    binding = layer.kv_cache
+    group = _group(["layer"])
+
+    zeroer = cls(torch.device("cpu"), [group], [1], {"layer": layer}, 4)
+
+    assert len(zeroer._zeroers) == parent.call_count == len(expected)
+    for call, tensor in zip(parent.call_args_list, expected):
+        assert call.kwargs["static_forward_context"]["layer"].kv_cache is tensor
+    assert layer.kv_cache is binding
+    assert layer.kv_cache[0] is views
+    assert group.layer_names == ["layer"]
 
 
 def _group(names):
