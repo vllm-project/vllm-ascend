@@ -171,38 +171,38 @@ def dense_draft_attention(
 ) -> torch.Tensor:
     """Consume the device exact mask without a Host exact-length consumer.
 
-    Keep scores/probabilities in FP32: fused BF16 attention lost small
-    cancellation results in a controlled real-layer same-window comparison.
-    All intermediates are private and retained before their next consumer.
+    Keep native inputs in FP32: fused BF16 attention lost small cancellation
+    results in a controlled real-layer same-window comparison. The native FA
+    consumer uses the device mask and padded initialized KV, without reading
+    exact lengths on Host or explicitly expanding GQA heads. All private
+    operands and returned workspaces remain owned through reader completion.
     """
+    # Lazy import keeps leaf planning/ownership usable in CPU-only tests.
+    import torch_npu
+
     keys, values = gather_dense_draft_kv(read, key_cache, value_cache)
     query = query[: read.num_reqs * read.query_width].reshape(read.num_reqs, read.query_width, *query.shape[-2:])
-    queries_fp32 = query.transpose(1, 2).float()
-    read.retain(queries_fp32)
-    keys_fp32, values_fp32 = keys.transpose(1, 2).float(), values.transpose(1, 2).float()
-    read.retain(keys_fp32, values_fp32)
-    repeats = query.shape[-2] // keys.shape[-2]
-    if repeats != 1:
-        keys_fp32 = keys_fp32.repeat_interleave(repeats, dim=1)
-        read.retain(keys_fp32)
-        values_fp32 = values_fp32.repeat_interleave(repeats, dim=1)
-        read.retain(values_fp32)
-    scores = torch.matmul(queries_fp32, keys_fp32.transpose(-1, -2))
-    read.retain(scores)
-    scores.mul_(scale).masked_fill_(read.mask, -torch.inf)
-    empty_rows = None
+    queries_fp32 = query.float().contiguous()
+    keys_fp32, values_fp32 = keys.float().contiguous(), values.float().contiguous()
+    read.retain(queries_fp32, keys_fp32, values_fp32)
+    outputs = torch_npu.npu_fusion_attention(
+        queries_fp32,
+        keys_fp32,
+        values_fp32,
+        head_num=query.shape[-2],
+        input_layout="BSND",
+        atten_mask=read.mask,
+        scale=scale,
+        keep_prob=1.0,
+        sparse_mode=0,
+        inner_precise=0,
+    )
+    read.retain(*outputs)
+    result = outputs[0]
     if read.may_have_empty_rows:
-        empty_rows = read.mask.all(-1, keepdim=True)
+        empty_rows = read.mask.all(-1, keepdim=True).transpose(1, 2)
         read.retain(empty_rows)
-        scores.masked_fill_(empty_rows, 0)
-    probabilities = scores.softmax(-1)
-    read.retain(probabilities)
-    if empty_rows is not None:
-        probabilities.masked_fill_(empty_rows, 0)
-    result = torch.matmul(probabilities, values_fp32)
-    read.retain(result)
-    if empty_rows is not None:
         result.masked_fill_(empty_rows, 0)
-    output = result.transpose(1, 2).to(query.dtype).flatten(0, 1)
+    output = result.to(query.dtype).flatten(0, 1)
     read.retain(output)
     return output
