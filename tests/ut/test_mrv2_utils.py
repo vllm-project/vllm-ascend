@@ -44,15 +44,23 @@ def test_environment_override_wins(monkeypatch, env_value):
                 architectures=["UnknownModel"],
             )
         ),
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="unknown_method",
-                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
-            )
-        ),
         SimpleNamespace(lora_config=object()),
         SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: False,
+                use_step3p5_mtp=lambda: False,
+                draft_model_config=SimpleNamespace(
+                    architectures=[],
+                    hf_config=SimpleNamespace(
+                        model_type="glm5_next_mtp",
+                        architectures=["Glm5NextMTPModel"],
+                    ),
+                ),
+            )
+        ),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
                 method="dflash",
@@ -60,6 +68,7 @@ def test_environment_override_wins(monkeypatch, env_value):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
         SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
@@ -93,11 +102,12 @@ def test_environment_override_wins(monkeypatch, env_value):
         "empty-config",
         "no-model",
         "unknown-attention-free-generate",
-        "dynamic-unsupported-speculation",
         "lora",
         "parallel-drafting",
         "eagle3-without-parallel-drafting",
+        "multi-kv-group-mtp",
         "dflash2-eager",
+        "draft-model",
         "hy3-preview",
         "hy3-preview-architecture",
         "gemma4-causal",
@@ -149,7 +159,22 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="medusa")),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="unknown_method")),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: True,
+                use_step3p5_mtp=lambda: False,
+            )
+        ),
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                use_gemma4_mtp=lambda: False,
+                use_step3p5_mtp=lambda: True,
+            )
+        ),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle", parallel_drafting=True)),
     ],
@@ -167,7 +192,10 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
-        "draft-model-speculative-decoding",
+        "medusa-speculative-decoding",
+        "unsupported-speculative-decoding",
+        "gemma4-mtp-speculative-decoding",
+        "step3p5-mtp-speculative-decoding",
         "p-eagle",
         "p-eagle-method-eagle",
     ],
@@ -245,6 +273,21 @@ def test_blacklist_logs_fallback(monkeypatch):
     assert use_v2_model_runner(config) is False
     assert len(warning_calls) == 1
     assert "dflash2 graph" in warning_calls[0][1]
+
+
+def test_dflash2_graph_gate_uses_shared_family_resolver(monkeypatch):
+    seen = []
+    speculative_config = SimpleNamespace(method="dflash", enforce_eager=False)
+    vllm_config = SimpleNamespace(speculative_config=speculative_config)
+
+    def is_dflash2_draft(config, method=None):
+        seen.append(config)
+        return True
+
+    monkeypatch.setattr("vllm_ascend.worker.spec_decode_family.is_dflash2_draft", is_dflash2_draft)
+
+    assert mrv2_utils._spec_decode_reasons(vllm_config, speculative_config) == ["dflash2 graph"]
+    assert seen == [speculative_config]
 
 
 def test_validation_is_decoupled_from_upstream():
