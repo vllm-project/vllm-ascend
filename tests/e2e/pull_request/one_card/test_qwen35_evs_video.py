@@ -15,13 +15,23 @@
 
 import os
 
-from vllm.assets.video import VideoAsset
+import numpy as np
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 MODEL = os.environ.get("QWEN35_EVS_MODEL", "/workspace/shared_assets/models/Qwen/Qwen3.5-2B")
-VIDEO = VideoAsset("baby_reading", num_frames=8)
 PROMPT = "Describe what happens in this video in one sentence."
+
+
+def _synthetic_video() -> np.ndarray:
+    frames = []
+    for index in range(8):
+        frame = np.zeros((64, 64, 3), dtype=np.uint8)
+        frame[:, :, 0] = index * 24
+        frame[:, :, 1] = 255 - index * 24
+        frame[index * 4 : index * 4 + 16, :, :] = 255
+        frames.append(frame)
+    return np.stack(frames)
 
 
 @wait_until_npu_memory_free()
@@ -37,14 +47,14 @@ def test_qwen35_video_pruning_reduces_visual_tokens_and_stays_stable():
     with VllmRunner(MODEL, video_pruning_rate=0.0, **common) as baseline:
         baseline_outputs = baseline.generate_greedy(
             prompts=[PROMPT],
-            videos=[VIDEO.np_ndarrays],
+            videos=[_synthetic_video()],
             max_tokens=32,
         )
 
     with VllmRunner(MODEL, video_pruning_rate=0.75, **common) as pruned:
         pruned_outputs = pruned.generate_greedy(
             prompts=[PROMPT],
-            videos=[VIDEO.np_ndarrays],
+            videos=[_synthetic_video()],
             max_tokens=32,
         )
 
