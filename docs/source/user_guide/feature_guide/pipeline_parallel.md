@@ -288,12 +288,13 @@ layers with a custom partition. `draft_tensor_parallel_size` controls only the
 draft model's TP size; it does not define a draft-model PP partition.
 
 The following matrix lists the features that can be stacked with PP on
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,
-"supported" means the combination is enabled in code and exercised by CI.
+Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual
+feature combination with PP and remains subject to the model and hardware
+requirements in the relevant feature guide.
 
 | Feature stacked with PP | Support |
 | --- | --- |
-| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY`; validated with MTP stacks. |
+| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and `PIECEWISE`; `FULL_DECODE_ONLY` is validated with MTP stacks. |
 | MTP | Supported. |
 | EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model Runner V2 restriction is lifted for these architectures. |
 | DFlash | Not supported. |
@@ -304,6 +305,13 @@ Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,
 | KV offloading (Sparse KV Cache Offload) | Supported with the layerwise connector. |
 | Prefix caching | Supported. |
 | Pooling | Supported. |
+| KV Cache Pool | Supported. |
+| Lmhead TP | Supported. |
+| MLAPO | Supported. |
+| Multimodal inputs (mm) | Supported. |
+| Shared Expert DP | Supported. |
+| Quantization | Supported for all quantization methods available for the model and hardware, including W4A4, W4A8, and W8A8. |
+| Weight NZ | Supported. |
 | P/D disaggregation | Supported with PP on the Prefill node only; the Decode node must use `PP1`. |
 | Async scheduling | Supported. |
 | Sequence parallelism | Supported. |
