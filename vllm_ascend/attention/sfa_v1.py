@@ -29,6 +29,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.prolog_query import normalize_prolog_query, prolog_query_unsupported_reasons
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -479,6 +480,22 @@ def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
         cached = (slots, slots.to(torch.int64))
         attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
     return cached[1]
+
+
+def _prolog_kv_slots(slots: torch.Tensor, attn_metadata: M, num_tokens: int) -> torch.Tensor:
+    """Match the final input prefix without changing shared slot metadata.
+
+    Convert before slicing so every layer reuses the per-step int64 copy.
+    ``num_tokens`` is the input row count, including padding during FULL
+    graph execution; invalid-slot write semantics belong to the operator.
+    """
+    if slots.ndim != 1 or num_tokens < 0 or slots.numel() < num_tokens:
+        raise ValueError(
+            "SFA Prolog V3 requires a one-dimensional slot mapping covering "
+            f"all input rows, got slots={tuple(slots.shape)} and token_x={num_tokens}."
+        )
+    slots_i64 = _int64_kv_slots(slots, attn_metadata)
+    return slots_i64 if slots_i64.numel() == num_tokens else slots_i64[:num_tokens]
 
 
 @dataclass
@@ -1015,6 +1032,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._quant_type = type(quant_method) if quant_method is not None else None
 
         pp_type = self._fused_preprocess_type()
+        if hasattr(self, "_fused_preprocess_planned_type"):
+            planned = self._fused_preprocess_planned_type
+            if planned is None:
+                # Native-owned weights must not be switched to fusion later
+                # merely because a post-load attribute now appears supported.
+                return PreprocessType.NATIVE
+            if pp_type is not planned:
+                raise RuntimeError(
+                    "SFA preprocessing eligibility changed after weight management was marked. "
+                    "Reload with a consistent configuration; native fallback is not safe here."
+                )
         if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
             return pp_type
         return PreprocessType.NATIVE
@@ -1051,6 +1079,8 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)
         if reasons:
+            if getattr(self, "_fused_preprocess_planned_type", None) is pp_type:
+                raise RuntimeError("SFA fused weight plan is no longer supported: " + "; ".join(reasons))
             for msg in reasons:
                 logger.warning_once(msg)
             return False
@@ -1077,8 +1107,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # unquantized indexer, including layers that later toggle skip_topk.
             if self.has_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
-                if not hasattr(wq_b, "weight_scale"):
-                    reasons.append("PROLOG_V3 requires a quantized indexer query projection.")
+                reasons.extend(prolog_query_unsupported_reasons(wq_b, self.q_lora_rank, qt))
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
             if qt is None and self.enable_sparse_sfa_c8:
@@ -1494,15 +1523,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         q_pe = q_pe.view(-1, num_h, self.qk_rope_head_dim)
 
         if self.has_indexer:
-            if q_c is None:
-                raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
-            q_c = q_c.view(-1, self.q_lora_rank)
-            if q_c_scale is not None:
-                if qt is AscendW8A8MXFP8DynamicLinearMethod:
-                    q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
-                    q_c = (q_c, q_c_scale)
-                else:
-                    q_c = (q_c, q_c_scale.view(-1))
+            q_c = normalize_prolog_query(
+                q_c,
+                q_c_scale,
+                hidden_states.shape[0],
+                self.q_lora_rank,
+                mxfp8=qt is AscendW8A8MXFP8DynamicLinearMethod,
+            )
         elif self._quant_type is None:
             q_c = None
 
@@ -2019,10 +2046,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
-                    # the per-step conversion so all layers of a step share
-                    # one Cast kernel (the .to() inside is a no-op on int64).
-                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
+                    # Match the already-trimmed input while reusing the
+                    # per-step int64 conversion across layers. FULL graph
+                    # inputs retain their padding rows and slot entries.
+                    slot_mapping=_prolog_kv_slots(slot_mapping_sfa, attn_metadata, hidden_states.shape[0]),
                     attn_metadata=attn_metadata,
                 )
             else:
