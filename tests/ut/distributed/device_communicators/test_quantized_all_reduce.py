@@ -46,9 +46,7 @@ def _make(
 ) -> QuantizedAllReduce:
     """Build a wrapper; raises RuntimeError on unvalidated configs."""
     with (
-        patch.dict(
-            os.environ, {"VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": str(min_numel)}
-        ),
+        patch.dict(os.environ, {"VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": str(min_numel)}),
         patch(
             "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
             return_value=device_type,
@@ -92,10 +90,14 @@ class TestQuantizedAllReduce(unittest.TestCase):
     def test_small_message_skips_quantization(self):
         wrapper = _make(min_numel=8)
         x = torch.randn(2, 3, dtype=torch.bfloat16)  # numel=6 < 8
-        with patch("torch.distributed.all_reduce") as mock_ar, patch(
-            "torch_npu.npu_quantize"
-        ) as mock_q, patch("torch_npu.npu_anti_quant") as mock_aq:
+        with (
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize") as mock_q,
+            patch("torch_npu.npu_anti_quant") as mock_aq,
+        ):
             out = wrapper.all_reduce(x)
+            # small messages fall back to a plain bf16 all-reduce
+            mock_ar.assert_called_once()
             mock_q.assert_not_called()
             mock_aq.assert_not_called()
             self.assertTrue(out is x)
@@ -106,11 +108,11 @@ class TestQuantizedAllReduce(unittest.TestCase):
 
         q_fake = torch.zeros(4, 8, dtype=torch.int8)
         deq_fake = torch.randn_like(x)
-        with patch("torch.distributed.all_reduce") as mock_ar, patch(
-            "torch_npu.npu_quantize", return_value=q_fake
-        ) as mock_q, patch(
-            "torch_npu.npu_anti_quant", return_value=deq_fake
-        ) as mock_aq:
+        with (
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", return_value=q_fake) as mock_q,
+            patch("torch_npu.npu_anti_quant", return_value=deq_fake) as mock_aq,
+        ):
             out = wrapper.all_reduce(x)
             # two all-reduces happen: per-channel amax sync + int8 payload
             self.assertEqual(mock_ar.call_count, 2)
@@ -150,18 +152,18 @@ class TestQuantizedAllReduce(unittest.TestCase):
             captured.setdefault("payload", []).append(t.clone())
 
         q_fake = torch.full((4, 8), wrapper.max_q, dtype=torch.int8)
-        with patch("torch.distributed.all_reduce", side_effect=fake_ar), patch(
-            "torch_npu.npu_quantize", return_value=q_fake
-        ) as mock_q, patch(
-            "torch_npu.npu_anti_quant",
-            return_value=torch.randn_like(x),
-        ) as mock_aq:
+        with (
+            patch("torch.distributed.all_reduce", side_effect=fake_ar),
+            patch("torch_npu.npu_quantize", return_value=q_fake) as mock_q,
+            patch(
+                "torch_npu.npu_anti_quant",
+                return_value=torch.randn_like(x),
+            ) as mock_aq,
+        ):
             wrapper.all_reduce(x)
         # scale handed to npu_quantize must be global_amax / max_q = 1 / 31
         scale = mock_q.call_args.args[1]
-        self.assertTrue(
-            torch.allclose(scale, torch.full_like(scale, 1.0 / wrapper.max_q))
-        )
+        self.assertTrue(torch.allclose(scale, torch.full_like(scale, 1.0 / wrapper.max_q)))
         # [0] = amax fp32 sync, [1] = int8 payload; payload is exactly what
         # npu_quantize produced, i.e. nothing clamped it afterwards
         payload = captured["payload"][1]
