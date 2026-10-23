@@ -15,7 +15,6 @@ Dequantization:
 """
 
 import torch
-from vllm.logger import logger
 
 
 # OSCAR clip ratios (from previous agent's tuning)
@@ -43,10 +42,15 @@ def oscar_quantize_int2(
 
     # Step 1: Clip outliers per token-head
     clip_idx = int(clip_ratio * head_dim)
+    assert clip_idx >= 1, (
+        f"clip_ratio={clip_ratio} yields clip_idx=0 for head_dim={head_dim}; "
+        "need clip_ratio >= 1/head_dim so at least one value survives clipping"
+    )
     abs_x = x.abs()
-    # Sort along head_dim to find threshold
-    sorted_abs, _ = abs_x.sort(dim=-1)
-    threshold = sorted_abs[:, :, clip_idx - 1].unsqueeze(-1)  # [T, H, 1]
+    # k-th smallest magnitude = clip threshold (same element a full sort
+    # would select at position clip_idx - 1, without the O(N log N) sort)
+    threshold, _ = torch.kthvalue(abs_x, clip_idx, dim=-1)
+    threshold = threshold.unsqueeze(-1)  # [T, H, 1]
     x_clipped = torch.clamp(x, -threshold, threshold)
 
     # Step 2: Compute per-token-head affine scale and zero
@@ -62,7 +66,7 @@ def oscar_quantize_int2(
     # Step 4: Pack 4 values per byte
     # Layout: q0 | (q1 << 2) | (q2 << 4) | (q3 << 6)
     quarter = head_dim // 4
-    q = q.view(num_tokens, num_heads, 4, quarter)
+    q = q.reshape(num_tokens, num_heads, 4, quarter)
     packed = (
         q[:, :, 0, :]
         | (q[:, :, 1, :] << 2)
@@ -101,7 +105,7 @@ def oscar_dequantize_int2(
 
     # Interleave back to original order
     q = torch.stack([q0, q1, q2, q3], dim=-2)  # [T, H, 4, packed_dim]
-    q = q.view(num_tokens, num_heads, head_dim).to(torch.float32)
+    q = q.reshape(num_tokens, num_heads, head_dim).to(torch.float32)
 
     # Dequantize: x = (q - zero) * scale
     x = (q - zeros.unsqueeze(-1)) * scales.unsqueeze(-1)
