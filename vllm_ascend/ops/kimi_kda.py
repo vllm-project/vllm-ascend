@@ -718,24 +718,37 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             maybe_save_kv_layer_to_connector("", [])
             return
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
-        core_attn_out[:, :num_actual_tokens].zero_()
-        if core_spec is not None and core_non_spec is not None:
-            assert spec_token_indices is not None
-            assert non_spec_token_indices is not None
-            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
-        elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
-        elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
+        norm_out = core_attn_out[:, :num_actual_tokens]
+        single_core = core_spec if core_non_spec is None else core_non_spec if core_spec is None else None
+        if (
+            single_core is not None
+            and single_core.shape == norm_out.shape
+            and single_core.dtype == norm_out.dtype
+            and single_core.device == norm_out.device
+            and single_core.is_contiguous()
+            and norm_out.is_contiguous()
+        ):
+            # A single full-coverage branch is already in token order. The
+            # norm can read it directly without clearing or copying norm_out.
+            norm_input = single_core
+        else:
+            # Preserve conversion before normalization for other layouts and
+            # dtypes. FULL graphs may leave holes between mixed index sets.
+            norm_out.zero_()
+            if core_spec is not None and core_non_spec is not None:
+                assert spec_token_indices is not None
+                assert non_spec_token_indices is not None
+                assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
+                norm_out.index_copy_(1, spec_token_indices, core_spec)
+                norm_out.index_copy_(1, non_spec_token_indices, core_non_spec)
+            elif core_spec is not None:
+                norm_out.copy_(core_spec)
+            elif core_non_spec is not None:
+                norm_out.copy_(core_non_spec)
+            norm_input = norm_out
 
         # Keep the registered norm's parameters while writing into the
         # caller-owned attention output directly.
-        norm_out = core_attn_out[:, :num_actual_tokens]
-        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
+        self.o_norm.forward_oot(norm_input, g2, out=norm_out)
         core_attn_out[:, num_actual_tokens:].zero_()
         maybe_save_kv_layer_to_connector("", [])
