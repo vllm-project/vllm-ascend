@@ -1108,6 +1108,13 @@ class AscendConfig:
             for architecture in model_architectures
         )
         hf_text_config = vllm_config.model_config.hf_text_config
+        is_deepseek_v4 = any(
+            architecture in ("DeepseekV4ForCausalLM", "DeepseekV4ForConditionalGeneration")
+            for architecture in model_architectures
+        ) or (
+            getattr(hf_text_config, "model_type", None) == "deepseek_v4"
+            and "DSparkDraftModel" in model_architectures
+        )
         # K3 projects the residual stream before the routed FFN. Other models
         # retain the existing hidden-size lookup and supported dimensions.
         hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None
@@ -1133,10 +1140,10 @@ class AscendConfig:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
-        # validated SiTU shape without widening support for unrelated models.
+        # Preserve the validated 6144-wide first projection for MiniMax-M3,
+        # Kimi K3, and DeepSeek V4 without widening support for unrelated models.
         supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3 or is_kimi_k3:
+        if is_minimax_m3 or is_kimi_k3 or is_deepseek_v4:
             supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
         intermediate_hidden = 2 * int(moe_intermediate_size)
@@ -1148,10 +1155,16 @@ class AscendConfig:
             )
             return False
 
-        # num_experts must divide evenly across the EP group.
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-        )
+        # Speculative draft setup can reconstruct VllmConfig with a different
+        # execution topology (for example, PCP=1 for replicated draft runs).
+        # Routed experts still use the target model's EP group, so validate
+        # MegaMoe against the target topology whenever it is available.
+        parallel_config = vllm_config.parallel_config
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        target_parallel_config = getattr(speculative_config, "target_parallel_config", None)
+        if target_parallel_config is not None:
+            parallel_config = target_parallel_config
+        ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
         if ep_world_size < 2:
             return False
         if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
