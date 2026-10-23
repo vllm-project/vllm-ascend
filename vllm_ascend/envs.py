@@ -122,6 +122,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", "0"))
     ),
+    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
+    # 0 (default): auto-detect from device properties, falling back to 192 KB
+    # (safe for Ascend 910B/A3). Set to a positive value to override when
+    # auto-detection is unavailable or for debugging UB overflow issues.
+    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Skip process-wide NUMA page migration when a Mooncake shared segment
+    # falls back to mmap + HostRegister. CPU thread binding remains enabled.
+    "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
 }
 
 # end-env-vars-definition

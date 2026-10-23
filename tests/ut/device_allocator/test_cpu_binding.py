@@ -908,6 +908,21 @@ class TestCpuBindingSupplemental(unittest.TestCase):
 
         self.assertEqual(mock_logger_info.call_count, 2)
 
+    @patch(
+        "vllm_ascend.cpu_binding.envs.VLLM_ASCEND_SKIP_MIGRATEPAGES",
+        True,
+    )
+    @patch("vllm_ascend.cpu_binding.execute_command")
+    def test_bind_memory_skips_when_configured(
+        self,
+        mock_execute_command,
+    ):
+        cpu_alloc = make_cpu_alloc()
+
+        cpu_alloc.bind_memory("999", 0)
+
+        mock_execute_command.assert_not_called()
+
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.cpu_binding.logger.info")
     def test_print_plan_uses_ascend_950_worker_log(self, mock_logger_info, _mock_get_device_type):
