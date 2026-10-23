@@ -15,10 +15,11 @@ the OSCAR INT2 three-tier path, with
 Default: DISABLED — the stock BF16 path is never touched unless OSCAR is
 explicitly enabled.
 """
+
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 def _flag(name: str, default: str = "0") -> bool:
@@ -55,7 +56,7 @@ class OscarInt2Config:
     """
 
     # -- lifecycle / opt-in -------------------------------------------------
-    enabled: bool = False            # master switch (default OFF)
+    enabled: bool = False  # master switch (default OFF)
 
     # -- tier geometry ------------------------------------------------------
     prefix_window: int = 128
@@ -69,14 +70,14 @@ class OscarInt2Config:
     v_rotation_path: str = ""
 
     # -- executor ------------------------------------------------------------
-    eager: bool = True               # validated executor
-    batched_middle: bool = True      # B>=2 askv-masked carrier staging
-    cpp_quantizer: bool = True       # single-call C++ K/V quantize (byte-exact)
+    eager: bool = True  # validated executor
+    batched_middle: bool = True  # B>=2 askv-masked carrier staging
+    cpp_quantizer: bool = True  # single-call C++ K/V quantize (byte-exact)
 
     # -- numerics ------------------------------------------------------------
     quant_clip_k: float = 0.96
     quant_clip_v: float = 0.92
-    int2_msd: bool = True            # MSD anti-overflow mode (kernel arg 1/1)
+    int2_msd: bool = True  # MSD anti-overflow mode (kernel arg 1/1)
 
 
 def _from_legacy_env() -> OscarInt2Config:
