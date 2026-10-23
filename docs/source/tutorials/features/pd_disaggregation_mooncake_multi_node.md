@@ -262,34 +262,34 @@ docker run --rm \
     --device /dev/ummu \
     --device /dev/uburma \
     -e ASCEND_RT_VISIBLE_DEVICES \
-    --mount type=bind,src=/usr/local/Ascend/driver,dst=/usr/local/Ascend/driver,readonly \
-    --mount type=bind,src=/usr/local/dcmi,dst=/usr/local/dcmi,readonly \
-    --mount type=bind,src=/usr/local/bin/npu-smi,dst=/usr/local/bin/npu-smi,readonly \
-    --mount type=bind,src=/usr/bin/urma_admin,dst=/usr/bin/urma_admin,readonly \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+    -v /usr/local/dcmi:/usr/local/dcmi:ro \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
     -it "$IMAGE" bash
 ```
 
-Add your model/cache mounts and any transport-specific options below before the image name. Check that each bind source exists and use the actual host path for tools such as `npu-smi`.
+Add your model/cache mounts and any transport-specific options below before the image name. Before starting the container, ensure every host source path exists and has the expected type (file or directory). With `-v`, Docker creates a directory when a source path does not exist, so a missing file such as `route.conf` or `hrn5.driver` can become an unintended directory mount. Use the actual host path for tools such as `npu-smi`.
 
 The example uses `--privileged`, which also exposes host devices. An explicit-device configuration without `--privileged` was validated for a single-node Mooncake Host RoCE transfer with `--cap-add=NET_ADMIN`, the device mappings above, and `/dev/infiniband`. Without `NET_ADMIN`, that configuration failed at `RsGetLbMax`. Validate the required permissions for your driver and workload before using this alternative for a full deployment.
 
 For automatic UB communication configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments as described above. Mounting `/lib/route.conf` is optional and is not part of the default command: a single-node Mooncake UB device-to-device transfer was validated with this automatic setting both with and without the file. If your environment requires a manually generated file, generate it on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md), then add:
 
 ```bash
---mount type=bind,src=/lib/route.conf,dst=/lib/route.conf,readonly \
+-v /lib/route.conf:/lib/route.conf:ro \
 ```
 
 For Host RoCE, make `/dev/infiniband` available (already exposed by `--privileged`; map it explicitly when using the alternative above). The HRN5 provider shared library must also be loadable inside the container. Mounting only `/etc/libibverbs.d/hrn5.driver` does not supply that library. For a host with the provider at `/usr/lib64/libhrn5-rdmav34.so`, add:
 
 ```bash
 --device=/dev/infiniband \
---mount type=bind,src=/usr/lib64/libhrn5-rdmav34.so,dst=/usr/lib64/libhrn5-rdmav34.so,readonly \
+-v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
 ```
 
 Use the provider path and version matching the host driver and the container's RDMA userspace. If your userspace requires the provider configuration file, also mount it:
 
 ```bash
---mount type=bind,src=/etc/libibverbs.d/hrn5.driver,dst=/etc/libibverbs.d/hrn5.driver,readonly \
+-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
 ```
 
 The tested CANN 9.2.0 / day20261015 stack could transfer without this configuration file when the provider library was available; other RDMA userspace versions may require it. Also ensure `libibv_extend.so.4` is loadable. When the complete driver mount already supplies it under `driver/lib64/driver` and that directory is on the runtime library search path, a second mount into `/usr/lib64` is unnecessary.
