@@ -70,6 +70,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
+        hf_config = vllm_config.model_config.hf_config
+        self.o_lora_rank = hf_config.o_lora_rank if hf_config.model_type == "deepseek_v4" else None
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
@@ -211,15 +213,35 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         target_scale = reshaped_scale.transpose(0, 1)
 
+        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        # DSV4 attention consumes wo_a through a grouped transpose BMM,
+        # rather than the ordinary two-dimensional Linear.apply path.
+        grouped_wo_a = self.o_lora_rank is not None and getattr(layer, "prefix", "").endswith("wo_a")
+        layer._mxfp8_grouped_wo_a_layout = grouped_wo_a
+        if grouped_wo_a:
+            if transposed_weight.shape[1] % self.o_lora_rank:
+                raise ValueError("wo_a output shard must contain complete o_lora_rank groups")
+            # Derive the local group count from the loaded shard for TP/OTP.
+            n_local_groups = transposed_weight.shape[1] // self.o_lora_rank
+            transposed_weight = (
+                transposed_weight.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+            )
+            target_scale = (
+                target_scale.transpose(0, 1)
+                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
+                .transpose(1, 2)
+                .contiguous()
+            )
+
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            layer._mxfp8_weight_buf = transposed_weight
+            if not grouped_wo_a and not getattr(layer, "_fused_preprocess_managed", False):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
+            layer._mxfp8_weight_buf.copy_(transposed_weight)
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf
@@ -258,6 +280,12 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
+
+        if getattr(layer, "_mxfp8_grouped_wo_a_layout", False):
+            layer.weight.data = layer.weight.data.transpose(1, 2).reshape(orig_shapes["weight"]).contiguous()
+            layer.weight_scale.data = layer.weight_scale.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
+            layer._mxfp8_transformed = False
+            return
 
         # Restore weight: (input_size, output_size) -> (output_size, input_size)
         target_weight = layer.weight.data.transpose(0, 1).contiguous()

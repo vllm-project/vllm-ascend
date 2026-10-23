@@ -22,6 +22,11 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        scale_alg = patch(
+            "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg", return_value=0
+        )
+        self.addCleanup(scale_alg.stop)
+        scale_alg.start()
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
@@ -46,6 +51,98 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             scheme = AscendW8A8MXFP8DynamicLinearMethod()
 
         self.assertEqual(scheme.group_size, 32)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    def test_deepseek_v4_caches_output_projection_rank(self, mock_config):
+        config = create_mock_vllm_config()
+        config.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4", o_lora_rank=4)
+        mock_config.return_value = config
+        scheme = AscendW8A8MXFP8DynamicLinearMethod()
+        self.assertEqual(scheme.o_lora_rank, 4)
+
+    @staticmethod
+    def _make_wo_a_layer(groups, rank=4, hidden_size=128):
+        layer = nn.Module()
+        layer.prefix = "model.layers.0.self_attn.wo_a"
+        layer.weight = nn.Parameter(
+            torch.randint(0, 32, (groups * rank, hidden_size)).to(torch.float8_e4m3fn), requires_grad=False
+        )
+        layer.weight_scale = nn.Parameter(
+            torch.randint(0, 255, (groups * rank, hidden_size // 32), dtype=torch.uint8), requires_grad=False
+        )
+        return layer
+
+    @patch("torch_npu.npu_format_cast")
+    def test_modelslim_wo_a_grouped_layout(self, mock_cast):
+        self.scheme.o_lora_rank = 4
+        for groups in (1, 2, 16):
+            with self.subTest(local_groups=groups):
+                layer = self._make_wo_a_layer(groups)
+                original_weight = layer.weight.detach().clone()
+                original_scale = layer.weight_scale.detach().clone()
+                self.scheme.process_weights_after_loading(layer)
+                self.assertEqual(layer.weight.shape, (groups, 128, 4))
+                self.assertEqual(layer.weight_scale.shape, (groups, 2, 4, 2))
+                # Compare each group against its original checkpoint rows.
+                for group in range(groups):
+                    torch.testing.assert_close(
+                        layer.weight[group].float(),
+                        original_weight[group * 4 : (group + 1) * 4].T.float(),
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        layer.weight_scale[group],
+                        original_scale[group * 4 : (group + 1) * 4].reshape(4, 2, 2).transpose(0, 1),
+                    )
+                self.assertTrue(layer.weight.is_contiguous())
+                self.assertTrue(layer.weight_scale.is_contiguous())
+        mock_cast.assert_not_called()
+
+    @patch("torch_npu.npu_format_cast")
+    def test_modelslim_wo_a_reload_preserves_values_and_graph_buffers(self, mock_cast):
+        self.scheme.o_lora_rank = 4
+        layer = self._make_wo_a_layer(2)
+        for iteration in range(3):
+            original_weight = layer.weight.detach().clone()
+            original_scale = layer.weight_scale.detach().clone()
+            self.scheme.process_weights_after_loading(layer)
+            pointers = (layer.weight.data_ptr(), layer.weight_scale.data_ptr())
+            if iteration == 0:
+                initial_pointers = pointers
+            self.assertEqual(pointers, initial_pointers)
+            # Reprocessing must not reshape an already grouped tensor again.
+            self.scheme.process_weights_after_loading(layer)
+            self.assertEqual((layer.weight.data_ptr(), layer.weight_scale.data_ptr()), initial_pointers)
+            self.scheme.restore_weights_for_rl_loading(layer)
+            self.assertEqual(layer.weight.shape, (8, 128))
+            self.assertEqual(layer.weight_scale.shape, (8, 4))
+            torch.testing.assert_close(layer.weight.float(), original_weight.float(), rtol=0, atol=0)
+            torch.testing.assert_close(layer.weight_scale, original_scale)
+            layer.weight.data.copy_(torch.randint(0, 32, layer.weight.shape).to(torch.float8_e4m3fn))
+            layer.weight_scale.data.copy_(torch.randint(0, 255, layer.weight_scale.shape, dtype=torch.uint8))
+        mock_cast.assert_not_called()
+
+    def test_wo_a_name_on_other_models_keeps_linear_layout(self):
+        layer = self._make_wo_a_layer(2)
+        self.assertIsNone(self.scheme.o_lora_rank)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.weight.shape, (128, 8))
+        self.assertEqual(layer.weight_scale.shape, (2, 8, 2))
+
+    def test_deepseek_v4_other_projections_keep_linear_layout(self):
+        self.scheme.o_lora_rank = 4
+        layer = self._make_wo_a_layer(2)
+        layer.prefix = "model.layers.0.self_attn.wo_b"
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.weight.shape, (128, 8))
+        self.assertEqual(layer.weight_scale.shape, (2, 8, 2))
+
+    def test_wo_a_rejects_partial_output_group(self):
+        self.scheme.o_lora_rank = 3
+        layer = self._make_wo_a_layer(2)
+        with self.assertRaisesRegex(ValueError, "complete o_lora_rank groups"):
+            self.scheme.process_weights_after_loading(layer)
 
     def test_get_weight_various_input_sizes(self):
         sizes = [(128, 64), (512, 256), (1024, 512)]
