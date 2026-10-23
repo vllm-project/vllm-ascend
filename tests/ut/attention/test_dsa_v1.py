@@ -2012,7 +2012,8 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     assert torch.equal(built_local_common.seq_lens, seq_lens)
     assert torch.equal(built_local_common.slot_mapping, expected_local_slots)
     assert local_call.kwargs["num_actual_reqs"] == num_actual_reqs
-    assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata
+    assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata["pcp_local"]
+    assert builder.common_ratio_to_sas_metadata is shared_local_metadata
 
 
 def test_pcp_metadata_provider_discards_unused_global_tasks():

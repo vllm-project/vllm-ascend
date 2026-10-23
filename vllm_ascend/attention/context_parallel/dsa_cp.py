@@ -367,7 +367,10 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
         # The standard caller creates a fresh cache for each build invocation.
         # Global and rank-local layouts must never share metadata entries.
         shared = common_ratio_to_sas_metadata if specialized else {}
-        global_shared = shared.setdefault("pcp_global", {})
+        # Reuse the base DSA computation cache even on the full-builder path.
+        # Only graph-stable PCP preparation is restricted to specialized builds.
+        global_shared = common_ratio_to_sas_metadata.setdefault("pcp_global", {})
+        local_shared = common_ratio_to_sas_metadata.setdefault("pcp_local", {})
         if needs_global_metadata:
             prepared = shared.get("pcp_context")
             if prepared is None:
@@ -417,12 +420,13 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
                 req_metadata = global_dsa_metadata.req_metadata
                 assert req_metadata is not None
                 if req_metadata.cos is not None:
-                    rope = global_shared.get("staged_rope")
+                    rope = global_shared.get("staged_rope") if specialized else None
                     if rope is None:
                         rope = req_metadata.cos.copy_to_buffers(
                             self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
                         )
-                        global_shared["staged_rope"] = rope
+                        if specialized:
+                            global_shared["staged_rope"] = rope
                     req_metadata.cos, req_metadata.sin = rope
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
@@ -453,10 +457,13 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             local_common_attn_metadata,
             fast_build,
             num_actual_reqs=num_actual_reqs,
-            common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+            common_ratio_to_sas_metadata=local_shared,
             full_graph_mode=full_graph_mode,
             update_cache=not specialized or not needs_global_metadata,
         )
+        # Base build stores the local namespace on self; expose both layouts
+        # to the runner for the next cache group, including empty local ranks.
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         # Replicated decode tokens stay in scheduler order on every PCP rank.
         # The local metadata therefore describes the canonical cache update
         # directly and can use the ordinary non-PCP DSA execution path.

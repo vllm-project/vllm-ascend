@@ -377,3 +377,48 @@ class TestDSAMetadataBuilders(TestCase):
             self.assertIs(call.kwargs["common_ratio_to_sas_metadata"], shared["pcp_global"])
             self.assertFalse(call.kwargs["build_query"])
             self.assertFalse(builder._build_local_dsa_metadata.call_args.kwargs["update_cache"])
+
+    def test_full_pcp_builders_share_base_cache_without_sharing_graph_preparation(self):
+        shared: dict[Any, Any] = {}
+        context = SimpleNamespace(
+            global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([True]), num_reqs=1),
+            global_block_tables=[torch.tensor([[10]]), torch.tensor([[20]])],
+            global_slot_mappings=[torch.tensor([1, 2]), torch.tensor([3, 4])],
+            hidden_restore_idx=torch.tensor([0, 1]),
+        )
+        builders = []
+        with patch.object(dsa_cp.AscendDSAPCPMetadata, "from_local_metadata"):
+            for index in range(2):
+                builder = make_builder(dsa_cp.AscendDSAPCPMetadataBuilder)
+                builder._is_decode_sharded = False
+                builder._prepare_graph_pcp_context = Mock(return_value=context)
+                builder._build_global_common_attn_metadata = Mock(return_value=self.common)
+                builder._build_graph_common_attn_metadata = Mock(side_effect=lambda common, actual: common)
+                builder._build_local_common_attn_metadata = Mock(return_value=self.common)
+                builder._global_metadata_builder = SimpleNamespace(build=Mock(return_value=SimpleNamespace()))
+
+                def build_local(*args, _builder=builder, **kwargs):
+                    _builder.common_ratio_to_sas_metadata = kwargs["common_ratio_to_sas_metadata"]
+                    return SimpleNamespace()
+
+                builder._build_local_dsa_metadata = Mock(side_effect=build_local)
+                builder.build(
+                    0,
+                    self.common,
+                    pcp_context=context,
+                    pcp_cache_group_idx=index,
+                    num_actual_reqs=1,
+                    common_ratio_to_sas_metadata=shared,
+                )
+                builders.append(builder)
+        self.assertIsNot(shared["pcp_global"], shared["pcp_local"])
+        for index, builder in enumerate(builders):
+            builder._prepare_graph_pcp_context.assert_called_once()
+            global_call = builder._global_metadata_builder.build.call_args
+            local_call = builder._build_local_dsa_metadata.call_args
+            self.assertIs(global_call.kwargs["common_ratio_to_sas_metadata"], shared["pcp_global"])
+            self.assertIs(local_call.kwargs["common_ratio_to_sas_metadata"], shared["pcp_local"])
+            self.assertIs(builder.common_ratio_to_sas_metadata, shared)
+            self.assertIs(global_call.args[1].block_table_tensor, context.global_block_tables[index])
+            self.assertTrue(global_call.kwargs["build_query"])
+            self.assertTrue(local_call.kwargs["update_cache"])
