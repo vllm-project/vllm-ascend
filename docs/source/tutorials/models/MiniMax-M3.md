@@ -2833,7 +2833,7 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
 | GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
 
