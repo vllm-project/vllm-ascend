@@ -67,7 +67,6 @@ class AscendIndexerKPoolMetadata:
     keypool_state_table: torch.Tensor | None = None
     keypool_start_offsets: torch.Tensor | None = None
     pooled_slot_mapping: torch.Tensor | None = None
-    max_pool_seq_len: int | None = None
     # Reused between layers; graph capture records the device-side updates.
     c8_quant_metadata: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
@@ -262,24 +261,11 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             local_start=self.dsa_cp_rank * (num_cache_tokens // self.dsa_cp_size),
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        max_seq_len = getattr(common_attn_metadata, "max_seq_len", None)
-        if not max_seq_len and num_reqs > 0:
-            # Ascend's spec-decode proposer hardcodes max_seq_len=0 in draft
-            # (MTP) metadata, which the other attention backends never read.
-            # The KPool score kernel derives its pool bound from it, so recover
-            # the batch's longest sequence from the CPU lengths. seq_lens_cpu
-            # is host-side data, so this adds no device synchronization.
-            seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
-            if seq_lens_cpu is None:
-                seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
-            if seq_lens_cpu is not None and seq_lens_cpu.numel() >= num_reqs:
-                max_seq_len = int(seq_lens_cpu[:num_reqs].max().item())
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             positions=positions,
-            max_pool_seq_len=(max_seq_len + self.compress_ratio - 1) // self.compress_ratio if max_seq_len else None,
             block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
@@ -778,18 +764,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if indexer_cache.dtype == torch.int8:
             from vllm_ascend.ops.triton.glm5_next_quant_indexer import glm5_next_c8_quant_indexer
 
-            # Capture must cover sequence growth on replay. The integer scorer
-            # reads the original pages directly, without a history-sized workspace.
-            max_pools = indexer_metadata.max_pool_seq_len
-            if max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
-                max_pools = int(indexer_metadata.block_table.shape[1] * indexer_cache.shape[1])
             return glm5_next_c8_quant_indexer(
                 q_values,
                 indexer_cache,
                 weights,
                 indexer_metadata,
                 query_metadata,
-                max_pools,
                 self.topk_tokens,
                 self.index_kpool,
                 self.topk_indices_buffer,

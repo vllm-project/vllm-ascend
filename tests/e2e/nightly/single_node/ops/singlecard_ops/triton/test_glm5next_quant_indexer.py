@@ -54,7 +54,7 @@ def test_integer_kpool_cache_and_causal_expansion(page_rows, padded, padded_quer
         positions=positions,
     )
     output = torch.full((tokens + 1, 2064), -777, device="npu", dtype=torch.int32)
-    result = glm5_next_c8_quant_indexer(q, cache, w, meta, qm, 600, 2048, 4, output)
+    result = glm5_next_c8_quant_indexer(q, cache, w, meta, qm, 2048, 4, output)
     assert result.shape == (tokens, 1, 2051)
     assert (result[9:] == -1).all()
     result = result.cpu().squeeze(1)
@@ -81,7 +81,7 @@ def test_integer_kpool_cache_and_causal_expansion(page_rows, padded, padded_quer
             row += 1
     assert (output[:tokens, 2051:] == -1).all()
     assert (output[tokens:] == -777).all()
-    repeated = glm5_next_c8_quant_indexer(q, cache, w, meta, qm, 600, 2048, 4, output).cpu().squeeze(1)
+    repeated = glm5_next_c8_quant_indexer(q, cache, w, meta, qm, 2048, 4, output).cpu().squeeze(1)
     torch.testing.assert_close(repeated, result, rtol=0, atol=0)
 
 
@@ -104,7 +104,7 @@ def test_integer_kpool_operator_limits(pool_size, topk):
     query = torch.empty(1, 32, 128)
     unused = SimpleNamespace()
     with pytest.raises(ValueError, match="power-of-two"):
-        glm5_next_c8_quant_indexer(query, query, query, unused, unused, 0, topk, pool_size, None)
+        glm5_next_c8_quant_indexer(query, query, query, unused, unused, topk, pool_size, None)
 
 
 @pytest.mark.parametrize("tokens", [1, 6, 16])
@@ -125,7 +125,7 @@ def test_integer_kpool_graph_replay_updates_lengths_and_pages(tokens):
 
     def run(output):
         meta = SimpleNamespace(block_table=table, c8_quant_metadata=None)
-        return glm5_next_c8_quant_indexer(q, cache, weights, meta, qm, 1024, 2048, 4, output)
+        return glm5_next_c8_quant_indexer(q, cache, weights, meta, qm, 2048, 4, output)
 
     output = torch.empty(tokens, 2064, device="npu", dtype=torch.int32)
     run(output)
@@ -164,7 +164,7 @@ def test_integer_kpool_eight_one_million_token_histories():
     meta = SimpleNamespace(block_table=table, c8_quant_metadata=None)
     query = torch.ones(requests, 32, 128, device="npu", dtype=torch.bfloat16)
     weights = torch.ones(requests, 32, device="npu", dtype=torch.bfloat16)
-    result = glm5_next_c8_quant_indexer(query, cache, weights, meta, qm, pools, 2048, 4, None).cpu()
+    result = glm5_next_c8_quant_indexer(query, cache, weights, meta, qm, 2048, 4, None).cpu()
     for row in result[:, 0]:
         assert (row[:2048] >= 0).all() and (row[:2048] < 1048576).all()
         assert row[:2048].unique().numel() == 2048
@@ -176,4 +176,4 @@ def test_integer_kpool_missing_operator_is_an_error(monkeypatch):
     query = torch.empty(1, 32, 128)
     unused = SimpleNamespace()
     with pytest.raises(RuntimeError, match="requires the QLI v2 integer operators"):
-        glm5_next_c8_quant_indexer(query, query, query, unused, unused, 0, 2048, 4, None)
+        glm5_next_c8_quant_indexer(query, query, query, unused, unused, 2048, 4, None)

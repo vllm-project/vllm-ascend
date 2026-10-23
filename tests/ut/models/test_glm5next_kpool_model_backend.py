@@ -413,7 +413,6 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         setattr(op, "_" + name, mock)
         calls.attach_mock(mock, name)
     metadata = _indexer_metadata()
-    metadata.max_pool_seq_len = 1
     metadata.query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     metadata.start_pos = torch.zeros(2, dtype=torch.int32)
     metadata.pool_tail = torch.zeros(2, dtype=torch.int64)
@@ -479,7 +478,6 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert select_int8dot.call_args.args[3] is metadata
         assert select_int8dot.call_args.args[4] is query_metadata
         assert select_int8dot.call_args.args[-1] is op.topk_indices_buffer
-        assert select_int8dot.call_args.args[5] == (2 if runtime_mode == CUDAGraphMode.FULL else 1)
     elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]

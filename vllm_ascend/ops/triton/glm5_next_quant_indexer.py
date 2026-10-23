@@ -88,7 +88,6 @@ def glm5_next_c8_quant_indexer(
     weights: torch.Tensor,
     meta: AscendIndexerKPoolMetadata,
     query_meta: AscendIndexerKPoolQueryMetadata | AscendIndexerKPoolMetadata,
-    max_pools: int,
     topk_tokens: int,
     pool_size: int,
     output: torch.Tensor | None,
@@ -131,6 +130,7 @@ def glm5_next_c8_quant_indexer(
         cu = torch.cat((torch.zeros(1, device=q.device, dtype=torch.int32), ends))
         lengths = query_meta.seq_lens.to(torch.int32)
         tails = query_meta.pool_tail.to(torch.int32)
+        # PA_BBND reads actual K lengths from seqused_k, including graph replay.
         tiling = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
             num_heads_q=q.shape[1],
             num_heads_k=1,
@@ -142,7 +142,6 @@ def glm5_next_c8_quant_indexer(
             cmp_residual_k=tails,
             batch_size=lengths.numel(),
             max_seqlen_q=q.shape[0],
-            max_seqlen_k=max_pools * pool_size + pool_size - 1,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,

@@ -32,7 +32,6 @@ def _write_keypool_caches_kernel(
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
     BLOCK: tl.constexpr,
-    CACHE_ROW: tl.constexpr,
     QUANT: tl.constexpr,
     TAIL_STRIDE: tl.constexpr,
 ):
@@ -58,10 +57,9 @@ def _write_keypool_caches_kernel(
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
-        row_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * CACHE_ROW
+        page_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE
+        row_base = page_base + slot % BLOCK_SIZE * HEAD_DIM
         if QUANT:
-            page_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE
-            row_base = page_base + slot % BLOCK_SIZE * HEAD_DIM
             values = pool_value.to(tl.float32)
             abs_max = tl.max(tl.abs(values))
             scale = tl.where(abs_max > 0, tl.div_rn(abs_max, 127.0), 1.0)
@@ -108,7 +106,6 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         writes.shape[1],
         key is not None,
         triton.next_power_of_2(2 * head_dim),
-        cache.shape[-1],
         quant,
         tail.stride(0),
     )
