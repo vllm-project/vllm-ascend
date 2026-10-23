@@ -295,13 +295,13 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         A runtime cache alone is insufficient: a different first builder must
         not change the addresses referenced by an already captured graph.
         """
-        by_config = {}
+        by_config: dict[int, list[AscendDSAV41PCPMetadataBuilder]] = {}
         for builder in builders:
             by_config.setdefault(id(builder.vllm_config), []).append(builder)
         for config_builders in by_config.values():
             config_builders.sort(key=lambda builder: tuple(builder.layer_names))
             owner = config_builders[0]
-            rope_buffers = {}
+            rope_buffers: dict[tuple[int, int], tuple[torch.Tensor, ...]] = {}
             for builder in config_builders:
                 builder._pcp_context_owner = owner
                 for layer_name, buffers in builder._pcp_rope_buffers.items():
@@ -517,6 +517,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
                     pcp_context, full_graph_mode=full_graph_mode
                 )
                 shared["pcp_context"] = prepared_context
+            assert prepared_context is not None
             pcp_context = prepared_context
             global_common = shared.get("global_common")
             if global_common is None:
