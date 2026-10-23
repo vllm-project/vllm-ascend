@@ -1,0 +1,8 @@
+pr: 19536
+entries:
+  - category: feature
+    text: >-
+      Added end-to-end embedding support for intfloat/e5-mistral-7b-instruct on
+      Ascend NPUs, including last-token pooling, L2 normalization, an asymmetric
+      instruction-prefix template, a user-facing tutorial, and offline accuracy
+      tests against a Hugging Face fp32 reference.
