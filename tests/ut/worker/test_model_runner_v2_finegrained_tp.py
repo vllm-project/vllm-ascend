@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
@@ -162,9 +163,10 @@ def _canary_tail_calls(parent):
         (False, False),  # plain sampler branch
         (True, False),  # grammar bitmask + sampler
         (False, True),  # rejection sampler branch
+        (True, True),  # grammar invalid-draft mask + rejection sampler
     ],
 )
-def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
+def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft, monkeypatch):
     """Main2main canary: with lmhead TP on, the override must drive the
     dispatch tail (grammar bitmask / sampler / rejection sampler) exactly like
     upstream GPUModelRunner.sample — same calls, same order, same arguments
@@ -190,6 +192,17 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     if with_draft:
         input_batch.num_draft_tokens = 5
     grammar_output = MagicMock() if with_grammar else None
+    if with_grammar and with_draft:
+        assert grammar_output is not None
+        input_batch.num_draft_tokens = 2
+        input_batch.req_ids = ["request"]
+        input_batch.num_draft_tokens_per_req = np.array([2], dtype=np.int32)
+        input_batch.expanded_local_pos = torch.tensor([0, 1, 2])
+        input_batch.cu_num_logits = torch.tensor([0, 3])
+        grammar_output.structured_output_request_ids = ["request"]
+        grammar_output.num_acceptable_drafts = [1]
+        # The real helper runs on CPU tensors; no accelerator-pinned staging.
+        monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
 
     GPUModelRunner.sample(runner, hidden_states, input_batch, grammar_output)
     upstream_calls = _canary_tail_calls(parent)
@@ -203,6 +216,10 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     expected_calls = 2 if with_grammar else 1
     assert len(upstream_calls) == expected_calls
     assert override_calls == upstream_calls
+    if with_grammar and with_draft:
+        # Exercise real grammar masking, not merely a fourth None argument.
+        invalid_drafts = runner.rejection_sampler.call_args.args[3]
+        assert invalid_drafts.tolist() == [False, False, True]
 
 
 @pytest.mark.parametrize(
