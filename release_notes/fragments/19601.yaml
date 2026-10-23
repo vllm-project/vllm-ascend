@@ -1,0 +1,4 @@
+pr: 19601
+entries:
+  - category: bugfix
+    text: Fixed the batch-job-aware scheduler returning removed requests from its cached selection.
