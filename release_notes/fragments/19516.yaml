@@ -1,0 +1,4 @@
+pr: 19516
+entries:
+  - category: dependency
+    text: Updated the supported vLLM release to v0.32.0 while retaining compatibility with the verified main revision.
