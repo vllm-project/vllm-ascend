@@ -57,15 +57,10 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 # vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
 # main; the v0.31.0 lane still ships them in `kv_cache_utils`.
 if vllm_version_is("0.31.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_config_from_groups,
-        is_kv_cache_spec_uniform,
-    )
+    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
 else:
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_config_from_groups,
-        is_kv_cache_spec_uniform,
-    )
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -388,6 +383,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec_type"], "MLAAttentionSpec")
         self.assertEqual(kv_group2layeridx[1][1], [3, 60])
 
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="KV cache config builder is main-only")
     def test_m3_index_spec_is_preserved_and_splits_transfer_group(self):
         main_layer = "model.layers.3.attn"
         index_layer = f"{main_layer}.index_cache"
@@ -416,10 +412,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
         num_blocks = 10
-        allocated_config = get_kv_cache_config_from_groups(
+        allocated_config = get_kv_cache_config_builder(vllm_config).get_kv_cache_config_from_groups(
             vllm_config,
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
-            available_memory=uniform_spec.page_size_bytes * num_blocks,
+            num_blocks,
         )
         placements = {
             layer: tensor
@@ -1786,6 +1782,7 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
     def __init__(self):
         self.model_config = MagicMock()
+        self.model_config.kv_cache_config_builder_cls = None
         # vLLM main reads attention_config.hisparse_config in the KV cache
         # config helpers; Ascend does not enable HiSparse.
         self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None)
