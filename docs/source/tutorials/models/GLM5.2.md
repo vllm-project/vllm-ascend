@@ -912,7 +912,7 @@ layerwise setting and topology.
 
     See [950DT preparation](#glm-950-preparation) for checkpoint, environment and PP-node settings.
 
-    Run the Prefill script on P0/P1. Decode uses four nodes, eight TP1 ranks per node (global ranks 0–31), not the previous two-node DP16 layout. Both roles declare DP32/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
+    Run the Prefill script on P0/P1. Decode uses DP16/TP1 across two eight-device nodes, with eight local ranks per node (global ranks 0–15). Both roles declare DP16/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
 
     ###### Prepare the Scripts
 
@@ -1067,14 +1067,14 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}'
             ```
 
         2. Prefill node 1
@@ -1173,18 +1173,18 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}' \
               --headless
             ```
 
-        3. Decode nodes 0–3
+        3. Decode nodes 0 and 1
 
             ```shell
             #!/usr/bin/env bash
@@ -1272,7 +1272,7 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
@@ -1302,25 +1302,13 @@ layerwise setting and topology.
     3. Decode node 0
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     4. Decode node 1
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
-        ```
-
-    5. Decode node 2
-
-        ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
-        ```
-
-    6. Decode node 3
-
-        ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     <a id="glm-950-proxy"></a>
@@ -1340,8 +1328,6 @@ layerwise setting and topology.
     P0_IP="<P0_IP>"
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
-    D2_IP="<D2_IP>"
-    D3_IP="<D3_IP>"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
@@ -1350,13 +1336,7 @@ layerwise setting and topology.
             "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
-            "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
-            "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
-            "$D3_IP" "$D3_IP" "$D3_IP" "$D3_IP" \
-            "$D3_IP" "$D3_IP" "$D3_IP" "$D3_IP" \
         --decoder-ports 8000 8001 8002 8003 8004 8005 8006 8007 \
-            8000 8001 8002 8003 8004 8005 8006 8007 \
-            8000 8001 8002 8003 8004 8005 8006 8007 \
             8000 8001 8002 8003 8004 8005 8006 8007
     ```
 
@@ -1374,12 +1354,12 @@ layerwise setting and topology.
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
       the Prefill engine, with `VLLM_PP_LAYER_PARTITION="42,36"` across
       two nodes. Only PP rank 0 exposes the Prefill API.
-    - The Decode launcher uses `--dp-size 32`, `--tp-size 1`, and
-      `--dp-size-local 8`: eight local ranks on each of four nodes.
+    - The Decode launcher uses `--dp-size 16`, `--tp-size 1`, and
+      `--dp-size-local 8`: eight local ranks on each of two nodes.
       `--dp-address` and `--dp-rpc-port` must match across Decode nodes;
       `--dp-rank-start` assigns their disjoint global rank ranges.
     - `--vllm-start-port 8000` assigns Decode API ports `8000-8007` on
-      each node. Register all 32 endpoints with the proxy.
+      each node. Register all 16 endpoints with the proxy.
     - Both roles use `--max-model-len 135000`. Prefill sets
       `--max-num-seqs 500` and `--max-num-batched-tokens 16384`;
       Decode sets `10` and `60`, respectively, per engine.
@@ -1389,10 +1369,10 @@ layerwise setting and topology.
       `FULL_DECODE_ONLY` graph mode.
     - `MooncakeConnectorV1` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30000` and `30300`, respectively.
-      Both roles declare Prefill DP1/PP2/TP8 and Decode DP32/TP1.
+      Both roles declare Prefill DP1/PP2/TP8 and Decode DP16/TP1.
     - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 2`.
-      Decode enables MLAPO and shared-expert multistream overlap.
-      Both roles enable prefix caching and recomputation scheduling.
+      Decode enables MLAPO. Both roles enable shared-expert multistream
+      overlap, prefix caching and recomputation scheduling.
     - `enable_fused_mc2: 2` selects MegaMoE when `cann_ops_transformer`
       is installed. In the selected maintenance branch, MTP draft MoE
       layers with an unsupported quantization layout use the non-fused
