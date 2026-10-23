@@ -921,8 +921,27 @@ def lease_control_server():
         assert not server.is_alive()
 
 
+@pytest.fixture
+def lease_client_sockets(monkeypatch):
+    """Track real per-exchange sockets while sharing one live context."""
+    context = zmq.Context.instance()
+    sockets = []
+    create_socket = context.socket
+
+    def socket(*args, **kwargs):
+        result = create_socket(*args, **kwargs)
+        sockets.append(result)
+        return result
+
+    monkeypatch.setattr(context, "socket", socket)
+    yield sockets
+    assert sockets and all(socket.closed for socket in sockets)
+    assert not context.closed
+    assert zmq.Context.instance() is context
+
+
 @pytest.mark.parametrize("released", [False, True])
-def test_post_read_verification_protocol_detects_released_hold(lease_control_server, released):
+def test_post_read_verification_protocol_detects_released_hold(lease_control_server, released, lease_client_sockets):
     producer, port = lease_control_server
     nonce = producer.add_delayed_request("p", time.time())
     worker = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
@@ -999,9 +1018,12 @@ def test_duplicate_registration_preserves_original_hold():
     assert producer.get_and_clear_finished_requests() == {"p"}
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("expired", [False, True])
 @pytest.mark.parametrize("can_report", [False, True])
-def test_read_inflight_expiry_reaches_worker_failure(lease_control_server, expired, can_report, monkeypatch):
+def test_read_inflight_expiry_reaches_worker_failure(
+    lease_control_server, expired, can_report, cancelled, monkeypatch, lease_client_sockets
+):
     producer, port = lease_control_server
     nonce = producer.add_delayed_request("p", time.time())
     worker = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
@@ -1021,6 +1043,13 @@ def test_read_inflight_expiry_reaches_worker_failure(lease_control_server, expir
         return_value=({(0, 0): {}, (0, 1): {}}, {(0, 0): {"r"}, (0, 1): {"r"}})
     )
     first_started, second_observed, release_first = threading.Event(), threading.Event(), threading.Event()
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._reqs_recv_info["r"] = ("127.0.0.1", port, "p", nonce)
+    scheduler._recving_thread = MagicMock()
+    scheduler._recving_thread.add_request.side_effect = (
+        lambda _host, _port, req_id, hold: producer._handle_finished_request(req_id, hold)
+    )
     observed_results = []
     verified_results = []
 
@@ -1070,6 +1099,11 @@ def test_read_inflight_expiry_reaches_worker_failure(lease_control_server, expir
             assert first_started.wait(5) and second_observed.wait(5)
             worker._verify_remote_leases.assert_not_called()
             assert worker.finished_requests.empty()
+            if cancelled:
+                request = make_request(request_id="r", status=RequestStatus.FINISHED_ABORTED)
+                assert scheduler.request_finished(request, ([10], [20])) == (False, None)
+                scheduler._recving_thread.add_request.assert_not_called()
+                assert producer._verify_leases((("p", nonce),)) == [True]
             if expired:
                 with producer.state_lock:
                     producer.delayed_free_requests["p"] = 0.0
@@ -1083,12 +1117,20 @@ def test_read_inflight_expiry_reaches_worker_failure(lease_control_server, expir
     result = worker.get_and_clear_finished_requests()
     assert result.finished_recving == {"r"}
     assert result.failed_recving == ({"r"} if expired else set())
+    output = KVConnectorOutput(finished_recving=result.finished_recving, failed_recving=result.failed_recving)
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+    scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", port, "p", nonce)
+    assert producer.get_and_clear_finished_requests() == {"p"}
+    assert not producer.lease_nonces and not scheduler._reqs_recv_info
     assert worker.invalid_block_ids == ({10, 20} if expired and can_report else set())
     worker.request_queue.task_done.assert_called_once()
 
 
 @pytest.mark.parametrize("can_report", [False, True])
-def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(lease_control_server, can_report, monkeypatch):
+def test_unresponsive_lease_peer_fails_run_then_processes_next_batch(
+    lease_control_server, can_report, monkeypatch, lease_client_sockets
+):
     producer, healthy_port = lease_control_server
     nonce = producer.add_delayed_request("healthy-p", time.time())
     worker = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
