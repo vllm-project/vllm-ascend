@@ -44,12 +44,6 @@ def test_environment_override_wins(monkeypatch, env_value):
                 architectures=["UnknownModel"],
             )
         ),
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(
-                method="unknown_method",
-                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
-            )
-        ),
         SimpleNamespace(lora_config=object()),
         SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
         SimpleNamespace(speculative_config=SimpleNamespace(method="eagle3", parallel_drafting=False)),
@@ -74,6 +68,7 @@ def test_environment_override_wins(monkeypatch, env_value):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
         SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
         SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
@@ -107,12 +102,12 @@ def test_environment_override_wins(monkeypatch, env_value):
         "empty-config",
         "no-model",
         "unknown-attention-free-generate",
-        "dynamic-unsupported-speculation",
         "lora",
         "parallel-drafting",
         "eagle3-without-parallel-drafting",
         "multi-kv-group-mtp",
         "dflash2-eager",
+        "draft-model",
         "hy3-preview",
         "hy3-preview-architecture",
         "gemma4-causal",
@@ -165,7 +160,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="medusa")),
-        SimpleNamespace(speculative_config=SimpleNamespace(method="draft_model", parallel_drafting=True)),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="unknown_method")),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
                 method="mtp",
@@ -198,7 +193,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "ngram-speculative-decoding",
         "ngram-gpu-speculative-decoding",
         "medusa-speculative-decoding",
-        "draft-model-speculative-decoding",
+        "unsupported-speculative-decoding",
         "gemma4-mtp-speculative-decoding",
         "step3p5-mtp-speculative-decoding",
         "p-eagle",

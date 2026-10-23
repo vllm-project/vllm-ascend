@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-import ast
-from pathlib import Path
-from types import SimpleNamespace
+import importlib
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -93,24 +94,50 @@ def test_uses_ascend_mtp_speculator(family, expected):
     assert uses_ascend_mtp_speculator(family) is expected
 
 
-def test_mtp_speculator_routes_share_family_helper():
-    repo_root = Path(__file__).resolve().parents[3]
-    route_files = [
-        repo_root / "vllm_ascend/worker/v2/spec_decode/__init__.py",
-        repo_root / "vllm_ascend/patch/worker/patch_v2/patch_spec_decode_310.py",
-    ]
+def test_310p_mtp_routing_uses_family_helper(monkeypatch):
+    import vllm_ascend.worker.v2.spec_decode as base_spec_decode
 
-    for route_file in route_files:
-        source = route_file.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        calls = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "uses_ascend_mtp_speculator"
-        ]
-        assert calls, f"{route_file} must route MTP families through the shared helper"
+    original_init = base_spec_decode.init_speculator
+    patch_module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310")
+    monkeypatch.setattr(base_spec_decode, "init_speculator", original_init)
+
+    module = ModuleType("vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator")
+    speculator_cls = MagicMock()
+    module.AscendMTPSpeculator310 = speculator_cls
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(
+        patch_module,
+        "resolve_spec_decode_family",
+        lambda _config: SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP,
+    )
+    monkeypatch.setattr(
+        patch_module,
+        "uses_ascend_mtp_speculator",
+        lambda family: family is SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP,
+    )
+
+    config = SimpleNamespace(speculative_config=object())
+    result = patch_module._init_speculator_310p(config, "npu")
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, "npu")
+
+
+def test_310p_non_mtp_routing_uses_parent_factory(monkeypatch):
+    import vllm_ascend.worker.v2.spec_decode as base_spec_decode
+
+    original_init = base_spec_decode.init_speculator
+    patch_module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310")
+    monkeypatch.setattr(base_spec_decode, "init_speculator", original_init)
+    monkeypatch.setattr(patch_module, "uses_ascend_mtp_speculator", lambda _family: False)
+    fallback = MagicMock()
+    monkeypatch.setattr(patch_module, "_orig_init_speculator", fallback)
+
+    config = SimpleNamespace(speculative_config=object())
+    result = patch_module._init_speculator_310p(config, "npu")
+
+    assert result is fallback.return_value
+    fallback.assert_called_once_with(config, "npu")
 
 
 def test_resolve_spec_decode_family_uses_dispatch_method_override():
@@ -141,6 +168,25 @@ def test_dflash2_architecture_sources(owner_name, attribute, value):
     config = SimpleNamespace(speculative_config=SimpleNamespace(method="dflash", draft_model_config=draft_model_config))
 
     assert resolve_spec_decode_family(config) is SpecDecodeFamily.DFLASH2
+
+
+@pytest.mark.parametrize(
+    "owner_name",
+    ["draft", "hf_config", "hf_text_config", "model_arch_config"],
+)
+def test_multi_kv_mtp_architecture_sources(owner_name):
+    draft_model_config = SimpleNamespace(
+        architecture=None,
+        architectures=[],
+        hf_config=SimpleNamespace(model_type=None, architectures=[]),
+        hf_text_config=SimpleNamespace(architectures=[]),
+        model_arch_config=SimpleNamespace(architectures=[]),
+    )
+    target = draft_model_config if owner_name == "draft" else getattr(draft_model_config, owner_name)
+    target.architectures = "Glm5NextMTPModel"
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="mtp", draft_model_config=draft_model_config))
+
+    assert resolve_spec_decode_family(config) is SpecDecodeFamily.MULTI_KV_CACHE_GROUP_MTP
 
 
 @pytest.mark.parametrize(

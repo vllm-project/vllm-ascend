@@ -69,8 +69,12 @@ def is_multi_kv_cache_group_mtp(vllm_config: Any) -> bool:
     speculative_config = getattr(vllm_config, "speculative_config", None)
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
     hf_config = getattr(draft_model_config, "hf_config", None)
+    hf_text_config = getattr(draft_model_config, "hf_text_config", None)
+    model_arch_config = getattr(draft_model_config, "model_arch_config", None)
     model_type = getattr(hf_config, "model_type", None)
-    architectures = set(getattr(hf_config, "architectures", None) or ())
+    architectures: set[str] = set()
+    for owner in (draft_model_config, hf_config, hf_text_config, model_arch_config):
+        architectures.update(_architecture_names(owner))
     return model_type in _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES or bool(
         architectures & _MULTI_KV_CACHE_GROUP_MTP_ARCHITECTURES
     )
