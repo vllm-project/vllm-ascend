@@ -2,7 +2,12 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # mypy: ignore-errors
 
-"""Triton-free Ascend310PSampler: ``sample/`` ops + mainline ``apply_top_k_top_p_npu``."""
+"""Triton-free MRV2 sampler for Ascend 310P.
+
+Aligns temperature / top-k / top-p post-processing with MRV1's
+``AscendSampler310`` (inverse-CDF random sampling) while keeping the MRV2
+``sampling_states`` surface required by MTP draft ``propose()``.
+"""
 
 from __future__ import annotations
 
@@ -46,7 +51,15 @@ _SAMPLING_EPS = 1e-5
 
 
 class Ascend310PSampler:
-    """310P MRV2 sampler; exposes ``sampling_states.*`` for MTP draft propose()."""
+    """Triton-free sampler for 310P MRV2 with MRV1-aligned temperature sampling.
+
+    Exposes ``sampling_states.temperature/seeds/top_k/top_p/min_p`` so MTP draft
+    ``propose()`` (and ``_dummy_run``) can read device buffers without UVA
+    SamplingStates.
+    """
+
+    # TODO: Refactor this sampler to register 310P implementations through
+    # Triton Dispatcher after vLLM RFC #45133 lands.
 
     def __init__(
         self,
@@ -121,9 +134,12 @@ class Ascend310PSampler:
         self._bad_words_token_ids: dict[int, list[list[int]]] = {}
         self._num_logprobs = np.full(max_num_reqs, fill_value=-1, dtype=np.int32)
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
+        # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        # vLLM #56497 dropped the prompt_len argument from
+        # Sampler.add_request (and added custom logits processors).
         self._add_request_impl(req_idx, sampling_params)
 
     def _add_request_impl(self, req_idx: int, sampling_params: SamplingParams) -> None:
@@ -146,7 +162,11 @@ class Ascend310PSampler:
         repetition_penalty = float(sampling_params.repetition_penalty)
         frequency_penalty = float(sampling_params.frequency_penalty)
         presence_penalty = float(sampling_params.presence_penalty)
-        vocab_size = max(top_k, 1) if self.vocab_size <= 0 else self.vocab_size
+        if self.vocab_size <= 0:
+            # Late-bind from logits on first sample if caller omitted vocab_size.
+            vocab_size = max(top_k, 1)
+        else:
+            vocab_size = self.vocab_size
         if top_k <= 0 or top_k > vocab_size:
             top_k = vocab_size
 
@@ -213,6 +233,8 @@ class Ascend310PSampler:
     def apply_staged_writes(self) -> None:
         if not self._sampling_state_dirty:
             return
+        # MTP proposer is first device consumer. Bulk H2D copies replace
+        # per-request scalar assignments.
         self.sampling_states.temperature.gpu.copy_(self.temperature_cpu, non_blocking=True)
         self.sampling_states.seeds.gpu.copy_(self.seeds_cpu, non_blocking=True)
         self.sampling_states.top_k.gpu.copy_(self.top_k_cpu, non_blocking=True)
@@ -228,6 +250,7 @@ class Ascend310PSampler:
             return
         self.vocab_size = int(vocab_size)
         self.sampling_states.vocab_size = self.vocab_size
+        # Replace unset top_k defaults (initialized to 1 when vocab was unknown).
         unset = self._top_k_np <= 1
         self._top_k_np[unset] = self.vocab_size
         self.top_k_cpu[unset] = self.vocab_size
@@ -404,7 +427,12 @@ class Ascend310PSampler:
         expanded_idx_mapping_np: np.ndarray | None = None,
         expanded_local_pos_np: np.ndarray | None = None,
     ) -> torch.Tensor:
-        """FP32 copy + full post-process for MTP rejection verify."""
+        """FP32 copy + post-process for MTP rejection verify.
+
+        Mirrors upstream ``Sampler.apply_sampling_params`` so
+        ``RejectionSampler310V2`` matches MRV1 tempered verify. Prefer CPU
+        mirrors from InputBatch to avoid NPU→CPU sync (#16489).
+        """
         self._maybe_bind_vocab_size(logits.shape[-1])
         processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
         if not self._batch_needs_logits_processing(idx_mapping_np):
@@ -424,6 +452,7 @@ class Ascend310PSampler:
         self,
         expanded_idx_mapping_np: np.ndarray,
     ) -> dict[int, torch.Generator]:
+        """Map logit-row index → CPU generator for seeded random requests."""
         sources: dict[int, torch.Generator] = {}
         for row_idx, req_idx in enumerate(expanded_idx_mapping_np.tolist()):
             if req_idx < 0 or self._temperature_np[req_idx] < _SAMPLING_EPS:
@@ -439,16 +468,19 @@ class Ascend310PSampler:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         num_reqs = input_batch.num_reqs
+        # Prefer CPU mirrors from InputBatch when available (#16489).
         expanded_np = getattr(input_batch, "expanded_idx_mapping_np", None)
         if expanded_np is None:
             expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
         input_ids_cpu = getattr(input_batch, "input_ids_cpu", None)
         local_pos_np = getattr(input_batch, "expanded_local_pos_np", None)
         max_num_logprobs = self._batch_max_num_logprobs(idx_mapping_np)
+        # Gather logprobs from raw logits before any post-process masking.
         raw_logprobs = None
         if max_num_logprobs is not None:
             raw_logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float32)
 
+        # Fast path: all greedy and no logits processors → argmax.
         if not self._any_random(idx_mapping_np) and not self._batch_needs_logits_processing(idx_mapping_np):
             sampled = logits.argmax(dim=-1).to(torch.int32)
             num_sampled = input_batch.seq_lens.new_ones(num_reqs)
@@ -463,6 +495,8 @@ class Ascend310PSampler:
                 num_rejected=torch.zeros_like(num_sampled),
             )
 
+        # Copy to FP32 before in-place post-process, matching upstream MRV2
+        # Sampler.apply_sampling_params.
         processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
         if self._batch_needs_logits_processing(idx_mapping_np):
             processed = self._apply_postprocess(
@@ -477,6 +511,7 @@ class Ascend310PSampler:
         if not self._any_random(idx_mapping_np):
             sampled = processed.argmax(dim=-1).to(torch.int32)
         else:
+            # Greedy rows keep argmax; random rows use MRV1 inverse-CDF sampling.
             greedy = processed.argmax(dim=-1)
             probs = processed.softmax(dim=-1, dtype=torch.float32)
             generators = self._build_row_generators(expanded_np)

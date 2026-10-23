@@ -29,7 +29,13 @@ _SAMPLING_EPS = 1e-5
 
 
 class RejectionSampler310V2(RejectionSampler):
-    """MTP rejection for 310P MRv2: greedy on NPU; temperature via CPU RNG path."""
+    """MTP rejection sampler for 310P MRv2.
+
+    - ``temperature≈0``: greedy argmax verify on NPU.
+    - ``temperature>0``: Leviathan / IS_NGRAM path aligned with MRV1
+      ``AscendRejectionSampler310`` (accept iff ``u < p(draft)``, else recovered
+      token from residual; bonus via inverse-CDF).
+    """
 
     def __init__(
         self,
@@ -67,7 +73,12 @@ class RejectionSampler310V2(RejectionSampler):
         cu_num_logits: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ):
-        """Device-side raw logprobs; avoids NPU→CPU sync (see #16489)."""
+        """Raw logprobs for emitted tokens (aligned with ``cu_num_logits`` rows).
+
+        Triton-free stand-in for upstream ``RejectionSampler._get_logprobs_tensors``.
+        Emitted token ``j`` of request ``r`` uses logits row ``cu[r] + j``.
+        Built on device to avoid NPU→CPU sync (#16489); uses raw logits.
+        """
         max_num_logprobs = self.sampler._batch_max_num_logprobs(idx_mapping_np)
         if max_num_logprobs is None:
             return None
@@ -94,7 +105,8 @@ class RejectionSampler310V2(RejectionSampler):
         num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
         expanded_idx_mapping = input_batch.expanded_idx_mapping
-        # Post-process for verify; raw logits kept for logprobs. Prefer CPU mirrors (#16489).
+        # Post-process for verify; keep raw ``logits`` for logprobs. Prefer CPU
+        # mirrors from InputBatch to avoid NPU→CPU sync (#16489).
         processed = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -114,6 +126,7 @@ class RejectionSampler310V2(RejectionSampler):
             assert input_batch.logits_indices_np is not None
             draft_sampled_cpu = input_batch.input_ids_cpu[torch.from_numpy(input_batch.logits_indices_np)]
             source_generators = getattr(self.sampler, "_source_generators", {})
+            # Persistent InputBatch arrays; slice to this step's request count.
             cu_num_logits_np = input_batch.cu_num_logits_np[: num_reqs + 1]
             idx_np = idx_mapping_np[:num_reqs]
             sampled, _, sampled_cpu, num_sampled_cpu = probabilistic_rejection_sample_cpu(
@@ -133,6 +146,7 @@ class RejectionSampler310V2(RejectionSampler):
                 input_batch.prefill_len_np[:num_reqs],
                 logits.device,
             )
+            # Copy into preallocated buffers; do not assign (would shrink capacity).
             self.sampled_tokens_cpu[:num_reqs].copy_(sampled_cpu)
             self.num_sampled_cpu[:num_reqs].copy_(num_sampled_cpu)
             self.num_rejected_cpu[:num_reqs].copy_(num_rejected_cpu)
@@ -159,8 +173,10 @@ class RejectionSampler310V2(RejectionSampler):
         cu_num_draft_tokens = cu_num_logits[1:] - torch.arange(1, num_reqs + 1, dtype=torch.int32, device=logits.device)
 
         if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1:
+            # MTP1: every request contributes one target row and one draft row.
             target_rows = cu_num_logits[:-1].to(torch.int64)
         else:
+            # Variable/MTP2+: remove one interleaved bonus row per request.
             token_req_ids = torch.repeat_interleave(torch.arange(num_reqs, device=logits.device), draft_counts)
             target_rows = torch.arange(int(sum(num_draft_tokens)), device=logits.device) + token_req_ids
         draft_rows = target_rows + 1
@@ -168,7 +184,7 @@ class RejectionSampler310V2(RejectionSampler):
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
-        # Verify against post-processed logits (allowed / penalties / …).
+        # Verify / bonus against post-processed logits (allowed / penalties / …).
         target_logits = processed.index_select(0, target_rows)
         bonus_token_ids = processed.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
 
@@ -235,6 +251,7 @@ class RejectionSampler310V2(RejectionSampler):
         )
 
     def synchronize_cpu(self) -> None:
+        """Wait only when CPU request bookkeeping consumes sampled results."""
         if self._copy_pending:
             self._copy_event.synchronize()
             self._copy_pending = False
