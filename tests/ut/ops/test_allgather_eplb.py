@@ -23,11 +23,20 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 
 
+@pytest.fixture(autouse=True)
+def v2_forward_context(monkeypatch):
+    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_allgather_routes_execute_and_count_each_token_once(monkeypatch, tp_size):
     profile = get_hardware_profile(AscendDeviceType.A5)
     monkeypatch.setattr("vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: profile)
-    monkeypatch.setattr(afc, "get_forward_context", lambda: SimpleNamespace(moe_comm_type=afc.MoECommType.ALLGATHER))
+    monkeypatch.setattr(
+        afc,
+        "get_forward_context",
+        lambda: SimpleNamespace(additional_kwargs={"moe_comm_type": afc.MoECommType.ALLGATHER}),
+    )
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_map_to_physical", map_to_physical)
     # Default initial layout: four owners, eight logical experts, four replicas.
     # Expert 1's copies live on ranks 0 and 3, so rank-dependent choices
@@ -102,7 +111,9 @@ def test_sp_mask_tracks_padding_and_source_phase(tp_size):
 def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
-    monkeypatch.setattr(afc, "get_forward_context", lambda: SimpleNamespace(max_tokens_across_dp=4))
+    monkeypatch.setattr(
+        afc, "get_forward_context", lambda: SimpleNamespace(additional_kwargs={"max_tokens_across_dp": 4})
+    )
     peer_logits = torch.tensor([[20.0], [21.0], [0.0], [0.0]])
     peer_mask = torch.tensor([1, 0, 0, 0], dtype=torch.int32)
 
@@ -133,7 +144,7 @@ def test_other_paths_keep_rank_dependent_mapping(monkeypatch, device, comm):
     monkeypatch.setattr(
         "vllm_ascend.ops.fused_moe.eplb.get_current_hardware_profile", lambda: get_hardware_profile(device)
     )
-    monkeypatch.setattr(afc, "get_forward_context", lambda: SimpleNamespace(moe_comm_type=comm))
+    monkeypatch.setattr(afc, "get_forward_context", lambda: SimpleNamespace(additional_kwargs={"moe_comm_type": comm}))
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_map_to_physical", map_to_physical)
     ranked = torch.full((1024, 2), 3, dtype=torch.int32)
     router = SimpleNamespace(
