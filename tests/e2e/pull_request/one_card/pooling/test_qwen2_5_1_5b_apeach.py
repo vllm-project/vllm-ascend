@@ -54,6 +54,7 @@ Scoping notes (see issue #10680):
 
 import glob
 import os
+from collections.abc import Generator
 
 import pytest
 import torch
@@ -214,7 +215,7 @@ def _fallback_when_ascend_custom_op_unavailable():
 
 
 @pytest.fixture(scope="session")
-def apeach_vllm_runner(model_path: str) -> VllmRunner:
+def apeach_vllm_runner(model_path: str) -> Generator[VllmRunner, None, None]:
     """Shared bf16 pooling runner (the same instance is reused across tests
     so that determinism / single-vs-batch comparisons run against one
     engine)."""
@@ -238,7 +239,7 @@ def apeach_vllm_runner(model_path: str) -> VllmRunner:
 
 
 @pytest.fixture(scope="session")
-def apeach_hf_runner(model_path: str) -> HfRunner:
+def apeach_hf_runner(model_path: str) -> Generator[HfRunner, None, None]:
     """HF fp32 reference (same tolerance convention as the existing
     `test_classification.py` precedent)."""
     cleanup_dist_env_and_memory()
@@ -295,7 +296,9 @@ def test_classify_matches_hf_fp32_reference(
     argmax_mismatch = []
     for prompt, expected, hf_probs, vllm_probs in zip(prompts, expected_labels, hf_outputs, vllm_outputs):
         _check_probs(vllm_probs)
-        hf_label = _argmax(hf_probs)
+        # HfRunner.classify is annotated `list[str]` in conftest but actually
+        # returns per-prompt probability lists (`list[list[float]]`).
+        hf_label = _argmax(hf_probs)  # type: ignore[arg-type]
         vllm_label = _argmax(vllm_probs)
         assert hf_label == vllm_label, f"argmax mismatch for {prompt!r}: hf={hf_label} vllm={vllm_label}"
         if hf_label != expected:
@@ -385,9 +388,9 @@ def test_invalid_inputs_are_rejected(apeach_vllm_runner: VllmRunner) -> None:
     with pytest.raises(ValueError):
         apeach_vllm_runner.classify([""])
     with pytest.raises(TypeError):
-        apeach_vllm_runner.classify([None])
+        apeach_vllm_runner.classify([None])  # type: ignore[list-item]
     with pytest.raises(TypeError):
-        apeach_vllm_runner.classify([["not", "a", "token", "id", "list"]])
+        apeach_vllm_runner.classify([["not", "a", "token", "id", "list"]])  # type: ignore[list-item]
 
 
 def test_chinese_english_smoke(apeach_vllm_runner: VllmRunner) -> None:
