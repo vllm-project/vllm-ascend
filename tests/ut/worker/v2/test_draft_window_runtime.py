@@ -48,6 +48,8 @@ def setup(monkeypatch):
         num_query_per_req=3,
         num_speculative_steps=3,
         use_fused_multi_step_decode=False,
+        input_buffers=SimpleNamespace(positions=torch.tensor([11, 26])),
+        last_token_indices=torch.tensor([0, 1]),
         block_tables=SimpleNamespace(
             block_tables=[SimpleNamespace(gpu=canonical)],
             num_blocks=SimpleNamespace(np=np.full((1, 6), 8, dtype=np.int32)),
@@ -276,12 +278,14 @@ def test_eagle_freezes_anchor_across_rejection_and_retains_all_step_reads(setup)
     assert [metadata.seq_lens[1].item() for metadata in outputs] == [7, 5, 6]
     assert all(metadata.block_table_tensor[1, 0] == canonical[3, 5] for metadata in outputs)
     assert len({metadata.block_table_tensor.data_ptr() for metadata in outputs}) == 3
-    assert len(owner.retained) == 9
+    assert all(any(value is metadata for value in owner.retained) for metadata in outputs)
+    assert sum(type(value).__name__ == "DraftReadView" for value in owner.retained) == 3
     assert len(completions) == 1
 
 
 def test_eagle_terminal_prefill_first_pass_stays_full_then_uses_window(setup):
     _, spec, _, _ = setup
+    spec.input_buffers.positions = torch.tensor([15, 26])
     policy = resolve_draft_window_policy(requested_window_size=8, method="eagle3")
     runtime = DraftWindowRuntime(spec, policy)
     state = batch(computed=(12, 24))
@@ -292,6 +296,30 @@ def test_eagle_terminal_prefill_first_pass_stays_full_then_uses_window(setup):
             runtime.metadata_callback(step, 2)(0, metadata)
             outputs.append(metadata)
     assert [metadata.seq_lens[0].item() for metadata in outputs] == [16, 9, 10]
+
+
+def test_eagle_first_pass_anchor_uses_live_queries_after_rejection(setup):
+    _, spec, _, _ = setup
+    canonical = torch.arange(72, dtype=torch.int32).reshape(6, 12)
+    spec.block_tables.block_tables[0].gpu = canonical
+    spec.block_tables.num_blocks.np = np.full((1, 6), 12, dtype=np.int32)
+    spec.block_tables.kernel_block_sizes[0] = 128
+    # Current real MRV2 preparation preserves native query padding. Row1 has
+    # one rejected query: native extent1160, last live position1158 => E1159.
+    spec.input_buffers = SimpleNamespace(positions=torch.tensor([1155, 1156, 1157, 1158, 1156, 1157, 1158, 1155]))
+    spec.last_token_indices = torch.tensor([3, 6])
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=1035, method="eagle3"))
+    state = batch(computed=(1300, 1300), prompt=(1147, 1148), scheduled=(4, 4), drafts=(3, 3))
+    outputs = []
+    with runtime.proposal_context(spec, state):
+        for step, exact in enumerate(((1159, 1160), (1160, 1160), (1161, 1161))):
+            metadata = common(exact=exact, upper=(1162, 1163))
+            runtime.metadata_callback(step, 2)(0, metadata)
+            outputs.append(metadata)
+    # H=1159+3=1162; H-W=127 gives S0. Native padded1160 would
+    # incorrectly cross the block boundary to S128 for row1.
+    assert [metadata.seq_lens[:2].tolist() for metadata in outputs] == [[1159, 1160], [1160, 1160], [1161, 1161]]
+    assert all(metadata.block_table_tensor[1, 0] == canonical[3, 0] for metadata in outputs)
 
 
 def test_eagle_rejects_unsafe_window_at_startup(setup):

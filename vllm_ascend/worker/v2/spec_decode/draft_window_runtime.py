@@ -290,6 +290,42 @@ class DraftWindowRuntime:
 
         return apply
 
+    def _eagle_first_pass_lengths(self, native_extent: torch.Tensor, num_reqs: int):
+        """Snapshot live anchor and padded native extent in one current copy.
+
+        MRV2 keeps rejected query padding in the first-pass native layout.
+        Its last valid query index, rather than that padded extent, identifies
+        the logical proposal end. Native lengths keep the original causal
+        alignment; only the frozen Window anchor uses the live end.
+        """
+        positions = self.speculator.input_buffers.positions
+        indices = self.speculator.last_token_indices[:num_reqs]
+        if (
+            positions.ndim != 1
+            or indices.shape != (num_reqs,)
+            or positions.device != native_extent.device
+            or indices.device != native_extent.device
+            or positions.dtype not in (torch.int32, torch.int64)
+            or indices.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError("Eagle3 Window requires current one-dimensional prepared positions and last query indices")
+        owner = self._owner
+        indices = indices.to(dtype=torch.int64)
+        self.pool.retain(owner, indices)
+        last_positions = positions.index_select(0, indices)
+        self.pool.retain(owner, last_positions)
+        live_end = last_positions.to(dtype=torch.int32)
+        self.pool.retain(owner, live_end)
+        live_end.add_(1)
+        pair = torch.stack((native_extent[:num_reqs], live_end))
+        self.pool.retain(owner, pair)
+        snapshot = pair.to(device="cpu", dtype=torch.int32, copy=True)
+        self.pool.retain(owner, snapshot)
+        extent_cpu, live_cpu = snapshot[0], snapshot[1]
+        if bool(((live_cpu <= 0) | (live_cpu > extent_cpu) | (extent_cpu - live_cpu > self.static_k)).any()):
+            raise ValueError("Eagle3 prepared live queries disagree with the current native padding extent")
+        return extent_cpu, live_cpu
+
     def _host_metadata_callback(
         self,
         step: int,
@@ -342,12 +378,12 @@ class DraftWindowRuntime:
 
         # All direct-prefix groups use the same logical exact lengths and S.
         # The callback runs once per fresh common object, before each builder.
-        exact = starts = rows = full_exact_input = None
+        exact = starts = rows = full_exact_input = proposal_exact = None
         request_ids = None
         seen: set[int] = set()
 
         def apply(gid: int, common_metadata: Any) -> None:
-            nonlocal exact, starts, rows, request_ids, full_exact_input
+            nonlocal exact, starts, rows, request_ids, full_exact_input, proposal_exact
             if gid not in self.gids:
                 return
             if self._owner is not owner:
@@ -362,7 +398,9 @@ class DraftWindowRuntime:
                 rows = batch.idx_mapping_np[:num_reqs].copy()
                 full_exact_input = common_metadata.seq_lens
                 mapping = (request_ids, tuple(int(row) for row in rows))
-                if prepared_exact_cpu is not None:
+                if self.method == "eagle3" and step == 0:
+                    exact, proposal_exact = self._eagle_first_pass_lengths(full_exact_input, num_reqs)
+                elif prepared_exact_cpu is not None:
                     if mapping != prepared_mapping:
                         raise RuntimeError("Prepared exact lengths belong to another request mapping")
                     if (
@@ -394,7 +432,7 @@ class DraftWindowRuntime:
                                 window_size=self.window_size,
                                 block_span_tokens=self.anchor_block_span,
                             )
-                            for end in exact
+                            for end in proposal_exact
                         )
                     if self._eagle_plans is None:
                         raise RuntimeError("Eagle3 decode metadata has no frozen first-pass plan")

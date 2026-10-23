@@ -124,6 +124,22 @@ full reads so long prompt queries are preserved. Per-row phase decisions use
 computed prompt tokens, prompt length, and scheduled tokens excluding draft
 placeholders.
 
+Eagle3's first pass preserves rejected query padding in the native layout.
+Its logical proposal end is the current last valid query position plus one;
+the padded native extent must not choose the frozen anchor. For example,
+live E=1159, native extent=1160, K=3, W=1035 and B=128 require S=0, whereas
+using the native extent would incorrectly choose S=128. The runtime snapshots
+both current device values in one combined Host copy, shared across groups.
+This corrects the anchor; it does not remove Eagle3's remaining synchronization.
+
+Native first-pass lengths retain the original padded query alignment. With R
+rejected query slots, native extent=E+R and padded query count=Q+R, so their
+difference still equals E-Q for the live causal queries. Shortening only the
+native length would shift that causal mask. Positions, query rows and Full KV
+writes therefore retain the existing layout; the logical anchor uses E, while
+the native read extent accounts explicitly for its query padding. Subsequent
+AR steps consume their newly prepared current exact lengths with the frozen S.
+
 `DraftReadView` changes only the table, device exact length, both exact CPU
 mirrors, scheduling upper bound, and maximum length. Positions, query layout,
 Full KV write slots, and target metadata keep their original ownership.
