@@ -466,7 +466,7 @@ def test_release_encoder_allocation_preserves_notifications(monkeypatch, with_co
     scheduler._allocate_encoder_inputs(request, [0, 2], [])
 
     assert scheduler.encoder_cache_manager.allocate.call_args_list == [call(request, 0), call(request, 2)]
-    if with_connector:
+    if scheduler.ec_connector is not None:
         assert scheduler.ec_connector.update_state_after_alloc.call_args_list == [call(request, 0), call(request, 2)]
 
 
