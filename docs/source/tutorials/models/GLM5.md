@@ -980,6 +980,8 @@ Once the preparation is done, you can start the server with the following comman
 
 The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP1 PCP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
+> **Model runner compatibility:** The PCP16 Prefill commands below require a compatible Model Runner V2 runtime (`VLLM_USE_V2_MODEL_RUNNER=1`). Model Runner V1 rejects `--prefill-context-parallel-size` values greater than `1`. For a V1 deployment, use the [v0.30.0 recipe](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.30.0/docs/source/tutorials/models/GLM5.md#532-prefill-decode-disaggregation-a3-series): `--tensor-parallel-size 16`, `--prefill-context-parallel-size 1` (the default), and `"enable_dsa_cp": true` in `--additional-config`. Keep PP2 and the KV transfer topology consistent with that recipe; do not combine TP16 metadata with TP1/PCP16 commands.
+
 Before you start, please
 
 prepare the script `launch_online_dp.py` on each node:
