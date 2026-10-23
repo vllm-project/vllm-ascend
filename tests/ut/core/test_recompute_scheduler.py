@@ -5,10 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.request import RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
@@ -405,3 +408,45 @@ def test_remote_load_excludes_only_async_blocks_from_zeroing(scheduler_cls, asyn
         assert output.new_block_ids_to_zero is None
     else:
         assert set(output.new_block_ids_to_zero) == set(blocks)
+
+
+def test_async_load_preserves_zeroing_for_unloaded_group():
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.num_gpu_blocks = 100
+    kv_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"layer{group}"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16)
+            )
+            for group in range(2)
+        ],
+    )
+    scheduler = AsyncRecomputeScheduler(
+        vllm_config=config,
+        kv_cache_config=kv_config,
+        log_stats=True,
+        block_size=16,
+        structured_output_manager=StructuredOutputManager(config),
+    )
+    scheduler.use_v2_model_runner = False
+    scheduler.needs_kv_cache_zeroing = True
+    for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        manager._record_new_block_ids = True
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (8, True)
+    connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector = connector
+    request = create_request(request_id=1, num_tokens=10)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    loaded, fresh = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert loaded and fresh
+    zeroed = set(output.new_block_ids_to_zero or [])
+    assert zeroed.isdisjoint(loaded)
+    assert set(fresh) <= zeroed
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
