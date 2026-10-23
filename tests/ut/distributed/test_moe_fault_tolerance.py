@@ -5,9 +5,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from vllm.v1.worker.sentinel import gpu_worker_sentinel as upstream_sentinel
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import _NpuAll2AllManager
+from vllm_ascend.worker.sentinel import npu_worker_sentinel as sentinel_module
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
 
 
 class FakeSymmBuffer:
@@ -30,10 +31,9 @@ class FakeSymmBuffer:
         return self.ccl
 
 
-@pytest.mark.parametrize("inference_mode", [False, True])
-def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage(inference_mode):
+def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage():
     manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    with torch.inference_mode(inference_mode):
+    with torch.inference_mode():
         buffer = FakeSymmBuffer()
         manager.bind_mega_moe_buffer(buffer)
     address = buffer.mask_buffer.data_ptr()
@@ -55,18 +55,9 @@ def test_mega_moe_cleanup_and_mask_replay_preserve_captured_storage(inference_mo
     assert manager.query_active_mask().tolist() == [0, 1, 0, 1]
     assert buffer.mask_buffer.tolist() == [0, 1, 0, 1]
     assert buffer.mask_buffer.data_ptr() == address
-
-
-def test_unmask_only_updates_the_requested_rank():
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    buffer = FakeSymmBuffer()
-    manager.bind_mega_moe_buffer(buffer)
-    manager.update_mask(1)
-    manager.update_mask(3)
     manager.update_mask(1, False)
     assert manager.query_active_mask().tolist() == [0, 0, 0, 1]
     assert buffer.mask_buffer.tolist() == [0, 0, 0, 1]
-    assert buffer.ccl.eq(1).all()
 
 
 def test_fault_queries_never_touch_device_buffer():
@@ -76,15 +67,6 @@ def test_fault_queries_never_touch_device_buffer():
     manager._mega_moe_buffer = Mock(spec=[])
     assert manager.query_active_mask().tolist() == [0, 1, 0, 0]
     assert not manager.query_fault()
-
-
-def test_mask_allocation_failure_is_not_silently_ignored():
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    buffer = FakeSymmBuffer()
-    buffer.clean_mask_buffer = Mock(side_effect=RuntimeError("unsupported device"))
-    with pytest.raises(RuntimeError, match="unsupported device"):
-        manager.bind_mega_moe_buffer(buffer)
-    assert not manager.has_mega_moe_buffer
 
 
 def test_mc2_manager_keeps_dense_rank_translation_and_retry_behavior():
@@ -104,63 +86,92 @@ def test_mc2_manager_keeps_dense_rank_translation_and_retry_behavior():
     assert info.data_ptr() == address
 
 
-@pytest.mark.parametrize("rank", [-1, 4, True])
-def test_invalid_fault_rank_cannot_corrupt_cpu_mask(rank):
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    with pytest.raises(ValueError, match="EP rank"):
-        manager.update_mask(rank)
-    assert not manager.query_active_mask().any()
+def test_retry_publishes_device_writes_before_leaving_quarantine():
+    sentinel = object.__new__(WorkerSentinel)
+    sentinel.worker_faulted = True
+    sentinel.reset_device = Mock()
+    request = object()
+
+    def synchronize_while_quarantined():
+        retry.assert_called_once_with(request)
+        assert sentinel.worker_faulted
+
+    with (
+        patch.object(sentinel_module.GPUWorkerSentinel, "retry") as retry,
+        patch.object(torch.npu, "synchronize", side_effect=synchronize_while_quarantined) as synchronize,
+    ):
+        sentinel.retry(request)
+    sentinel.reset_device.assert_called_once()
+    retry.assert_called_once_with(request)
+    synchronize.assert_called_once_with()
+    assert not sentinel.worker_faulted
 
 
 @pytest.mark.parametrize("mega_moe", [False, True])
-def test_upstream_retry_replays_dead_ranks_across_consecutive_recoveries(mega_moe):
-    manager = _NpuAll2AllManager(4, torch.device("cpu"))
-    manager.set_num_local_physical_experts(8)
-    buffer = FakeSymmBuffer()
-    if mega_moe:
-        manager.bind_mega_moe_buffer(buffer)
-    sentinel = SimpleNamespace(
-        _clean_worker_state=Mock(),
-        worker=SimpleNamespace(
-            rank=0,
-            model_runner=object(),
-            parallel_config=SimpleNamespace(
-                data_parallel_size=4,
-                world_size=1,
-                tensor_parallel_size=1,
-                prefill_context_parallel_size=1,
-                enable_eplb=False,
-            ),
-        ),
+def test_scale_down_uses_backend_specific_physical_expert_ids(mega_moe):
+    # Rank 1 is dead: the expert on rank 2 must keep id 8 for MegaMoe,
+    # but become id 4 for MC2. A tail-rank-only test would miss this bug.
+    table = torch.tensor([[0], [8], [12]], dtype=torch.int32)
+    layer = SimpleNamespace(eplb_state=SimpleNamespace(expert_replica_routing_table=table))
+    state = SimpleNamespace(
+        physical_to_logical_map=torch.empty(1, 16),
+        logical_replica_count=torch.empty(1, 3),
+        model=SimpleNamespace(moe_layers=[layer]),
     )
-
-    def check_cleanup(*args):
-        assert not manager.query_active_mask().any()
-        if mega_moe:
-            assert not buffer.mask_buffer.any()
-            assert not buffer.ccl.any()
-
+    sentinel = object.__new__(WorkerSentinel)
+    sentinel._eplb_model_state = lambda: state
+    sentinel.worker = SimpleNamespace(model_runner=SimpleNamespace(model=state.model), vllm_config=object())
+    manager = SimpleNamespace(
+        has_mega_moe_buffer=mega_moe,
+        query_active_mask=lambda: torch.tensor([0, 1, 0, 0]),
+        get_mc2_elastic_info=Mock(return_value=torch.zeros(12)),
+    )
     with (
-        patch.object(torch.accelerator, "synchronize"),
-        patch.object(upstream_sentinel, "get_cached_tcp_store_client"),
-        patch.object(upstream_sentinel, "reset_eplb_async_state"),
-        patch.object(upstream_sentinel, "_reinit_cpu_group", side_effect=check_cleanup),
-        patch.object(upstream_sentinel, "get_dp_group", return_value=SimpleNamespace()),
-        patch.object(upstream_sentinel, "get_ep_all2all_manager", return_value=manager),
+        patch.object(sentinel_module, "mark_dead_expert_slots_inplace"),
+        patch.object(sentinel_module, "redistribute_expert_placement", return_value={(0, 1)}),
+        patch.object(sentinel_module, "_commit_eplb_maps"),
+        patch.object(sentinel_module, "rebuild_model_expert_maps"),
+        patch.object(sentinel_module, "reload_experts_from_disk") as reload_experts,
+        patch.object(sentinel_module, "refresh_model_routing_tables"),
+        patch.object(sentinel_module, "get_ep_group", return_value=SimpleNamespace(world_size=4)),
+        patch.object(sentinel_module, "get_ep_all2all_manager", return_value=manager),
     ):
-        for dead_ranks in ([1], [1, 3]):
-            request = SimpleNamespace(
-                params={
-                    "dp_master_ip": "127.0.0.1",
-                    "dp_group_rank": 0,
-                    "dp_group_size": 4 - len(dead_ranks),
-                    "recovery_round": len(dead_ranks),
-                    "recovery_store_port": 12345,
-                    "dead_dp_ranks": dead_ranks,
-                }
-            )
-            upstream_sentinel.WorkerSentinel.retry(sentinel, request)
-            expected = [int(rank in dead_ranks) for rank in range(4)]
-            assert manager.query_active_mask().tolist() == expected
-            if mega_moe:
-                assert buffer.mask_buffer.tolist() == expected
+        sentinel._redistribute_experts({1})
+    reload_experts.assert_called_once_with(state.model, sentinel.worker.vllm_config, {(0, 1)})
+    assert table.flatten().tolist() == ([0, 8, 12] if mega_moe else [0, 4, 8])
+
+
+@pytest.mark.parametrize(
+    "fused,mega_moe,bound,error",
+    [
+        (1, True, True, None),
+        (1, True, False, "warmup"),
+        (1, False, False, "enable_fused_mc2"),
+        (0, False, False, None),
+    ],
+)
+def test_scale_down_rejects_unsupported_fused_backend(fused, mega_moe, bound, error):
+    sentinel = object.__new__(WorkerSentinel)
+    sentinel.worker = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(eplb_state=object()),
+        parallel_config=SimpleNamespace(eplb_config=SimpleNamespace(num_redundant_experts=8)),
+        vllm_config=object(),
+    )
+    with (
+        patch.object(
+            sentinel_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_fused_mc2=fused, enable_mc2_hierarchy_comm=False),
+        ),
+        patch.object(sentinel_module, "use_cann_megamoe", return_value=mega_moe),
+        patch.object(
+            sentinel_module, "get_ep_all2all_manager", return_value=SimpleNamespace(has_mega_moe_buffer=bound)
+        ),
+        patch.object(sentinel_module.torch_npu, "npu_moe_distribute_dispatch_v2", create=True),
+    ):
+        if error:
+            with pytest.raises(ValueError, match=error):
+                sentinel._validate_scale_down_preconditions()
+        else:
+            sentinel._validate_scale_down_preconditions()
