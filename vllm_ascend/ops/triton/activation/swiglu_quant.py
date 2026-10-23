@@ -42,7 +42,6 @@ def _swiglu_quant_kernel(
         cur_x = tl.load(x_ptr + x_offsets)
         x1 = extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
         x2 = extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
-        # Triton Ascend 3.6.0 does not support BF16 input to tl.sigmoid.
         out = x1 * tl.sigmoid(x1.to(tl.float32)) * x2
 
         # quant
