@@ -124,6 +124,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.hooks import bind_verify_input_hook
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
@@ -216,6 +217,7 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
+        self.speculator_hooks = frozenset()
         self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
         self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
         if self.speculative_config is not None and self.is_last_pp_rank:
@@ -223,6 +225,10 @@ class NPUModelRunner(GPUModelRunner):
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
             self.speculator.update_stream = self.update_stream
+            if hasattr(self.speculator, "overridden_hooks"):
+                self.speculator_hooks = self.speculator.overridden_hooks()
+                if "prepare_verify_inputs" in self.speculator_hooks:
+                    bind_verify_input_hook(self.speculator, update_cos_sin)
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -438,6 +444,20 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_block_zeroer = C8KVBlockZeroer(  # type: ignore[assignment]
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
+
+    def _init_native_decode(self, target_layer_names, cudagraph_mode) -> None:
+        if self.speculator is None or not getattr(self.speculator, "may_suspend_drafting", False):
+            return
+        # ACL update tasks currently use one process-wide GraphParams instance.
+        # A second target-only graph manager would share or overwrite the
+        # speculative graph's task handles. Keep this explicit until those
+        # workspaces and update handles can be isolated per manager.
+        if cudagraph_mode != CUDAGraphMode.NONE:
+            raise NotImplementedError(
+                "Draft suspension on Ascend currently requires target enforce_eager=True; "
+                "speculative and target-only ACL graph update tasks are not isolated."
+            )
+        super()._init_native_decode(target_layer_names, cudagraph_mode)
 
     def initialize_kv_cache(
         self,
@@ -834,15 +854,17 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
-
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
+        self._update_seq_lens_cpu(scheduler_output, req_ids, num_scheduled_tokens_np)
+        effective_draft_tokens = getattr(batch_req_state, "num_draft_tokens_np", None)
         idx_mapping_np = batch_req_state.idx_mapping_np
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
-        if scheduler_output.scheduled_spec_decode_tokens:
+        if effective_draft_tokens is not None:
+            num_valid_tokens = num_scheduled_tokens_np - effective_draft_tokens
+        elif scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
                 [
                     num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
@@ -871,10 +893,16 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
+            # gather_batch_req_state has already applied verify_budget.
+            # Re-reading scheduler drafts would restore rows it trimmed away.
+            num_draft_tokens_per_req = (
+                effective_draft_tokens
+                if effective_draft_tokens is not None
+                else np.fromiter(
+                    (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+                    dtype=np.int32,
+                    count=num_reqs,
+                )
             )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
@@ -1192,17 +1220,20 @@ class NPUModelRunner(GPUModelRunner):
 
         previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
         previous_speculator = self.speculator
+        previous_speculator_hooks = getattr(self, "speculator_hooks", frozenset())
         previous_max_num_reqs = self.max_num_reqs
         try:
             self.input_buffers.profile_cpp = True
             # CPP profiles the target prefill. This also matches MRV1, where the
             # drafter dummy run is explicitly skipped for profile_cpp.
             self.speculator = None
+            self.speculator_hooks = frozenset()
             self.max_num_reqs = 1
             yield
         finally:
             self.input_buffers.profile_cpp = previous_profile_cpp
             self.speculator = previous_speculator
+            self.speculator_hooks = previous_speculator_hooks
             self.max_num_reqs = previous_max_num_reqs
 
     @step_eplb_after(is_dummy=True)
@@ -1322,6 +1353,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         req_ids: list[str],
+        effective_num_scheduled_tokens: np.ndarray | None = None,
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
@@ -1342,7 +1374,12 @@ class NPUModelRunner(GPUModelRunner):
         for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+            scheduled = (
+                num_scheduled_tokens[req_id]
+                if effective_num_scheduled_tokens is None
+                else effective_num_scheduled_tokens[i]
+            )
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + scheduled
 
     def _pad_query_start_loc_for_fia(
         self,

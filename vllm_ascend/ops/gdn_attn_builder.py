@@ -337,6 +337,7 @@ def _build_non_spec_chunked_prefill_metadata(
 
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
+    supports_linear_attn_verify = True
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     build_device_chunk_metadata = True
 
@@ -348,6 +349,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if getattr(self, "verify_extension", None) is not None and not self.supports_linear_attn_verify:
+            raise NotImplementedError("This Ascend GDN backend does not support linear-attention verify extensions.")
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -972,6 +975,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         self._attach_non_spec_prefill_metadata(
             attn_metadata, non_spec_chunked_prefill_metadata, non_spec_conv1d_cache_indices
         )
+        # The upstream builder creates the registered verifier; Ascend
+        # constructs its own metadata and must retain that extension explicitly.
+        if hasattr(self, "verify_extension"):
+            attn_metadata.verify_extension = self.verify_extension
         self._attach_spec_decode_metadata(attn_metadata)
         self._attach_non_spec_decode_metadata(attn_metadata, non_spec_conv1d_cache_indices)
         return attn_metadata

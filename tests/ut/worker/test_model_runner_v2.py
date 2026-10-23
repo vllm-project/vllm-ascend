@@ -1981,3 +1981,42 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
     for i, req_id in enumerate(batch.req_ids):
         index = runner.req_states.req_id_to_index[req_id]
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
+
+
+@pytest.mark.parametrize("budget", [[0, 0], [1, 0], [1, 2]])
+def test_prepare_inputs_respects_effective_verify_budget(budget):
+    runner, scheduler, batch, desc = _prepare_inputs_runner(draft=True)
+    scheduler.num_scheduled_tokens = {"r0": 2, "r1": 3}
+    batch.num_draft_tokens_np = np.array(budget, dtype=np.int32)
+    batch.num_scheduled_tokens = batch.num_draft_tokens_np + 1
+    batch.num_tokens = int(batch.num_scheduled_tokens.sum())
+    desc.num_tokens = batch.num_tokens
+    # Return a batch-shaped namespace to inspect the effective budget.
+    with (
+        patch(
+            "vllm_ascend.worker.v2.model_runner.AscendInputBatch",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
+        patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
+            return_value=torch.zeros(batch.num_tokens, dtype=torch.int32),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
+            return_value=(
+                torch.zeros(batch.num_tokens, dtype=torch.int32),
+                torch.zeros(batch.num_tokens, dtype=torch.int32),
+            ),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
+    ):
+        out = runner.prepare_inputs(scheduler, batch, desc, 0)
+    assert out.num_draft_tokens == sum(budget)
+    assert out.cu_num_logits_np[-1] == 2 + sum(budget)
+    np.testing.assert_array_equal(out.num_draft_tokens_per_req, budget)
+    np.testing.assert_array_equal(out.cu_num_logits_np, np.r_[0, np.cumsum(np.array(budget) + 1)])
+    np.testing.assert_array_equal(out.seq_lens_np[:2], np.array([1, 2]) + batch.num_scheduled_tokens)

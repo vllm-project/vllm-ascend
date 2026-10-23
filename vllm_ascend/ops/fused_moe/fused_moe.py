@@ -131,6 +131,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            if hasattr(self._shared_experts, "disable_aux_stream"):
+                self._shared_experts.disable_aux_stream = self._disable_shared_experts_aux_stream
+
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
@@ -149,6 +152,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
+
+    def _disable_shared_experts_aux_stream(self) -> None:
+        # Honor the upstream per-layer opt-out for the Ascend executor too.
+        # This is called before graph capture, with no pending shared output.
+        type(self._shared_experts).disable_aux_stream(self._shared_experts)
+        self.ascend_shared_experts.multistream_overlap = False
+        self._forward_entry = self._select_forward()
 
     def forward(
         self,

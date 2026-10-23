@@ -21,6 +21,8 @@ import copy
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def init_speculator(
     vllm_config: VllmConfig,
@@ -35,6 +37,15 @@ def init_speculator(
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if not vllm_version_is("0.31.0"):
+        # A registered method owns its device implementation. Resolve it before
+        # use_eagle(): the registry can declare target hidden-state traits that
+        # also make that predicate true.
+        from vllm.v1.spec_decode.registry import get_speculative_method
+
+        registered = get_speculative_method(speculative_config.method)
+        if registered is not None:
+            return registered.resolve_speculator_cls()(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.

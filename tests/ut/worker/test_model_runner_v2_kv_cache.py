@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +28,22 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     # MagicMock makes aux_output_config.enabled truthy by default; disable it so
     # the test exercises the KV-connector path only (main-only branch).
     runner.vllm_config.aux_output_config.enabled = False
-    runner.jit_warmup_registry.activate.side_effect = nullcontext
+    warmup_active = False
+
+    @contextmanager
+    def warmup():
+        nonlocal warmup_active
+        warmup_active = True
+        try:
+            yield
+        finally:
+            warmup_active = False
+
+    def init_native(*_args):
+        assert warmup_active, "Native attention builders must register their JIT warmup providers."
+
+    runner.jit_warmup_registry.activate.side_effect = warmup
+    runner._init_native_decode.side_effect = init_native
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
@@ -52,6 +67,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
+    runner._init_native_decode.assert_called_once()
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
     if is_profiling:
         assert registration_order == ["offload"]

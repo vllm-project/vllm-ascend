@@ -171,6 +171,12 @@ def initialize_kv_cache(
         varlen_decode=self.adaptive_verification is not None,
         ubatch_runner=self.ubatch_runner,
     )
+    # Keep the upstream request-ID suspension/drain state machine and
+    # target-only metadata. graph_manager_wrapper supplies the ACL manager
+    # for both configurations, so no CUDA graph manager is constructed here.
+    if hasattr(self, "_init_native_decode"):
+        with self.jit_warmup_registry.activate():
+            self._init_native_decode(target_attn_layer_names, cudagraph_mode)
     if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
         self.fast_prefill = upstream.FastPrefillHelper(self.cudagraph_manager, self.max_num_tokens)
     upstream.check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
