@@ -3,44 +3,46 @@
 from types import SimpleNamespace
 
 import pytest
+import vllm.envs as vllm_envs
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
 from vllm_ascend.patch.worker.patch_v2 import patch_dspark
-from vllm_ascend.worker.v2 import pp_transport
 
 
-@pytest.mark.parametrize("legacy", [True, False])
+@pytest.mark.parametrize("inherits_quant", [True, False])
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, legacy, pp_size, fail):
-    bypass_pp_guard = legacy and pp_size > 1
+def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
         model_config=SimpleNamespace(model="target", architecture="GlmMoeDsaForCausalLM"),
-        speculative_config=SimpleNamespace(method="dspark", draft_model_config=SimpleNamespace(model="draft")),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_model_config=SimpleNamespace(model="target" if inherits_quant else "draft")
+        ),
+        quant_config=object(),
     )
-    monkeypatch.setattr(pp_transport, "use_legacy_spec_pp", lambda: legacy)
-    monkeypatch.setattr(patch_dspark, "use_legacy_spec_pp", lambda: legacy)
     get_pp_group = lambda: SimpleNamespace(world_size=pp_size)
     monkeypatch.setattr(patch_dspark.dspark_utils, "get_pp_group", get_pp_group, raising=False)
-    monkeypatch.setattr(pp_transport.vllm_envs, "VLLM_PP_LAYER_PARTITION", "42,36")
-    should_share = patch_dspark.eagle_utils._should_share
+    monkeypatch.setattr(vllm_envs, "VLLM_PP_LAYER_PARTITION", "42,36")
+    should_share = eagle_utils._should_share
+    get_quant_config = patch_dspark.model_utils.get_draft_quant_config
     assert "_should_share" not in vars(patch_dspark.dspark_utils)
 
     def load(target, received_config):
         assert received_config is config
-        assert config.parallel_config.pipeline_parallel_size == (1 if bypass_pp_guard else pp_size)
+        assert config.parallel_config.pipeline_parallel_size == pp_size
         expected_partition = None if pp_size > 1 else "42,36"
-        assert expected_partition == pp_transport.vllm_envs.VLLM_PP_LAYER_PARTITION
-        assert patch_dspark.dspark_utils.get_pp_group().world_size == (1 if bypass_pp_guard else pp_size)
-        # Both upstream loaders resolve this helper inside load_dspark_model.
+        assert expected_partition == vllm_envs.VLLM_PP_LAYER_PARTITION
+        assert patch_dspark.dspark_utils.get_pp_group().world_size == pp_size
+        # Native PP loading and sharing are not overridden.
         from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
 
-        assert _should_share is patch_dspark.eagle_utils._should_share
+        assert _should_share is should_share
         assert "_should_share" not in vars(patch_dspark.dspark_utils)
-        if bypass_pp_guard:
-            assert _should_share is not should_share
+        if inherits_quant:
+            assert patch_dspark.model_utils.get_draft_quant_config(config) is config.quant_config
         else:
-            assert _should_share is should_share
+            assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config
         if fail:
             raise RuntimeError("draft load failed")
         return target
@@ -53,7 +55,8 @@ def test_dspark_draft_partition_isolation(monkeypatch, legacy, pp_size, fail):
     else:
         assert patch_dspark._load_dspark_model_with_target_quant(target, config) is target
     assert config.parallel_config.pipeline_parallel_size == pp_size
-    assert pp_transport.vllm_envs.VLLM_PP_LAYER_PARTITION == "42,36"
-    assert patch_dspark.eagle_utils._should_share is should_share
+    assert vllm_envs.VLLM_PP_LAYER_PARTITION == "42,36"
+    assert eagle_utils._should_share is should_share
+    assert patch_dspark.model_utils.get_draft_quant_config is get_quant_config
     assert patch_dspark.dspark_utils.get_pp_group is get_pp_group
     assert "_should_share" not in vars(patch_dspark.dspark_utils)

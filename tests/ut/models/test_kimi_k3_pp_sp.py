@@ -5,6 +5,7 @@
 import __future__
 
 import ast
+import logging
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,15 @@ from torch import nn
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _keep_definition(item, allowed):
+    if getattr(item, "name", None) in allowed:
+        return True
+    if isinstance(item, ast.If):
+        # Keep requested definitions nested in class-scope conditionals.
+        return any(_keep_definition(stmt, allowed) for stmt in (*item.body, *item.orelse))
+    return False
+
+
 def load_definitions(path, names, namespace, *, bases=None, methods=None):
     tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
@@ -27,7 +37,7 @@ def load_definitions(path, names, namespace, *, bases=None, methods=None):
         if isinstance(node, ast.ClassDef):
             node.bases = [ast.Name(id=bases[node.name], ctx=ast.Load())]
             node.decorator_list = []
-            node.body = [item for item in node.body if getattr(item, "name", None) in methods[node.name]]
+            node.body = [item for item in node.body if _keep_definition(item, methods[node.name])]
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(ROOT / path), "exec", flags=__future__.annotations.compiler_flag), namespace)
 
@@ -458,12 +468,16 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
         {".gate_proj": (".gate_up_proj", 0)},
     )
     captured = []
+
+    def load_weights(weights, *, mapper):
+        captured.append(mapper)
+        return {name for name, _ in weights}
+
     namespace = {
         "BaseModel": nn.Module,
         "replace": replace,
-        "AutoWeightsLoader": lambda model: SimpleNamespace(
-            load_weights=lambda weights, mapper: captured.append(mapper)
-        ),
+        "logger": logging.getLogger(__name__),
+        "AutoWeightsLoader": lambda model: SimpleNamespace(load_weights=load_weights),
     }
     load_definitions(
         "vllm_ascend/models/kimi_k3_dspark.py",
@@ -475,7 +489,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     model = namespace["AscendK3DSparkForCausalLM"]()
     model.hf_to_vllm_mapper = mapper
     model._owns_embed_tokens = owns_embed
-    model.load_weights([])
+    assert model.load_weights([]) == set()
     selected = captured[0]
     expected = dict(mapper.orig_to_new_substr)
     if owns_embed:
@@ -530,7 +544,6 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
 
 
 @pytest.mark.parametrize("architecture", ["KimiK3ForCausalLM", "DeepseekV4ForCausalLM"])
-@pytest.mark.parametrize("legacy_transport", [False, True])
 @pytest.mark.parametrize(
     "use_pp,num_speculative_steps,owns_speculator,prefill_chunk",
     [
@@ -545,7 +558,7 @@ def test_pp_cpu_count_sync_is_scoped(architecture, use_pp, num_speculative_steps
     ],
 )
 def test_host_positions_after_rejection_or_chunk(
-    architecture, legacy_transport, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
+    architecture, use_pp, num_speculative_steps, owns_speculator, prefill_chunk
 ):
     events = []
 
@@ -569,11 +582,18 @@ def test_host_positions_after_rejection_or_chunk(
         {"NPUModelRunner"},
         namespace,
         bases={"NPUModelRunner": "BaseStateRunner"},
-        methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
+        methods={
+            "NPUModelRunner": {
+                "_can_skip_spec_cpu_length_sync",
+                "postprocess_sampled",
+                "postprocess_num_computed_tokens",
+                "_update_seq_lens_cpu",
+            }
+        },
     )
     runner = namespace["NPUModelRunner"]()
+    runner.speculative_config = None
     runner.speculator = object() if owns_speculator else None
-    runner.use_spec_pp = use_pp and num_speculative_steps > 0 and legacy_transport
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp
     runner.model_state = object()

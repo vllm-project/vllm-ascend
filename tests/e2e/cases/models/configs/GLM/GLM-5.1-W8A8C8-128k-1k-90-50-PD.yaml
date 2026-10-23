@@ -18,7 +18,8 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 2
+    cp_size: 4
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -27,28 +28,30 @@ config:
     dp_size: 4
     dp_size_local: 2
     dp_rank_start: 2
-    tp_size: 8
+    tp_size: 2
+    cp_size: 4
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
     port_start: 7100
     dp_rpc_port: 13321
-    dp_size: 8
-    dp_size_local: 4
+    dp_size: 16
+    dp_size_local: 8
     dp_rank_start: 0
-    tp_size: 4
+    tp_size: 2
     dp_address: "${NODE_2_IP}"
 
   - node_index: 3
     port_start: 7100
     dp_rpc_port: 13321
-    dp_size: 8
-    dp_size_local: 4
-    dp_rank_start: 4
-    tp_size: 4
+    dp_size: 16
+    dp_size_local: 8
+    dp_rank_start: 8
+    tp_size: 2
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
@@ -64,7 +67,7 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      HCCL_BUFFSIZE: "400"
+      HCCL_BUFFSIZE: "1536"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -80,6 +83,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -88,13 +93,13 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "202752"
+      - "147456"
       - --kv-cache-dtype
       - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -119,11 +124,11 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 2
                     },
                     "decode": {
-                            "dp_size": 8,
-                            "tp_size": 4
+                            "dp_size": 16,
+                            "tp_size": 2
                     }
             }
         }'
@@ -131,7 +136,7 @@ templates:
     envs:
       <<: *env_common
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      HCCL_BUFFSIZE: "400"
+      HCCL_BUFFSIZE: "1536"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -147,6 +152,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --hf-overrides
       - '{"use_index_cache": true, "index_topk_freq": 4}'
@@ -155,13 +162,13 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "202752"
+      - "147456"
       - --kv-cache-dtype
       - "int8"
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -186,11 +193,11 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 2
                     },
                     "decode": {
-                            "dp_size": 8,
-                            "tp_size": 4
+                            "dp_size": 16,
+                            "tp_size": 2
                     }
             }
         }'
@@ -220,7 +227,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "202752"
+      - "147456"
       - --max-num-batched-tokens
       - "164"
       - --compilation-config
@@ -255,11 +262,11 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 2
                     },
                     "decode": {
-                            "dp_size": 8,
-                            "tp_size": 4
+                            "dp_size": 16,
+                            "tp_size": 2
                     }
             }
         }'
@@ -289,7 +296,7 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "202752"
+      - "147456"
       - --max-num-batched-tokens
       - "164"
       - --compilation-config
@@ -324,11 +331,11 @@ templates:
                     "use_ascend_direct": true,
                     "prefill": {
                             "dp_size": 4,
-                            "tp_size": 8
+                            "tp_size": 2
                     },
                     "decode": {
-                            "dp_size": 8,
-                            "tp_size": 4
+                            "dp_size": 16,
+                            "tp_size": 2
                     }
             }
         }'
@@ -341,7 +348,7 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 81920
+    max_out_len: 65536
     batch_size: 32
     baseline: 93.33
     threshold: 10

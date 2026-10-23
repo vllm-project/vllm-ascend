@@ -51,10 +51,10 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
-# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
-# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
+# Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
+# A5 decode keeps its lower-latency Triton path.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
 _USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
@@ -117,6 +117,12 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_MINIMAX_M3_SPARSE_INDEXER"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3IndexerImpl]:
         return AscendMiniMaxM3IndexerImpl
@@ -130,7 +136,7 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod
@@ -583,6 +589,12 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
     def get_name() -> str:
         return "ASCEND_MINIMAX_M3_SPARSE"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3SparseImpl]:
         return AscendMiniMaxM3SparseImpl
@@ -596,7 +608,7 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
         return [128]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [128]
 
     @classmethod

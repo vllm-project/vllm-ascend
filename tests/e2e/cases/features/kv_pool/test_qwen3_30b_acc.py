@@ -21,7 +21,8 @@ import openai
 import pytest
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import MooncakeLauncher, RemoteOpenAIServer
+# from tests.e2e.conftest import MooncakeLauncher, RemoteOpenAIServer
+from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import maybe_download_from_modelscope, run_aisbench_cases
 
 MODELS = [
@@ -42,14 +43,14 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-mooncake_json = {
-    "local_hostname": "localhost",
-    "metadata_server": "P2PHANDSHAKE",
-    "protocol": "ascend",
-    "device_name": "",
-    "master_server_address": "",
-    "global_segment_size": 8589934592,
-}
+# mooncake_json = {
+#     "local_hostname": "localhost",
+#     "metadata_server": "P2PHANDSHAKE",
+#     "protocol": "ascend",
+#     "device_name": "",
+#     "master_server_address": "",
+#     "global_segment_size": 8589934592,
+# }
 
 aisbench_cases = [
     {
@@ -70,30 +71,30 @@ aisbench_cases = [
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 async def test_models(model: str, tp_size: int) -> None:
     port = get_open_port()
-    mooncake_port = get_open_port()
-    mooncake_metrics_port = get_open_port()
-    mooncake_json["master_server_address"] = f"127.0.0.1:{mooncake_port}"
-    with open("mooncake.json", "w") as f:
-        json.dump(mooncake_json, f)
+    # mooncake_port = get_open_port()
+    # mooncake_metrics_port = get_open_port()
+    # mooncake_json["master_server_address"] = f"127.0.0.1:{mooncake_port}"
+    # with open("mooncake.json", "w") as f:
+    #     json.dump(mooncake_json, f)
     env_dict = {
         "PYTHONHASHSEED": "0",
-        "ASCEND_CONNECT_TIMEOUT": "10000",
-        "ASCEND_TRANSFER_TIMEOUT": "10000",
+        # "ASCEND_CONNECT_TIMEOUT": "10000",
+        # "ASCEND_TRANSFER_TIMEOUT": "10000",
         "VLLM_USE_V1": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "1024",
         "OMP_NUM_THREADS": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "MOONCAKE_CONFIG_PATH": "mooncake.json",
-        "ASCEND_ENABLE_USE_FABRIC_MEM": "1",
-        "ASCEND_AUTO_CONNECT": "1",
+        # "MOONCAKE_CONFIG_PATH": "mooncake.json",
+        # "ASCEND_ENABLE_USE_FABRIC_MEM": "0",
+        # "ASCEND_AUTO_CONNECT": "1",
     }
-    kv_transfer_config = {
-        "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"register_buffer": True, "use_layerwise": False, "mooncake_rpc_port": "0"},
-    }
+    # kv_transfer_config = {
+    #     "kv_connector": "AscendStoreConnector",
+    #     "kv_role": "kv_both",
+    #     "kv_connector_extra_config": {"register_buffer": True, "use_layerwise": False, "mooncake_rpc_port": "0"},
+    # }
     speculative_config = {"method": "eagle3", "model": eagle_model, "num_speculative_tokens": 3}
     server_args = [
         "--trust-remote-code",
@@ -118,14 +119,14 @@ async def test_models(model: str, tp_size: int) -> None:
         "0.95",
         "--speculative-config",
         json.dumps(speculative_config),
-        "--kv-transfer-config",
-        json.dumps(kv_transfer_config),
+        # "--kv-transfer-config",
+        # json.dumps(kv_transfer_config),
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
     with (
-        MooncakeLauncher(mooncake_port, mooncake_metrics_port),
+        # MooncakeLauncher(mooncake_port, mooncake_metrics_port),
         RemoteOpenAIServer(model, server_args, server_port=port, env_dict=env_dict, auto_port=False) as server,
     ):
         client = server.get_async_client()

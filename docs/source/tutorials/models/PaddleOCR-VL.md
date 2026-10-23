@@ -362,7 +362,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 #### 9.2.1 General Tuning Reference
 
-For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
+For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 

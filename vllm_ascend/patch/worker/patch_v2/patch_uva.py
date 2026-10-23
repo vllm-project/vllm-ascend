@@ -120,6 +120,25 @@ class MonitoredTorchTensor:
         return getattr(self._tensor, name)
 
 
+def _zeros_on_npu(cpu: torch.Tensor) -> torch.Tensor:
+    """Zero an NPU buffer matching ``cpu``.
+
+    ``aclnnInplaceZero`` rejects ``DT_UINT64``. Prompt-embeds pointer tables
+    use that dtype, so zero an int64 allocation and view it back. The zero
+    bit pattern is identical, and callers still see ``uint64``.
+    """
+    if cpu.dtype == torch.uint64:
+        return torch.zeros(cpu.shape, dtype=torch.int64, device="npu").view(torch.uint64)
+    return torch.zeros_like(cpu, device="npu")
+
+
+def _int64_storage(tensor: torch.Tensor) -> torch.Tensor:
+    """View a uint64 tensor as int64 so NPU copy kernels accept it."""
+    if tensor.dtype == torch.uint64:
+        return tensor.view(torch.int64)
+    return tensor
+
+
 class UvaBufferWrapper:
     """
     Ascend NPU doesn't support UVA tensors directly.
@@ -140,7 +159,7 @@ class UvaBufferWrapper:
         self._use_real_uva = view is not None
         if requested_real_uva and not self._use_real_uva:
             logger.warning_once("Pinned CPU memory is not mapped for NPU UVA; using the async H2D fallback")
-        self._uva: torch.Tensor = view if view is not None else torch.zeros_like(self._cpu, device="npu")
+        self._uva: torch.Tensor = view if view is not None else _zeros_on_npu(self._cpu)
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
@@ -163,13 +182,18 @@ class UvaBufferWrapper:
                 # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
                 # pinned and enables true async DMA without an intermediate
                 # tensor or stream sync.
-                self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
+                _int64_storage(self._uva[:n_dirty]).copy_(_int64_storage(self._cpu[:n_dirty]), non_blocking=True)
             else:
                 # Sparse modification pattern — fall back to indexed copy.
                 # Explicitly re-pin the CPU source so that non_blocking is
-                # not silently degraded.
+                # not silently degraded. uint64 is copied through its int64
+                # storage because NPU rejects DT_UINT64 in the copy kernel.
                 src = self._cpu[dirty_rows].pin_memory()
-                self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
+                if src.dtype == torch.uint64:
+                    copied = _int64_storage(src).to(device="npu", non_blocking=True)
+                    _int64_storage(self._uva)[dirty_rows] = copied
+                else:
+                    self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
 
     def uva(self, n: int | None = None) -> torch.Tensor:

@@ -25,6 +25,7 @@ import glob
 import json
 import os
 from collections.abc import Callable
+from copy import deepcopy
 from functools import wraps
 from typing import Any, Optional
 
@@ -621,6 +622,10 @@ class AscendModelSlimConfig(QuantizationConfig):
           the consistency verification in get_quant_type_for_layer applies to
           all expert shards (gate/up/down or w1/w2/w3).
         """
+        # Mutating the mapping we were handed by reference would leak these
+        # deltas into the model class's own mapping, which vLLM's LoRA manager
+        # reads to pick its packing branch. Work on a private copy instead.
+        self.packed_modules_mapping = deepcopy(self.packed_modules_mapping)
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
         mapping_model_type = "glm5_next" if model_type == "glm5_next_text" else model_type
         if mapping_model_type in UPDATED_PACKED_MODULES_MAPPING:

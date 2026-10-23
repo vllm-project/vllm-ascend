@@ -321,10 +321,17 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
         cached_tokens = request.save_start_token
         if request.load_spec is not None and request.load_spec.can_load:
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not worker.use_eagle and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not worker.use_eagle
+                and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
         load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
-        for group, block_size in enumerate(worker.grouped_block_size):
+        for group in worker.cacheable_group_ids:
+            # Skip private rings before deriving token hashes: their physical
+            # capacity need not even be divisible by the hash block size.
+            block_size = worker.grouped_block_size[group]
             view = copy(request)
             # Keep the complete group block table: LayerBatchBuilder indexes it
             # using task.group_id. Only key/session metadata is group-local.
@@ -374,7 +381,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             view.save_end_token = end * block_size
             view.save_key_block_offset = start
             view.save_block_keys = [None] * max(0, end - start)
-            if not request.can_save or not worker._is_layerwise_save_owner():
+            if not request.can_save or not worker._is_layerwise_save_owner(group):
                 continue
             key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
             names = [name for name, _ in key_indices]

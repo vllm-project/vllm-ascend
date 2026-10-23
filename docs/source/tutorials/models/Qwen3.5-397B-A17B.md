@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 Qwen3.5-397B-A17B is a large-scale Qwen3.5 MoE model that combines multimodal capability, long-context inference, MTP speculative decoding, and W8A8 quantized deployment for production serving on Ascend hardware.
 
 This document describes the main validation steps for the model, including supported features, prerequisites, installation, single-node online deployment, multi-node deployment, Prefill-Decode (PD) disaggregation, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
@@ -228,7 +234,6 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     export VLLM_USE_MODELSCOPE=True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
@@ -644,7 +649,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_producer",
     "kv_port": "30100",
-    "engine_id": "1",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {
@@ -720,7 +724,6 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   '{"kv_connector": "MooncakeConnector",
     "kv_role": "kv_consumer",
     "kv_port": "30300",
-    "engine_id": "3",
     "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
     "kv_connector_extra_config": {
       "prefill": {
@@ -738,7 +741,174 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
 
 Common Issues Tip: If decode node 0 fails to initialize, check that `--data-parallel-start-rank` is 0, `--tensor-parallel-size` is 8, and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size (1).
 
-### 5.6 Request Forwarding
+### 5.6 Prefill-Decode Disaggregation (A2)
+
+PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. This mode is suitable for production serving scenarios where prefill and decode resource ratios need to be tuned separately.
+
+We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
+
+For Atlas 800 A2 (64G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a8-mtp`:
+
+- 1 Prefill node: 1 Atlas 800 A2 (64G x 8).
+- 1 Decode node: 1 Atlas 800 A2 (64G x 8).
+
+Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
+
+#### 5.6.1 Prefill Node
+
+Create `run_p.sh` on the prefill node.
+
+```shell
+#!/usr/bin/env bash
+
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<PREFILL_NODE_IP>"
+
+export HCCL_IF_IP="${local_ip}"
+export GLOO_SOCKET_IFNAME="${nic_name}"
+export TP_SOCKET_IFNAME="${nic_name}"
+export HCCL_SOCKET_IFNAME="${nic_name}"
+
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE=AIV
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_FASTOKENS=1
+export ASCEND_RT_VISIBLE_DEVICES="$1"
+export ASCEND_BUFFER_POOL=0:0
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+
+vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
+  --host 0.0.0.0 \
+  --port "$2" \
+  --data-parallel-size "$3" \
+  --data-parallel-size-local 1 \
+  --tensor-parallel-size "$7" \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --served-model-name qwen35 \
+  --max-model-len 133120 \
+  --max-num-batched-tokens 16384 \
+  --max-num-seqs 64 \
+  --enforce-eager \
+  --trust-remote-code \
+  --allowed-local-media-path / \
+  --gpu-memory-utilization 0.90 \
+  --quantization ascend \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --all2all-backend allgather_reducescatter \
+  --mm-processor-cache-gb 0 \
+  --mm-encoder-tp-mode data \
+  --distributed-executor-backend mp \
+  --no-disable-hybrid-kv-cache-manager \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+  --additional-config '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}, "weight_nz_mode":1, "enable_shared_expert_dp":true,"scheduler_config":{"recompute_scheduler_enable":false}}' \
+  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"55220","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
+```
+
+#### 5.6.2 Decode Node
+
+Create `run_d.sh` on the decode node.
+
+```shell
+#!/usr/bin/env bash
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=120
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<DECODE_NODE_IP>"
+
+export HCCL_IF_IP="${local_ip}"
+export GLOO_SOCKET_IFNAME="${nic_name}"
+export TP_SOCKET_IFNAME="${nic_name}"
+export HCCL_SOCKET_IFNAME="${nic_name}"
+
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE=AIV
+
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_FASTOKENS=1
+export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
+export ASCEND_RT_VISIBLE_DEVICES="$1"
+unset ASCEND_BUFFER_POOL
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+
+vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
+  --host 0.0.0.0 \
+  --port "$2" \
+  --data-parallel-size "$3" \
+  --data-parallel-size-local 1 \
+  --data-parallel-rank "$4" \
+  --data-parallel-address "$5" \
+  --data-parallel-rpc-port "$6" \
+  --tensor-parallel-size "$7" \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --served-model-name qwen35 \
+  --max-model-len 133120 \
+  --max-num-batched-tokens 300 \
+  --max-num-seqs 200 \
+  --trust-remote-code \
+  --allowed-local-media-path / \
+  --gpu-memory-utilization 0.90 \
+  --quantization ascend \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --all2all-backend allgather_reducescatter \
+  --mm-processor-cache-gb 0 \
+  --mm-encoder-tp-mode data \
+  --distributed-executor-backend mp \
+  --no-disable-hybrid-kv-cache-manager \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "weight_nz_mode":1, "enable_shared_expert_dp":false, "scheduler_config":{"recompute_scheduler_enable":true}}' \
+  --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"56010","engine_id":"2","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":8},"decode":{"dp_size":1,"tp_size":8}}}'
+```
+
+Common Issues Tip: If the decode node fails to initialize, check that `--tensor-parallel-size` is 8, `--data-parallel-size-local` matches the global decode DP size (1), and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size.
+
+**Key parameters for PD disaggregation:**
+
+- `--distributed-executor-backend mp` uses multiprocessing on each node for the local workers.
+- Prefill uses `--data-parallel-size 1`, and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
+- Decode uses `--data-parallel-size 1`, and `--tensor-parallel-size 8`. This creates 1 DP group with TP8.
+- `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane.
+- `--max-num-batched-tokens` is larger on the prefill node and smaller on the decode node because prefill is prompt-token intensive while decode is latency sensitive.
+- `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on the decode node in PD mode.
+- `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
+- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
+
+### 5.7 Request Forwarding
 
 Run a proxy server on the same node as the prefiller service instance. You can get the proxy program in the repository examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
@@ -755,6 +925,30 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --prefiller-ports 30060 \
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
+      --host 192.xx.xx.1 \
+      --port 8000
+    ```
+
+    For example:
+
+    ```shell
+    cd vllm-ascend/examples/disaggregated_prefill_v1/
+    bash proxy.sh
+    ```
+
+=== "A2 series"
+
+    For A2 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the standard proxy script.
+
+    ```shell
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+    python3 load_balance_proxy_server_example.py \
+      --prefiller-hosts 192.xx.xx.1 \
+      --prefiller-ports <PREFILL_PORT> \
+      --decoder-hosts 192.xx.xx.2 \
+      --decoder-ports <DECODE_PORT> \
       --host 192.xx.xx.1 \
       --port 8000
     ```

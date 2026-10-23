@@ -12,11 +12,8 @@ while the language model path remains the Ascend-native implementation in
 ``vllm_ascend.models.minimax_m3``.
 """
 
-import sys
 from collections.abc import Iterable
 from pathlib import Path
-from types import ModuleType
-from typing import Any, cast
 
 import torch
 import vllm
@@ -77,12 +74,17 @@ MiniMaxM3VLProcessingInfo = _mm_preprocess.MiniMaxM3VLProcessingInfo
 
 
 def _install_fused_allreduce_norm_fallback() -> None:
-    """Avoid importing vLLM's CUDA-only fusion module on Ascend."""
-    module_name = "vllm.model_executor.layers.fused_allreduce_gemma_rms_norm"
-    if module_name in sys.modules:
-        return
+    """Install the Ascend fused all-reduce implementation on vLLM's real
+    module instead of shadowing it with a fake one.
 
-    fallback_module = ModuleType(module_name)
+    vLLM's real module keeps its optional flashinfer symbols
+    (``_AR_RESIDUAL_RMS_NORM``, ``_can_use_flashinfer``,
+    ``flashinfer_trtllm_fused_allreduce_norm``) and degrades them to None on
+    Ascend through its own try/except, so the kimi_k3 DSpark imports succeed
+    against the real module. We only replace the single public entry
+    ``fused_allreduce_gemma_rms_norm`` and never mirror vLLM internal names.
+    """
+    import vllm.model_executor.layers.fused_allreduce_gemma_rms_norm as _real
 
     def fused_allreduce_gemma_rms_norm(
         hidden_states: torch.Tensor,
@@ -107,8 +109,7 @@ def _install_fused_allreduce_norm_fallback() -> None:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
-    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
-    sys.modules[module_name] = fallback_module
+    _real.fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
 
 
 _install_fused_allreduce_norm_fallback()
