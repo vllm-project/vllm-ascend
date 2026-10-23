@@ -20,7 +20,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE
+from vllm_ascend.worker.spec_decode_utils import PREPARE_INPUTS_BLOCK_SIZE
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker
@@ -75,7 +75,7 @@ def _is_ngram_spec_method(spec_config) -> bool:
 def _collect_no_draft_probs_values(spec_config, pipeline_parallel_size: int) -> list[bool]:
     """Return ``NO_DRAFT_PROBS`` values that match the live rejection_sample path.
 
-    ``model_runner_v1._sample`` passes ``draft_probs=None`` when PP==1.
+    The V1 model runner's ``_sample`` passes ``draft_probs=None`` when PP==1.
     ngram never provides draft probs. Model-based drafts may supply probs only
     when PP>1.
     """
@@ -145,10 +145,10 @@ def _make_rejection_tensors(
 def _warm_prepare_inputs(device: torch.device, num_reqs: int) -> None:
     """Warm ``prepare_inputs_padded_kernel`` once.
 
-    ``BLOCK_SIZE`` is fixed at ``_PREPARE_INPUTS_BLOCK_SIZE`` and ``num_reqs`` is
+    ``BLOCK_SIZE`` is fixed at ``PREPARE_INPUTS_BLOCK_SIZE`` and ``num_reqs`` is
     ``do_not_specialize``, so a single launch covers all request counts.
     """
-    num_blocks = triton.cdiv(num_reqs, _PREPARE_INPUTS_BLOCK_SIZE)
+    num_blocks = triton.cdiv(num_reqs, PREPARE_INPUTS_BLOCK_SIZE)
     grid_size = min(num_blocks, get_vectorcore_num())
     grid = (max(grid_size, 1),)
 
@@ -169,7 +169,7 @@ def _warm_prepare_inputs(device: torch.device, num_reqs: int) -> None:
         token_indices_to_sample,
         num_rejected_tokens_gpu,
         num_reqs,
-        BLOCK_SIZE=_PREPARE_INPUTS_BLOCK_SIZE,
+        BLOCK_SIZE=PREPARE_INPUTS_BLOCK_SIZE,
     )
 
 

@@ -1275,10 +1275,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_context: Any | None = None,
-        pcp_cache_group_idx: int | None = None,
         **kwargs,
     ) -> AscendSFAMetadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if pcp_context is None:
             # Decode-only graph capture builds dummy metadata without running
             # PCP's prefill gather, so no PCP context is available or needed.

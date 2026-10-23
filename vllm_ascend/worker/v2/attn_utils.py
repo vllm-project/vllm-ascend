@@ -18,7 +18,7 @@
 #
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -69,9 +70,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
-    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
@@ -108,6 +107,7 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -334,6 +334,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
+        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
+        # the spec while specs are built. The v0.31.0 lane has no ``is_draft``
+        # field and annotates EAGLE groups through the packed hook, so only main
+        # propagates the flag here; without it no group is flagged as the draft
+        # model's and the coordinator fallback treats the target groups as
+        # EAGLE groups too.
+        if not vllm_version_is("0.31.0") and getattr(attn_module, "is_draft_layer", False):
+            spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -408,6 +416,7 @@ def build_attn_metadata(
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
+    common_metadata_callback=None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -537,8 +546,12 @@ def build_attn_metadata(
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+            pcp_context=pcp_context,
+            pcp_cache_group_idx=i if pcp_context is not None else None,
             **common_attn_metadata_extra_kwargs,
         )
+        if common_metadata_callback is not None:
+            common_metadata_callback(i, common_attn_metadata)
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
@@ -556,7 +569,6 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -587,13 +599,6 @@ def build_attn_metadata(
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
-                )
-            # Parallel attention and cache-only backends opt in to the PCP
-            # context needed to construct their own metadata.
-            if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
-                attn_metadata_extra_kwargs.update(
-                    pcp_context=pcp_context,
-                    pcp_cache_group_idx=i,
                 )
 
             for variant_names, variant_common in metadata_variants:
@@ -957,7 +962,105 @@ def _uses_single_raw_mla_cache(
     attn_module = attn_layers.get(layer_name)
     if attn_module is None:
         return False
+    if not isinstance(attn_module, MLAAttention):
+        return False
+    if getattr(attn_module, "indexer", None) is not None:
+        return False
+    impl = getattr(attn_module, "impl", None)
+    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+        # PCP gathers and sharded-decode writes still use the legacy
+        # preprocessing contract. Keep their allocation compatible with it.
+        return False
+    if getattr(impl, "use_flashmla", False):
+        # The external reader retains its fused-cache contract, including
+        # DCP. Native FIA continues to follow the dependency's exclusions.
+        return True
     return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
+
+
+def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
+    """Keep Gemma 4's budget and the V2 runner on the same dense layout.
+
+    Equal physical pages let full and sliding-window groups overlay the same
+    pool even when their head dimensions and tokens per block differ. Keep
+    specialized/quantized caches and distributed transfer on their existing
+    allocation paths. Limit this regression fix to Gemma 4 so other models
+    retain their existing allocation behavior.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) != "gemma4_text":
+        return False
+    if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+        return False
+    specs = tuple(specs)
+    if {type(spec) for spec in specs} != {FullAttentionSpec, SlidingWindowSpec}:
+        return False
+    if vllm_config.kv_transfer_config is not None:
+        return False
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size != 1 or parallel_config.prefill_context_parallel_size != 1:
+        return False
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not (layout.is_layer_compact and layout.is_block_compact):
+        return False
+    return len({spec.page_size_bytes for spec in specs}) == 1 and all(
+        spec.dtype in (torch.float16, torch.bfloat16)
+        and spec.kv_quant_mode == KVQuantMode.NONE
+        and spec.head_size == spec.head_size_v
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and spec.tokens_per_state == 1
+        and spec.num_head_slots is None
+        and spec.state_content_bytes is None
+        for spec in specs
+    )
+
+
+def allocate_shared_attention_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    allocate: Callable[[int], torch.Tensor],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Materialize overlay descriptors as contiguous K/V views of one pool.
+
+    Groups share block IDs from one scheduler pool, so the same ID cannot be
+    live in two groups at once. Split each layer slot into K and V halves;
+    equal, unpadded pages and equal K/V widths make this mapping identical
+    across groups while preserving the contiguous layout required by PA.
+    Upstream constructs the layer coverage, offsets and allocation bounds.
+    Check only the shared backing and contiguous strides required here:
+    upstream permits alignment padding that this K/V split cannot consume.
+    """
+    descriptors = kv_cache_config.kv_cache_tensors
+    specs = {
+        name: (
+            group.kv_cache_spec.kv_cache_specs[name]
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group.kv_cache_spec
+        )
+        for group in kv_cache_config.kv_cache_groups
+        for name in group.layer_names
+    }
+    sizes = {descriptor.size for descriptor in descriptors}
+    if len(sizes) != 1 or kv_cache_config.num_blocks <= 0:
+        raise ValueError("Shared attention KV cache requires one nonempty backing allocation.")
+    backing_size = sizes.pop()
+    regions: dict[str, tuple[int, int]] = {}
+    for descriptor in descriptors:
+        for index, name in enumerate(descriptor.layers):
+            spec = specs[name]
+            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            start = descriptor.offset + index * descriptor.layer_stride
+            if descriptor.layer_stride != layer_size or descriptor.block_stride != spec.page_size_bytes:
+                raise ValueError(f"Invalid shared attention KV cache descriptor for {name}.")
+            regions[name] = (start, layer_size)
+    backing = allocate(backing_size)
+    return {
+        name: (
+            backing[start : start + layer_size // 2],
+            backing[start + layer_size // 2 : start + layer_size],
+        )
+        for name, (start, layer_size) in regions.items()
+    }
 
 
 def _allocate_kv_cache(
@@ -996,6 +1099,13 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
+    # Gemma 4 full/sliding groups share one pool while retaining contiguous
+    # K/V views. The worker keeps the full budget only for this V2 path.
+    if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
+        return allocate_shared_attention_kv_cache(
+            kv_cache_config,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+        )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
@@ -1678,15 +1788,9 @@ def _reshape_kv_cache_v2(
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
 
-                if (
-                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                    and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                    and get_flashmla_ops() is not None
-                    # The outer eligibility check admits only supported PD,
-                    # which requires component-major pages at both endpoints.
-                    and vllm_config.kv_transfer_config is None
-                ):
-                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if attn_impl.use_flashmla:
+                    # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(
                         single_raw_mla_cache,
@@ -1697,7 +1801,7 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each component internally contiguous and puts
+                # FIA keeps each component internally contiguous and puts
                 # the hybrid-page padding only in the leading block stride.
                 kv_caches[layer_name] = _reshape_combined_mla_kv_cache(
                     single_raw_mla_cache,
@@ -1846,7 +1950,14 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, offload_kwargs=None
+    positions,
+    pad,
+    is_prefilling,
+    seq_lens_cpu=None,
+    *,
+    attn_state=None,
+    parallel_config=None,
+    offload_kwargs=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 

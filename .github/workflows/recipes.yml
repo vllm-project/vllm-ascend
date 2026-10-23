@@ -1,0 +1,29 @@
+name: Recipes
+
+# Validate Huawei-scoped overlays with the upstream renderer workflow.
+# PR #1160 supplies the source registration and staged cutover support.
+
+on:
+  pull_request:
+    paths:
+      - 'recipes/**'
+      - '.github/workflows/recipes.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Recipes
+    if: github.repository_owner == 'vllm-project'
+    uses: vllm-project/recipes/.github/workflows/validate-recipes.yml@main
+    with:
+      source: vllm-ascend
+      path: recipes
+      # Temporary preview pin from recipes PR #1160. Remove once main
+      # registers the official Ascend source and supports identical entries.
+      renderer-ref: 9ffe8f5da08b1f2ae862464805ebc487529c34d4

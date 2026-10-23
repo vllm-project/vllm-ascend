@@ -11,7 +11,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize("reuse", [False, True])

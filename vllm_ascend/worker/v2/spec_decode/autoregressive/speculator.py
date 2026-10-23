@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/target_dependent_ar/speculator.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -35,7 +35,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -46,6 +45,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -61,6 +61,17 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
 )
+
+# vLLM #60335 renamed `autoregressive` to `target_dependent_ar` on main;
+# the release lane (v0.31.0) still ships the old module and class name.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
+        AutoRegressiveSpeculator,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -299,67 +310,122 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         self.prefill_cudagraph_manager.update_stream = self.update_stream
         self.decode_cudagraph_manager.update_stream = self.update_stream
 
-    def propose(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        # [num_tokens, hidden_size]
-        last_hidden_states: torch.Tensor,
-        # num_layers x [num_tokens, hidden_size]
-        aux_hidden_states: list[torch.Tensor] | None,
-        # [num_reqs]
-        num_sampled: torch.Tensor,
-        # [num_reqs]
-        num_rejected: torch.Tensor,
-        # [max_num_reqs]
-        last_sampled: torch.Tensor,
-        # [max_num_reqs]
-        next_prefill_tokens: torch.Tensor,
-        # [max_num_reqs]
-        temperature: torch.Tensor,
-        # [max_num_reqs]
-        seeds: torch.Tensor,
-        dp_sync: Any = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: Any = None,
-    ):
-        """Override GPU EagleSpeculator.propose for Ascend NPUs,
-        because npu attention metadata needs more information,
-        we need to cache input_batch, so we can use it later in
-        generate_draft.
-        """
-        self.input_batch = input_batch
-        # Replicated drafts use global tokens, unlike the PCP-local target.
-        # Every DP rank must take the draft sync, including decode and idle ranks.
-        sync_state = None if self.replicated_pcp else dp_sync
-        # wrap build_attn_metadata to use Ascend attention metadata building.
-        # so we can call super().propose() directly.
-        with (
-            disable_target_pcp_for_replicated_draft(self),
-            build_attn_metadata_wrapper(),
-            torch_gather_wrapper(),
+    # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
+    # vLLM #60335 added `num_speculative_tokens`. Define the per-version public
+    # signature and body.
+    if vllm_version_is("0.31.0"):
+
+        def propose(
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync: Any = None,
+            dummy_run: bool = False,
+            skip_attn_for_dummy_run: bool = False,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+            is_profile: Any = None,
         ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-            )
+            """Override GPU EagleSpeculator.propose for Ascend NPUs,
+            because npu attention metadata needs more information,
+            we need to cache input_batch, so we can use it later in
+            generate_draft.
+            """
+            self.input_batch = input_batch
+            # Replicated drafts use global tokens, unlike the PCP-local target.
+            # Every DP rank must take the draft sync, including decode and idle ranks.
+            sync_state = None if self.replicated_pcp else dp_sync
+            # wrap build_attn_metadata to use Ascend attention metadata building.
+            # so we can call super().propose() directly.
+            with (
+                disable_target_pcp_for_replicated_draft(self),
+                build_attn_metadata_wrapper(),
+                torch_gather_wrapper(),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                )
+
+    else:
+
+        def propose(  # type: ignore[misc]
+            self,
+            input_batch: InputBatch,
+            attn_metadata: dict[str, Any],
+            slot_mappings: dict[str, torch.Tensor],
+            last_hidden_states: torch.Tensor,
+            aux_hidden_states: list[torch.Tensor] | None,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            dp_sync_state: Any = None,
+            dummy_run: bool = False,
+            skip_attn_for_dummy_run: bool = False,
+            mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+            is_profile: Any = None,
+            num_speculative_tokens: int | None = None,
+        ):
+            """Override GPU EagleSpeculator.propose for Ascend NPUs,
+            because npu attention metadata needs more information,
+            we need to cache input_batch, so we can use it later in
+            generate_draft.
+            """
+            self.input_batch = input_batch
+            # Replicated drafts use global tokens, unlike the PCP-local target.
+            # Every DP rank must take the draft sync, including decode and idle ranks.
+            sync_state = None if self.replicated_pcp else dp_sync_state
+            # wrap build_attn_metadata to use Ascend attention metadata building.
+            # so we can call super().propose() directly.
+            with (
+                disable_target_pcp_for_replicated_draft(self),
+                build_attn_metadata_wrapper(),
+                torch_gather_wrapper(),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
+                )
 
     def set_attn(
         self,
@@ -398,6 +464,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
+        self.idx_mapping.zero_()
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
@@ -407,6 +474,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         with (
             disable_target_pcp_for_replicated_draft(self),
             build_attn_metadata_wrapper(),
@@ -423,12 +491,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.kv_cache_config,
                 progress_bar_desc="Capturing prefill CUDA graphs",
             )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
 
         # Capture all decode draft generation steps as a single graph.
         assert self.decode_cudagraph_manager is not None
+        self.on_multi_step_decode_begin(self.max_num_reqs)
         with (
             disable_target_pcp_for_replicated_draft(self),
             build_attn_metadata_wrapper(),
@@ -442,6 +512,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
+        self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
     def _run_model(
@@ -453,7 +524,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Override AutoRegressiveSpeculator._run_model for Ascend NPUs."""
+        """Override the upstream AR speculator._run_model for Ascend NPUs."""
         last_hidden_states, hidden_states = super()._run_model(
             num_tokens,
             attn_metadata,
@@ -474,18 +545,31 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """Thin override: delegate to upstream single-step ``_generate_draft``,
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
+        if vllm_version_is("0.31.0"):
+            super()._generate_draft(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
+        else:
+            # vLLM #60335 added `num_speculative_steps` on main.
+            super()._generate_draft(
+                num_reqs,
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                num_speculative_steps,
+            )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
@@ -496,6 +580,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+        num_speculative_steps: int | None = None,
     ) -> None:
         """Minimal override to handle the merged multi-step graph in FULL mode.
 
@@ -509,7 +594,18 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
+        if vllm_version_is("0.31.0"):
+            super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
+        else:
+            # vLLM #60335 added `num_speculative_steps` on main.
+            super()._multi_step_decode(
+                num_reqs,
+                skip_attn,
+                batch_desc,
+                num_tokens_across_dp,
+                seq_lens_cpu_upper_bound,
+                num_speculative_steps,
+            )
 
     def _prefill(
         self,
@@ -743,16 +839,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
-        layer_name, metadata = next(iter(draft_attn_metadata.items()))
-        block_table = metadata.block_tables
+        block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
                 {
                     "layer_name": layer_name,
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": block_table,
+                    "block_table": metadata.block_tables,
                 }
+                for layer_name, metadata in draft_attn_metadata.items()
             ]
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs

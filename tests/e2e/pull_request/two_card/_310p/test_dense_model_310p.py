@@ -15,11 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
-
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
 
 def test_qwen3_dense_tp2_fp16():

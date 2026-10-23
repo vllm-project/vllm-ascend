@@ -158,6 +158,29 @@ class TestAscendConfig(TestBase):
         config._sparse_li_layer_filter_enabled = AscendConfig._has_sparse_li_layer_config(quant_config)
         return config
 
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+            with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
+                clear_ascend_config()
+                config = VllmConfig()
+                config.model_config.is_moe = True
+                config.additional_config = {
+                    "finegrained_tp_config": {
+                        "oproj_tensor_parallel_size": otp_size,
+                        "mlp_tensor_parallel_size": mlp_size,
+                    },
+                    "scheduler_config": {"recompute_scheduler_enable": False},
+                }
+                if otp_size > 1 or mlp_size > 0:
+                    with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
+                        init_ascend_config(config)
+                else:
+                    result = init_ascend_config(config)
+                    self.assertFalse(result.scheduler_config.recompute_scheduler_enable)
+                    self.assertEqual(result.finegrained_tp_config.oproj_tensor_parallel_size, otp_size)
+
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
         config = self._make_sparse_li_c8_config(
             {
@@ -475,6 +498,21 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_force_eplb_logs_production_warning(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_force_eplb": True}
+        with patch("vllm_ascend.ascend_config.logger") as mock_logger:
+            ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_force_eplb)
+        warnings = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
+        self.assertTrue(
+            any("must not be used in production" in message for message in warnings),
+            f"expected a production warning, got {warnings}",
+        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -883,6 +921,56 @@ class TestShortRequestFirstConfig(TestBase):
 
 
 class TestSparseKVOffloadConfig(TestBase):
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_950_rejects_sparse_offload(self, mock_is_950):
+        for keep_device_kv_cache in (False, True):
+            for use_fused_overlap in (False, True):
+                with (
+                    self.subTest(keep_device_kv_cache=keep_device_kv_cache, use_fused_overlap=use_fused_overlap),
+                    self.assertRaisesRegex(ValueError, "not supported on 950PR&950DT Products"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        SimpleNamespace(speculative_config=None),
+                        {
+                            "enabled": True,
+                            "keep_device_kv_cache": keep_device_kv_cache,
+                            "use_fused_overlap": use_fused_overlap,
+                        },
+                    )
+        mock_is_950.assert_called()
+
+    @patch("vllm_ascend.ascend_config.is_950", return_value=True)
+    def test_a5_allows_sparse_offload_disabled(self, mock_is_950):
+        config = SparseKVOffloadConfig.from_additional_config(SimpleNamespace(speculative_config=None), {})
+        self.assertFalse(config.enabled)
+        mock_is_950.assert_not_called()
+
+    def test_preempt_offload_is_mutually_exclusive(self):
+        for multi_connector in (False, True):
+            transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector" if multi_connector else "PreemptOffloadConnector",
+                kv_role="kv_consumer",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "SfaRemoteD2HConnector", "kv_role": "kv_consumer"},
+                        {"kv_connector": "PreemptOffloadConnector", "kv_role": "kv_consumer"},
+                    ]
+                }
+                if multi_connector
+                else {},
+            )
+            vllm_config = SimpleNamespace(kv_transfer_config=transfer_config, speculative_config=None)
+            for keep_device_kv_cache in (False, True):
+                with (
+                    self.subTest(multi_connector=multi_connector, keep_device_kv_cache=keep_device_kv_cache),
+                    self.assertRaisesRegex(ValueError, "cannot be combined with PreemptOffloadConnector"),
+                ):
+                    SparseKVOffloadConfig.from_additional_config(
+                        vllm_config, {"enabled": True, "keep_device_kv_cache": keep_device_kv_cache}
+                    )
+            # Preempt offload alone remains supported.
+            self.assertFalse(SparseKVOffloadConfig.from_additional_config(vllm_config, {}).enabled)
+
     def test_topk_buffer_default_is_unset(self):
         self.assertEqual(SparseKVOffloadConfig().topk_buffer_size, -1)
 
@@ -927,7 +1015,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
         )
 
@@ -956,7 +1044,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -978,7 +1066,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=True,
             speculative_config=None,
         )
@@ -1006,7 +1094,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 decode_context_parallel_size=1,
                 pipeline_parallel_size=1,
             ),
-            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
             use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )
@@ -1547,6 +1635,33 @@ class TestTopLevelSwitchTypeValidation(TestBase):
                 clear_enable_sp()
 
         return wrapper
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"})
+    def test_kv_pool_range_debug_defaults_off_without_env_fallback(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {}
+        self.assertIs(init_ascend_config(vc).kv_pool_range_debug, False)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kv_pool_range_debug_additional_config_is_typed(self, mock_fix):
+        for value, expected in ((True, True), (False, False), ("false", False), ("0", False), (1, True)):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"kv_pool_range_debug": value}
+                self.assertIs(init_ascend_config(vc).kv_pool_range_debug, expected)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_kv_pool_range_debug_rejects_invalid_values(self, mock_fix):
+        for value in (2, "invalid", None):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"kv_pool_range_debug": value}
+                with self.assertRaises(ValueError):
+                    init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

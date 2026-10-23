@@ -55,11 +55,9 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
-#include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "gmm/gmm_dequant_situ_quant/gmm_dequant_situ_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -2853,12 +2851,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
 
     ops.def(
-        "gmm_dequant_situ_quant(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
-        "Tensor x_scale, Tensor group_list, Tensor[] weight_assist_matrix, "
-        "float beta=1.0, float? linear_beta=None, int group_list_type=1) -> (Tensor y, Tensor scale)");
-    ops.impl("gmm_dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::gmm_dequant_situ_quant);
-
-    ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
         "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
         "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
@@ -3553,17 +3545,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
-
-    ops.def(
-        "npu_msa_index_score("
-        "Tensor query, Tensor key, Tensor block_table, Tensor start_loc, *, "
-        "Tensor? scale=None, Tensor? atten_mask=None, "
-        "Tensor? actual_seq_qlen=None, Tensor? actual_seq_klen=None, "
-        "str layout_key=\"BBND\", int sparse_mode=3, "
-        "int init_blocks=0, int local_blocks=0) -> Tensor"
-    );
-    ops.impl("npu_msa_index_score", torch::kPrivateUse1,
-             &vllm_ascend::npu_msa_index_score);
 
     ops.def(
         "npu_fused_lightning_indexer_manage("
