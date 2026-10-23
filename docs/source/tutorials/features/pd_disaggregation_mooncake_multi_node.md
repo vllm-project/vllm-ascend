@@ -188,7 +188,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), use the separate container example below instead.
+Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), apply the container adjustments below.
 
 ```bash
 # Update the vllm-ascend image
@@ -233,78 +233,38 @@ docker run --rm \
 
 ### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
 
-Use the dedicated 950PR/950DT image from `quay.io/ascend/vllm-ascend`, with a version compatible with the host driver. The example below uses the Ubuntu image; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag instead. This example assumes eight host device nodes, `/dev/davinci0` through `/dev/davinci7`; check the host inventory and adjust the mappings if it differs. Do not copy the A3 mappings for `/dev/davinci8` through `/dev/davinci15`, or `/dev/devmm_svm`, onto a host where these devices do not exist: Docker rejects missing device paths before starting the container.
+Adapt the A3 command above as follows:
 
-Mount the complete `/usr/local/Ascend/driver` directory. Mounting only `lib64`, `version.info`, and individual tools omits the topology files under `driver/topo/950`. Expose the host's physical NPU nodes and select the devices assigned to this service with `ASCEND_RT_VISIBLE_DEVICES`.
+- Use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5` (Ubuntu) or `{{ vllm_ascend_version }}-a5-openeuler` (openEuler), compatible with the host driver.
+- Map the actual host NPU nodes: for an eight-device host, keep `/dev/davinci0` through `/dev/davinci7` and remove `/dev/davinci8` through `/dev/davinci15`. Remove `/dev/devmm_svm`.
+- Replace the individual driver mounts with the complete `/usr/local/Ascend/driver` mount to include `driver/topo/950`.
+- Add the following options before the image name:
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
-export NAME=vllm-ascend-950
-# Replace this list with the physical devices assigned to this service.
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-docker run --rm \
-    --name "$NAME" \
-    --net=host \
-    --privileged \
-    --shm-size=1g \
-    --ulimit memlock=-1:-1 \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/hisi_hdc \
-    --device /dev/ummu \
-    --device /dev/uburma \
-    -e ASCEND_RT_VISIBLE_DEVICES \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
-    -v /usr/local/dcmi:/usr/local/dcmi:ro \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
-    -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
-    -it "$IMAGE" bash
+--privileged \
+--ulimit memlock=-1:-1 \
+--device /dev/ummu \
+--device /dev/uburma \
+-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+-v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
 ```
 
-Add your model/cache mounts and any transport-specific options below before the image name. Before starting the container, ensure every host source path exists and has the expected type (file or directory). With `-v`, Docker creates a directory when a source path does not exist, so a missing file such as `route.conf` or `hrn5.driver` can become an unintended directory mount. Use the actual host path for tools such as `npu-smi`.
+Select the physical devices assigned to the service with `ASCEND_RT_VISIBLE_DEVICES` inside the container. Check that all host mount sources exist and have the expected file/directory type; `-v` creates a directory for a missing source path. Remove A3-specific mounts such as `/etc/hccn.conf` if they are not present or used on the host.
 
-The example uses `--privileged`, which also exposes host devices. An explicit-device configuration without `--privileged` was validated for a single-node Mooncake Host RoCE transfer with `--cap-add=NET_ADMIN`, the device mappings above, and `/dev/infiniband`. Without `NET_ADMIN`, that configuration failed at `RsGetLbMax`. Validate the required permissions for your driver and workload before using this alternative for a full deployment.
+For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
-For automatic UB communication configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments as described above. Mounting `/lib/route.conf` is optional and is not part of the default command: a single-node Mooncake UB device-to-device transfer was validated with this automatic setting both with and without the file. If your environment requires a manually generated file, generate it on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md), then add:
-
-```bash
--v /lib/route.conf:/lib/route.conf:ro \
-```
-
-For Host RoCE, make `/dev/infiniband` available (already exposed by `--privileged`; map it explicitly when using the alternative above). The HRN5 provider shared library must also be loadable inside the container. Mounting only `/etc/libibverbs.d/hrn5.driver` does not supply that library. For a host with the provider at `/usr/lib64/libhrn5-rdmav34.so`, add:
+For Host RoCE, also expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
 ```bash
---device=/dev/infiniband \
+--device /dev/infiniband \
 -v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
-```
-
-Use the provider path and version matching the host driver and the container's RDMA userspace. If your userspace requires the provider configuration file, also mount it:
-
-```bash
--v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
-```
-
-The tested CANN 9.2.0 / day20261015 stack could transfer without this configuration file when the provider library was available; other RDMA userspace versions may require it. Also ensure `libibv_extend.so.4` is loadable. When the complete driver mount already supplies it under `driver/lib64/driver` and that directory is on the runtime library search path, a second mount into `/usr/lib64` is unnecessary.
-
-Make the RoCE endpoint directory available inside the container, for example:
-
-```bash
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
 
-Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
-
-```bash
--v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
-```
+- Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
+- Ensure `libibv_extend.so.4` is loadable. No separate mount is needed when the complete driver mount already supplies it on the runtime library search path.
+- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
+- Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake
 
