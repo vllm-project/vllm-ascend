@@ -14,6 +14,22 @@ from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 
 
+def _uses_layerwise_store(transfer: Any) -> bool:
+    if transfer is None:
+        return False
+    extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
+    connectors = (
+        extra_config.get("connectors", [])
+        if transfer.kv_connector == "MultiConnector"
+        else [{"kv_connector": transfer.kv_connector, "kv_connector_extra_config": extra_config}]
+    )
+    return any(
+        connector.get("kv_connector") == "AscendStoreConnector"
+        and (connector.get("kv_connector_extra_config") or {}).get("use_layerwise", False)
+        for connector in connectors
+    )
+
+
 class KVPPRuntime:
     """Bind contiguous cache storage to the shared layer prefetch scheduler."""
 
@@ -55,28 +71,10 @@ class KVPPRuntime:
             # The allocator binds every component to this contiguous layer span.
             raw = torch.empty(0, dtype=torch.int8, device=first.device).set_(storage, base, (size,), (1,))
             layer_buffers[name] = raw
-        transfer = vllm_config.kv_transfer_config
-        connectors = []
-        if transfer is not None:
-            extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
-            connectors = (
-                extra_config.get("connectors", [])
-                if transfer.kv_connector == "MultiConnector"
-                else [
-                    {
-                        "kv_connector": transfer.kv_connector,
-                        "kv_connector_extra_config": extra_config,
-                    }
-                ]
-            )
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
-            layerwise=any(
-                connector.get("kv_connector") == "AscendStoreConnector"
-                and (connector.get("kv_connector_extra_config") or {}).get("use_layerwise", False)
-                for connector in connectors
-            ),
+            layerwise=_uses_layerwise_store(vllm_config.kv_transfer_config),
         )
         for name in layer_buffers:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler
