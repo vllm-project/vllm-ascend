@@ -23,7 +23,8 @@ tasks:
   - name: "pass_at_1,none"
     value: 0.89
 
-num_fewshot: 0
+# Per-task fewshot defaults are used (humaneval: 0-shot, mbpp: 3-shot):
+# a global num_fewshot: 0 here forced mbpp into 0-shot and scored 0.0.
 # Completion mode, not chat: with apply_chat_template=true the reasoning
 # preamble of this model is truncated by humaneval's until sequences
 # ("\ndef", "\nclass", ...) before any code is written, yielding 0.0 pass@1.
