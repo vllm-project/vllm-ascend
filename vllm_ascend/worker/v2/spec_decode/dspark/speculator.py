@@ -254,19 +254,20 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            # Draft physical KV blocks may differ from the target configuration.
+            # Each draft group can have a different physical KV block size.
+            # Bind it to the same table object passed by the upstream caller;
+            # kernel addressing is restored separately by the DFlash wrapper.
             draft_block_sizes = {
-                kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.block_size
+                id(block_tables.input_block_tables[group_id]): kv_cache_config.kv_cache_groups[
+                    group_id
+                ].kv_cache_spec.block_size
                 for group_id in self.draft_kv_cache_group_ids
             }
-            if len(draft_block_sizes) != 1:
-                raise ValueError("DSpark input preparation requires one physical KV block size across draft groups")
-            draft_block_size = draft_block_sizes.pop()
             if vllm_version_is("0.31.0"):
-                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(draft_block_size)
+                dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(draft_block_sizes)
             else:
                 dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
-                    draft_block_size,
+                    draft_block_sizes,
                     block_tables,
                 )
 

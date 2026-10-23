@@ -261,7 +261,8 @@ def test_dspark_propose_owns_draft_lifecycle_and_preserves_parent_arguments(prof
 
 @pytest.mark.parametrize("sizes", [(128, 128), (128, 256)])
 @pytest.mark.parametrize("release", [False, True])
-def test_dspark_input_preparation_uses_actual_draft_physical_kv_blocks(sizes, release):
+@pytest.mark.parametrize("offload_enabled", [False, True])
+def test_dspark_input_preparation_uses_actual_draft_physical_kv_blocks(sizes, release, offload_enabled):
     class Parent:
         def set_attn(self, *_args):
             self.draft_kv_cache_group_ids = [1, 2]
@@ -291,6 +292,7 @@ def test_dspark_input_preparation_uses_actual_draft_physical_kv_blocks(sizes, re
     )
     draft = cls()
     draft.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
+    draft.expert_offload_manager = object() if offload_enabled else None
     draft.attn_vllm_config = object()
     draft._context_slot_mappings = torch.zeros(1, dtype=torch.long)
     draft.draft_attn_layer_names = set()
@@ -300,15 +302,11 @@ def test_dspark_input_preparation_uses_actual_draft_physical_kv_blocks(sizes, re
             SimpleNamespace(layer_names=[], kv_cache_spec=SimpleNamespace(block_size=size)) for size in (32, *sizes)
         ]
     )
-    tables = object()
-    if sizes[0] != sizes[1]:
-        with pytest.raises(ValueError, match="physical KV block size"):
-            draft.set_attn(None, cache, tables, None, None)
-        factory.assert_not_called()
-    else:
-        draft.set_attn(None, cache, tables, None, None)
-        factory.assert_called_once_with(*((128,) if release else (128, tables)))
-        assert patched_module.prepare_dflash_inputs is factory.return_value
+    tables = SimpleNamespace(input_block_tables=[object(), object(), object()])
+    draft.set_attn(None, cache, tables, None, None)
+    expected = {id(tables.input_block_tables[group]): size for group, size in enumerate(sizes, start=1)}
+    factory.assert_called_once_with(*((expected,) if release else (expected, tables)))
+    assert patched_module.prepare_dflash_inputs is factory.return_value
 
 
 def test_disabled_load_does_not_allocate_or_finalize_offload():
@@ -363,7 +361,8 @@ def test_pool_accounting_starts_after_both_warmups(warmups):
 
 
 @pytest.mark.parametrize("release", [False, True])
-def test_dflash_factory_preserves_physical_and_kernel_block_sizes(release):
+@pytest.mark.parametrize("per_group", [False, True])
+def test_dflash_factory_preserves_physical_and_kernel_block_sizes(release, per_group):
     path = ROOT / "vllm_ascend/worker/v2/spec_decode/dflash/speculator.py"
     functions = [
         node
@@ -377,18 +376,19 @@ def test_dflash_factory_preserves_physical_and_kernel_block_sizes(release):
     namespace = {"prepare_dflash_inputs": prepare}
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
     factory = namespace[function.name]
-    table = object()
-    if release:
-        factory(128)(block_size=32)
-        assert prepare.call_args.kwargs["block_size"] == 32
-    else:
-        tables = SimpleNamespace(kernel_block_sizes=[32], input_block_tables=[table])
-        wrapper = factory(128, tables)
-        arguments = dict.fromkeys(inspect.signature(wrapper).parameters)
-        arguments.update(block_table=table, block_size=128)
-        wrapper(**arguments)
-        assert prepare.call_args.args[17] == 32
-    assert prepare.call_args.kwargs["kv_cache_block_size"] == 128
+    tables = SimpleNamespace(kernel_block_sizes=[32, 64], input_block_tables=[object(), object()])
+    sizes = {id(table): size for table, size in zip(tables.input_block_tables, (128, 256))} if per_group else 128
+    wrapper = factory(sizes) if release else factory(sizes, tables)
+    for table, kernel_size, physical_size in zip(tables.input_block_tables, (32, 64), (128, 256)):
+        if release:
+            wrapper(block_table=table, block_size=kernel_size)
+            assert prepare.call_args.kwargs["block_size"] == kernel_size
+        else:
+            arguments = dict.fromkeys(inspect.signature(wrapper).parameters)
+            arguments.update(block_table=table, block_size=physical_size)
+            wrapper(**arguments)
+            assert prepare.call_args.args[17] == kernel_size
+        assert prepare.call_args.kwargs["kv_cache_block_size"] == (physical_size if per_group else 128)
 
 
 @pytest.mark.parametrize(
