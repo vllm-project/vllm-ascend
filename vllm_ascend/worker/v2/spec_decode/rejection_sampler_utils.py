@@ -28,10 +28,114 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_global_logsumexp as _compute_global_lse,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+    _compute_local_logits_stats_kernel as _upstream_block_stats_kernel,
 )
 
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+
+# Workspaces for the block-level logits statistics and the rejected-token
+# normalizers. They are keyed by the launch geometry and reused across decode
+# steps: every cell is written by the kernels before it is read, the kernels
+# are enqueued on the sampler stream, and no workspace is handed back to
+# callers, so reuse cannot race with an in-flight step.
+_WORKSPACE_CACHE: dict[tuple, tuple[torch.Tensor, ...]] = {}
+_DUMMY_DRAFT_LOGITS_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _get_workspace(
+    target_logits: torch.Tensor,
+    num_logits: int,
+    num_reqs: int,
+    vocab_num_blocks: int,
+) -> tuple[torch.Tensor, ...]:
+    key = (target_logits.device, num_logits, num_reqs, vocab_num_blocks)
+    workspace = _WORKSPACE_CACHE.get(key)
+    if workspace is None:
+        workspace = (
+            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64),
+            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
+            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
+            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
+            target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32),
+            target_logits.new_empty(num_reqs, dtype=torch.float32),
+            target_logits.new_empty(num_reqs, dtype=torch.float32),
+        )
+        _WORKSPACE_CACHE[key] = workspace
+    return workspace
+
+
+def _get_dummy_draft_logits(target_logits: torch.Tensor) -> torch.Tensor:
+    """Placeholder pointer for the one-hot draft path; never read."""
+    key = (target_logits.device, target_logits.dtype)
+    dummy = _DUMMY_DRAFT_LOGITS_CACHE.get(key)
+    if dummy is None:
+        dummy = target_logits.new_empty(1, 1, 1)
+        _DUMMY_DRAFT_LOGITS_CACHE[key] = dummy
+    return dummy
+
+
+@triton.jit
+def _compute_block_stats_kernel(
+    # [num_logits, num_blocks]
+    target_local_argmax_ptr,
+    target_local_argmax_stride,
+    # [num_logits, num_blocks]
+    target_local_max_ptr,
+    target_local_max_stride,
+    # [num_logits, num_blocks]
+    target_local_sumexp_ptr,
+    target_local_sumexp_stride,
+    # [num_logits, num_blocks]
+    draft_local_max_ptr,
+    draft_local_max_stride,
+    # [num_logits, num_blocks]
+    draft_local_sumexp_ptr,
+    draft_local_sumexp_stride,
+    # [num_logits, V]
+    target_logits_ptr,
+    target_logits_stride,
+    # [max_num_reqs, num_speculative_steps, V]
+    draft_logits_ptr,
+    draft_logits_stride_0,
+    draft_logits_stride_1,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    expanded_local_pos_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    # The vocabulary and the speculative depth are fixed for a given model and
+    # draft configuration. Declaring them constexpr lets triton-ascend resolve
+    # the launch-time tiling at compile time instead of per launch.
+    vocab_size: tl.constexpr,
+    num_speculative_steps: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
+):
+    _upstream_block_stats_kernel(
+        target_local_argmax_ptr,
+        target_local_argmax_stride,
+        target_local_max_ptr,
+        target_local_max_stride,
+        target_local_sumexp_ptr,
+        target_local_sumexp_stride,
+        draft_local_max_ptr,
+        draft_local_max_stride,
+        draft_local_sumexp_ptr,
+        draft_local_sumexp_stride,
+        target_logits_ptr,
+        target_logits_stride,
+        draft_logits_ptr,
+        draft_logits_stride_0,
+        draft_logits_stride_1,
+        expanded_idx_mapping_ptr,
+        expanded_local_pos_ptr,
+        temp_ptr,
+        vocab_size,
+        num_speculative_steps,
+        BLOCK_SIZE=BLOCK_SIZE,
+        HAS_DRAFT_LOGITS=HAS_DRAFT_LOGITS,
+    )
 
 
 @triton.jit
@@ -86,7 +190,9 @@ def _probabilistic_rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
-    vocab_num_blocks,
+    # Fixed for a given model: constexpr so the tiling is resolved at compile
+    # time rather than per launch.
+    vocab_num_blocks: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
@@ -314,10 +420,10 @@ def rejection_sample(
     has_draft_logits = draft_logits is not None
 
     if draft_logits is None:
-        # When draft_logits is None, create a dummy tensor so that Triton
+        # When draft_logits is None, pass a cached dummy tensor so that Triton
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
-        draft_logits = target_logits.new_empty(1, 1, 1)
+        draft_logits = _get_dummy_draft_logits(target_logits)
     else:
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
@@ -329,11 +435,15 @@ def rejection_sample(
     VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
-    target_local_argmax = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.int64)
-    target_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
+    (
+        target_local_argmax,
+        target_local_max,
+        target_local_sumexp,
+        draft_local_max,
+        draft_local_sumexp,
+        target_rejected_logsumexp,
+        draft_rejected_logsumexp,
+    ) = _get_workspace(target_logits, num_logits, num_reqs, vocab_num_blocks)
     _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
         target_local_argmax,
         target_local_argmax.stride(0),
@@ -353,8 +463,8 @@ def rejection_sample(
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
-        vocab_size,
-        num_speculative_steps,
+        vocab_size=vocab_size,
+        num_speculative_steps=num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         # TODO: Remove this workaround after the Triton Ascend AutoBlockify
@@ -428,8 +538,6 @@ def rejection_sample(
     # the step.
     sampled = draft_sampled.new_empty(num_reqs, num_speculative_steps + 1, dtype=torch.int64)
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
-    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     _probabilistic_rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
@@ -461,7 +569,7 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
-        vocab_num_blocks,
+        vocab_num_blocks=vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,

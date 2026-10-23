@@ -11,13 +11,36 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 
 _RESAMPLE_BLOCK_SIZE = 1024
 
+_VECTORCORE_NUM = -1
+
+# Resample workspaces, keyed by the launch geometry and reused across decode
+# steps. Every cell consumed by the finalize kernel is written by the resample
+# kernel in the same step, and both are enqueued on the sampler stream.
+_WORKSPACE_CACHE: dict[tuple, tuple[torch.Tensor, ...]] = {}
+
 
 def _get_vectorcore_num() -> int:
-    try:
-        return int(get_vectorcore_num())
-    except AssertionError:
-        init_device_properties_triton()
-        return int(get_vectorcore_num())
+    global _VECTORCORE_NUM
+    if _VECTORCORE_NUM <= 0:
+        try:
+            _VECTORCORE_NUM = int(get_vectorcore_num())
+        except AssertionError:
+            init_device_properties_triton()
+            _VECTORCORE_NUM = int(get_vectorcore_num())
+    return _VECTORCORE_NUM
+
+
+def _get_workspace(target_logits: torch.Tensor, num_reqs: int, num_blocks: int) -> tuple[torch.Tensor, ...]:
+    key = (target_logits.device, num_reqs, num_blocks)
+    workspace = _WORKSPACE_CACHE.get(key)
+    if workspace is None:
+        workspace = (
+            torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=target_logits.device),
+            torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device),
+            torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device),
+        )
+        _WORKSPACE_CACHE[key] = workspace
+    return workspace
 
 
 @triton.jit(
@@ -53,8 +76,10 @@ def _resample_kernel(
     temp_ptr,
     cumulative_log_p_ptr,
     num_reqs,
-    num_blocks,
-    vocab_size,
+    # Vocabulary geometry is fixed for a given model: constexpr so that the
+    # tiling is resolved at compile time instead of per launch.
+    num_blocks: tl.constexpr,
+    vocab_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
@@ -181,8 +206,10 @@ def _categorical_finalize_kernel(
     seed_ptr,
     pos_ptr,
     cumulative_log_p_ptr,
-    vocab_size,
-    num_blocks,
+    # Vocabulary geometry is fixed for a given model: constexpr so that the
+    # tiling is resolved at compile time instead of per launch.
+    vocab_size: tl.constexpr,
+    num_blocks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     PADDED_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -412,9 +439,7 @@ def resample(
         draft_logits = target_logits.new_empty(1, 1, 1)
 
     num_blocks = triton.cdiv(vocab_size, _RESAMPLE_BLOCK_SIZE)
-    local_argmax = torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=target_logits.device)
-    local_max = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
-    local_mass = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
+    local_argmax, local_max, local_mass = _get_workspace(target_logits, num_reqs, num_blocks)
     num_workers = min(_get_vectorcore_num(), num_reqs * num_blocks)
 
     _resample_kernel[(num_workers,)](
@@ -438,8 +463,8 @@ def resample(
         temperature,
         cumulative_log_p,
         num_reqs,
-        num_blocks,
-        vocab_size,
+        num_blocks=num_blocks,
+        vocab_size=vocab_size,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_BLOCK_VERIFICATION=use_block_verification,
@@ -471,8 +496,8 @@ def resample(
         seed,
         pos,
         cumulative_log_p,
-        vocab_size,
-        num_blocks,
+        vocab_size=vocab_size,
+        num_blocks=num_blocks,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         HAS_DRAFT_LOGITS=has_draft_logits,
