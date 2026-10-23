@@ -16,7 +16,6 @@ Dequantization:
 
 import torch
 
-
 # OSCAR clip ratios (from previous agent's tuning)
 DEFAULT_K_CLIP_RATIO = 0.96
 DEFAULT_V_CLIP_RATIO = 0.92
@@ -67,12 +66,7 @@ def oscar_quantize_int2(
     # Layout: q0 | (q1 << 2) | (q2 << 4) | (q3 << 6)
     quarter = head_dim // 4
     q = q.reshape(num_tokens, num_heads, 4, quarter)
-    packed = (
-        q[:, :, 0, :]
-        | (q[:, :, 1, :] << 2)
-        | (q[:, :, 2, :] << 4)
-        | (q[:, :, 3, :] << 6)
-    )
+    packed = q[:, :, 0, :] | (q[:, :, 1, :] << 2) | (q[:, :, 2, :] << 4) | (q[:, :, 3, :] << 6)
 
     return packed, scale.squeeze(-1), zero.squeeze(-1)
 

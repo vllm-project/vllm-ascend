@@ -6,14 +6,15 @@ per-token-head affine INT2 with quantile clipping). The C++ single-call
 variant in the launcher extension is value-identical (at::kthvalue(k) ==
 sorted[k-1]); the threshold-equality test below documents that contract.
 """
+
 import pytest
 import torch
 
 from vllm_ascend.oscar.int2_quant import (
-    oscar_quantize_int2,
-    oscar_dequantize_int2,
     DEFAULT_K_CLIP_RATIO,
     DEFAULT_V_CLIP_RATIO,
+    oscar_dequantize_int2,
+    oscar_quantize_int2,
 )
 
 
@@ -55,8 +56,7 @@ class TestNumerics:
         x = _rand_kv()
         packed, scales, zeros = oscar_quantize_int2(x)
         xd = oscar_dequantize_int2(packed, scales, zeros, torch.float32)
-        cos = torch.nn.functional.cosine_similarity(
-            x.view(-1), xd.view(-1), dim=0)
+        cos = torch.nn.functional.cosine_similarity(x.view(-1), xd.view(-1), dim=0)
         # 4-level affine per token-head on fp32 randn: cos ~0.93-0.96;
         # serve-level needle tests are the quality acceptance, this bounds
         # the encoder against gross defects (sign flips, lane swaps).
