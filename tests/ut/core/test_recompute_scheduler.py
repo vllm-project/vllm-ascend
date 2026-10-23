@@ -11,6 +11,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.request import RequestStatus
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
+from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
@@ -21,6 +22,7 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
     RecomputeSchedulerConfig,
 )
+from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
 
 
 @pytest.fixture(autouse=True)
@@ -377,3 +379,36 @@ def test_first_request_preserves_ascend_speculative_padding_without_cached_token
 
     assert output.num_scheduled_tokens[request.request_id] == 3
     assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_schedule_multimodal_inputs_with_duplicate_cache_tracking(running):
+    """Exercise the real upstream five-value API on waiting and running paths."""
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = False
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+    config.model_config.hf_config.vision_config = SimpleNamespace(num_heads=1, hidden_size=1, intermediate_size=1)
+    config.ec_manager_config.manager_config = {"cpu_cache_slots": 8}
+    manager = ScoreEncoderCacheManager(8, config)
+    scheduler.encoder_cache_manager = manager
+    scheduler.max_num_encoder_input_tokens = 32
+    scheduler.max_num_scheduled_tokens = 2 if running else 8
+    second_identifier = "second" if running else "shared"
+    request = make_mm_request("mm", [("shared", [True, True]), (second_identifier, [True, True])])
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if running:
+        assert output.scheduled_encoder_inputs[request.request_id] == [0]
+        runner_output = create_model_runner_output([request])
+        runner_output.sampled_token_ids = [[]]
+        scheduler.update_from_output(output, runner_output)
+        assert request in scheduler.running
+        output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs[request.request_id] == ([1] if running else [0])
+    assert 1 in manager.request_cached_ids[request.request_id]
+    if not running:
+        assert manager.request_cached_ids[request.request_id] == {0, 1}
+        assert manager.cpu_num_free_slots == 6
+        assert output.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
+    manager._check_invariant()
