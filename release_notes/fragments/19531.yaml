@@ -1,0 +1,9 @@
+pr: 19531
+entries:
+  - category: feature
+    text: >-
+      Added end-to-end classification support for Qwen2.5-1.5B-apeach (Korean
+      harmful-content classifier) on Ascend NPUs, including a runnable e2e test
+      against a Hugging Face fp32 reference and a user-facing tutorial.
+    model: Qwen2.5-1.5B-apeach
+    hardware: [A2, A3]
