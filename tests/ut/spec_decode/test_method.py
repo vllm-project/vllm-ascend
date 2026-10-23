@@ -103,7 +103,7 @@ def test_310p_mtp_routing_uses_family_helper(monkeypatch):
 
     module = ModuleType("vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator")
     speculator_cls = MagicMock()
-    module.AscendMTPSpeculator310 = speculator_cls
+    module.__dict__["AscendMTPSpeculator310"] = speculator_cls
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(
         patch_module,
