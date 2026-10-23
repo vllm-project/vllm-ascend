@@ -179,6 +179,10 @@ def _prepare_beta(
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
+    # Prepare convolution indices once per metadata group, after graph padding,
+    # instead of materializing the same first column in every KDA layer.
+    use_contiguous_conv_indices = True
+
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
 
