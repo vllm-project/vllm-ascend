@@ -61,11 +61,12 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
+    SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
     AscendConfig = None
@@ -1648,6 +1649,27 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+    """Match supported target/draft pairs against the live loader tag."""
+    # V2 keeps the target model_config while loading the draft. Match the live
+    # loader tag so the target and other auxiliary models retain their backend.
+    target = spec.target_model_config
+    if spec.method == "dflash":
+        return (
+            bool(spec.enforce_eager)
+            and model_tag == "dflash_head"
+            and target.hf_text_config.model_type == "glm_moe_dsa"
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+        )
+    if spec.method == "dspark":
+        return (
+            model_tag == "dspark_head"
+            and not _MINIMAX_M3_ARCHITECTURES.isdisjoint(target.hf_config.architectures or ())
+            and "Qwen3DSparkModel" in (spec.draft_model_config.architectures or ())
+        )
+    return False
+
+
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
     """Select CANN FlashAttn for A5 GLM DFlash2 and MiniMax-M3 DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
@@ -1661,30 +1683,12 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None:
-        return False
-    target = spec.target_model_config
-    # V2 keeps the target model_config while loading the draft. Match the live
-    # loader tag so the target and other auxiliary models retain their backend.
-    if spec.method == "dflash":
-        if not spec.enforce_eager:
-            return False
-        if backends.model_tag != "dflash_head" or target.hf_text_config.model_type != "glm_moe_dsa":
-            return False
-        draft_architecture = "DFlash2DraftModel"
-    elif spec.method == "dspark":
-        if backends.model_tag != "dspark_head" or not _MINIMAX_M3_ARCHITECTURES.intersection(
-            target.hf_config.architectures or ()
-        ):
-            return False
-        draft_architecture = "Qwen3DSparkModel"
-    else:
+    if spec is None or not _is_supported_flash_attn_draft(spec, backends.model_tag):
         return False
 
     return (
-        draft_architecture in (spec.draft_model_config.architectures or [])
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
-        and selector.dtype in (torch.float16, torch.bfloat16)
+        selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
         # These features require additional metadata or batch-invariance guarantees.
         and not (

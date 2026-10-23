@@ -23,6 +23,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_paged_cache_views,
     mxfp_v_scale_cache_shape,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -2053,9 +2055,105 @@ def test_pp_exact_counts_override_device_length_exemption(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _m3_device_length_runner():
+    runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
+    runner.speculator = SimpleNamespace(
+        attn_backends={"draft.0": AscendFlashAttentionBackend, "draft.1": AscendFlashAttentionBackend}
+    )
+    runner.model_config.architecture = "MiniMaxM3SparseForConditionalGeneration"
+    runner.model_config.hf_config.model_type = "minimax_m3"
+    runner.model_config.hf_text_config = SimpleNamespace(model_type="minimax_m3")
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.speculative_config = SimpleNamespace(
+        method="dspark",
+        draft_model_config=SimpleNamespace(architectures=["Qwen3DSparkModel"], dtype=torch.bfloat16),
+        kv_cache_dtype=None,
+        enable_adaptive_verification=False,
+        enforce_eager=False,
+    )
+    runner.use_fia = True
+    return runner, output, batch
+
+
+@pytest.fixture
+def m3_device_length_runner():
+    return _m3_device_length_runner()
+
+
+@pytest.mark.parametrize("architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
+@pytest.mark.parametrize("eager", [False, True])
+def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager):
+    runner, _, _ = m3_device_length_runner
+    runner.model_config.architecture = architecture
+    runner.speculative_config.enforce_eager = eager
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "no_spec_config",
+        "no_speculator",
+        "method",
+        "target_arch",
+        "no_draft_config",
+        "draft_arch",
+        "no_backends",
+        "empty_backends",
+        "draft_backend",
+        "mixed_backends",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported):
+    runner, _, _ = m3_device_length_runner
+    spec = runner.speculative_config
+    if unsupported == "no_spec_config":
+        runner.speculative_config = None
+    elif unsupported == "no_speculator":
+        runner.speculator = None
+    elif unsupported == "method":
+        spec.method = "eagle3"
+    elif unsupported == "target_arch":
+        runner.model_config.architecture = "OtherModel"
+    elif unsupported == "no_draft_config":
+        spec.draft_model_config = None
+    elif unsupported == "draft_arch":
+        spec.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported == "no_backends":
+        del runner.speculator.attn_backends
+    elif unsupported == "empty_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported == "draft_backend":
+        runner.speculator.attn_backends = {"draft.0": AscendAttentionBackend}
+    elif unsupported == "mixed_backends":
+        runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        spec.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected):
-    runner, output, _ = _device_length_runner()
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark"])
+def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
+    runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])

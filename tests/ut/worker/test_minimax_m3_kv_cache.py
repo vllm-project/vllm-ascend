@@ -12,7 +12,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerBackend
 from vllm_ascend.worker.v2 import attn_utils
 
 
-@pytest.mark.parametrize("scheduler_block_size,expected_pages", [(128, 2), (256, 4)])
+@pytest.mark.parametrize("scheduler_block_size,expected_pages", [(128, 2), (256, 4), (512, 8)])
 @pytest.mark.parametrize("scale_dim", [0, 1])
 def test_indexer_views_split_scheduler_blocks_into_kernel_pages(
     monkeypatch, scheduler_block_size, expected_pages, scale_dim
@@ -50,4 +50,5 @@ def test_indexer_views_split_scheduler_blocks_into_kernel_pages(
     torch.testing.assert_close(cache[0].flatten(), key)
     if scale_dim:
         assert cache[1].shape == (expected_pages, 128, 1)
+        assert cache[1].data_ptr() == scales.data_ptr()
         torch.testing.assert_close(cache[1].flatten(), scales)

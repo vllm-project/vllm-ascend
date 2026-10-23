@@ -66,6 +66,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -1256,7 +1257,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def _can_skip_spec_cpu_length_sync(self) -> bool:
-        """Allow device lengths for GLM-5.3 with a DFlash2 draft."""
+        """Allow device lengths for supported speculative-decoding paths."""
         if self.sync_spec_pp_cpu_counts:
             return False
 
@@ -1273,7 +1274,33 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
-        return False
+
+        if (
+            spec is None
+            or self.speculator is None
+            or spec.method != "dspark"
+            or self.model_config.architecture
+            not in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration")
+            or spec.draft_model_config is None
+            or "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
+        ):
+            return False
+
+        # Inspect the initialized draft backends instead of repeating selection
+        # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
+        draft_backends = getattr(self.speculator, "attn_backends", {})
+        parallel_config = self.parallel_config
+        # Keep parallel, transfer, offload and adaptive paths on host counts.
+        return (
+            bool(draft_backends)
+            and all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and self.vllm_config.kv_transfer_config is None
+            and not self.ascend_config.sparse_kv_offload_config.enabled
+            and not spec.enable_adaptive_verification
+        )
 
     def postprocess_sampled(
         self,

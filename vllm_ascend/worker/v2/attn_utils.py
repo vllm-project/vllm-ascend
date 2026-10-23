@@ -69,7 +69,6 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -231,13 +230,19 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
 
-        layer_config = vllm_config
-        if isinstance(attn_module, Attention) and attn_module.get_attn_backend() is AscendFlashAttentionBackend:
-            # The BF16 draft owns its pages; target quantization padding may be smaller.
+        spec = attn_module.get_kv_cache_spec(vllm_config)
+        if (
+            isinstance(attn_module, Attention)
+            and getattr(attn_module, "is_draft_layer", False)
+            and isinstance(spec, SlidingWindowSpec)
+            and spec.page_size_padded is not None
+            and spec.page_size_padded < spec.real_page_size_bytes
+        ):
+            # The draft must fit one kernel block; target padding can be smaller.
             layer_config = copy(vllm_config)
             layer_config.cache_config = copy(vllm_config.cache_config)
             layer_config.cache_config.skip_page_size_padded = None
-        spec = attn_module.get_kv_cache_spec(layer_config)
+            spec = attn_module.get_kv_cache_spec(layer_config)
         if spec is None:
             continue
 
@@ -1692,6 +1697,8 @@ def _reshape_kv_cache_v2(
                 assert sum_page_size_bytes % group_spec.page_size_bytes == 0
                 num_blocks = sum_page_size_bytes // group_spec.page_size_bytes
                 assert num_blocks >= kv_cache_config.num_blocks
+                # Page-size unification can make one manager block span several
+                # kernel pages. Match the kernel block table without copying KV.
                 num_kernel_blocks = num_blocks * group_spec.block_size // kernel_block_size
 
                 kv_cache_shape = group.backend.get_kv_cache_shape(
