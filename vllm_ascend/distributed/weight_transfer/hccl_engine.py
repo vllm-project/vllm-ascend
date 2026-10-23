@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from typing_extensions import Self
+from typing_extensions import Self, deprecated
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
     VLLMWeightSyncClient,
@@ -87,10 +87,9 @@ class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
-    """Upstream trainer contract with the HCCL unpacked default."""
+    """Upstream trainer contract, including packed transfers by default."""
 
     backend: ClassVar[str] = "hccl"
-    packed: bool = False
 
     def __post_init__(self) -> None:
         _validate_packed_params(self)
@@ -98,7 +97,7 @@ class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
 
 @dataclass
 class HCCLTrainerSendWeightsArgs:
-    """Backward-compatible arguments for the static trainer entry point."""
+    """Deprecated static-path arguments; use HCCLTrainerInitInfo instead."""
 
     group: Any
     """Process group (PyHcclCommunicator) for HCCL communication."""
@@ -136,6 +135,9 @@ class HCCLWeightTransferUpdateInfo(NCCLWeightTransferUpdateInfo):
 class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
     """Inherit the reload lifecycle; adapt the rendezvous and the NPU data plane."""
 
+    if TYPE_CHECKING:
+        model_update_group: PyHcclCommunicator | None  # type: ignore[assignment]
+
     init_info_cls = HCCLWeightTransferInitInfo  # type: ignore[assignment]
     update_info_cls = HCCLWeightTransferUpdateInfo
     # Tests and alternate HCCL transports can swap the group constructor.
@@ -151,6 +153,17 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
+        # Preserve the parent's handshake attributes, resetting omitted values
+        # on re-init. _wire_params still supports legacy per-update overrides.
+        self.packed = init_info.packed if init_info.packed is not None else False
+        self.packed_buffer_size_bytes = (
+            init_info.packed_buffer_size_bytes
+            if init_info.packed_buffer_size_bytes is not None
+            else DEFAULT_PACKED_BUFFER_SIZE_BYTES
+        )
+        self.packed_num_buffers = (
+            init_info.packed_num_buffers if init_info.packed_num_buffers is not None else DEFAULT_PACKED_NUM_BUFFERS
+        )
         # Unique rank across data-parallel groups; the trainer occupies the
         # ranks before `rank_offset`.
         parallel = self.parallel_config
@@ -163,12 +176,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
                 init_info.world_size,
                 device=torch.accelerator.current_device_index(),
             )
-            # `--follow-imports skip` hides the inherited `PyNcclCommunicator`
-            # annotation, so mypy would infer a non-optional type from this
-            # assignment and then reject clearing the field in `shutdown()`.
-            # Declare the optional HCCL type here (attribute annotations inside a
-            # function body are not evaluated at runtime).
-            self.model_update_group: PyHcclCommunicator | None = group  # type: ignore[assignment]
+            self.model_update_group = group
 
     def _wire_params(self, update: HCCLWeightTransferUpdateInfo) -> dict[str, Any]:
         """Resolve the packed wire params for one update.
@@ -233,11 +241,20 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
             group.close()
 
     @staticmethod
+    @deprecated(
+        "HCCLWeightTransferEngine.trainer_init is deprecated. Use "
+        "WeightTransferTrainerFactory.trainer_init(HCCLTrainerInitInfo(...), "
+        "client=..., source=...) instead."
+    )
     def trainer_init(init_info: HCCLWeightTransferInitInfo | dict) -> "PyHcclCommunicator":
         """Legacy rendezvous for trainers that drive their own update RPCs."""
         return hccl_common.trainer_init(init_info)
 
     @staticmethod
+    @deprecated(
+        "HCCLWeightTransferEngine.trainer_send_weights is deprecated. Use "
+        "HCCLTrainerWeightTransferEngine.send_weights() instead."
+    )
     def trainer_send_weights(
         iterator: Iterator[tuple[str, torch.Tensor]],
         trainer_args: dict[str, Any] | HCCLTrainerSendWeightsArgs,
@@ -276,23 +293,39 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
 
     init_info_cls = HCCLTrainerInitInfo
 
-    def __init__(  # type: ignore[override]
+    if TYPE_CHECKING:
+        model_update_group: PyHcclCommunicator | None  # type: ignore[assignment]
+
+    def __init__(
         self,
         *,
+        client: VLLMWeightSyncClient,
+        source: WeightSource,
+        is_sender: bool = True,
         device: torch.device | None = None,
-        packed: bool = False,
-        **kwargs: Any,
+        packed: bool = True,
+        packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+        packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     ) -> None:
-        super().__init__(packed=packed, **kwargs)
+        super().__init__(
+            client=client,
+            source=source,
+            is_sender=is_sender,
+            packed=packed,
+            packed_buffer_size_bytes=packed_buffer_size_bytes,
+            packed_num_buffers=packed_num_buffers,
+        )
         if device is None:
             index = torch.accelerator.current_device_index()
             if index is None:
                 raise ValueError("HCCL trainer requires a current NPU device")
             device = torch.device("npu", index)
         self.device = device
-        self.model_update_group: PyHcclCommunicator | None = None
+        self.model_update_group = None
         self._state = "ready"
 
+    # Mirror NCCLTrainerWeightTransferEngine.trainer_init orchestration until
+    # upstream exposes a hook for the endpoint opener and worker init-info type.
     @classmethod
     def trainer_init(  # type: ignore[override]
         cls,
@@ -369,26 +402,33 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 return
             if self.model_update_group is None:
                 raise RuntimeError("HCCL trainer communicator is not initialized")
-            # One sender path for both modes: the device-local copy rides in
-            # `post_iter_func`, so packed batching and the one-by-one path both
-            # ship tensors that live on the communicator's device.
-            HCCLWeightTransferEngine.trainer_send_weights(
-                self._checked_iter(source, meta),
-                HCCLTrainerSendWeightsArgs(
+            pairs = self._checked_iter(source, meta)
+            if self.packed:
+                packed_broadcast_producer(
+                    iterator=pairs,
                     group=self.model_update_group,
-                    packed=self.packed,
+                    src=0,
                     post_iter_func=lambda item: item[1].detach().to(self.device).contiguous(),
-                    packed_buffer_size_bytes=self.packed_buffer_size_bytes,
-                    packed_num_buffers=self.packed_num_buffers,
-                ),
-            )
+                    buffer_size_bytes=self.packed_buffer_size_bytes,
+                    num_buffers=self.packed_num_buffers,
+                )
+            else:
+                stream = torch.npu.current_stream()
+                for _name, tensor in pairs:
+                    send = tensor.detach().to(self.device).contiguous()
+                    self.model_update_group.broadcast(send, src=0, stream=stream)
+                    # Keep the staging storage alive until HCCL has read it.
+                    stream.synchronize()
 
     def _post_send_sync(self) -> None:
         """Wait for this rank's transfer work to land before returning."""
-        with torch.npu.device(self.device):
-            torch.npu.current_stream().synchronize()
+        if torch.npu.is_available():
+            with torch.npu.device(self.device):
+                torch.npu.current_stream().synchronize()
 
     def _release_group(self) -> None:
+        # HCCL counterpart of NCCLTrainerWeightTransferEngine.shutdown: close
+        # the communicator explicitly before dropping the reference.
         group, self.model_update_group = getattr(self, "model_update_group", None), None
         if group is not None:
             group.close()

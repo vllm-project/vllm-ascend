@@ -15,6 +15,7 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerInitInfo,
+    HCCLTrainerSendWeightsArgs,
     HCCLTrainerWeightTransferEngine,
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
@@ -108,13 +109,16 @@ def test_wire_params_preserve_legacy_updates_and_reject_init_conflicts(name, val
     update = HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], **{name: value})
     with patch.object(engine, "_stateless_init_process_group", return_value=MagicMock()):
         engine.init_transfer_engine(HCCLWeightTransferInitInfo(**args))
+        default = getattr(engine, name)
         assert engine._wire_params(update)[name] == value
         engine.init_transfer_engine(HCCLWeightTransferInitInfo(**args, **{name: value}))
+        assert getattr(engine, name) == value
         assert engine._wire_params(update)[name] == value
         other = False if name == "packed" else value + 1
         with pytest.raises(ValueError, match=name):
             engine._wire_params(HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], **{name: other}))
         engine.init_transfer_engine(HCCLWeightTransferInitInfo(**args))
+        assert getattr(engine, name) == default
         assert engine._wire_params(HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[]))[name] != value
 
 
@@ -130,10 +134,49 @@ def _trainer(sender=True):
     )
 
 
+def test_trainer_defaults_to_packed_like_upstream():
+    info = HCCLTrainerInitInfo(rank=0, master_address="host", master_port=1234, world_size=2)
+    assert info.packed is True
+    assert _trainer().packed is True
+    assert HCCLTrainerSendWeightsArgs(group=MagicMock()).packed is False
+
+
+def test_legacy_trainer_init_warns_and_delegates():
+    info = dict(master_address="host", master_port=1234, world_size=2)
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.hccl_common.trainer_init") as init,
+        pytest.warns(DeprecationWarning, match="WeightTransferTrainerFactory.trainer_init"),
+    ):
+        group = HCCLWeightTransferEngine.trainer_init(info)
+    init.assert_called_once_with(info)
+    assert group is init.return_value
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_legacy_trainer_send_warns_and_preserves_wire_mode(packed):
+    group = MagicMock()
+    group.device = torch.device("cpu")
+    tensor = torch.ones(1)
+    args = HCCLTrainerSendWeightsArgs(group=group, packed=packed)
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_producer") as producer,
+        pytest.warns(DeprecationWarning, match="HCCLTrainerWeightTransferEngine.send_weights"),
+    ):
+        HCCLWeightTransferEngine.trainer_send_weights(iter([("w", tensor)]), args)
+    if packed:
+        producer.assert_called_once()
+        group.broadcast.assert_not_called()
+    else:
+        producer.assert_not_called()
+        group.broadcast.assert_called_once_with(tensor, src=0, stream=torch.npu.current_stream())
+        torch.npu.current_stream().synchronize.assert_called_once_with()
+
+
 @pytest.mark.parametrize("sender", [False, True])
-def test_trainer_init_builds_rank_zero_handshake(sender):
+@pytest.mark.parametrize("packed", [False, True])
+def test_trainer_init_builds_rank_zero_handshake(sender, packed):
     info = HCCLTrainerInitInfo(
-        rank=0 if sender else 1, master_address="host", master_port=1234, world_size=3, packed=True
+        rank=0 if sender else 1, master_address="host", master_port=1234, world_size=3, packed=packed
     )
     client = MagicMock()
     with (
@@ -145,7 +188,7 @@ def test_trainer_init_builds_rank_zero_handshake(sender):
     if sender:
         payload = client.init_weight_transfer_engine.call_args.args[0]
         assert payload["rank_offset"] == 1
-        assert payload["packed"] is True
+        assert payload["packed"] is packed
         assert init.call_args.kwargs["rank"] == 0
     else:
         client.init_weight_transfer_engine.assert_not_called()
@@ -170,14 +213,40 @@ def test_trainer_normalizes_source_for_both_modes(packed):
     with (
         patch.object(
             torch, "npu", SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock()), create=True
-        ),
+        ) as npu,
         patch.object(engine, "_checked_iter", return_value=iter(pairs)),
+        patch.object(HCCLWeightTransferEngine, "trainer_send_weights", side_effect=AssertionError("deprecated path")),
         patch(f"{namespace}.packed_broadcast_producer", side_effect=pack),
     ):
         engine._broadcast(pairs, [])
     tensor.detach.return_value.to.assert_called_once_with(engine.device)
     if not packed:
         assert torch.equal(engine.model_update_group.broadcast.call_args.args[0], torch.ones(1))
+        npu.current_stream().synchronize.assert_called_once_with()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_post_send_sync_only_when_npu_available(available):
+    engine = _trainer()
+    stream = MagicMock()
+    device_context = MagicMock(return_value=nullcontext())
+    with patch.object(
+        torch,
+        "npu",
+        SimpleNamespace(
+            is_available=lambda: available,
+            device=device_context,
+            current_stream=lambda: stream,
+        ),
+        create=True,
+    ):
+        engine._post_send_sync()
+    if available:
+        device_context.assert_called_once_with(engine.device)
+        stream.synchronize.assert_called_once_with()
+    else:
+        device_context.assert_not_called()
+        stream.synchronize.assert_not_called()
 
 
 def test_non_sender_drains_source_without_validating_placeholder_tensors():
