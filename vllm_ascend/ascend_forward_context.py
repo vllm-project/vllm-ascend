@@ -11,7 +11,11 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import (
+    compute_mega_moe_buffer_tokens_per_rank,
+    get_ascend_config,
+    is_mega_moe_supported,
+)
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -278,6 +282,33 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+def get_a5_mega_moe_buffer_tokens_per_rank(
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int | None = None,
+) -> int:
+    """Resolve the A5 MegaMoE capacity for the current PD role."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_producer = bool(getattr(kv_transfer_config, "is_kv_producer", False))
+    if kv_transfer_config is None or kv_role in ("kv_producer", "kv_both") or (kv_role is None and is_kv_producer):
+        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
+    else:
+        if mc2_tokens_capacity is None:
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if mc2_tokens_capacity is None:
+            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+        execution_tokens_per_rank = mc2_tokens_capacity
+
+    ascend_config = get_ascend_config()
+    expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
+    buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
+        ascend_config.mega_moe_max_tokens,
+        execution_tokens_per_rank,
+        expert_parallel_size,
+    )
+    return buffer_tokens_per_rank
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -348,7 +379,9 @@ def _select_capacity_and_world_size_moe_comm_method(
                 # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
                 # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
                 pass
-            else:
+            elif num_tokens is not None and num_tokens <= get_a5_mega_moe_buffer_tokens_per_rank(
+                vllm_config, mc2_tokens_capacity
+            ):
                 return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,

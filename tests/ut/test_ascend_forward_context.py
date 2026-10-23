@@ -95,7 +95,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, mega_moe_max_tokens=65536),
     )
 
 
@@ -195,6 +195,12 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
 
 def test_is_decode_only_node_false_without_kv_transfer():
     assert afc._is_decode_only_node(_make_vllm_config()) is False
+
+
+def test_a5_mega_moe_uses_prefill_capacity_without_kv_transfer(monkeypatch):
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(mega_moe_max_tokens=65536))
+    config = _make_vllm_config(world_size=8, max_num_batched_tokens=4096)
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(config, mc2_tokens_capacity=32) == 4096
 
 
 def test_is_decode_only_node_true_for_decode_bench_connector(monkeypatch):
@@ -474,7 +480,7 @@ def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_to
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8, max_num_batched_tokens=4096)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == MoECommType.FUSED_MC2
 
@@ -489,7 +495,7 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
         enable_fused_mc2=1,
     )
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
-    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4, max_num_batched_tokens=4096)
     expected = MoECommType.FUSED_MC2
     if draft_quant == QuantType.NONE:
         expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
