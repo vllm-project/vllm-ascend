@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-"""DFlash2 bypasses Dynamo while remaining capturable by the outer ACL graph."""
+"""Exercise DFlash2's real compilation decorators with a CPU Dynamo backend.
 
+Attention construction and linear layers use CPU stand-ins. The decorators are
+real, and fullgraph=True rejects graph breaks in the production selector and
+grouped-convolution calculations. This does not test the NPU compiler backend.
+"""
+
+import contextlib
 import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -16,6 +21,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import CompilationMode, set_current_vllm_config
+from vllm.config.compilation import DynamicShapesType
 
 MODEL_PATH = Path(__file__).resolve().parents[3] / "vllm_ascend/models/qwen3_dflash2.py"
 
@@ -80,39 +86,84 @@ def model_module(monkeypatch):
     return module
 
 
-def _config():
+def _config(dynamic_shapes_type=DynamicShapesType.BACKED):
     draft = SimpleNamespace(
         hidden_size=4,
         vocab_size=8,
         dflash_config={"selector_rank": 3, "selector_top_k": 2},
     )
     return SimpleNamespace(
-        # This must remain enabled: the bypass is local to DFlash2 modules,
-        # and does not force the target or its outer graph manager to eager.
-        compilation_config=SimpleNamespace(mode=CompilationMode.VLLM_COMPILE),
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.VLLM_COMPILE,
+            backend="eager",
+            dynamic_shapes_config=SimpleNamespace(type=dynamic_shapes_type, assume_32_bit_indexing=False),
+            traced_files=set(),
+            cudagraph_mode=SimpleNamespace(has_piecewise_cudagraphs=lambda: False),
+        ),
         model_config=SimpleNamespace(dtype=torch.float32),
         speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=draft)),
     )
 
 
-def test_dflash2_parent_compilation_wrapper_is_bypassed(model_module):
+@pytest.fixture
+def cpu_compile_wrapper(monkeypatch):
+    initialized = []
+
+    def initialize(model, *, compile_prefix="", is_encoder=False):
+        model._is_encoder = is_encoder
+        model.test_compile_graphs = []
+
+        def backend(graph, example_inputs):
+            model.test_compile_graphs.append(graph)
+            return graph.forward
+
+        model.test_compiled_forward = torch.compile(model.forward, backend=backend, fullgraph=True)
+        initialized.append(model)
+
+    def call(model, *args, **kwargs):
+        return model.test_compiled_forward(*args, **kwargs)
+
+    torch._dynamo.reset()
+    monkeypatch.setattr(TorchCompileWithNoGuardsWrapper, "__init__", initialize)
+    monkeypatch.setattr(TorchCompileWithNoGuardsWrapper, "__call__", call)
+    monkeypatch.setattr(
+        TorchCompileWithNoGuardsWrapper,
+        "original_code_object",
+        lambda model: model.forward.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr("vllm.envs.VLLM_USE_AOT_COMPILE", False)
+    monkeypatch.setattr("vllm.compilation.decorators.monitor_torch_compile", lambda *a, **kw: contextlib.nullcontext())
+    monkeypatch.setattr("vllm.compilation.decorators.monitor_profiling_run", lambda *a, **kw: contextlib.nullcontext())
+    # Real ForwardContext construction/lifetime is checked by speculator tests.
+    context = SimpleNamespace(skip_compiled=False, is_padding=None)
+    monkeypatch.setattr("vllm.compilation.decorators.is_forward_context_available", lambda: True)
+    monkeypatch.setattr("vllm.compilation.decorators.get_forward_context", lambda: context)
+    yield initialized
+    torch._dynamo.reset()
+
+
+def test_dflash2_inherited_compilation_wrapper_remains_enabled(model_module, cpu_compile_wrapper):
     config = _config()
-    with (
-        set_current_vllm_config(config),
-        patch.object(TorchCompileWithNoGuardsWrapper, "__init__", side_effect=AssertionError("Dynamo initialized")),
-    ):
+    with set_current_vllm_config(config):
         model = model_module.DFlash2Qwen3Model(vllm_config=config)
 
-    assert model.do_not_compile
-    assert model.candidate_selector.do_not_compile
+    assert not model.do_not_compile
+    assert not model.candidate_selector.do_not_compile
+    assert cpu_compile_wrapper == [model, model.candidate_selector]
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     input_ids = torch.tensor([1, 2, 3])
     positions = torch.tensor([0, 1, 2])
     torch.testing.assert_close(model(input_ids, positions), model.embed_tokens(input_ids))
+    assert model.compiled
+    assert len(model.test_compile_graphs) == 1
 
 
-@pytest.mark.parametrize("num_reqs", [1, 3])
-def test_selector_runs_without_forward_context_and_matches_edge_scores(model_module, num_reqs):
+@pytest.mark.parametrize("num_steps", [4, 5, 6])
+@pytest.mark.parametrize("dynamic_shapes_type", [DynamicShapesType.BACKED, DynamicShapesType.UNBACKED])
+def test_selector_compiles_dynamic_batches_and_matches_edge_scores(
+    model_module, cpu_compile_wrapper, num_steps, dynamic_shapes_type
+):
     torch.manual_seed(1)
     selector = model_module.CandidateSelector(
         hidden_size=4,
@@ -121,55 +172,65 @@ def test_selector_runs_without_forward_context_and_matches_edge_scores(model_mod
         top_k=2,
         params_dtype=torch.float32,
         prefix="selector",
-        vllm_config=_config(),
+        vllm_config=_config(dynamic_shapes_type),
     )
     with torch.no_grad():
         selector.predecessor_codebook.copy_(torch.randn_like(selector.predecessor_codebook))
         selector.successor_codebook.copy_(torch.randn_like(selector.successor_codebook))
-    candidates = torch.arange(num_reqs * 3 * 2).reshape(num_reqs, 3, 2) % 8
-    unary = torch.randn(num_reqs, 3, 2)
-    hidden_states = torch.randn(num_reqs, 3, 4)
-    anchor_ids = torch.arange(num_reqs) % 8
-    # Scoring is invoked outside _run_model's ForwardContext, both during
-    # profiling and inside the enclosing DFlash full-graph capture.
-    with patch("vllm.compilation.decorators.get_forward_context", side_effect=AssertionError("No forward context")):
+    for num_reqs in (3, 1, 2):
+        candidates = torch.arange(num_reqs * num_steps * 2).reshape(num_reqs, num_steps, 2) % 8
+        unary = torch.randn(num_reqs, num_steps, 2)
+        hidden_states = torch.randn(num_reqs, num_steps, 4)
+        anchor_ids = torch.arange(num_reqs) % 8
         actual = selector(candidates, unary, hidden_states, anchor_ids)
+        hidden = F.linear(hidden_states, selector.hidden_projection.weight)
+        expected = torch.empty(num_reqs, num_steps, 2, 2)
+        for request in range(num_reqs):
+            for step in range(num_steps):
+                for predecessor in range(2):
+                    previous_id = anchor_ids[request] if step == 0 else candidates[request, step - 1, predecessor]
+                    for successor in range(2):
+                        current_id = candidates[request, step, successor]
+                        interaction = (
+                            selector.predecessor_codebook[previous_id]
+                            * hidden[request, step]
+                            * selector.successor_codebook[current_id]
+                        ).sum()
+                        expected[request, step, predecessor, successor] = unary[request, step, successor] + interaction
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual, selector.forward(candidates, unary, hidden_states, anchor_ids))
+    assert selector.compiled
+    # Backed shapes may specialize batch=1; batch=2 must reuse the batch=3 graph.
+    assert 1 <= len(selector.test_compile_graphs) <= 2
 
-    hidden = F.linear(hidden_states, selector.hidden_projection.weight)
-    expected = torch.empty(num_reqs, 3, 2, 2)
-    for request in range(num_reqs):
-        for step in range(3):
-            for predecessor in range(2):
-                previous_id = anchor_ids[request] if step == 0 else candidates[request, step - 1, predecessor]
-                for successor in range(2):
-                    current_id = candidates[request, step, successor]
-                    interaction = (
-                        selector.predecessor_codebook[previous_id]
-                        * hidden[request, step]
-                        * selector.successor_codebook[current_id]
-                    ).sum()
-                    expected[request, step, predecessor, successor] = unary[request, step, successor] + interaction
-    torch.testing.assert_close(actual, expected)
 
-
-@pytest.mark.parametrize("block_size", [3, 4])
+@pytest.mark.parametrize("block_size", [5, 6, 7])
 def test_grouped_convolution_keeps_request_boundaries(model_module, block_size):
     torch.manual_seed(2)
     num_groups, group_size, taps = 2, 2, 2
-    hidden = torch.randn(2 * block_size, num_groups * group_size)
-    delta = torch.randn(2 * block_size, taps, num_groups)
     base = torch.randn(taps, num_groups * group_size)
 
-    actual = model_module._grouped_conv(hidden, delta, base, block_size, num_groups, group_size, taps)
+    graphs = []
 
-    expected = torch.zeros_like(hidden)
-    for token in range(hidden.shape[0]):
-        for group in range(num_groups):
-            for lane in range(group_size):
-                column = group * group_size + lane
-                for tap in range(taps):
-                    if token % block_size >= tap:
-                        expected[token, column] += (base[tap, column] + delta[token, tap, group]) * hidden[
-                            token - tap, column
-                        ]
-    torch.testing.assert_close(actual, expected)
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    compiled = torch.compile(model_module._grouped_conv, backend=backend, fullgraph=True, dynamic=True)
+    for num_reqs in (3, 1, 2):
+        hidden = torch.randn(num_reqs * block_size, num_groups * group_size)
+        delta = torch.randn(num_reqs * block_size, taps, num_groups)
+        actual = compiled(hidden, delta, base, block_size, num_groups, group_size, taps)
+
+        expected = torch.zeros_like(hidden)
+        for token in range(hidden.shape[0]):
+            for group in range(num_groups):
+                for lane in range(group_size):
+                    column = group * group_size + lane
+                    for tap in range(taps):
+                        if token % block_size >= tap:
+                            expected[token, column] += (base[tap, column] + delta[token, tap, group]) * hidden[
+                                token - tap, column
+                            ]
+        torch.testing.assert_close(actual, expected)
+    assert len(graphs) == 1

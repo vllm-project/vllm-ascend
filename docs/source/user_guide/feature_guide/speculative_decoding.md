@@ -371,9 +371,11 @@ A few important things to consider when using DFlash2 draft models:
 
 2. **Model runner V2 draft graphs**: DFlash2 uses full ACL graphs when the
    target enables `FULL_DECODE_ONLY` and the draft's `enforce_eager` is unset
-   or false. The draft backbone and candidate selector skip Dynamo compilation
-   while their operations, candidate TopK, path sampling, and proposal-cache
-   updates are captured by the draft ACL graph. Set `"enforce_eager": true`
+   or false. The draft backbone and candidate selector retain the configured
+   Dynamo compilation path. Candidate scoring uses its own request-shaped
+   forward context and compilation cache namespace, while the outer draft ACL
+   graph captures the compiled operations, candidate TopK, path sampling, and
+   proposal-cache updates. Set `"enforce_eager": true`
    to compare against eager drafting. Validate graph/eager equivalence and
    request reuse on the intended NPU configuration before deployment.
 
@@ -392,6 +394,21 @@ A few important things to consider when using DFlash2 draft models:
 
    ```shell
    pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash_fia.py
+   ```
+
+   The QK/RoPE fusion pass skips target/draft dimension combinations that
+   cannot form a valid fusion pattern; the unfused operations still compile
+   and execute. The paired-Q/K RoPE compilation and graph replay test is:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_dflash2_rope.py
+   ```
+
+   The model-level acceptance test exercises both eager drafting and
+   `VLLM_COMPILE` with `FULL_DECODE_ONLY` on two NPUs:
+
+   ```shell
+   pytest -sv tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py -k test_dflash2_v2_acceptance
    ```
 
 3. **Graph capture sizes**: each decode step runs `(1 + K)` tokens per

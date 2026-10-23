@@ -24,6 +24,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import (
+    BatchDescriptor,
+    create_forward_context,
+    get_forward_context,
+    is_forward_context_available,
+    override_forward_context,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as upstream_dflash2
 
@@ -118,6 +125,76 @@ def test_init_cudagraph_manager_preserves_graph_mode_and_manager_references(monk
     assert calls == [CUDAGraphMode.NONE if enforce_eager else mode]
     assert speculator.query_cudagraph_manager.speculator is speculator
     assert speculator.query_cudagraph_manager.update_stream is speculator.update_stream
+
+
+@pytest.mark.parametrize("num_reqs,num_steps", [(1, 4), (2, 5), (3, 6)])
+@pytest.mark.parametrize("outer_context", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_selector_compilation_context_preserves_scoring_and_outer_graph(
+    monkeypatch, num_reqs, num_steps, outer_context, fail
+):
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            fast_moe_cold_start=False,
+            static_forward_context={"draft.attn": object()},
+        ),
+        parallel_config=SimpleNamespace(data_parallel_size=4, is_moe_model=True),
+    )
+    # A selector has no DP collectives, even if its target is a distributed MoE.
+    monkeypatch.setattr(
+        "vllm.forward_context.set_forward_context",
+        MagicMock(side_effect=AssertionError("Selector must not coordinate target DP batches")),
+    )
+    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.num_query_per_req = num_steps + 1
+    speculator.input_buffers = SimpleNamespace(
+        input_ids=torch.arange(num_reqs * (num_steps + 1) + 8, dtype=torch.int64)
+    )
+    candidates = torch.arange(num_reqs * num_steps * 2).view(num_reqs, num_steps, 2)
+    unary = torch.randn(num_reqs, num_steps, 2)
+    hidden = torch.randn(num_reqs, num_steps, 4)
+    scores = torch.randn(num_reqs, num_steps, 2, 2)
+    previous = (
+        create_forward_context(
+            {"target.attn": object()},
+            config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=BatchDescriptor(num_tokens=num_reqs * (num_steps + 1)),
+        )
+        if outer_context
+        else None
+    )
+
+    def score(candidate_ids, unary_logits, hidden_states, anchor_token_ids):
+        context = get_forward_context()
+        assert context is not previous
+        assert context.no_compile_layers is config.compilation_config.static_forward_context
+        assert context.batch_descriptor.num_tokens == num_reqs
+        assert context.cudagraph_runtime_mode == CUDAGraphMode.NONE
+        assert context.dp_metadata is None
+        assert context.attn_metadata is None
+        assert context.slot_mapping == {}
+        assert context.skip_compiled is False
+        assert candidate_ids is candidates
+        assert unary_logits is unary
+        assert hidden_states is hidden
+        torch.testing.assert_close(anchor_token_ids, torch.arange(num_reqs) * (num_steps + 1))
+        if fail:
+            raise RuntimeError("selector failed")
+        return scores
+
+    selector = MagicMock(side_effect=score)
+    selector.vllm_config = config
+    speculator.model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
+    with override_forward_context(previous):
+        expected_context = pytest.raises(RuntimeError, match="selector failed") if fail else nullcontext()
+        with expected_context:
+            assert speculator._score_candidates(candidates, unary, hidden) is scores
+        assert is_forward_context_available() is outer_context
+        if outer_context:
+            assert get_forward_context() is previous
+            assert previous.cudagraph_runtime_mode == CUDAGraphMode.FULL
+    selector.assert_called_once()
 
 
 @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only context-KV capture callback")

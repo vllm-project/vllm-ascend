@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.backends import set_model_tag
-from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -175,10 +175,8 @@ def _score_edges(
     return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
 
 
-# Candidate scoring runs after _run_model leaves its ForwardContext. Bypass
-# Dynamo's compiled wrapper here; DFlash's outer FULL ACL graph still captures
-# the selector together with candidate generation and path sampling.
-@ignore_torch_compile
+# The V2 speculator supplies a request-shaped ForwardContext for this module.
+# Its compiled operations remain inside DFlash2's outer FULL ACL graph.
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -230,9 +228,6 @@ class CandidateSelector(nn.Module):
         )
 
 
-# Capture the draft's Torch operations directly in the outer FULL ACL graph.
-# Its NPU RoPE path does not need Dynamo/FakeTensor tracing for graph replay.
-@ignore_torch_compile
 class DFlash2Qwen3Model(DFlashQwen3Model):
     # vLLM #52816 switched the parent constructor from its module global to
     # this class factory. Declare the main-lane factory so DFlash2 decoder
@@ -254,8 +249,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
-        # Retain a distinct model tag so selector compilation cannot reuse the
-        # draft backbone's cache if Dynamo support is restored in the future.
+        # The selector has different inputs from the draft backbone, so it
+        # must use a separate compilation cache namespace.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(
                 hidden_size=self.config.hidden_size,

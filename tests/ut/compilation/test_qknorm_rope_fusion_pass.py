@@ -56,12 +56,62 @@ def pass_module():
             del sys.modules["npugraph_ex"]
 
 
-def make_vllm_config():
-    vllm_config = MagicMock()
-    vllm_config.model_config.dtype = torch.bfloat16
-    vllm_config.compilation_config.splitting_ops = []
-    vllm_config.compilation_config.use_inductor_graph_partition = False
-    return vllm_config
+def make_vllm_config(head_size=128, partial_rotary_factor=1.0):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            use_mla=False,
+            get_head_size=lambda: head_size,
+            hf_text_config=SimpleNamespace(head_dim=head_size, partial_rotary_factor=partial_rotary_factor),
+        ),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+        compilation_config=SimpleNamespace(
+            splitting_ops=[], use_inductor_graph_partition=False, pass_config=SimpleNamespace()
+        ),
+    )
+
+
+@pytest.fixture
+def traced_cpu_patterns(monkeypatch, pass_module):
+    """Run real example construction and pattern bodies, checking device-op shapes."""
+    patterns = []
+    empty, ones = torch.empty, torch.ones
+
+    def cpu_allocation(factory):
+        def allocate(*args, **kwargs):
+            if kwargs.get("device") == "npu":
+                kwargs["device"] = "cpu"
+            return factory(*args, **kwargs)
+
+        return allocate
+
+    def rms_norm(hidden, weight, eps):
+        assert hidden.shape[-1] == weight.shape[-1]
+        return hidden, None
+
+    def rotary_embedding(positions, query, key, cache, head_size, rotary_dim, is_neox_style):
+        assert 0 < rotary_dim <= head_size, "example rotary dimension exceeds its attention head"
+        assert cache.shape[-1] == rotary_dim, "example RoPE cache must have the rotary width"
+        assert query.shape[-1] % head_size == key.shape[-1] % head_size == 0
+        assert positions.shape[0] == query.shape[0] == key.shape[0]
+        return query, key
+
+    def trace_examples(pattern, _passes):
+        inputs = pattern.get_inputs()
+        pattern.get_pattern()(*inputs)
+        patterns.append((pattern, inputs))
+
+    monkeypatch.setattr(torch, "empty", cpu_allocation(empty))
+    monkeypatch.setattr(torch, "ones", cpu_allocation(ones))
+    monkeypatch.setattr(torch.ops.npu, "npu_rms_norm", rms_norm, raising=False)
+    monkeypatch.setattr(torch.ops.vllm, "npu_rotary_embedding", rotary_embedding, raising=False)
+    for pattern_class in (
+        pass_module.QKNormRopeFusionPattern,
+        pass_module.QKNormRopeFusionPatternWithBias,
+        pass_module.QKVNormRopeFusionPattern,
+    ):
+        monkeypatch.setattr(pattern_class, "register", trace_examples)
+    return patterns
 
 
 def register_patterns(pass_module, layer_shapes, device_type=AscendDeviceType.A2):
@@ -148,3 +198,43 @@ def test_hardware_without_the_kernel_keeps_only_qk_patterns(pass_module):
 
     assert qkv_shapes == []
     assert qk_shapes == sorted(2 * [(*QWEN3_8B_TP1, eps) for eps in EPSILONS])
+
+
+def test_skips_qk_examples_when_target_rope_exceeds_discovered_head(pass_module, traced_cpu_patterns):
+    # An explicit 256-wide target head can coexist with a 128-wide draft head.
+    # Registration traces examples before graph matching can reject the shape.
+    target_config = make_vllm_config(head_size=256)
+    layers = {"draft.layers.0.attn": SimpleNamespace(head_size=128, num_heads=32, num_kv_heads=8)}
+    with (
+        patch.object(pass_module, "get_layers_from_vllm_config", return_value=layers),
+        patch.object(
+            pass_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+        ),
+        patch.object(pass_module, "HAS_TRITON", True),
+    ):
+        pass_module.QKNormRopeFusionPass(target_config)
+
+    assert len(traced_cpu_patterns) == len(EPSILONS)
+    for pattern, inputs in traced_cpu_patterns:
+        assert type(pattern) is pass_module.QKVNormRopeFusionPattern
+        assert pattern.head_dim == pattern.rope_dim == inputs[-2].shape[-1] == 128
+
+
+@pytest.mark.parametrize("pattern_name", ["QKNormRopeFusionPattern", "QKNormRopeFusionPatternWithBias"])
+@pytest.mark.parametrize("partial_rotary_factor", [1.0, 0.5], ids=["full128", "partial64"])
+def test_qk_examples_use_actual_rotary_cache_width(
+    pass_module, traced_cpu_patterns, pattern_name, partial_rotary_factor
+):
+    pattern = getattr(pass_module, pattern_name)(
+        make_vllm_config(partial_rotary_factor=partial_rotary_factor),
+        head_dim=128,
+        num_heads=32,
+        num_kv_heads=8,
+    )
+
+    pattern.register(None)
+
+    assert len(traced_cpu_patterns) == 1
+    traced_pattern, inputs = traced_cpu_patterns[0]
+    assert traced_pattern is pattern
+    assert pattern.rope_dim == inputs[-2].shape[-1] == int(128 * partial_rotary_factor)
