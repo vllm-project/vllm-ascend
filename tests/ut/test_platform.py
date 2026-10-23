@@ -1040,6 +1040,25 @@ class TestNPUPlatform(TestBase):
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
+    def test_piecewise_ep_keeps_dynamic_moe_outside_graph_capture(self):
+        for enable_expert_parallel in (False, True):
+            with self.subTest(enable_expert_parallel=enable_expert_parallel):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                compilation_config = vllm_config.compilation_config
+                compilation_config.mode = CompilationMode.VLLM_COMPILE
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                compilation_config.splitting_ops = []
+                vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
+                vllm_config.model_config.enforce_eager = False
+                vllm_config.additional_config = {"ascend_compilation_config": {}}
+                vllm_config._set_cudagraph_sizes = MagicMock()
+
+                with patch("vllm_ascend.platform.enable_sp", return_value=False):
+                    _setup_compile_backend(vllm_config, compile_backend="test_backend")
+
+                moe_ops = {"vllm::moe_forward", "vllm::moe_forward_shared"}
+                self.assertEqual(moe_ops.issubset(compilation_config.splitting_ops), enable_expert_parallel)
+
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
