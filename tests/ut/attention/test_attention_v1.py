@@ -318,7 +318,10 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         read.apply(common)
         result = self.builder.build(0, common)
         arguments = metadata_cls.call_args.kwargs
-        assert arguments["seq_lens_list"] == [256]
+        # E=129 remains exact on device. U=130 bounds this allocation to
+        # 160 after alignment, rather than the window-only capacity256.
+        assert read.capacity == 160
+        assert arguments["seq_lens_list"] == [160]
         assert arguments["seq_lens_gpu"].tolist() == [129]
         assert result._draft_window_device_read is read
 
