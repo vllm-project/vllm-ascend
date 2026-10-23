@@ -75,9 +75,10 @@ class FakeStore:
 
 
 class ByteFakeStore(FakeStore):
-    def __init__(self, payloads):
+    def __init__(self, payloads, failed_keys=()):
         super().__init__()
         self.payloads = payloads
+        self.failed_keys = set(failed_keys)
 
     def get(self, keys, addrs, sizes):
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
@@ -85,7 +86,7 @@ class ByteFakeStore(FakeStore):
             payload = self.payloads[key]
             for addr, size in zip(key_addrs, key_sizes):
                 ctypes.memmove(addr, payload[:size], size)
-        return [0] * len(keys)
+        return [1 if key in self.failed_keys else 0 for key in keys]
 
 
 class FakeAllGatherContext:
@@ -1345,6 +1346,47 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
 
 
 class TestShardedGetAllGather(unittest.TestCase):
+    @staticmethod
+    def _build_task_args(caches, payloads, context, failed_keys_by_rank=None):
+        block_size = caches[0].shape[1]
+        num_blocks = caches[0].shape[0]
+        keys = [f"k{index}" for index in range(num_blocks)]
+        stores = []
+        groups = []
+        task_args = []
+        for tp_rank, cache in enumerate(caches):
+            database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [block_size], None)
+            database.set_group_buffers(
+                {0: [cache.data_ptr()]},
+                {0: [block_size]},
+                {0: [block_size]},
+                group_num_layers={0: 1},
+                group_cache_storages={
+                    0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
+                },
+            )
+            addrs = []
+            sizes = []
+            block_ids = []
+            views = []
+            for block_id in range(num_blocks):
+                addr, size, key_views, _ = database.prepare_value_with_views(
+                    block_id * block_size,
+                    (block_id + 1) * block_size,
+                    list(range(num_blocks)),
+                    block_id=block_id,
+                )
+                addrs.append(addr)
+                sizes.append(size)
+                block_ids.append(block_id)
+                views.append(key_views)
+            failed_keys = failed_keys_by_rank[tp_rank] if failed_keys_by_rank is not None else ()
+            store = ByteFakeStore(payloads, failed_keys=failed_keys)
+            stores.append(store)
+            groups.append(FakeAllGatherGroup(context, tp_rank))
+            task_args.append((store, groups[-1], tp_rank, keys, addrs, sizes, block_ids, views))
+        return keys, stores, task_args
+
     def test_each_tp_rank_reads_disjoint_blocks_and_gathers_full_cache(self):
         block_size = 8
         num_blocks = 13
@@ -1357,41 +1399,8 @@ class TestShardedGetAllGather(unittest.TestCase):
                     [index + 1 for index in range(num_blocks) for _ in range(block_size)],
                     dtype=torch.uint8,
                 ).view(num_blocks, block_size)
-                stores = []
-                groups = []
-                task_args = []
                 context = FakeAllGatherContext(tp_size)
-
-                for tp_rank, cache in enumerate(caches):
-                    database = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [block_size], None)
-                    database.set_group_buffers(
-                        {0: [cache.data_ptr()]},
-                        {0: [block_size]},
-                        {0: [block_size]},
-                        group_num_layers={0: 1},
-                        group_cache_storages={
-                            0: [(cache.untyped_storage(), cache.storage_offset() * cache.element_size(), cache.device)]
-                        },
-                    )
-                    addrs = []
-                    sizes = []
-                    block_ids = []
-                    views = []
-                    for block_id, key in enumerate(keys):
-                        addr, size, key_views, _ = database.prepare_value_with_views(
-                            block_id * block_size,
-                            (block_id + 1) * block_size,
-                            list(range(num_blocks)),
-                            block_id=block_id,
-                        )
-                        addrs.append(addr)
-                        sizes.append(size)
-                        block_ids.append(block_id)
-                        views.append(key_views)
-                    store = ByteFakeStore(payloads)
-                    stores.append(store)
-                    groups.append(FakeAllGatherGroup(context, tp_rank))
-                    task_args.append((store, groups[-1], tp_rank, keys, addrs, sizes, block_ids, views))
+                _, stores, task_args = self._build_task_args(caches, payloads, context)
 
                 errors = []
 
@@ -1412,6 +1421,36 @@ class TestShardedGetAllGather(unittest.TestCase):
                 for tp_rank, (cache, store) in enumerate(zip(caches, stores)):
                     torch.testing.assert_close(cache, expected)
                     self.assertEqual(store.get_calls[0][0], keys[tp_rank::tp_size])
+
+    def test_failed_shard_propagates_missing_block_to_every_rank(self):
+        block_size = 8
+        caches = [torch.zeros(2, block_size, dtype=torch.uint8) for _ in range(2)]
+        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(2)}
+        context = FakeAllGatherContext(2)
+        keys, _, task_args = self._build_task_args(caches, payloads, context, failed_keys_by_rank=[{"k0"}, set()])
+        results = []
+        errors = []
+
+        def run(args):
+            try:
+                results.append(sharded_get_all_gather(*args))
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(args,)) for args in task_args]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        for request_failed, missing_block_ids, local_key_count in results:
+            self.assertFalse(request_failed)
+            self.assertEqual(missing_block_ids, {0})
+            self.assertEqual(local_key_count, 1)
+        self.assertEqual(keys, ["k0", "k1"])
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
