@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -555,6 +555,26 @@ class KVTransferThread(threading.Thread):
         self._fatal_error: BaseException | None = None
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
+        # Subclasses that share the pool worker's state overwrite these with the
+        # shared set and lock; the per-thread defaults keep
+        # ``_record_invalid_block_ids`` safe for every subclass.
+        self._invalid_block_ids = set()
+        self._invalid_block_ids_lock = threading.Lock()
+
+    def _record_invalid_block_ids(self, block_ids: Iterable[int]) -> None:
+        """Record block IDs whose KV load failed.
+
+        Writers live on the transfer threads while the model runner drains
+        ``get_block_ids_with_load_errors`` at the end of each forward pass.
+        Materialize the iterable before acquiring the lock so request
+        metadata is not walked while the reader waits, and hold the lock only
+        for the set update.
+        """
+        new_block_ids = tuple(block_ids)
+        if not new_block_ids:
+            return
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(new_block_ids)
 
     def _mark_failed_requests(self, requests: list[ReqMeta]) -> None:
         logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
@@ -563,15 +583,14 @@ class KVTransferThread(threading.Thread):
         with self.done_task_lock:
             self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
         self.save_disabled.set()
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(
-                block_id
-                for request in requests
-                if len(request.block_ids_by_group) == 1
-                for group in request.block_ids_by_group
-                for block_id in group
-                if block_id > 0
-            )
+        self._record_invalid_block_ids(
+            block_id
+            for request in requests
+            if len(request.block_ids_by_group) == 1
+            for group in request.block_ids_by_group
+            for block_id in group
+            if block_id > 0
+        )
 
     def get_and_clear_failed_requests(self) -> set[str]:
         with self.done_task_lock:
@@ -1626,8 +1645,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     ret,
                 )
                 if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_block_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -1642,8 +1660,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     [1] * len(block_id_list_c),
                 )
                 if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
+                    self._record_invalid_block_ids(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -2341,12 +2358,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 partial_index = block_range.partial_block_index
                 if partial_index is not None and 0 <= partial_index < len(request_block_ids):
                     block_ids.add(request_block_ids[partial_index])
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+        self._record_invalid_block_ids(block_ids)
 
     def _mark_invalid_range_indices(self, req_meta: LayerRangeReqMeta, indices: list[int]) -> None:
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(req_meta.block_ids[index] for index in indices)
+        self._record_invalid_block_ids(req_meta.block_ids[index] for index in indices)
 
     def _handle_range_request(self, req_meta: LayerRangeReqMeta, shared: SharedBlockData) -> None:
         layer_id = req_meta.layer_id
