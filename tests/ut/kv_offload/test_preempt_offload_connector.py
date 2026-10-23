@@ -162,6 +162,7 @@ def test_preempt_offload_connector_capacity_priority():
 
 def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {}
     scheduler._cleanup_preempt_cache_request = MagicMock()
     request = SimpleNamespace(request_id="req-1", num_tokens=10)
@@ -187,6 +188,7 @@ def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states()
 
 def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)
     request = SimpleNamespace(request_id="req-1")
     blocks = MagicMock()
@@ -207,6 +209,7 @@ def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
 
 def test_preempt_offload_connector_scheduler_aligns_sliding_window_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True, False]
 
     assert scheduler._align_group_block_ids(0, [7, 8], 4) == [0, 0, 7, 8]
@@ -347,10 +350,11 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
 
 def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler.enable_offload_prefix_caching = False
     scheduler._pending_hash_blocks = {}
@@ -382,10 +386,11 @@ def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
 
 def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler._gpu_block_pool = SimpleNamespace(blocks={30: "gpu30", 31: "gpu31"}, touch=MagicMock())
     scheduler._preempted_req_states = {
@@ -414,10 +419,11 @@ def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_block
 
 def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
     )
     scheduler._gpu_block_pool = SimpleNamespace(
         blocks={10: "gpu10", 11: "gpu11", 12: "gpu12"},
@@ -447,6 +453,7 @@ def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
 
 def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler.num_spec_tokens = 3
     scheduler._group_is_mamba = [True]
     scheduler._group_has_mamba_conv = [True]
@@ -470,7 +477,7 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16),
+                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False),
             )
         ]
     )
@@ -606,6 +613,7 @@ def test_preempt_offload_connector_scheduler_h2d_rejects_invalid_mamba_mapping()
 
 def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._store_event_counter = 4
     scheduler._load_event_counter = 7
     scheduler._preempt_store_event_to_blocks = {}
@@ -662,6 +670,7 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
 
 def test_preempt_offload_connector_scheduler_update_connector_output_marks_store_ready():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._expected_worker_count = 2
     scheduler._store_event_pending_counts = {}
     scheduler._preempted_req_states = {}
@@ -684,6 +693,7 @@ def test_preempt_offload_connector_scheduler_update_connector_output_marks_store
 
 def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {
         "ready": PreemptedRequestState(
             req_id="ready",
@@ -724,6 +734,7 @@ def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending(
 
 def test_preempt_offload_connector_scheduler_process_store_event_finishes_pending_req():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     cpu_block = MagicMock()
     cpu_block.block_hash = None
     scheduler.cpu_block_pool = SimpleNamespace(blocks={4: cpu_block})
@@ -751,6 +762,7 @@ def test_preempt_offload_connector_scheduler_process_store_event_finishes_pendin
 
 def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._store_event_pending_counts = {}
     scheduler._preempt_store_event_to_blocks = {}
     scheduler._preempted_req_states = {}
@@ -783,6 +795,7 @@ def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
 
 def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempt_load_event_to_reqs = {2: ["req-1"]}
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
@@ -811,6 +824,7 @@ def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
 
 def test_preempt_offload_connector_scheduler_cleanup_skips_null_cpu_blocks():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
             req_id="req-1",
@@ -1144,6 +1158,7 @@ def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_
         assert spec is not None
     config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = 1
     scheduler.cpu_kv_cache_config = config
     scheduler._group_is_sliding_window = scheduler._get_group_is_sliding_window(config)
     scheduler._group_is_mamba = [False]
@@ -1235,3 +1250,35 @@ def test_worker_only_deduplicates_identical_mamba_state_views(difference):
     assert set(worker.cpu_kv_caches) == expected_names
     if difference == "role":
         assert set(worker.mamba_conv_cache_bindings) == {"first.0"}
+
+
+@pytest.mark.parametrize("dcp_size,sharded,computed_tokens", [(1, True, 385), (16, True, 6145), (16, False, 385)])
+def test_preempt_offload_dcp_partial_block_round_trip(dcp_size, sharded, computed_tokens):
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.dcp_world_size = dcp_size
+    scheduler._group_is_sliding_window = [False]
+    scheduler._group_is_mamba = [False]
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=384, dcp_sharded=sharded))]
+    )
+    scheduler.enable_offload_prefix_caching = False
+    scheduler._pending_hash_blocks = {}
+    scheduler._preempted_req_states = {}
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={i: SimpleNamespace(block_id=i, block_hash=None) for i in [20, 21, 22, 30, 31, 32]},
+        touch=MagicMock(),
+    )
+    scheduler.cpu_block_pool = SimpleNamespace(
+        get_num_free_blocks=MagicMock(return_value=8),
+        get_new_blocks=MagicMock(
+            side_effect=lambda count: [SimpleNamespace(block_id=101 + i, _block_hash=None) for i in range(count)]
+        ),
+    )
+    # Two computed blocks, including a partial last block; the third is speculative.
+    assert scheduler._create_preempt_state("dcp", ([20, 21, 22],), computed_tokens)
+    state = scheduler._preempted_req_states["dcp"]
+    assert state.store_transfer_meta == TransferMeta([20, 21], [101, 102])
+    state.ready = True
+    state.load_start_tokens = computed_tokens - 1
+    assert scheduler._prepare_preempt_load_after_alloc(SimpleNamespace(request_id="dcp"), ([30, 31, 32],), 1)
+    assert state.load_transfer_meta == TransferMeta([31], [102])
