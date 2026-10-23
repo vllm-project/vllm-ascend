@@ -655,6 +655,7 @@ class AscendConfig:
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _kpool_li_c8_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -917,17 +918,26 @@ class AscendConfig:
         from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
-        # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
-        # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
-        # LightningIndexer cache layout, so it stays gated by use_sparse.
-        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
+        use_kpool_indexer = model_uses_kpool_indexer(vc.model_config)
+        # KPool and LightningIndexer own different C8 cache layouts.
+        use_sparse_sfa = use_sparse or use_kpool_indexer
 
         cache_config = getattr(vc, "cache_config", None)
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
-        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
+        indexer_dtype = vllm_config.attention_config.indexer_kv_dtype
+        self.enable_sparse_li_c8 = (indexer_dtype in ("fp8", "int8") and use_sparse) or (
+            indexer_dtype == "fp8" and use_kpool_indexer
+        )
+        if use_kpool_indexer and indexer_dtype == "int8":
+            raise ValueError("GLM-Next KPool supports FP8 CANN or BF16 keys. Use 'fp8' or 'auto', not 'int8'.")
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
+        if use_kpool_indexer and vllm_config.attention_config.indexer_kv_dtype == "mxfp4":
+            raise ValueError("The GLM-Next KPool indexer does not support LI C4. Use 'fp8' or 'auto'.")
+        # KPool quantizes pooled rows at runtime, independently of calibrated
+        # LightningIndexer weights (GLM checkpoints mark those as FLOAT).
+        self._kpool_li_c8_enabled = self.enable_sparse_li_c8 and use_kpool_indexer
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
             raise ValueError("enable_sparse_li_c8 and enable_sparse_li_c4 are mutually exclusive.")
         quant_config = getattr(vc, "quant_config", None)
@@ -1269,6 +1279,10 @@ class AscendConfig:
             self._sparse_li_c8_layer_names,
             self._sparse_li_c8_layer_ids,
         )
+
+    def is_kpool_li_c8_enabled(self) -> bool:
+        """Use the KPool C8 decision without the LightningIndexer layer filter."""
+        return self._kpool_li_c8_enabled
 
     def is_sparse_li_c4_layer(self, layer_name: str | None) -> bool:
         return self._is_sparse_li_layer(
@@ -1906,6 +1920,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "_sparse_li_c4_layer_ids",
         "_sparse_li_c4_layer_names",
         "_sparse_li_layer_filter_enabled",
+        "_kpool_li_c8_enabled",
         # SchedulerConfig-internal top-level legacy keys (resolved internally,
         # then replaced by the typed scheduler_config passed above).
         "enable_balance_scheduling",

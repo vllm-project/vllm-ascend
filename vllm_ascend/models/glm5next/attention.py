@@ -106,10 +106,14 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16 vectors without quantization scales.
+        # CANN FP8 indexing uses separate key/FP32 descale planes with or
+        # without DSA-CP. The main SFA KV-cache dtype remains independent.
+        indexer_dtype = (
+            torch.float8_e4m3fn if vllm_config.attention_config.indexer_kv_dtype == "fp8" else torch.bfloat16
+        )
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,

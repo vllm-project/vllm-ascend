@@ -527,7 +527,14 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.k_cache: Any = vllm_indexer.k_cache
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
-        self._init_cann_ops()
+        if self.k_cache.dtype == torch.float8_e4m3fn:
+            from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool_cann import SparseAttnIndexerKpool
+
+            self.indexer_op = SparseAttnIndexerKpool(self.topk_tokens, self.head_dim)
+        elif self.k_cache.dtype == torch.bfloat16:
+            self._init_cann_ops()
+        else:
+            raise TypeError("GLM KPool CANN indexer requires BF16 or FP8 E4M3FN cache keys.")
         for name in (
             "_key_weight",
             "_gate_weight",
@@ -548,7 +555,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
     @property
     def num_cache_tensors(self) -> int:
-        return 1
+        return 2 if self.k_cache.dtype == torch.float8_e4m3fn else 1
 
     def process_weights_after_loading(self) -> None:
         self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
@@ -558,7 +565,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
 
     @staticmethod
-    def _bound_cache(layer: Any) -> torch.Tensor:
+    def _bound_cache(layer: Any, slot: int = 0) -> torch.Tensor:
         context = get_forward_context()
         cache = layer.kv_cache
         if isinstance(cache, list):
@@ -567,9 +574,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 raise IndexError(f"Cache virtual engine {virtual_engine} is out of range.")
             cache = cache[virtual_engine]
         if isinstance(cache, (list, tuple)):
-            if len(cache) != 1:
-                raise TypeError("GLM KPool cache requires one key tensor.")
-            cache = cache[0]
+            expected = 2 if cache and cache[0].dtype == torch.float8_e4m3fn else 1
+            if len(cache) != expected:
+                raise TypeError("GLM KPool cache requires a key tensor and, for FP8, one scale tensor.")
+            cache = cache[slot]
+        elif slot != 0:
+            raise TypeError("GLM KPool FP8 cache requires a bound scale tensor.")
         if not isinstance(cache, torch.Tensor):
             raise TypeError(f"GLM KPool cache {layer.prefix!r} is not bound to a tensor.")
         return cache
@@ -610,19 +620,49 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache = self._bound_cache(self.k_cache)
+        indexer_scale_cache = (
+            self._bound_cache(self.k_cache, slot=1) if indexer_cache.dtype == torch.float8_e4m3fn else None
+        )
         tail_cache = self._bound_cache(self.tail_cache)
         if indexer_metadata.query_metadata is not None:
+            # CANN pools global inputs; FP8 keys/scales are written by its cache adapter.
+            # Replicate global input rows for cache updates; query projection
+            # and sparse selection stay local to each CP rank.
             k_hidden = get_tp_group().all_gather(k_hidden, dim=0)
-        return self._forward_cann(
+        if indexer_cache.dtype == torch.bfloat16:
+            return self._forward_cann(
+                k_hidden,
+                q_values,
+                weights,
+                indexer_cache,
+                tail_cache,
+                indexer_metadata,
+                tail_metadata,
+                compute_topk=compute_topk,
+            )
+        positions = indexer_metadata.positions[: k_hidden.shape[0]]
+        result = self.indexer_op(
             k_hidden,
             q_values,
             weights,
+            positions,
             indexer_cache,
             tail_cache,
             indexer_metadata,
             tail_metadata,
+            key_weight=self._key_weight,
+            gate_weight=self._gate_weight,
+            norm_weight=self._norm_weight_f32,
+            norm_bias=self._norm_bias_f32,
+            norm_eps=getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6)),
+            compress_ape=self.index_kpool_compress_ape,
+            index_kpool=self.index_kpool,
             compute_topk=compute_topk,
+            output_buffer=self.topk_indices_buffer,
+            indexer_scale_cache=indexer_scale_cache,
+            skip_empty_cp_scoring=context.cudagraph_runtime_mode != CUDAGraphMode.FULL,
         )
+        return result
 
     def _init_cann_ops(self) -> None:
         try:
