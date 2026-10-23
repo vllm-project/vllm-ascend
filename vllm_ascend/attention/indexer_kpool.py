@@ -33,6 +33,7 @@ from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 C8_CANN_MIN_QUERY_TOKENS = 32
+C8_QUANT_MIN_QUERY_TOKENS = 512
 
 
 @dataclass
@@ -71,6 +72,8 @@ class AscendIndexerKPoolMetadata:
     max_pool_seq_len: int | None = None
     # Reused only between layers of this eager forward on the same stream.
     c8_dequant_workspace: tuple[torch.Tensor, torch.Tensor] | None = None
+    c8_quant_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    c8_quant_metadata: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -790,6 +793,31 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 max_pools = int(indexer_metadata.block_table.shape[1] * indexer_cache.shape[1])
             else:
                 max_pools = known_max_pools
+            # Amortize query quantization and cache gathering over a large
+            # prefill. QLI v2 keeps the QK multiplication in INT8 on A2/A3.
+            if (
+                num_tokens >= C8_QUANT_MIN_QUERY_TOKENS
+                and self.n_head in (32, 64)
+                and self.head_dim == 128
+                and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+                and hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2")
+                and hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata")
+            ):
+                from vllm_ascend.ops.triton.glm5_next_quant_indexer import glm5_next_c8_quant_indexer
+
+                indices = glm5_next_c8_quant_indexer(
+                    q_values,
+                    indexer_cache,
+                    weights,
+                    indexer_metadata,
+                    query_metadata,
+                    max_pools,
+                    self.topk_tokens,
+                    self.index_kpool,
+                    self.topk_indices_buffer,
+                )
+                if indices is not None:
+                    return indices
             # Dequantizing pools once per layer is cheaper than unpacking
             # them for every prefill query. Capture keeps the paged INT8 scorer.
             if (

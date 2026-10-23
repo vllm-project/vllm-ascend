@@ -380,22 +380,34 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 )
 @pytest.mark.parametrize("reuse_output", [False, True])
 @pytest.mark.parametrize("quant", [False, True])
-@pytest.mark.parametrize("c8_path", ["paged", "dequant", "over_budget"])
+@pytest.mark.parametrize(
+    "c8_path",
+    ["paged", "dequant", "over_budget", "integer", "integer_over_budget", "integer_unavailable", "integer_unsupported"],
+)
 def test_cann_indexer_writes_caches_before_optional_selection(
     monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output, quant, c8_path
 ):
     monkeypatch.setattr(backend_module, "C8_CANN_MIN_QUERY_TOKENS", 32 if c8_path == "paged" else 4)
+    monkeypatch.setattr(backend_module, "C8_QUANT_MIN_QUERY_TOKENS", 4 if c8_path.startswith("integer") else 512)
+    quant_ops = SimpleNamespace()
+    if c8_path != "integer_unavailable":
+        quant_ops.npu_quant_lightning_indexer_v2 = MagicMock()
+        quant_ops.npu_quant_lightning_indexer_v2_metadata = MagicMock()
+    monkeypatch.setattr(torch.ops, "_C_ascend", quant_ops)
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
     )
     op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(op)
     op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
+    op.n_head = 32
+    if c8_path.startswith("integer"):
+        op.head_dim = 64 if c8_path == "integer_unsupported" else 128
     op._key_weight = torch.empty(2, 3, dtype=torch.bfloat16)
     op._gate_weight = torch.empty(2, 3, dtype=torch.bfloat16)
     op._norm_weight_f32 = op._norm_bias_f32 = None
     op.k_norm = SimpleNamespace(eps=1e-6)
-    op.index_kpool_compress_ape = torch.empty(4, 2)
+    op.index_kpool_compress_ape = torch.empty(4, op.head_dim)
     storage = torch.full((20, 22), 77, dtype=torch.int32)
     op.topk_indices_buffer = storage[::2, :11] if reuse_output else None
     pooled = torch.empty(2, 2, dtype=torch.bfloat16)
@@ -432,7 +444,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     query_metadata = metadata.query_metadata or metadata
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
-    cache = torch.empty(2, 2, 1, 6 if quant else 2, dtype=torch.int8 if quant else torch.bfloat16)
+    cache = torch.empty(2, 2, 1, op.head_dim + (4 if quant else 0), dtype=torch.int8 if quant else torch.bfloat16)
     select_int8 = MagicMock(return_value=packed)
     calls.attach_mock(select_int8, "select_int8")
     workspace = (torch.empty(2, 128, 1, 2, dtype=torch.bfloat16), torch.tensor([[0], [1]], dtype=torch.int32))
@@ -442,12 +454,19 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         "vllm_ascend.ops.triton.glm5_next_lightning_indexer",
         SimpleNamespace(glm5_next_lightning_indexer_triton=select_int8, glm5_next_c8_dequant_pool_key=dequant),
     )
-    tail = torch.empty(2, 4, 4)
+    select_int8dot = MagicMock(return_value=None if c8_path == "integer_over_budget" else packed)
+    calls.attach_mock(select_int8dot, "select_int8dot")
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.glm5_next_quant_indexer",
+        SimpleNamespace(glm5_next_c8_quant_indexer=select_int8dot),
+    )
+    tail = torch.empty(2, 4, 2 * op.head_dim)
     with patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device synchronization")):
         result = op._forward_cann(
             torch.empty(8, 3, dtype=torch.bfloat16),
-            torch.empty(query_rows, 1, 2, dtype=torch.bfloat16),
-            torch.empty(query_rows, 1, dtype=torch.bfloat16),
+            torch.empty(query_rows, op.n_head, op.head_dim, dtype=torch.bfloat16),
+            torch.empty(query_rows, op.n_head, dtype=torch.bfloat16),
             cache,
             tail,
             metadata,
@@ -474,7 +493,22 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             assert torch.all(op.topk_indices_buffer[query_rows:] == 77)
             assert torch.all(storage[1::2] == 77)
             assert torch.all(storage[:, 11:] == 77)
-    elif compute_topk and quant and c8_path == "dequant" and runtime_mode != CUDAGraphMode.FULL:
+    elif compute_topk and quant and c8_path == "integer" and runtime_mode != CUDAGraphMode.FULL:
+        assert result is packed
+        select_int8.assert_not_called()
+        dequant.assert_not_called()
+        op._pool_key_indexer.assert_not_called()
+        op._pack_keypool_indices.assert_not_called()
+        assert select_int8dot.call_args.args[1] is cache
+        assert select_int8dot.call_args.args[3] is metadata
+        assert select_int8dot.call_args.args[4] is query_metadata
+        assert select_int8dot.call_args.args[-1] is op.topk_indices_buffer
+    elif (
+        compute_topk
+        and quant
+        and c8_path in ("dequant", "integer_over_budget", "integer_unavailable", "integer_unsupported")
+        and runtime_mode != CUDAGraphMode.FULL
+    ):
         assert result is packed
         select_int8.assert_not_called()
         assert metadata.c8_dequant_workspace is workspace
@@ -513,3 +547,12 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         op._pack_keypool_indices.assert_not_called()
     if runtime_mode == CUDAGraphMode.FULL or not compute_topk or not quant or skip_empty_query or c8_path == "paged":
         dequant.assert_not_called()
+
+    if (
+        runtime_mode == CUDAGraphMode.FULL
+        or not compute_topk
+        or not quant
+        or skip_empty_query
+        or c8_path not in ("integer", "integer_over_budget")
+    ):
+        select_int8dot.assert_not_called()

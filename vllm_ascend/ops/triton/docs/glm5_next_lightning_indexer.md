@@ -12,26 +12,30 @@
 
 ## INT8 model execution
 
-GLM-5.3-Flash enables the packed INT8 pooled cache with
-`--attention_config.indexer_kv_dtype int8`. Each row stores `D` signed bytes
-and a four-byte FP32 scale. INT8 scoring uses
-`sum_h(weights[t, h] * relu(dot(query[t, h], key[j])))`; the per-head ReLU
-must precede head reduction to match CANN.
+LI C8 keeps pooled keys as 128 INT8 bytes plus one FP32 scale per row.
+For eager prefill with at least 512 query rows, 32 or 64 heads and head
+size 128, the model uses CANN QLI v2 when the operator is available. Queries
+are dynamically quantized per head. QK multiplication uses INT8 operands
+and INT32 accumulation, followed by per-head ReLU, scaled weights and the
+key scale. Selected pool IDs are expanded to token IDs with the causal tail.
+The cache gather copies INT8 bytes; it does not dequantize keys for the dot.
 
-For eager prefill batches with at least 32 query tokens, the model calls
-`glm5_next_c8_dequant_pool_key` and scores the resulting BF16 keys with CANN
-PoolKeyIndexer. The helper reads only complete pools available to each request,
-folds each row's scale into its keys, and zeroes the padding. It preserves
-physical cache page strides and returns an identity page table. This keeps
-INT8 persistent storage while avoiding repeated unpacking for each query.
+The scoring relation is
+`score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k])))`.
+The per-head ReLU must precede the weighted reduction. Query quantization
+and the operator's FP16 scale/weight arithmetic add numerical rounding, so
+validation must include model accuracy as well as throughput.
 
-The BF16 working set is bounded by 256 MiB and reused between layers within
-one eager forward. It is not a persistent BF16 copy of the full KV cache.
-If the working set exceeds the budget, the model uses the paged Triton scorer.
-Small query batches and FULL graph capture/replay also keep that scorer;
-no device-to-host reduction or global mutable scratch cache is introduced.
-Dequantization rounds keys to BF16 before CANN scoring, so validation must
-include model accuracy as well as throughput.
+The contiguous INT8 keys and FP16 scales use at most 256 MiB of scratch.
+Scratch keys and query metadata are reused only between layers of the same
+eager forward. When QLI v2 is unavailable or its shape requirements are not
+met, eager batches with at least 32 queries dequantize live keys once per
+layer and use BF16 CANN PoolKeyIndexer. That BF16 working set has its own
+256 MiB budget. It is not a persistent BF16 copy of the full KV cache.
+If the working set cannot fit, selection falls back to the paged Triton
+scorer. Small batches and FULL graph capture/replay also retain the paged
+scorer. These paths introduce no device-to-host length reduction or global
+mutable scratch cache.
 
 ## Parameters
 
