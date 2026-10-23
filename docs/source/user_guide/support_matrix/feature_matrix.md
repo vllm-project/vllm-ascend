@@ -36,12 +36,11 @@ The symbols used have the following meanings:
 | <abbr title="Tensor Parallel">TP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |  |  |
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |  |
 | [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠 | ✅ | ❔ | ✅ | 🟠 | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
-| [Pipeline Parallel](../feature_guide/pipeline_parallel.md) | 🟠<sup>3</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>4</sup> | 🟠<sup>5</sup> | ✅ | ✅ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ✅ | ✅ | ❔ | ✅ |
+| [Pipeline Parallel](../feature_guide/pipeline_parallel.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟠<sup>3</sup> | 🟠<sup>4</sup> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 - <sup>1</sup> Lmhead TP is only enabled in the pure dp scenarios.
 - <sup>2</sup> MLAPO is only supported on the decode stage.
-- <sup>3</sup> Pipeline Parallel supports graph mode with `FULL_DECODE_ONLY` only.
-- <sup>4</sup> Pipeline Parallel is supported on the prefill node; the decode node must use `PP1`.
-- <sup>5</sup> Eagle3 with Pipeline Parallel supports MiniMax-M3 sparse models only.
+- <sup>3</sup> Pipeline Parallel is supported on the prefill node; the decode node must use `PP1`.
+- <sup>4</sup> Eagle3 with Pipeline Parallel supports MiniMax-M3 sparse models only.
 
 See the detailed PP feature-stacking matrix in [Pipeline Parallelism](../feature_guide/pipeline_parallel.md).
