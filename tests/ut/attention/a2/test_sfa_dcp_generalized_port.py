@@ -38,7 +38,7 @@ def context():
         group_name="generalized_dcp",
         use_device_communicator=False,
     )
-    retained = []
+    retained: list[tuple] = []
     yield rank, group, retained
     # Capture buffers must outlive all graphs sharing this communicator.
     for graph, checks, _owners in reversed(retained):
