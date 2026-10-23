@@ -1287,7 +1287,10 @@ layerwise setting and topology.
     Export the node-specific `MODEL_PATH`, `LOCAL_IP` and `NIC_NAME`, and the shared
     `D0_IP` address before starting the corresponding node script. Each Prefill
     instance uses its own `PP_MASTER_IP`: P0 for P0/P1, and P2 for P2/P3. Save
-    the appropriate PP-rank script above as `run_dp_template.sh` on each node.
+    the appropriate PP-rank script above as `run_dp_template.sh` on each node. Run each
+    command on its named node in a separate terminal. Start both PP ranks of
+    each Prefill instance and both Decode nodes before waiting for the APIs
+    to become ready.
 
     1. Prefill node 0 (PP rank 0 of the first instance)
 
