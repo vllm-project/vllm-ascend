@@ -751,7 +751,6 @@ ock.mmc.meta_service_url = tcp://<meta_service_ip>:5000
 ock.mmc.meta_service.config_store_url = tcp://<meta_service_ip>:6000
 ock.mmc.meta_service.metrics_url = http://<meta_service_ip>:8000
 ock.mmc.log_level = info
-ock.mmc.local_service.world_size = 256
 # Tune the following parameters when SSD is enabled to improve SSD cache hit rate
 ock.mmc.evict_threshold_high = 70
 ock.mmc.evict_threshold_low = 60
@@ -762,10 +761,10 @@ ock.mmc.evict_threshold_low = 60
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | No | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
-| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | No | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
-| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | No | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
-| `ock.mmc.log_level` | str | info | No | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
+| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | Yes | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
+| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | Yes | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
+| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | Yes | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
+| `ock.mmc.log_level` | str | info | Yes | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
 | `ock.mmc.evict_threshold_high` | int | 90 | No | [1, 99] (percentage) | High watermark of the secondary (L2) pool; eviction is triggered when this watermark is reached, and only when `usedSize * 100 > totalSize * threshold`. When SSD is enabled, 70 is recommended to improve SSD cache hit rate. |
 | `ock.mmc.evict_threshold_low` | int | 80 | No | [1, 98] (percentage) | Low watermark of the secondary (L2) pool; eviction stops at this watermark. When SSD is enabled, 60 is recommended. |
 
