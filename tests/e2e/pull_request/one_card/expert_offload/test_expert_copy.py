@@ -5,6 +5,7 @@ import acl  # type: ignore[import-not-found]
 import pytest
 import torch
 import torch_npu
+from vllm.config import VllmConfig, set_current_vllm_config
 
 from vllm_ascend.expert_offload.host_store import HostExpertStore
 from vllm_ascend.expert_offload.prefill import PrefillExpertPool
@@ -25,7 +26,7 @@ GROUP_SIZE = 32
 
 
 @pytest.fixture
-def expert_bundle():
+def expert_bundle(monkeypatch):
     generator = torch.Generator().manual_seed(0)
     tensors = {
         "w13_weight": torch.randint(
@@ -52,10 +53,13 @@ def expert_bundle():
         shards = ("w1", "w3") if name.startswith("w13") else ("w2",)
         store.loaded[name] = {(eid, shard) for eid in range(NUM_EXPERTS) for shard in shards}
     store.finalize(layer)
-    # Exercise the real post-processing without initializing a model/runtime config.
+    # These standalone grouped GEMMs do not initialize the distributed MegaMoE runtime.
+    monkeypatch.setattr("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", lambda _config: False)
+    # Exercise the real post-processing without constructing a complete model.
     scheme = object.__new__(AscendW4A8MXFPDSDynamicFusedMoEMethod)
     scheme.group_size = GROUP_SIZE
-    return MXFP4ExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
+    with set_current_vllm_config(VllmConfig()):
+        yield MXFP4ExpertAdapter(SimpleNamespace(activation="silu"), scheme), store
 
 
 def _physical_bytes(tensor):
