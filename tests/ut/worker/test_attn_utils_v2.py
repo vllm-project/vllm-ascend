@@ -54,9 +54,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -946,7 +944,10 @@ def test_v2_zeroer_skips_static_v_scale_for_mxfp8(monkeypatch):
     assert torch.all(raw[:128] == 37)
 
 
+@pytest.mark.skipif(vllm_version_is("0.32.0"), reason="the pluggable KV cache builder is main-only")
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
+    from vllm_ascend.core.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
+
     small_name = "model.layers.0.self_attn.attn"
     large_name = "model.layers.1.self_attn.attn"
     aliased_large_name = "model.layers.2.self_attn.attn"
@@ -990,21 +991,13 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     num_blocks = 3
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
-    monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
-        lambda _config, value: value,
-    )
-    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
+    kv_cache_config = _get_kv_cache_config_deepseek_v4_main(
+        SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
         groups,
-        backing_size,
+        num_blocks,
     )
-    assert planned_num_blocks == num_blocks
-    kv_cache_config = KVCacheConfig(
-        num_blocks=planned_num_blocks,
-        kv_cache_tensors=descriptors,
-        kv_cache_groups=groups,
-    )
+    assert kv_cache_config.num_blocks == num_blocks
+    descriptors = kv_cache_config.kv_cache_tensors
     vllm_config = SimpleNamespace(
         additional_config={},
         kv_transfer_config=None,

@@ -10,9 +10,9 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
 2. The standard ``find_longest_cache_hit`` skips the EAGLE last-block drop on
    the PD prefill producer and on standalone instances. The role is derived
    from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
-   attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
-   builder in ``patch_kv_cache_utils``, and read back by the coordinator -
-   no role environment variable is involved.
+   attached onto ``KVCacheConfig`` by ``AscendKVCacheConfigBuilder`` (in
+   ``vllm_ascend.core.kv_cache_config_builder``), and read back by the
+   coordinator - no role environment variable is involved.
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.
@@ -215,22 +215,17 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
         None,
     ],
 )
-def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+def test_kv_cache_config_builder_mounts_kv_transfer_config(kv_transfer_config):
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 
-    sentinel_config = SimpleNamespace()
-    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
-    monkeypatch.setattr(
-        kcu_patch,
-        "_orig_get_kv_cache_config_from_groups",
-        lambda *args, **kwargs: sentinel_config,
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
+        kv_transfer_config=kv_transfer_config,
     )
-    result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
-    # The builder replaces the upstream entry point, so the coordinator-side
-    # getattr in __init__ sees the attached role on every real engine path.
-    live_module = kcu_patch._kv_cache_planning
-    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
-    assert result is sentinel_config
+    result = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, [], 1)
+    # The builder owns the attach (``KVCacheConfig`` has no native field), so
+    # the coordinator-side getattr in __init__ sees the role on every engine
+    # path, including the generic one used here.
     assert result.kv_transfer_config is kv_transfer_config
 
 

@@ -28,15 +28,9 @@ from vllm_ascend.utils import vllm_version_is
 # vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.32.0
 # lane still ships them in `kv_cache_utils`.
 if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        create_kv_cache_group_specs,
-        may_override_num_blocks,
-    )
+    from vllm.v1.core.kv_cache_utils import create_kv_cache_group_specs
 else:
-    from vllm.v1.core.kv_cache_planning import (
-        create_kv_cache_group_specs,
-        may_override_num_blocks,
-    )
+    from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
 
 
 @dataclass(frozen=True)
@@ -388,16 +382,25 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
 def get_glm5_next_kv_cache_config(
     vllm_config: VllmConfig,
     groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
-    """Describe one standard unpacked tensor per physical cache slot."""
+    """Describe one standard unpacked tensor per physical cache slot.
+
+    ``num_blocks`` is authoritative when given: Core already converted the
+    available memory (and any ``num_gpu_blocks_override``) into a global block
+    count and re-plans every rank against the same value.
+    """
 
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = max(available_memory // bytes_per_block, 0)
     tensors: list[KVCacheTensor] = []
 
     def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:

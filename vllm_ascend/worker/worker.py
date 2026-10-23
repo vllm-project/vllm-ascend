@@ -60,6 +60,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -119,16 +120,21 @@ from vllm_ascend.utils import (
 
 # vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
 # in kv_cache_utils, so importing the main-only module breaks worker startup.
+# Main resolves grouping through the platform's `KVCacheConfigBuilder`.
 if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import (
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
     )
 else:
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_groups,
-        unify_hybrid_kv_cache_specs,
-    )
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+    from vllm.v1.core.kv_cache_planning import unify_hybrid_kv_cache_specs
+
+    def get_kv_cache_groups(
+        vllm_config: VllmConfig,
+        kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> list[KVCacheGroupSpec]:
+        return get_kv_cache_config_builder(vllm_config).get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402

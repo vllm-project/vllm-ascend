@@ -260,7 +260,8 @@
 #       together with entry 2 once upstream exposes the PD role.
 #   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
 #      v0.32.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
-#      #61183),
+#      #61183, where it is overridden by
+#      `vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder`),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
@@ -301,20 +302,22 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
-#   2. `vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder._get_pool_bytes_per_block`
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`,
+#      `...get_kv_cache_config_from_groups`,
+#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
-#       The builder-based vLLM planner probes one block and requires every
-#       device tensor to share one backing size. Ascend's DSV4.1, DSV4, GLM5,
-#       and TurboQuant layouts can use several differently sized allocations.
+#       The v0.31.0 release lane has no pluggable `KVCacheConfigBuilder`, so
+#       the Ascend DSV4/DSV4.1, GLM-Next, Kimi-K3 DSpark, and TurboQuant
+#       planning rules must stay module-level monkey patches there.
 #    How:
-#       Return the aggregate per-block pool size from existing Ascend layout
-#       accounting for those cache types; leave other layouts on the upstream
-#       placement probe.
+#       Keep the pre-vLLM #53558 planning patches applied from this file. Main
+#       plans through `vllm_ascend.core.kv_cache_config_builder`, selected by
+#       `NPUPlatform.get_kv_cache_config_builder_cls`.
 #    Related PR (if no, explain why):
-#       No upstream PR currently handles Ascend's multi-allocation layouts.
+#       vLLM PR #53558 (pluggable KVCacheConfigBuilder).
 #    Future Plan:
-#       Move this override into an Ascend KVCacheConfigBuilder, or remove it
-#       once upstream provides a platform hook for multi-allocation accounting.
+#       Remove them when vllm-ascend stops supporting v0.31.0.
+>>>>>>> 785c0c7a98 ([Refactor][KV Cache] Adapt Ascend KV cache planning to upstream KVCacheConfigBuilder)
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
