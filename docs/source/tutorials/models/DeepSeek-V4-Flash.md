@@ -1142,10 +1142,6 @@ cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
 cache in Memcache. Both connectors are configured as children of
 `MultiConnector`.
 
-DeepSeek-V4-Flash does not support layerwise KV Cache Pool access because its
-hybrid-attention model structure is incompatible with layer-by-layer KV
-save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
-
 Before starting vLLM, follow the
 [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
 to check the HDK/CANN and A3 memory prerequisites, install `memfabric-hybrid`
@@ -1548,8 +1544,7 @@ Key pooling parameters:
   caching; Decode disables it. With `--block-size 32`, use
   `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` on Prefill to retain hybrid
   attention checkpoints for reusable long prefixes.
-- Keep `--no-disable-hybrid-kv-cache-manager` on both roles. Use
-  `use_layerwise: false` for this hybrid-attention model and keep the top-level
+- Keep `--no-disable-hybrid-kv-cache-manager` on both roles and the top-level
   `kv_load_failure_policy` as `fail`; the `recompute` load-failure policy does
   not support DeepSeek-V4 hybrid attention.
 - `VLLM_USE_V2_MODEL_RUNNER=1` is required for PCP. Do not enable `enable_dsa_cp`
