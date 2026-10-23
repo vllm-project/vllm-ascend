@@ -54,9 +54,9 @@ def _is_enabled(value: object) -> bool:
 
 def _spec_decode_reasons(vllm_config: VllmConfig, speculative_config: object) -> list[str]:
     """Return MRV2 exclusions using the same family selector as dispatch."""
-    # mrv2_utils is imported while the platform is initialized. Keep the
-    # spec-decode package out of that import chain to avoid a vLLM cycle.
-    from vllm_ascend.worker.v1.spec_decode.method import SpecDecodeFamily, resolve_spec_decode_family
+    # Keep the selector import lazy because mrv2_utils is imported while the
+    # platform is initialized.
+    from vllm_ascend.worker.spec_decode_family import SpecDecodeFamily, resolve_spec_decode_family
 
     family = resolve_spec_decode_family(vllm_config)
     reasons: list[str] = []

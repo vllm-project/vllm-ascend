@@ -289,7 +289,7 @@ def test_dflash2_graph_gate_uses_shared_family_resolver(monkeypatch):
         seen.append(config)
         return True
 
-    monkeypatch.setattr("vllm_ascend.worker.v1.spec_decode.method.is_dflash2_draft", is_dflash2_draft)
+    monkeypatch.setattr("vllm_ascend.worker.spec_decode_family.is_dflash2_draft", is_dflash2_draft)
 
     assert mrv2_utils._spec_decode_reasons(vllm_config, speculative_config) == ["dflash2 graph"]
     assert seen == [speculative_config]

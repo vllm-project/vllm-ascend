@@ -14,11 +14,11 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_prefill_inputs_cpu,
     update_draft_inputs_cpu,
 )
-from vllm_ascend.worker.v1.spec_decode.method import (
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.spec_decode_family import (
     resolve_spec_decode_family,
     uses_ascend_mtp_speculator,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import aclgraph_utils as aclgraph_utils_mod
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
 
