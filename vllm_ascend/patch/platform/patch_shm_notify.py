@@ -5,8 +5,8 @@
 import time
 
 from vllm.distributed.device_communicators.shm_broadcast import SpinCondition
-from zmq import Context
 from zmq.constants import Flag
+from zmq.sugar.context import Context
 
 SHM_NOTIFY_POLL_INTERVAL_S = 2.0
 _original_init = SpinCondition.__init__
