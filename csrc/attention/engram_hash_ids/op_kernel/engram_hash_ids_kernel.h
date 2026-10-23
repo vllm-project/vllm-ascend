@@ -179,10 +179,14 @@ private:
                 // Load parameters once per tile, rather than once per token.
                 const int64_t prime = primes_.GetValue(index);
                 const uint64_t offset = static_cast<uint64_t>(offsets_.GetValue(index));
+#if (__CCE_AICORE__ == 310)
+                arithmetic_.WriteHead(output, head, prime, offset, count);
+#else
                 arithmetic_.PrepareHead(prime, offset, count);
                 for (uint32_t lane = 0; lane < count; ++lane) {
                     output.SetValue(lane * localRowElements + head, arithmetic_.Output(lane, prime, offset));
                 }
+#endif
             }
             Sync<HardEvent::S_MTE3>();
             const uint32_t rowBytes = heads * static_cast<uint32_t>(sizeof(int32_t));
