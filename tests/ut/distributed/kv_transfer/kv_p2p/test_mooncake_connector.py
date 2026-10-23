@@ -3568,7 +3568,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         return meta
 
     def test_get_kv_split_metadata_block_size_cp_validation(self):
-        """P/D block-size and CP-size mismatches must fail fast instead of mis-sharding."""
+        """P/D block-size and CP-size mismatches must fail fast instead of sharding incorrectly."""
         cases = (
             # (local block, remote block, local dcp, remote dcp, message)
             (128, 96, 2, 2, "must be divisible by each other"),
