@@ -14,7 +14,7 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.network_utils import is_valid_ipv6_address, make_zmq_path
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -620,6 +620,8 @@ class MooncakePullRecvingThread(threading.Thread):
             sock.setsockopt(zmq.LINGER, 0)  # type: ignore[attr-defined]
             sock.setsockopt(zmq.SNDTIMEO, LEASE_CHECK_TIMEOUT_MS)  # type: ignore[attr-defined]
             sock.setsockopt(zmq.RCVTIMEO, LEASE_CHECK_TIMEOUT_MS)  # type: ignore[attr-defined]
+            if is_valid_ipv6_address(host):
+                sock.setsockopt(zmq.IPV6, 1)  # type: ignore[attr-defined]
             sock.connect(path)
             sock.send(self.encoder.encode((VERIFY_LEASE_MSG, leases)))
             response = msgspec.msgpack.decode(sock.recv(), type=list[bool])
