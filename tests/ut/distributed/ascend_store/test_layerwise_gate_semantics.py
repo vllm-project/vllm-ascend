@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     AttentionComputeStartGate,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreKeyLayerRecvingThread,
     KVTransferThread,
 )
 
@@ -120,6 +121,44 @@ class TestLayerwiseGateWait(unittest.TestCase):
 
         gate._event = MagicMock()
         self.assertTrue(gate.wait(timeout=0.02))
+
+
+class TestLayerLoadGateShortCircuit(unittest.TestCase):
+    """A gated load that never opens must not reach the backend."""
+
+    def _recving_thread(self):
+        thread = KVCacheStoreKeyLayerRecvingThread.__new__(KVCacheStoreKeyLayerRecvingThread)
+        thread._stopping = threading.Event()
+        thread._stopping.set()
+        thread.token_database = MagicMock()
+        thread.final_layer_id = 0
+        thread.layer_offset = 0
+        thread.tp_rank = 0
+        thread.tp_size = 1
+        thread.m_store = MagicMock()
+        thread.request_queue = MagicMock()
+        thread.get_event = threading.Event()
+        thread.layer_load_finished_events = [threading.Event()]
+        return thread
+
+    def test_closed_gate_skips_backend_fetch_and_releases_layer(self):
+        thread = self._recving_thread()
+        data = MagicMock()
+        data.wait_for_save_layer = None
+        data.layer_id = 0
+        data.attention_start_gate = threading.Event()  # never opened
+        data.transfer_tasks = [MagicMock()]
+
+        thread._handle_request(data)
+
+        # No KV was transferred, so the backend must not be asked to fetch.
+        thread.m_store.get.assert_not_called()
+        self.assertEqual(data.transfer_tasks, [])
+        # The layer event is still released so the step cannot deadlock on a
+        # gate that never opened; the empty task list is what marks the miss.
+        self.assertTrue(thread.layer_load_finished_events[0].is_set())
+        thread.request_queue.task_done.assert_called_once_with()
+        self.assertTrue(thread.get_event.is_set())
 
 
 if __name__ == "__main__":
