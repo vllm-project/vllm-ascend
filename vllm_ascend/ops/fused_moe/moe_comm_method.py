@@ -116,12 +116,14 @@ class MoECommMethod(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        capture_enabled: bool = False,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=replace_allreduce,
             quant_type=quant_type,
+            capture_enabled=capture_enabled,
         )
 
     def finalize(

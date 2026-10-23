@@ -14,13 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from __future__ import annotations
+
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -47,6 +51,9 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCaptureLayout
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -641,13 +648,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
         input_ids: torch.Tensor | None = None,
+        capture_layout: RoutedExpertsCaptureLayout | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        # Preserve the old router call signature when capture is disabled.
+        capture_kwargs = {} if capture_layout is None else {"capture_layout": capture_layout}
         topk_weights, topk_ids = self.router._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             input_ids=input_ids,
+            **capture_kwargs,
         )
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
@@ -720,6 +731,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
+            capture_enabled=getattr(self.router, "capture_fn", None) is not None,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
@@ -728,11 +740,28 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+        if getattr(self.router, "capture_fn", None) is not None:
+            if prepare_output.capture_layout is None:
+                raise RuntimeError("Ascend MoE prepare did not provide a capture layout")
+            logger.debug(
+                "Ascend routed capture prepare: layer=%s dp=%d tp=%d sp=%s graph=%s comm=%s "
+                "rows=%d shards=%s ranges=%s",
+                self.layer_name,
+                self.moe_config.dp_rank,
+                get_tensor_model_parallel_rank(),
+                self.moe_config.is_sequence_parallel,
+                forward_context.cudagraph_runtime_mode,
+                _EXTRA_CTX.moe_comm_type.name,
+                router_logits.shape[0],
+                prepare_output.capture_layout.shard_sizes,
+                prepare_output.capture_layout.source_ranges,
+            )
         topk_weights, topk_ids = self._select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
+            capture_layout=prepare_output.capture_layout,
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
