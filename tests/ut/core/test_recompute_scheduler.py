@@ -377,3 +377,31 @@ def test_first_request_preserves_ascend_speculative_padding_without_cached_token
 
     assert output.num_scheduled_tokens[request.request_id] == 3
     assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
+
+
+@pytest.mark.parametrize("scheduler_cls", [RecomputeScheduler, AsyncRecomputeScheduler])
+@pytest.mark.parametrize("async_load", [False, True])
+def test_remote_load_excludes_only_async_blocks_from_zeroing(scheduler_cls, async_load):
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
+    scheduler.needs_kv_cache_zeroing = True
+    # Enable the attention-block zeroing used by hybrid models.
+    for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        manager._record_new_block_ids = True
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (8, async_load)
+    connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector = connector
+    request = create_request(request_id=1, num_tokens=10)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    assert blocks
+    if async_load:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert output.new_block_ids_to_zero is None
+    else:
+        assert set(output.new_block_ids_to_zero) == set(blocks)
