@@ -571,6 +571,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
+                "engine_id": "0",
                 "kv_port": "30100",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 8},
@@ -631,6 +632,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_consumer",
+                "engine_id": "1",
                 "kv_port": "30800",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 8},
@@ -789,7 +791,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         "multistream_overlap_shared_expert": false
       }' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680"}'
+      '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "2", "kv_port": "36680"}'
     ```
 
     Start two DP2/TP8 Prefill engines. `--dp-address` uses the Prefill node IP.
@@ -863,7 +865,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
         "enable_flashcomm1": true
       }' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580"}'
+      '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "3", "kv_port": "36580"}'
     ```
 
     Start eight DP8/TP2 Decode engines. `--dp-address` uses the Decode node
@@ -1041,6 +1043,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
+        "engine_id": "4",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
@@ -1167,6 +1170,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
+        "engine_id": "5",
         "kv_port": "30100",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
@@ -1430,6 +1434,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
+        "engine_id": "6",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1462,6 +1467,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
+        "engine_id": "7",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1625,6 +1631,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
+        "engine_id": "8",
         "kv_connector_extra_config": {
           "connectors": [
             {
@@ -1660,6 +1667,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
       '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
+        "engine_id": "9",
         "kv_connector_extra_config": {
           "connectors": [
             {

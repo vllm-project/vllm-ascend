@@ -731,6 +731,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
+            "engine_id": "0",
             "kv_port": "30100",
             "kv_connector_extra_config": {
                         "prefill": {
@@ -796,6 +797,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
+            "engine_id": "1",
             "kv_port": "30100",
             "kv_connector_extra_config": {
                         "prefill": {
@@ -863,6 +865,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
+            "engine_id": "2",
             "kv_port": "30300",
             "kv_connector_extra_config": {
                         "prefill": {
@@ -930,6 +933,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
+            "engine_id": "3",
             "kv_port": "30300",
             "kv_connector_extra_config": {
                         "prefill": {
@@ -1110,6 +1114,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_producer",
+            "engine_id": "4",
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -1172,6 +1177,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_producer",
+            "engine_id": "5",
             "kv_port": "30000",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -1230,6 +1236,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_consumer",
+            "engine_id": "6",
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -1288,6 +1295,7 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_consumer",
+            "engine_id": "7",
             "kv_port": "30200",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
