@@ -114,13 +114,15 @@ pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
 
 | Benchmark | Metric | Value |
 |---|---|---|
-| gsm8k | strict-match pass@1 | pending calibration |
-| gsm8k | flexible-extract pass@1 | pending calibration |
-| ceval-valid (limit 200) | acc | pending calibration |
+| gsm8k (limit 200, 5-shot) | strict-match | 0.81 (3-run median) |
+| gsm8k (limit 200, 5-shot) | flexible-extract | 0.81 (3-run median) |
+| aisbench gsm8klite (100 samples) | accuracy | 0.86 |
 | serve smoke (zh/en chat) | manual check | pass |
 | offline greedy vs HF bf16 (deterministic prompts) | prefix token equality | up to 32/32 |
 
 Thresholds are calibrated on a single Atlas A2 card with 3 runs (median, RTOL 0.05).
+
+ceval-valid was evaluated during calibration (acc 0.476 at limit 200) and dropped from the nightly config: as an English-centric model this score reflects real capability rather than an engine issue, and a bonus threshold within RTOL 0.05 could not be sustained. Chinese coverage is provided by the one-card e2e cases instead.
 
 ## 7 FAQ
 
