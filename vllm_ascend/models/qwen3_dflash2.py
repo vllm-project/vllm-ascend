@@ -4,10 +4,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-)
+from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -20,8 +17,9 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.qwen3_dspark import align_draft_weights
-from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.utils import get_rotation_path, lmhead_tp_enable
 
 
 def _grouped_conv(
@@ -298,9 +296,20 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         values, ids = torch.topk(logits, selector.top_k, dim=-1)
         ids = ids.to(torch.int64) + self.lm_head.shard_indices.org_vocab_start_index
 
-        if get_tensor_model_parallel_world_size() > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+        if lmhead_tp_enable():
+            # Pure-DP lmhead TP: the shared target LM head is vocab-sharded
+            # over the lmhead-TP group while the global TP world size is 1,
+            # so the merge must gather over the lmhead-TP group -- without
+            # it the merge below is skipped and every rank drafts from its
+            # own vocab shard only (silently wrong candidates). The rows
+            # come from the uniformly padded DFlash draft batch, so every
+            # rank contributes the same [rows, top_k] shape to the gather.
+            merge_group = get_lmhead_tp_group()
+        else:
+            merge_group = get_tp_group()
+        if merge_group.world_size > 1:
+            values = merge_group.all_gather(values, dim=-1)
+            ids = merge_group.all_gather(ids, dim=-1)
             values, selected = torch.topk(values, selector.top_k, dim=-1)
             ids = ids.gather(-1, selected)
 

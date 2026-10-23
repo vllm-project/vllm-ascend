@@ -340,6 +340,18 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             generate_draft.
             """
             self.input_batch = input_batch
+            # lmhead TP: stash the round's DP-agreed request count for the
+            # per-step draft-head capacity publish. The draft syncs below are
+            # request-scaled (the bootstrap reuses the target's
+            # (k+1)-rows-per-request verify sync, the continuations rebuild on
+            # a one-row basis), so the request count — not the raw synced
+            # token max — is the tightest group-uniform capacity for the
+            # one-row-per-request draft head in every phase. Replicated drafts
+            # sync global tokens instead; leave the stash unset so their
+            # publish keeps the raw-sync behavior.
+            self._lmhead_tp_uniform_num_reqs = (
+                None if self.replicated_pcp or dp_sync is None else getattr(dp_sync, "num_reqs", None)
+            )
             # Replicated drafts use global tokens, unlike the PCP-local target.
             # Every DP rank must take the draft sync, including decode and idle ranks.
             sync_state = None if self.replicated_pcp else dp_sync
@@ -397,6 +409,18 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             generate_draft.
             """
             self.input_batch = input_batch
+            # lmhead TP: stash the round's DP-agreed request count for the
+            # per-step draft-head capacity publish. The draft syncs below are
+            # request-scaled (the bootstrap reuses the target's
+            # (k+1)-rows-per-request verify sync, the continuations rebuild on
+            # a one-row basis), so the request count — not the raw synced
+            # token max — is the tightest group-uniform capacity for the
+            # one-row-per-request draft head in every phase. Replicated drafts
+            # sync global tokens instead; leave the stash unset so their
+            # publish keeps the raw-sync behavior.
+            self._lmhead_tp_uniform_num_reqs = (
+                None if self.replicated_pcp or dp_sync_state is None else getattr(dp_sync_state, "num_reqs", None)
+            )
             # Replicated drafts use global tokens, unlike the PCP-local target.
             # Every DP rank must take the draft sync, including decode and idle ranks.
             sync_state = None if self.replicated_pcp else dp_sync_state
@@ -465,6 +489,12 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
         self.idx_mapping.zero_()
+        # Capture invokes the phase entries directly (no propose round),
+        # so a request-count stash left over from the last dummy run would
+        # be stale against the capture buckets; clear it so the in-capture
+        # capacity publish falls back to the raw synced max / static
+        # bound, exactly as before.
+        self._lmhead_tp_uniform_num_reqs = None
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).

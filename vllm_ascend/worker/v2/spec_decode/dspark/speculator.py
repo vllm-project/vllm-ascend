@@ -39,7 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -57,11 +57,12 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
-    # DSpark samples via compute_draft_logits and never calls sample_draft, so
-    # the mixin sample_draft alignment is not used; instead load_draft_model
-    # wraps the draft model's compute_draft_logits to pad the LM-head input to
-    # the group-agreed capacity and trim the logits back (no _sample_sequential
-    # override, upstream sampling logic untouched).
+    # DSpark samples via compute_draft_logits, not sample_draft; the LM-head
+    # row alignment happens inside the head forward
+    # (AscendLogitsProcessor._get_logits_lmheadtp): the draft LMHead carries
+    # a static lmhead_tp_capacity from the model file, and _run_model
+    # publishes the per-step dynamic capacity from the DP sync before
+    # _sample_sequential computes draft logits.
     _lmhead_tp_sample_draft_supported = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -99,41 +100,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
-        self._lmhead_tp_wrap_draft_logits(model)
-
         return model
-
-    def _lmhead_tp_wrap_draft_logits(self, model: torch.nn.Module) -> None:
-        """Pad/trim the DSpark draft LM head around its collectives.
-
-        DSpark feeds its vocab-sharded draft LM head directly through
-        ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
-        ``_sample_sequential_topk``), which bypasses the mixin's
-        ``sample_draft`` alignment. Wrap the method instead of overriding the
-        sampling loop: every rank feeds the group-agreed capacity
-        (``max_num_reqs * num_speculative_steps``) into the LM-head
-        collectives, then the logits are trimmed back to the real rows.
-        """
-        if not lmhead_tp_enable():
-            return
-
-        original = model.compute_draft_logits
-        capacity = lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps)
-
-        def aligned(hidden_states: torch.Tensor) -> torch.Tensor:
-            num_logits = hidden_states.shape[0]
-            if num_logits > capacity:
-                raise ValueError(
-                    f"lmhead TP DSpark draft rows ({num_logits}) exceed the group-agreed "
-                    f"capacity ({capacity} = max_num_reqs * num_speculative_steps)."
-                )
-            padded = hidden_states
-            if num_logits < capacity:
-                # Zero rows carry no draft token; they are trimmed back off.
-                padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
-            return original(padded)[:num_logits]
-
-        model.compute_draft_logits = aligned
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -408,6 +375,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(
             hidden_states, hidden_states, num_tokens, replicated_pcp=self.replicated_pcp
         )
+        self._lmhead_tp_publish_dspark_draft_capacity(num_tokens_across_dp)
         return hidden_states
 
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
@@ -568,3 +536,33 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     is_profile=is_profile,
                     num_speculative_tokens=num_speculative_tokens,
                 )
+
+    def _lmhead_tp_publish_dspark_draft_capacity(self, num_tokens_across_dp: torch.Tensor | None) -> None:
+        """Publish the per-step DSpark draft LM-head capacity.
+
+        ``num_tokens_across_dp`` is the group-agreed per-rank query token count
+        (``max_reqs_across_dp * num_query_per_req``, see upstream
+        ``_build_uniform_batch_dp_sync``). The draft LM-head emits
+        ``num_speculative_steps`` rows per request, so the row capacity every
+        rank must feed is ``(max query rows // num_query_per_req) *
+        num_speculative_steps``. Publish it on the head before
+        ``_sample_sequential`` computes draft logits in this same step; without
+        a sync value the static ``lmhead_tp_capacity`` stays authoritative.
+        """
+        if not lmhead_tp_enable():
+            return
+        if num_tokens_across_dp is not None and num_tokens_across_dp.numel() > 0:
+            max_query_rows = int(num_tokens_across_dp.max().item())
+            if max_query_rows % self.num_query_per_req != 0:
+                raise ValueError(
+                    f"DSpark lmhead TP: synced draft query rows ({max_query_rows}) "
+                    f"are not divisible by num_query_per_req ({self.num_query_per_req}); "
+                    "the DP-synced capacity would desync the draft-head collectives."
+                )
+            max_reqs_across_dp = max_query_rows // self.num_query_per_req
+            self.model.lm_head._lmhead_tp_dynamic_capacity = max_reqs_across_dp * self.num_speculative_steps
+        elif hasattr(self.model.lm_head, "_lmhead_tp_dynamic_capacity"):
+            # No DP sync this round: drop the previous round's dynamic value so
+            # the static lmhead_tp_capacity stays authoritative and a stale
+            # capacity cannot be reused.
+            del self.model.lm_head._lmhead_tp_dynamic_capacity

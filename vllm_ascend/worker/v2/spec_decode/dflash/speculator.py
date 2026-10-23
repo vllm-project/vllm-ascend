@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+import logging
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -16,12 +18,14 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
+
+logger = logging.getLogger(__name__)
 
 # Upstream uses the attention kernel block size for DCP ownership, which is
 # incorrect when physical KV blocks are larger than kernel blocks. Bind the
@@ -139,13 +143,80 @@ else:
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+    # Set by load_draft_model: True when the loaded draft mounts the target's
+    # lm_head object (the DFlash/DFlash2 drafter checkpoints ship no lm_head
+    # weights, so the loader shares the target's; VL targets keep the head
+    # nested, e.g. language_model.lm_head). In that case load_draft_model
+    # DECOUPLES the draft onto a shallow copy of the head: same weight
+    # tensors and quant method, separate object. The draft-side capacity
+    # attributes (dyn/static) land on the copy -- the target's own head
+    # object must stay clean, or the target's sample() resolves the
+    # draft-scale dyn (rows > dyn -> ValueError, the Q6 crash). The copy
+    # also keeps the head-level row pad for the draft calls: the draft head
+    # rows are the REAL num_reqs * num_query_per_req per rank (NOT the
+    # padded-batch rows -- the first NPU retest of the skip-based fix
+    # logged rows=28/21/14 on an 18-req batch and hung HCCL after a few
+    # minutes of desynced all_gathers). Default False ("not shared / not
+    # yet loaded"): _run_model can never run before load_draft_model.
+    _lmhead_tp_head_is_shared = False
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         with disable_profiling_chunk_for_draft(self.vllm_config):
-            return super().load_draft_model(target_model, target_attn_layer_names)
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        # The draft head is shared when it is literally one of the target
+        # model's submodules: VL targets keep lm_head nested (e.g.
+        # language_model.lm_head) with no top-level attribute, so a
+        # top-level identity check would miss the sharing.
+        draft_head = getattr(model, "lm_head", None)
+        self._lmhead_tp_head_is_shared = draft_head is not None and any(
+            module is draft_head for module in target_model.modules()
+        )
+        if self._lmhead_tp_head_is_shared:
+            # Decouple the head OBJECT while sharing the weight tensors:
+            # inject/publish land on the copy (restoring the draft-side row
+            # pad), and the target's head object never carries draft
+            # capacity. copy.copy on an nn.Module shares the parameter/
+            # buffer tensors by reference; the plain capacity attributes
+            # written later live in the copy's own __dict__.
+            model.lm_head = copy.copy(draft_head)
+            if lmhead_tp_enable():
+                logger.info(
+                    "lmhead TP: the DFlash draft shares the target LM head "
+                    "weights; a decoupled head object carries the draft-side "
+                    "capacity so the target's head object stays clean."
+                )
+        # Generic DFlash draft models never pass lmhead_tp_capacity to the
+        # head constructor; attach the static bound post-load so the
+        # head-level pad has a fallback for steps without a DP sync.
+        self._lmhead_tp_inject_static_capacity(model)
+        return model
+
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        """Run the DFlash draft backbone and publish the draft LM-head
+        capacity before this step's head call. DFlash drafts
+        ``num_query_per_req`` query tokens per request and the head samples
+        ``num_speculative_steps`` of them, so the synced max query rows
+        already cover the head rows and are the capacity."""
+        output = super()._run_model(
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+        self._lmhead_tp_publish_draft_capacity(num_tokens_across_dp, tokens_per_req=self.num_query_per_req)
+        return output
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
