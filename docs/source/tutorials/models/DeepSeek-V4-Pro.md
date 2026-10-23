@@ -1153,14 +1153,6 @@ Decode and supports the pipeline parallelism used on Prefill.
 `AscendStoreConnector` stores reusable KV cache in Memcache. Both connectors
 are configured as children of `MultiConnector`.
 
-The example uses two Prefill nodes and two Decode nodes, with the same parallel
-layout as Section 5.2.1:
-
-| Pool | Nodes | NPUs per Node | DP | TP | PP | PCP |
-| --- | --- | --- | --- | --- | --- | --- |
-| Prefill | 2 | 16 | 1 | 2 | 2 | 8 |
-| Decode | 2 | 16 | 16 | 2 | 1 | 1 |
-
 Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on all nodes. This example
 uses MRv2 and DSpark. Prefill enables layerwise Memcache access with
 `use_layerwise: true` and `layerwise_prefetch_layers: 3`; Decode uses
@@ -1168,16 +1160,15 @@ uses MRv2 and DSpark. Prefill enables layerwise Memcache access with
 
 Before starting vLLM, follow the
 [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
-to install `memfabric-hybrid` and `memcache-hybrid`. Keep the `/etc/hccn.conf`
-container mount from Section 4.1. All Prefill and Decode nodes must connect to
-the same MetaService endpoint.
+to install `memfabric-hybrid` and `memcache-hybrid`, configure
+`mmc-meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`, and start the
+Memcache MetaService. The
+Prefill and Decode nodes must use the same MetaService endpoint. Keep the
+`/etc/hccn.conf` container mount from Section 4.1.
 
-This example follows the separated Memcache deployment in
-[the V4.1 tutorial](DeepSeek-V4.1-Flash.md#53-1p1d-deployment-with-memcache-kv-cache-pool).
-Standalone Memcache processes reserve host memory before vLLM loads the model
-and provide UBS IO storage for the pool.
-Prepare one MetaService configuration and two LocalService configurations, and
-run a standalone Memcache process on each of the four nodes.
+This example uses separated Memcache deployment so that the pool reserves host
+memory before vLLM loads the model. Prepare one MetaService configuration and
+two LocalService configurations as described below.
 
 #### 5.3.1 Prepare the Memcache Services
 
@@ -1207,8 +1198,8 @@ ock.mmc.local_service.storage.enabled = false
 ```
 
 Create `mmc-local-standalone.conf` on all four nodes for the standalone Memcache
-process. It uses the same endpoints, world size, and protocol, contributes
-`120GB` of host DRAM, and enables UBS IO storage:
+process. It uses the same endpoints, world size, and protocol, but contributes
+the host DRAM used by the pool:
 
 ```ini
 ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
@@ -1280,19 +1271,16 @@ python3 memcache_standalone.py
 For additional parameters and capacity constraints, refer to
 [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-Reuse `launch_online_dp.py` from Section 5.2.1 on both Decode nodes. Replace
-`/path/to/DeepSeek-V4-Pro-0813-w4a8` in each command with the downloaded checkpoint
-directory, as in Section 5.2.1. Set `MEMCACHE_INSTALL_PATH` to the `Location`
-reported by `pip show memcache_hybrid`, and set `MEMCACHE_CONFIG_DIR` to the
-directory containing the Memcache configuration files prepared above. These
-paths must be available inside each container. `PYTHON_LIB_DIR`, when set, is
-also included in `LD_LIBRARY_PATH`.
+Reuse `launch_online_dp.py` from Section 5.2.1. Set `MEMCACHE_INSTALL_PATH` to
+the `Location` reported by `pip show memcache_hybrid`, and set
+`MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
+files above on all nodes.
 
 #### 5.3.2 Start the Prefill Nodes with Pooling
 
 Save the following script as `run_prefill.sh` on both Prefill nodes. Set
 `local_ip` and `nic_name` for the current node, and set `MASTER_ADDR` to Prefill
-node 0's communication IP on both nodes. Each node uses all 16 local NPUs.
+node 0's communication IP on both nodes. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by `pip show memcache_hybrid`, and set `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration files above on both nodes.
 
 ```shell
 MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
@@ -1315,7 +1303,7 @@ export HCCL_SOCKET_IFNAME="$nic_name"
 # Parameters required by the Memcache KV Cache Pool.
 export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
-export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${PYTHON_LIB_DIR:+:$PYTHON_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1419,10 +1407,9 @@ bash run_prefill.sh 1
 
 #### 5.3.3 Start the Decode Nodes with Pooling
 
-Save the following script as `run_dp_template.sh` on both Decode nodes, in the
-same directory as `launch_online_dp.py`. Set `local_ip` and `nic_name` for the
-current node. The launcher supplies the visible devices, service port, and
-parallel parameters.
+On both Decode nodes, save the following script as `run_dp_template.sh` in the
+same directory as `launch_online_dp.py`. Set `local_ip`, `nic_name`,
+`MEMCACHE_INSTALL_PATH`, and `MEMCACHE_CONFIG_DIR` for the local environment.
 
 ```shell
 MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
@@ -1446,7 +1433,7 @@ export PCP_SIZE="$8"
 # Parameters required by the Memcache KV Cache Pool.
 export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
-export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${PYTHON_LIB_DIR:+:$PYTHON_LIB_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
 export MMC_LOCAL_CONFIG_PATH="$MEMCACHE_CONFIG_DIR/mmc-local.conf"
 
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1552,24 +1539,21 @@ Start the components in this order:
 4. Both Prefill nodes. Wait until the Prefill service is ready.
 5. The PD proxy, using the Prefill and Decode endpoints from Section 5.2.1.
 
-Refer to
-[Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)
-for proxy deployment, and use the requests in Section 6 to verify service
-responses through the proxy. Send the same request twice with a reusable prefix
-long enough to span multiple KV blocks. Inspect the KV Pool logs or metrics for
-Memcache lookup, get, put, and hit activity, and confirm that Decode still
-receives KV cache through `MooncakeConnectorV2`. Distinguish Memcache hits from
-hits in the local prefix cache when checking reuse.
+Wait until all four standalone Memcache processes report successful initialization
+before starting the Decode engines. Then wait until every Decode engine reports
+`Application startup complete` before starting Prefill. After every Prefill
+engine is ready, start the proxy with the same endpoint mapping described in
+Section 5.2.1 (step 5).
+
+Send the same request twice with a reusable prefix. Confirm that Prefill logs
+show Memcache lookup, get, put, and hit activity, and that Decode logs still
+show normal Prefill-to-Decode KV transfer.
 
 Key pooling parameters:
 
 - `MultiConnector` combines Prefill-to-Decode transfer through `MooncakeConnectorV2` with KV reuse through `AscendStoreConnector`. Both child connectors use the producer role on Prefill and the consumer role on Decode.
 - `backend: "memcache"` selects the Memcache KV Cache Pool backend. All nodes use the same MetaService endpoint.
 - Prefill uses `use_layerwise: true` with `layerwise_prefetch_layers: 3`. Decode keeps `use_layerwise: false`.
-- `PYTHONHASHSEED=0` keeps Python hashing consistent across processes. `MMC_LOCAL_CONFIG_PATH` selects the LocalService configuration embedded in vLLM; the standalone Memcache processes use `mmc-local-standalone.conf` instead.
-- The nested `MooncakeConnectorV2` topology stays consistent with the Prefill and Decode parallel layout. Prefill uses PP size `2` with `VLLM_PP_LAYER_PARTITION="32,29"`.
-- Both roles use DSpark with `num_speculative_tokens: 5`. Prefill uses eager execution; Decode uses asynchronous scheduling and `FULL_DECODE_ONLY` graphs.
-- This pooling example uses `HCCL_BUFFSIZE=1024` on Prefill and `2200` on Decode.
 
 For Memcache configuration, capacity tuning, and troubleshooting, refer to the
 [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
