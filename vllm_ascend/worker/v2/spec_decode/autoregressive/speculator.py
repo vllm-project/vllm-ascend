@@ -459,6 +459,15 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
+    def _configure_fused_multi_step_decode(self) -> None:
+        # Ascend captures _multi_step_decode as one ACL graph and updates
+        # per-step metadata on replay, including models with fixed positions.
+        self.use_fused_multi_step_decode = False
+
+    def _configure_decode_metadata_update(self) -> None:
+        # Newer upstream versions select the fused loop using this flag.
+        self.supports_decode_metadata_update = False
+
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -511,6 +520,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 self.attn_groups,
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
+                specialize_spec_tokens=self.speculative_config.uses_dynamic_speculative_decoding(),
             )
         self.on_multi_step_decode_end(self.max_num_reqs)
 
@@ -705,6 +715,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         num_tokens_padded: int,
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
@@ -724,6 +735,8 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             return [prepared_attn_metadata]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
+        if num_speculative_steps is not None:
+            draft_attn_metadatas = draft_attn_metadatas[: num_speculative_steps - 1]
 
         for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
             step = i + 1
@@ -835,10 +848,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
+            return self.build_fia_params_dcp(
+                num_reqs_padded,
+                draft_attn_metadata,
+                is_draft_model_prefill,
+                **({"num_speculative_steps": num_speculative_steps} if num_speculative_steps is not None else {}),
+            )
         layer_name, metadata = next(iter(draft_attn_metadata.items()))
         block_table = metadata.block_tables
         if is_draft_model_prefill:
@@ -854,7 +873,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        for step in range(1, self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
@@ -875,6 +894,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        num_speculative_steps: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all GQA DCP draft steps' history/current or cache parameters."""
         assert self.dcp_manager is not None
@@ -895,7 +915,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
+        for step in range(1, self.num_speculative_steps if num_speculative_steps is None else num_speculative_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]

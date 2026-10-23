@@ -4,11 +4,13 @@
 # Lean UTs for 310P MRv2 MTP (rejection offset, capture-safe draft step, RoPE flag).
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
@@ -20,9 +22,90 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     set_draft_step_host,
     update_draft_inputs_cpu,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestMRv2Mtp310(TestBase):
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
+    def test_decode_replays_only_runtime_width(self):
+        speculator = object.__new__(AscendMTPSpeculator310)
+        speculator.num_speculative_steps = 4
+        speculator.input_buffers = SimpleNamespace(positions=torch.zeros(2), query_start_loc=torch.arange(3))
+        speculator.idx_mapping = torch.arange(2)
+        speculator._set_draft_step = MagicMock()
+        speculator._generate_draft = MagicMock()
+        speculator.decode_cudagraph_manager = MagicMock()
+        for mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
+            for k in (1, 2, 4):
+                speculator._generate_draft.reset_mock()
+                speculator.decode_cudagraph_manager.reset_mock()
+                speculator._multi_step_decode(
+                    2, True, SimpleNamespace(cg_mode=mode, num_tokens=2), None, torch.ones(2), k
+                )
+                calls = (
+                    speculator.decode_cudagraph_manager.run_fullgraph.call_count
+                    if mode == CUDAGraphMode.FULL
+                    else speculator._generate_draft.call_count
+                )
+                self.assertEqual(calls, k - 1)
+
+    @pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Runtime K requires upstream #57053")
+    def test_full_decode_updates_autoregressive_inputs_across_width_changes(self):
+        # A per-step graph must feed its sampled token and feedback hidden
+        # states into the next replay, and write each draft to its own column.
+        # Two active rows in a three-row graph also exercise request padding.
+        speculator = object.__new__(AscendMTPSpeculator310)
+        speculator.num_speculative_steps = 4
+        speculator.max_model_len = 128
+        speculator.input_batch = SimpleNamespace(num_reqs=2)
+        speculator.model_state = SimpleNamespace()
+        speculator.input_buffers = SimpleNamespace(
+            input_ids=torch.zeros(3, dtype=torch.int64),
+            positions=torch.zeros(3, dtype=torch.int64),
+            seq_lens=torch.zeros(3, dtype=torch.int64),
+            query_start_loc=torch.arange(4),
+        )
+        speculator.current_draft_step = torch.tensor(0)
+        speculator.sample_src_positions = torch.zeros(3, dtype=torch.int64)
+        speculator.idx_mapping = torch.arange(3)
+        speculator.hidden_states = torch.zeros(3, 2)
+        speculator.draft_tokens = torch.full((3, 4), -1, dtype=torch.int64)
+        manager = object.__new__(AutoRegressiveAclGraphManager310)
+        manager.speculator = speculator
+        manager.is_draft_model_prefill = False
+        speculator.decode_cudagraph_manager = manager
+        desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=3, num_reqs=3)
+        sampled = torch.zeros(3, dtype=torch.int64)
+        feedback = torch.zeros(3, 2)
+        manager._decode_outputs = {desc: (sampled, feedback)}
+
+        def replay(manager, desc):
+            sampled.copy_(speculator.input_buffers.input_ids + 1)
+            feedback.copy_(speculator.hidden_states + 10)
+
+        with patch.object(CudaGraphManager, "run_fullgraph", replay):
+            for k in (4, 2, 3, 1, 4):
+                speculator.input_buffers.input_ids.copy_(torch.tensor([10, 20, 0]))
+                speculator.input_buffers.positions.zero_()
+                speculator.input_buffers.seq_lens.zero_()
+                speculator.sample_src_positions.zero_()
+                speculator.hidden_states.zero_()
+                speculator.draft_tokens.fill_(-1)
+                speculator.draft_tokens[:2, 0] = torch.tensor([10, 20])
+                speculator._multi_step_decode(2, True, desc, None, torch.ones(3), k)
+                expected = torch.tensor([[10 + step for step in range(k)], [20 + step for step in range(k)]])
+                self.assertEqual(speculator.draft_tokens[:2, :k].tolist(), expected.tolist())
+                self.assertTrue(torch.all(speculator.draft_tokens[:2, k:] == -1))
+                self.assertTrue(torch.all(speculator.draft_tokens[2] == -1))
+                # The final step writes its result but skips feedback updates.
+                advances = max(0, k - 2)
+                self.assertEqual(speculator.input_buffers.input_ids.tolist(), [10 + advances, 20 + advances, 0])
+                self.assertEqual(speculator.input_buffers.positions.tolist(), [advances, advances, 0])
+                self.assertEqual(speculator.input_buffers.seq_lens.tolist(), [advances, advances, 0])
+                self.assertEqual(speculator.sample_src_positions.tolist(), [advances, advances, 0])
+                self.assertTrue(torch.all(speculator.hidden_states[:2] == advances * 10))
+                self.assertTrue(torch.all(speculator.hidden_states[2] == 0))
+
     def test_greedy_rejection_uses_logit_idx_plus_one(self):
         # draft_sampled[logit_idx+1] must match argmax(logits[logit_idx]) to accept.
         target_logits = torch.tensor(
