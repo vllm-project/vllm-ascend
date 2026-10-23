@@ -22,7 +22,7 @@ for the complete support matrix and the
 The A3 configuration in this guide has been validated with W8A8 weights,
 TP4/DP4/EP16, automatic prefix caching, and `FULL_DECODE_ONLY` ACL Graph. The A2
 configuration uses the same global TP4/DP4/EP16 topology across two servers.
-BF16 serving, DSA context parallelism, FlashComm1, and Prefill-Decode
+BF16 serving, prefill context parallelism, FlashComm1, and Prefill-Decode
 disaggregation are not covered by this guide.
 
 ## 3 Prerequisites
@@ -476,7 +476,7 @@ model-specific issues.
 
 - Colocated serving is documented on either one Atlas 800 A3 server
   (128GB × 8 NPUs) or two Atlas 800 A2 servers (64GB × 8 NPUs each).
-- Prefill-Decode disaggregation, DSA context parallelism, and FlashComm1 are
+- Prefill-Decode disaggregation, prefill context parallelism, and FlashComm1 are
   not supported in the documented configuration.
 - BF16 full-model validation and production performance qualification are not
   complete.

@@ -103,8 +103,7 @@ def test_merge_preserves_input_dtype(dtype, defer):
 
 
 @pytest.mark.parametrize("dcp_enabled", [False, True])
-@pytest.mark.parametrize("with_pcp_context", [False, True])
-def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabled, with_pcp_context):
+def test_capture_preserves_dcp_dummy_metadata(dcp_enabled):
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
@@ -115,11 +114,8 @@ def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabl
     expected = object()
     builder.build = Mock(return_value=expected)
     common = SimpleNamespace(attn_state=None, is_prefilling=None, num_reqs=3, num_actual_tokens=9, max_query_len=3)
-    context = object()
-    kwargs = {"pcp_context": context, "pcp_cache_group_idx": 2} if with_pcp_context else {}
-    assert builder.build_for_cudagraph_capture(common, **kwargs) is expected
+    assert builder.build_for_cudagraph_capture(common) is expected
     args = builder.build.call_args.args
-    call = builder.build.call_args.kwargs
     assert args[0] == 0
     captured = args[1]
     assert captured is not common
@@ -130,10 +126,6 @@ def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabl
         assert not captured.is_prefilling.any()
     else:
         assert captured.is_prefilling is None
-    if with_pcp_context:
-        assert call["pcp_context"] is context and call["pcp_cache_group_idx"] == 2
-    else:
-        assert "pcp_context" not in call
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 4])

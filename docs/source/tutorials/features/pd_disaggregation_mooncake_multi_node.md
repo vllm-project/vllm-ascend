@@ -994,7 +994,6 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
         "enable_cpu_binding": true,
         "enable_shared_expert_dp": true,
         "multistream_overlap_shared_expert": true,
-        "enable_dsa_cp": false,
         "enable_flashcomm1": false
     }'
 ```
@@ -1083,7 +1082,6 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
         "enable_cpu_binding": true,
         "enable_shared_expert_dp": true,
         "multistream_overlap_shared_expert": true,
-        "enable_dsa_cp": false,
         "enable_flashcomm1": false
     }'
 ```
