@@ -141,7 +141,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |Kimi-K3          |✅        |W4A8; DSpark; FULL_DECODE_ONLY; KV Cache Pool||950DT Products|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
     |MiniMax-M3       |✅        |MXFP8; text/image/video||950DT Products||✅|✅||✅|✅|✅|✅|✅|✅|✅|🟡|✅|1M|| [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
     |Step-5-Preview       |🔵 | Experimental || 950DT Products |✅|✅|✅||✅|✅|✅|✅|✅|✅|||✅|1M|| [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) |
-    | MiniMax-M3.1-Flash | 🟡 | Initial adaptation | 🟡 | 950DT Products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |  |
+    | MiniMax-M3.1-Flash | 🟡 | MXFP8 / FP8 KV; DSpark; decode graph | 🟡 | 950DT Products | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 133000 | 🟡 |  |
 
 === "A2/A3"
 
