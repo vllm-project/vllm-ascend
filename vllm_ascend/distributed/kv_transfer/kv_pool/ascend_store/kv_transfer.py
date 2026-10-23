@@ -130,29 +130,64 @@ def _kv_shard_lengths(sizes: list[list[int]], world_size: int) -> list[int]:
     ]
 
 
-def _coalesced_kv_views(views: list[list[torch.Tensor]], indices: list[int]) -> list[torch.Tensor]:
+def _block_ids_are_contiguous(block_ids: list[int], indices: list[int]) -> bool:
+    return len(indices) <= 1 or all(
+        block_ids[indices[index + 1]] == block_ids[indices[index]] + 1 for index in range(len(indices) - 1)
+    )
+
+
+def _coalesced_kv_views(
+    views: list[list[torch.Tensor]], indices: list[int], *, assume_contiguous: bool = False
+) -> list[torch.Tensor]:
     """Return layer-major views, merging adjacent ranges backed by one storage."""
     max_views = max((len(views[index]) for index in indices), default=0)
     coalesced: list[torch.Tensor] = []
-    current_storage = None
-    current_device = None
-    current_start = 0
-    current_end = 0
 
-    def flush_current() -> None:
-        nonlocal current_storage, current_device
-        if current_storage is not None and current_end > current_start:
-            merged = torch.empty(0, dtype=torch.int8, device=current_device).set_(
-                current_storage,
-                current_start,
-                (current_end - current_start,),
-                (1,),
-            )
-            coalesced.append(merged)
-        current_storage = None
-        current_device = None
+    if assume_contiguous and indices:
+        first_key = indices[0]
+        last_key = indices[-1]
+        view_count = len(views[first_key])
+        if view_count and all(len(views[index]) == view_count for index in indices):
+            fast_views: list[torch.Tensor] = []
+            fast_path = True
+            key_count = len(indices)
+            for view_index in range(view_count):
+                first = views[first_key][view_index]
+                last = views[last_key][view_index]
+                if (
+                    not isinstance(first, torch.Tensor)
+                    or not isinstance(last, torch.Tensor)
+                    or first.dtype != torch.int8
+                    or last.dtype != torch.int8
+                    or not first.is_contiguous()
+                    or not last.is_contiguous()
+                    or first.numel() == 0
+                    or first.numel() != last.numel()
+                ):
+                    fast_path = False
+                    break
+                total_bytes = first.numel() * key_count
+                first_storage = first.untyped_storage()
+                last_storage = last.untyped_storage()
+                if (
+                    first_storage.data_ptr() != last_storage.data_ptr()
+                    or last.data_ptr() + last.numel() != first.data_ptr() + total_bytes
+                ):
+                    fast_path = False
+                    break
+                fast_views.append(
+                    torch.empty(0, dtype=torch.int8, device=first.device).set_(
+                        first_storage,
+                        first.storage_offset(),
+                        (total_bytes,),
+                        (1,),
+                    )
+                )
+            if fast_path:
+                return fast_views
 
     for view_index in range(max_views):
+        layer_views: list[torch.Tensor] = []
         for key_index in indices:
             if view_index >= len(views[key_index]):
                 continue
@@ -161,6 +196,34 @@ def _coalesced_kv_views(views: list[list[torch.Tensor]], indices: list[int]) -> 
                 raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
             if view.numel() == 0:
                 continue
+            layer_views.append(view)
+        if not layer_views:
+            continue
+
+        expected_ptr = layer_views[0].data_ptr()
+        spans_one_storage = True
+        for view in layer_views:
+            if view.data_ptr() != expected_ptr:
+                spans_one_storage = False
+                break
+            expected_ptr += view.numel()
+        if spans_one_storage:
+            first_storage = layer_views[0].untyped_storage()
+            if first_storage.data_ptr() == layer_views[-1].untyped_storage().data_ptr():
+                merged = torch.empty(0, dtype=torch.int8, device=layer_views[0].device).set_(
+                    first_storage,
+                    layer_views[0].storage_offset(),
+                    (expected_ptr - layer_views[0].data_ptr(),),
+                    (1,),
+                )
+                coalesced.append(merged)
+                continue
+
+        current_storage = None
+        current_device = None
+        current_start = 0
+        current_end = 0
+        for view in layer_views:
             storage = view.untyped_storage()
             storage_offset = view.storage_offset()
             if (
@@ -170,13 +233,130 @@ def _coalesced_kv_views(views: list[list[torch.Tensor]], indices: list[int]) -> 
             ):
                 current_end += view.numel()
                 continue
-            flush_current()
+            if current_storage is not None:
+                coalesced.append(
+                    torch.empty(0, dtype=torch.int8, device=current_device).set_(
+                        current_storage,
+                        current_start,
+                        (current_end - current_start,),
+                        (1,),
+                    )
+                )
             current_storage = storage
             current_device = view.device
             current_start = storage_offset
             current_end = storage_offset + view.numel()
-    flush_current()
+        if current_storage is not None:
+            coalesced.append(
+                torch.empty(0, dtype=torch.int8, device=current_device).set_(
+                    current_storage,
+                    current_start,
+                    (current_end - current_start,),
+                    (1,),
+                )
+            )
     return coalesced
+
+
+def _exchange_kv_shards(
+    tp_group: Any,
+    tp_rank: int,
+    local_views: list[torch.Tensor],
+    owner_views: dict[int, list[torch.Tensor]],
+) -> None:
+    exchange = getattr(tp_group, "exchange_kv_shards", None)
+    if callable(exchange):
+        exchange(tp_rank, local_views, owner_views)
+        return
+
+    ops = []
+    for owner, recv_views in owner_views.items():
+        if owner == tp_rank:
+            continue
+        global_rank = tp_group.ranks[owner]
+        for view in local_views:
+            ops.append(torch.distributed.P2POp(torch.distributed.isend, view, global_rank, group=tp_group.device_group))
+        for view in recv_views:
+            ops.append(torch.distributed.P2POp(torch.distributed.irecv, view, global_rank, group=tp_group.device_group))
+    handles = torch.distributed.batch_isend_irecv(ops)
+    for handle in handles:
+        handle.wait()
+
+
+def _all_reduce_kv_status(tp_group: Any, status: torch.Tensor) -> torch.Tensor:
+    all_reduce = getattr(tp_group, "all_reduce_kv_status", None)
+    if callable(all_reduce):
+        return all_reduce(status)
+    reduced = status.clone()
+    torch.distributed.all_reduce(reduced, group=tp_group.cpu_group)
+    return reduced
+
+
+def _all_gather_kv_shards(
+    tp_group: Any,
+    tp_rank: int,
+    local_views: list[torch.Tensor],
+    owner_views: dict[int, list[torch.Tensor]],
+    shard_lengths: list[int],
+    local_bytes: int,
+    status_values: list[int],
+    device: torch.device,
+) -> list[int]:
+    wire_bytes = max(shard_lengths, default=0)
+    status_word_count = len(status_values) // 2
+    status_bytes = status_word_count * 2 * 4
+    packet_bytes = wire_bytes + status_bytes
+    payload = torch.empty(packet_bytes, dtype=torch.int8, device=device)
+
+    destinations = []
+    cursor = 0
+    for view in local_views:
+        end = cursor + view.numel()
+        destinations.append(payload[cursor:end])
+        cursor = end
+    if cursor != local_bytes:
+        raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={cursor}")
+    if destinations:
+        torch._foreach_copy_(destinations, local_views)
+    if local_bytes < wire_bytes:
+        payload[local_bytes:wire_bytes].zero_()
+
+    status = torch.tensor(status_values, dtype=torch.int32, device=device)
+    payload[wire_bytes:].copy_(status.view(torch.int8))
+    gathered = tp_group.all_gather(payload, dim=0).flatten()
+    expected_numel = packet_bytes * tp_group.world_size
+    if gathered.numel() != expected_numel:
+        raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
+
+    destinations = []
+    sources = []
+    for owner, recv_views in owner_views.items():
+        shard_base = owner * packet_bytes
+        cursor = 0
+        for view in recv_views:
+            end = cursor + view.numel()
+            destinations.append(view)
+            sources.append(gathered[shard_base + cursor : shard_base + end])
+            cursor = end
+        if cursor != shard_lengths[owner]:
+            raise RuntimeError(
+                f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
+            )
+    if destinations:
+        torch._foreach_copy_(destinations, sources)
+
+    aggregated = [0] * len(status_values)
+    for owner in range(tp_group.world_size):
+        status_base = owner * packet_bytes + wire_bytes
+        owner_status = np.frombuffer(
+            gathered[status_base : status_base + status_bytes].cpu().numpy().tobytes(), dtype=np.int32
+        )
+        for index, value in enumerate(owner_status):
+            aggregated[index] |= int(value)
+    return aggregated
+
+
+_P2P_EXCHANGE_VIEW_LIMIT = 4
 
 
 def sharded_get_all_gather(
@@ -213,8 +393,6 @@ def sharded_get_all_gather(
     local_bytes = shard_lengths[tp_rank]
     wire_bytes = max(shard_lengths, default=0)
     status_word_count = (len(keys) + 31) // 32
-    status_bytes = status_word_count * 2 * 4
-    packet_bytes = wire_bytes + status_bytes
 
     ret = None
     local_missing: set[int] = set()
@@ -245,62 +423,53 @@ def sharded_get_all_gather(
             missing_words[word_index] |= 1 << bit_index
             failure_words[word_index] |= 1 << bit_index
 
-    payload = torch.empty(packet_bytes, dtype=torch.int8, device=device)
     if wire_bytes:
-        local_views = _coalesced_kv_views(views, local_indices)
-        destinations: list[torch.Tensor] = []
-        cursor = 0
-        for view in local_views:
-            end = cursor + view.numel()
-            destinations.append(payload[cursor:end])
-            cursor = end
-        if cursor != local_bytes:
-            raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={cursor}")
-        if destinations:
-            torch._foreach_copy_(destinations, local_views)
-        if local_bytes < wire_bytes:
-            payload[local_bytes:wire_bytes].zero_()
-
-    status = torch.tensor(missing_words + failure_words, dtype=torch.int32, device=device)
-    payload[wire_bytes:].copy_(status.view(torch.int8))
-    gathered = tp_group.all_gather(payload, dim=0).flatten()
-    expected_numel = packet_bytes * world_size
-    if gathered.numel() != expected_numel:
-        raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
-
-    if wire_bytes:
-        destinations = []
-        sources = []
+        local_views = _coalesced_kv_views(
+            views,
+            local_indices,
+            assume_contiguous=_block_ids_are_contiguous(block_ids, local_indices),
+        )
+        actual_local_bytes = sum(view.numel() for view in local_views)
+        if actual_local_bytes != local_bytes:
+            raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={actual_local_bytes}")
+        owner_views: dict[int, list[torch.Tensor]] = {}
         for owner in range(world_size):
             if owner == tp_rank:
                 continue
             owner_indices = _kv_shard_indices(len(keys), world_size, owner)
-            owner_views = _coalesced_kv_views(views, owner_indices)
-            shard_base = owner * packet_bytes
-            cursor = 0
-            for view in owner_views:
-                end = cursor + view.numel()
-                destinations.append(view)
-                sources.append(gathered[shard_base + cursor : shard_base + end])
-                cursor = end
-            if cursor != shard_lengths[owner]:
+            owner_view_list = _coalesced_kv_views(
+                views,
+                owner_indices,
+                assume_contiguous=_block_ids_are_contiguous(block_ids, owner_indices),
+            )
+            owner_bytes = sum(view.numel() for view in owner_view_list)
+            if owner_bytes != shard_lengths[owner]:
                 raise RuntimeError(
-                    f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
+                    f"KV P2P shard size mismatch for rank {owner}: expected={shard_lengths[owner]} actual={owner_bytes}"
                 )
-        if destinations:
-            torch._foreach_copy_(destinations, sources)
-
-    aggregated_missing = [0] * status_word_count
-    aggregated_failure = [0] * status_word_count
-    for owner in range(world_size):
-        status_base = owner * packet_bytes + wire_bytes
-        owner_status = np.frombuffer(
-            gathered[status_base : status_base + status_bytes].cpu().numpy().tobytes(), dtype=np.int32
-        )
-        for word_index, word in enumerate(owner_status[:status_word_count]):
-            aggregated_missing[word_index] |= int(word)
-        for word_index, word in enumerate(owner_status[status_word_count:]):
-            aggregated_failure[word_index] |= int(word)
+            owner_views[owner] = owner_view_list
+        status_values = missing_words + failure_words
+        total_views = len(local_views) + sum(len(owner_view_list) for owner_view_list in owner_views.values())
+        if total_views <= _P2P_EXCHANGE_VIEW_LIMIT:
+            status = torch.tensor(status_values, dtype=torch.int32, device="cpu")
+            status_values = _all_reduce_kv_status(tp_group, status).tolist()
+            _exchange_kv_shards(tp_group, tp_rank, local_views, owner_views)
+        else:
+            status_values = _all_gather_kv_shards(
+                tp_group,
+                tp_rank,
+                local_views,
+                owner_views,
+                shard_lengths,
+                local_bytes,
+                status_values,
+                device,
+            )
+    else:
+        status = torch.tensor(missing_words + failure_words, dtype=torch.int32, device="cpu")
+        status_values = _all_reduce_kv_status(tp_group, status).tolist()
+    aggregated_missing = status_values[:status_word_count]
+    aggregated_failure = status_values[status_word_count:]
 
     request_failed = any(aggregated_failure)
     missing_block_ids: set[int] = set()

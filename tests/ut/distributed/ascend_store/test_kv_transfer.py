@@ -100,6 +100,9 @@ class FakeAllGatherContext:
         self.payloads = [None] * world_size
         self.reduce_barrier = threading.Barrier(world_size, timeout=10)
         self.reduce_payloads = [None] * world_size
+        self.exchange_barrier = threading.Barrier(world_size, timeout=10)
+        self.exchange_views = [None] * world_size
+        self.exchange_status = [None] * world_size
 
 
 class FakeAllGatherGroup:
@@ -115,6 +118,21 @@ class FakeAllGatherGroup:
 
     def all_reduce(self, value, op=None):
         self._context.reduce_payloads[self.rank_in_group] = value.clone()
+        self._context.reduce_barrier.wait()
+        return torch.stack(self._context.reduce_payloads).sum(dim=0)
+
+    def exchange_kv_shards(self, tp_rank, local_views, owner_views):
+        self._context.exchange_views[tp_rank] = local_views
+        self._context.exchange_barrier.wait()
+        for owner, destinations in owner_views.items():
+            sources = self._context.exchange_views[owner]
+            if len(sources) != len(destinations):
+                raise AssertionError(f"P2P view count mismatch: {len(sources)} != {len(destinations)}")
+            for source, destination in zip(sources, destinations):
+                destination.copy_(source)
+
+    def all_reduce_kv_status(self, status):
+        self._context.reduce_payloads[self.rank_in_group] = status.clone()
         self._context.reduce_barrier.wait()
         return torch.stack(self._context.reduce_payloads).sum(dim=0)
 
