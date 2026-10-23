@@ -18,7 +18,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "950DT Products"
 
-    | Model   | Support   | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
+    | Model   | Support   | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallelism | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-------|--------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
     |DeepSeek V4-Flash|✅|Native mixed MXFP8/MXFP4 weights||950DT Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)|
     |DeepSeek V4-Pro|✅|Native mixed MXFP8/MXFP4 weights||950DT Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)|
@@ -29,7 +29,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "A2/A3"
 
-    |       Model         | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    |       Model         | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallelism | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     | ------------------- | ------- | ---- | ---- | ------------------ | ---- | --------------- | ---------------------- | ------ | ---------------------- | ------------------ | ----------------- | ------------------- | ----------------- | --------------- | ------------------------------- | -------------------- | -------------------- | --------------- | ----- |
     | DeepSeek V4-Flash   |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md) |
     | DeepSeek V4-Pro     |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 1M | [DeepSeek-V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md) |
@@ -132,7 +132,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "950DT Products"
 
-    | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
+    | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallelism | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
     | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | 950DT Products | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 133120 |  | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     |Qwen3.5-397B-A17B|✅        |       |✅    | 950DT Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
@@ -143,7 +143,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 === "A2/A3"
 
-    |                Model                | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
+    |                Model                | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallelism | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
     | ----------------------------------- | ------- | ---- | ---- | ------------------ | ---- | --------------- | ---------------------- | ---- | -------------------- | ---------------- | --------------- | ----------------- | --------------- | ------------- | ----------------------------- | ------------------ | ------------------ | ------------- | --- |
     | GLM-5.3-Flash | ✅ | Text, image, video | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k (A2) / 1M (A3) | [GLM-5.3-Flash](../../tutorials/models/GLM5.3-Flash.md) |
     | Qwen3-VL                            | ✅      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  |  |  |  | ✅ | ✅ |  | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
