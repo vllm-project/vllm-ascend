@@ -3,18 +3,10 @@
 
 import torch
 import torch.distributed as dist
+from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.sfa_dcp_merge import fused_merge
+from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge
 
-try:
-    import triton  # type: ignore[import-untyped]
-    import triton.language as tl  # type: ignore[import-untyped]
-except ImportError:
-    triton = None
-    tl = None
-
-
-_SUPPORTED_RANKS = (2, 4, 8)
 _HEAD_DIM = 512
 _MAX_LOCAL_HEADS = 32
 # Manually chosen conservative cap, not a demonstrated kernel limit.
@@ -22,75 +14,73 @@ _MAX_LOCAL_HEADS = 32
 _MAX_DECODE_TOKENS = 192
 
 
-if triton is not None:
+@triton.jit
+def _pack_t1_peer(output_words, lse, send, LOCAL_HEADS: tl.constexpr):
+    peer = tl.program_id(0)
+    OUTPUT_WORDS: tl.constexpr = LOCAL_HEADS * 256
+    PEER_WORDS: tl.constexpr = OUTPUT_WORDS + LOCAL_HEADS
+    word = tl.arange(0, OUTPUT_WORDS)
+    values = tl.load(output_words + peer * OUTPUT_WORDS + word, mask=word < OUTPUT_WORDS, other=0)
+    tl.store(send + peer * PEER_WORDS + word, values, mask=word < OUTPUT_WORDS)
+    local_head = tl.arange(0, LOCAL_HEADS)
+    stats = tl.load(
+        lse + peer * LOCAL_HEADS + local_head,
+        mask=local_head < LOCAL_HEADS,
+        other=0.0,
+    )
+    tl.store(
+        send + peer * PEER_WORDS + OUTPUT_WORDS + local_head,
+        stats.to(tl.int32, bitcast=True),
+        mask=local_head < LOCAL_HEADS,
+    )
 
-    @triton.jit
-    def _pack_t1_peer(output_words, lse, send, LOCAL_HEADS: tl.constexpr):
-        peer = tl.program_id(0)
-        OUTPUT_WORDS: tl.constexpr = LOCAL_HEADS * 256
-        PEER_WORDS: tl.constexpr = OUTPUT_WORDS + LOCAL_HEADS
-        word = tl.arange(0, OUTPUT_WORDS)
-        values = tl.load(output_words + peer * OUTPUT_WORDS + word, mask=word < OUTPUT_WORDS, other=0)
-        tl.store(send + peer * PEER_WORDS + word, values, mask=word < OUTPUT_WORDS)
-        local_head = tl.arange(0, LOCAL_HEADS)
-        stats = tl.load(
-            lse + peer * LOCAL_HEADS + local_head,
-            mask=local_head < LOCAL_HEADS,
-            other=0.0,
-        )
-        tl.store(
-            send + peer * PEER_WORDS + OUTPUT_WORDS + local_head,
-            stats.to(tl.int32, bitcast=True),
-            mask=local_head < LOCAL_HEADS,
-        )
 
-    @triton.jit(do_not_specialize=["tokens"])
-    def _pack_token_peer(
-        output,
-        lse,
-        send,
-        output_s0,
-        output_s1,
-        lse_s0,
-        lse_s1,
-        tokens,
-        LOCAL_HEADS: tl.constexpr,
-        HEAD_WORDS: tl.constexpr,
-        STATS_TILE: tl.constexpr,
-    ):
-        peer = tl.program_id(0)
-        OUTPUT_WORDS: tl.constexpr = LOCAL_HEADS * HEAD_WORDS
-        peer_words = tokens * (OUTPUT_WORDS + LOCAL_HEADS)
-        word = tl.arange(0, OUTPUT_WORDS)
-        local_head = word // HEAD_WORDS
-        dim_word = word % HEAD_WORDS
-        peer_base = peer * peer_words
-        for token in range(tokens):
-            values = tl.load(output + token * output_s0 + (peer * LOCAL_HEADS + local_head) * output_s1 + dim_word)
-            tl.store(send + peer_base + token * OUTPUT_WORDS + word, values)
-        index = tl.arange(0, STATS_TILE)
-        token, head = index // LOCAL_HEADS, index % LOCAL_HEADS
-        stats = tl.load(
-            lse + token * lse_s0 + (peer * LOCAL_HEADS + head) * lse_s1,
-            mask=index < tokens * LOCAL_HEADS,
-            other=0.0,
-        )
-        tl.store(
-            send + peer_base + tokens * OUTPUT_WORDS + index,
-            stats.to(tl.int32, bitcast=True),
-            mask=index < tokens * LOCAL_HEADS,
-        )
+@triton.jit(do_not_specialize=["tokens"])
+def _pack_token_peer(
+    output,
+    lse,
+    send,
+    output_s0,
+    output_s1,
+    lse_s0,
+    lse_s1,
+    tokens,
+    LOCAL_HEADS: tl.constexpr,
+    HEAD_WORDS: tl.constexpr,
+    STATS_TILE: tl.constexpr,
+):
+    peer = tl.program_id(0)
+    OUTPUT_WORDS: tl.constexpr = LOCAL_HEADS * HEAD_WORDS
+    peer_words = tokens * (OUTPUT_WORDS + LOCAL_HEADS)
+    word = tl.arange(0, OUTPUT_WORDS)
+    local_head = word // HEAD_WORDS
+    dim_word = word % HEAD_WORDS
+    peer_base = peer * peer_words
+    for token in range(tokens):
+        values = tl.load(output + token * output_s0 + (peer * LOCAL_HEADS + local_head) * output_s1 + dim_word)
+        tl.store(send + peer_base + token * OUTPUT_WORDS + word, values)
+    index = tl.arange(0, STATS_TILE)
+    token, head = index // LOCAL_HEADS, index % LOCAL_HEADS
+    stats = tl.load(
+        lse + token * lse_s0 + (peer * LOCAL_HEADS + head) * lse_s1,
+        mask=index < tokens * LOCAL_HEADS,
+        other=0.0,
+    )
+    tl.store(
+        send + peer_base + tokens * OUTPUT_WORDS + index,
+        stats.to(tl.int32, bitcast=True),
+        mask=index < tokens * LOCAL_HEADS,
+    )
 
 
 def can_exchange(output: torch.Tensor, lse: torch.Tensor, ranks: int = 8) -> bool:
     # These properties are uniform within a valid DCP group. Do not choose
     # different collective counts based on rank-local allocation/stride state.
     return (
-        triton is not None
-        and output.device.type == "npu"
-        and output.dtype == torch.bfloat16
+        output.dtype == torch.bfloat16
         and output.ndim == 3
-        and ranks in _SUPPORTED_RANKS
+        and ranks > 1
+        and ranks & (ranks - 1) == 0
         and 0 < output.shape[0] <= _MAX_DECODE_TOKENS
         and output.shape[2] == _HEAD_DIM
         and output.shape[1] % ranks == 0
@@ -98,7 +88,6 @@ def can_exchange(output: torch.Tensor, lse: torch.Tensor, ranks: int = 8) -> boo
         # Full vectors preserve the unmasked copy lowering. Other head counts
         # retain upstream packing rather than scalarizing a masked token loop.
         and ((output.shape[1] // ranks) & ((output.shape[1] // ranks) - 1)) == 0
-        and lse.device == output.device
         and lse.dtype == torch.float32
         and tuple(lse.shape) == (output.shape[0], output.shape[1], 1)
     )
@@ -145,8 +134,6 @@ def _exchange_tokens(output: torch.Tensor, lse: torch.Tensor, group, ranks: int)
 def exchange(output: torch.Tensor, lse: torch.Tensor, group) -> torch.Tensor:
     """Exchange head shards, retaining FP32 LSE bits and merge math."""
     ranks = dist.get_world_size(group)
-    if not can_exchange(output, lse, ranks):
-        raise ValueError("Unsupported native-DCP output/LSE exchange")
     if output.shape[0] != 1:
         return _exchange_tokens(output, lse, group, ranks)
     local_heads = output.shape[1] // ranks

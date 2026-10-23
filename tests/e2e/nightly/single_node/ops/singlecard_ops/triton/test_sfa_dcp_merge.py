@@ -6,7 +6,7 @@ import torch
 
 pytest.importorskip("torch_npu")
 
-from vllm_ascend.ops.triton.sfa_dcp_merge import fused_merge  # noqa: E402
+from vllm_ascend.ops.triton.dcp.sfa_dcp_merge import fused_merge  # noqa: E402
 
 
 @pytest.mark.parametrize("ranks", [2, 4, 8])

@@ -15,15 +15,15 @@ ALIGNMENT_METADATA = {
     "_prepare_query_head_major": {"ns0", "ns1", "ns2", "rs0", "rs1", "rs2"},
 }
 CASES: list[tuple[str, str, set[str], set[str]]] = [
-    ("sfa_dcp_exchange.py", "_pack_t1_peer", set(), set()),
+    ("dcp/sfa_dcp_exchange.py", "_pack_t1_peer", {"LOCAL_HEADS"}, set()),
     (
-        "sfa_dcp_exchange.py",
+        "dcp/sfa_dcp_exchange.py",
         "_pack_token_peer",
         {"LOCAL_HEADS", "HEAD_WORDS", "STATS_TILE"},
         {"output_s0", "output_s1", "lse_s0", "lse_s1", "tokens"},
     ),
     (
-        "sfa_dcp_merge.py",
+        "dcp/sfa_dcp_merge.py",
         "_fused_merge_kernel",
         {"RANKS", "NATIVE_LAYOUT", "BLOCK_D", "LSE_RANK_STRIDE"},
         {
@@ -38,12 +38,12 @@ CASES: list[tuple[str, str, set[str], set[str]]] = [
         },
     ),
     (
-        "sfa_dcp_query.py",
+        "dcp/sfa_dcp_query.py",
         "_prepare_query_head_major",
         {"NOPE_DIM", "ROPE_DIM"},
         {"ns0", "ns1", "ns2", "rs0", "rs1", "rs2", "tokens", "programs", "heads"},
     ),
-    ("sfa_dcp_query.py", "_unpack_query_fragments", {"NOPE_DIM", "ROPE_DIM"}, {"tokens", "programs", "heads"}),
+    ("dcp/sfa_dcp_query.py", "_unpack_query_fragments", {"NOPE_DIM", "ROPE_DIM"}, {"tokens", "programs", "heads"}),
     ("sfa_indexer_store.py", "_store_indexer_key_scale", set(), {"capacity"}),
 ]
 

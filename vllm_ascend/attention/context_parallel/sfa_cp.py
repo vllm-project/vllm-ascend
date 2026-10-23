@@ -46,8 +46,8 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.dcp.sfa_dcp_query import can_prepare_query, prepare_query_head_major, unpack_query
 from vllm_ascend.ops.triton.pcp_kv_cache import copy_pcp_kv_cache
-from vllm_ascend.ops.triton.sfa_dcp_query import can_prepare_query, prepare_query_head_major, unpack_query
 from vllm_ascend.quantization.methods import AscendLinearScheme
 from vllm_ascend.utils import (
     _round_up,
@@ -1591,7 +1591,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             self.dcp_size,
             scatter_dim,
             self.dcp_group.unique_name,
-            decode_token_budget=self.vllm_config.scheduler_config.max_num_batched_tokens,
         )
 
     def _start_dcp_query_gather(
@@ -1626,7 +1625,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
 
         # Decode-only callers reach this method; PCP+DCP keeps
         # its separate TP-group override and DSA-CP gathers tokens on dim 0.
-        if query_gather_dim == 1 and self.dcp_size in (2, 4, 8) and can_prepare_query(ql_nope, q_pe):
+        if query_gather_dim == 1 and can_prepare_query(ql_nope, q_pe):
             prepared = prepare_query_head_major(ql_nope, q_pe)
             gathered, handle = all_gather_async(prepared, self.dcp_group)
             return DCPGatherContext(

@@ -13,7 +13,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
-from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange, exchange
+from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -482,7 +482,6 @@ def dcp_a2a_fused_combine(
     pcp_group: GroupCoordinator | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
-    decode_token_budget: int | None = None,
 ) -> torch.Tensor:
     """Pack, scatter over DCP or TP, optionally gather over PCP, then merge.
 
@@ -494,10 +493,8 @@ def dcp_a2a_fused_combine(
         pcp_group is None
         and not return_lse
         and not defer_combine
-        and scatter_size in (2, 4, 8)
         and scatter_dim == 1
         and can_exchange(partial_output, softmax_lse, scatter_size)
-        and (decode_token_budget is None or partial_output.shape[0] <= decode_token_budget)
     ):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
@@ -538,7 +535,6 @@ def dcp_a2a_fused(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
-    decode_token_budget: int | None = None,
 ) -> torch.Tensor:
     """Fused DCP output merge, optionally gathering contributions across PCP.
 
@@ -547,8 +543,6 @@ def dcp_a2a_fused(
     With defer_combine=True, return the packed rank contributions after communication.
     With return_lse=True, require FP32 input and return [..., head_dim + 1],
     with the merged LSE in the last element for a subsequent local merge.
-    decode_token_budget bounds optimized routing by the caller's scheduler;
-    standalone callers may omit it and retain the tested manual kernel cap.
     """
     if defer_combine and return_lse:
         raise ValueError("defer_combine and return_lse are mutually exclusive.")
@@ -584,7 +578,6 @@ def dcp_a2a_fused(
         pcp_group=pcp_group,
         return_lse=return_lse,
         defer_combine=defer_combine,
-        decode_token_budget=decode_token_budget,
     )
 
 
@@ -597,7 +590,6 @@ def dcp_a2a_fused_fake(
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
-    decode_token_budget: int | None = None,
 ) -> torch.Tensor:
     """Propagate output metadata for torch.compile without running HCCL.
 
@@ -605,7 +597,7 @@ def dcp_a2a_fused_fake(
     operator. It must only describe the local output shape, dtype, and device;
     the real implementation performs the collective at execution time.
     """
-    del softmax_lse, group_name, decode_token_budget
+    del softmax_lse, group_name
     if defer_combine and return_lse:
         raise ValueError("defer_combine and return_lse are mutually exclusive.")
     if defer_combine:

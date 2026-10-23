@@ -101,7 +101,7 @@ def _remap_sparse_indices_integer(
     """Exact fallback; do not reintroduce FP32 index arithmetic above 2**24.
 
     Integer sorting may use AICPU on Ascend. This fallback favors correctness
-    outside the native DCP2/4/8/interleave128 two-kernel fast path.
+    outside the power-of-two DCP/interleave128 two-kernel fast path.
     """
     integer = indices.to(torch.int64)
     blocks = torch.div(integer, interleave_size, rounding_mode="floor")
@@ -147,7 +147,7 @@ def remap_sparse_indices_triton(
     """
     if topk_indices.numel() == 0:
         return topk_indices
-    if dcp_size not in (2, 4, 8) or interleave_size != 128:
+    if dcp_size <= 0 or dcp_size & (dcp_size - 1) or interleave_size != 128:
         return _remap_sparse_indices_integer(topk_indices, dcp_size, dcp_rank, interleave_size)
     orig_dtype = topk_indices.dtype
     orig_shape = topk_indices.shape

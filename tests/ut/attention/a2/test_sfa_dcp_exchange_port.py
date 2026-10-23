@@ -89,7 +89,7 @@ def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
     )
 
     from vllm_ascend.ops.triton.dcp import dcp_a2a as dispatch
-    from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange
+    from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange
 
     calls: dict[int, int] = {}
     original_exchange = dispatch.exchange
@@ -121,7 +121,7 @@ def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
         assert can_exchange(output, lse)
 
         def invoke(output=output, lse=lse):
-            return torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name, decode_token_budget=192)
+            return torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name)
 
         for _ in range(5):
             invoke()
@@ -196,7 +196,7 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
     )
 
     from vllm_ascend.ops.triton.dcp import dcp_a2a as dispatch
-    from vllm_ascend.ops.triton.sfa_dcp_exchange import exchange
+    from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import exchange
 
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -229,7 +229,7 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
 
         def invoke(output=output, lse=lse):
             fp32 = exchange(output, lse, group.device_group)
-            bf16 = torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name, decode_token_budget=192)
+            bf16 = torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name)
             return fp32, bf16
 
         for _ in range(3):

@@ -52,7 +52,7 @@ def test_sfa_dcp_routes_native_output_merge_to_custom_op(fused_a2a) -> None:
         actual = impl._merge_dcp_outputs(output, lse)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0", decode_token_budget=192)
+    fused_a2a.assert_called_once_with(output, lse, 2, 1, "dcp:0")
 
 
 @patch("torch.ops.vllm.dcp_a2a_fused")
@@ -72,7 +72,7 @@ def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
     actual = impl._merge_dcp_outputs(output, lse, dsa_cp_context)
 
     assert actual is expected
-    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0", decode_token_budget=192)
+    fused_a2a.assert_called_once_with(output, lse, 2, 0, "dcp:0")
 
 
 @pytest.mark.parametrize("scatter_dim", [0, 1])
@@ -116,7 +116,6 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
         pcp_group=None,
         return_lse=True,
         defer_combine=False,
-        decode_token_budget=None,
     )
 
 

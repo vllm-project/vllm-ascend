@@ -17,8 +17,8 @@ from vllm.distributed.parallel_state import (  # noqa: E402
 )
 
 from vllm_ascend.ops.triton.dcp import dcp_a2a  # noqa: E402
-from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange, exchange  # noqa: E402
-from vllm_ascend.ops.triton.sfa_dcp_query import prepare_query_head_major, unpack_query  # noqa: E402
+from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange  # noqa: E402
+from vllm_ascend.ops.triton.dcp.sfa_dcp_query import prepare_query_head_major, unpack_query  # noqa: E402
 
 RANKS = int(os.environ.get("WORLD_SIZE", "1"))
 pytestmark = pytest.mark.skipif(RANKS not in (2, 4, 8), reason="requires isolated DCP2/4/8")
@@ -131,7 +131,7 @@ def test_registered_exchange_group_sizes_against_fp64(context, local_heads, toke
 
     def invoke():
         fp32 = exchange(output, lse, group.device_group) if optimized else None
-        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name, decode_token_budget=192)
+        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
 
     for _ in range(3):
         invoke()

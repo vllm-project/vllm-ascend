@@ -11,7 +11,9 @@ import torch
 ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("variant", ["native", "prefill", "mixed", "pcp", "dsa", "dcp1", "large", "subclass", "c4"])
+@pytest.mark.parametrize(
+    "variant", ["native", "prefill", "mixed", "pcp", "dsa", "dcp1", "dcp2", "dcp4", "large", "subclass", "c4"]
+)
 @pytest.mark.parametrize("with_dependency", [False, True])
 def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency):
     """Keep quantization exact and finish parallel-layout transforms before writing."""
@@ -71,7 +73,7 @@ def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency
     future = ast.parse("from __future__ import annotations").body
     exec(compile(ast.Module(body=[*future, *methods], type_ignores=[]), str(source), "exec"), namespace)
     state = OtherBackend() if variant == "subclass" else Backend()
-    state._dcp_size = 1 if variant == "dcp1" else 8
+    state._dcp_size = int(variant[-1]) if variant in ("dcp1", "dcp2", "dcp4") else 8
     state._pcp_active, state._dsa_cp_active = variant == "pcp", variant == "dsa"
     state._is_pcp_decode_sharded = False
     state.enable_sparse_li_c8 = variant != "c4"
@@ -113,7 +115,7 @@ def test_native_quantization_and_cache_pipeline_routing(variant, with_dependency
     assert result is None and events == (
         ["quant"]
         + (["wait_q"] if with_dependency else [])
-        + ["gather_done", "fused" if variant == "native" else "legacy"]
+        + ["gather_done", "fused" if variant in ("native", "dcp1", "dcp2", "dcp4") else "legacy"]
     )
     assert torch.equal(caches[0][metadata.slot_mapping], quant)
     expected_scales = scales.view(rows, 1, 2, 2) if variant == "c4" else scales.to(torch.float16).view(rows, 1)

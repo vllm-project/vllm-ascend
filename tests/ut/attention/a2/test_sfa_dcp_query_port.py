@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 pytest.importorskip("torch_npu")
 
-from vllm_ascend.ops.triton.sfa_dcp_query import (  # noqa: E402
+from vllm_ascend.ops.triton.dcp.sfa_dcp_query import (  # noqa: E402
     can_prepare_query,
     prepare_query_head_major,
     unpack_query,

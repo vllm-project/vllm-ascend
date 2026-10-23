@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[3]
         (6, True, False, False, 8),
     ],
 )
-@pytest.mark.parametrize("ranks", [2, 4, 8])
+@pytest.mark.parametrize("ranks", [2, 4, 8, 16])
 def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, decode, dsa, prepared, pcp_size, ranks):
     if pcp_size > ranks:
         pytest.skip("PCP must divide the DCP group")
@@ -114,7 +114,7 @@ def test_query_gather_waits_before_final_unpack_and_preserves_fallback(tokens, d
 @pytest.mark.parametrize("tokens,expected", [(0, False), (1, False), (2, True), (6, True), (12, True), (13, False)])
 @pytest.mark.parametrize("local_heads", [1, 3, 8, 16, 32])
 def test_query_shape_gate_keeps_single_token_and_large_batch_paths(tokens, expected, local_heads):
-    source = ROOT / "vllm_ascend/ops/triton/sfa_dcp_query.py"
+    source = ROOT / "vllm_ascend/ops/triton/dcp/sfa_dcp_query.py"
     tree = ast.parse(source.read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "can_prepare_query")
     namespace = {

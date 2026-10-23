@@ -2,7 +2,6 @@
 """Exercise exchange routing and invalid-rank semantics without an NPU."""
 
 import ast
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,13 +36,12 @@ def load_function(path, name, namespace):
         (6, 16, 1, True, False),
         (8, 8, 0, True, False),
         (6, 8, 1, True, True),
-        (6, 1, 1, True, True),
-        (6, 1, 1, True, False),
+        (6, 1, 1, False, True),
+        (6, 1, 1, False, False),
     ],
 )
-@pytest.mark.parametrize("budget", [None, 32, 48, 192, 512])
 @pytest.mark.parametrize("a5", [False, True])
-def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, scatter, supported, pcp, budget, a5):
+def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, scatter, supported, pcp, a5):
     # Device generation must not change the tensor/mode eligibility contract.
     calls = []
     group = object()
@@ -76,9 +74,9 @@ def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, s
         return value
 
     pcp_group = SimpleNamespace(all_gather=pcp_gather) if pcp else None
-    result = run(output, lse, ranks, scatter, group, pcp_group, decode_token_budget=budget)
+    result = run(output, lse, ranks, scatter, group, pcp_group)
     assert result.dtype == output.dtype and result.shape == shape
-    if ranks in (2, 4, 8) and scatter == 1 and supported and not pcp and (budget is None or tokens <= budget):
+    if scatter == 1 and supported and not pcp:
         assert calls == ["exchange"]
     else:
         assert calls == (["upstream_collective"] if ranks > 1 else []) + (["pcp_gather"] if pcp else [])
@@ -88,7 +86,7 @@ def test_registered_op_keeps_upstream_fallback_and_output_dtype(tokens, ranks, s
     "tokens,expected", [(0, False), (1, True), (6, True), (12, True), (13, True), (48, True), (192, True), (193, False)]
 )
 def test_exchange_gate(tokens, expected):
-    source = ROOT / "vllm_ascend/ops/triton/sfa_dcp_exchange.py"
+    source = ROOT / "vllm_ascend/ops/triton/dcp/sfa_dcp_exchange.py"
     constants = {
         node.targets[0].id: ast.literal_eval(node.value)
         for node in ast.parse(source.read_text()).body
@@ -97,14 +95,14 @@ def test_exchange_gate(tokens, expected):
         and node.targets[0].id in ("_MAX_DECODE_TOKENS", "_SUPPORTED_RANKS", "_HEAD_DIM", "_MAX_LOCAL_HEADS")
     }
     namespace = {"torch": torch, "triton": object(), **constants}
-    run = load_function("vllm_ascend/ops/triton/sfa_dcp_exchange.py", "can_exchange", namespace)
+    run = load_function("vllm_ascend/ops/triton/dcp/sfa_dcp_exchange.py", "can_exchange", namespace)
     device = SimpleNamespace(type="npu")
     output = SimpleNamespace(device=device, dtype=torch.bfloat16, ndim=3, shape=(tokens, 64, 512))
     lse = SimpleNamespace(device=device, dtype=torch.float32, shape=(tokens, 64, 1))
     assert run(output, lse) is expected
 
 
-@pytest.mark.parametrize("ranks", [2, 4, 8])
+@pytest.mark.parametrize("ranks", [2, 4, 8, 16, 32])
 @pytest.mark.parametrize("local_heads", [1, 3, 8, 16, 32, 33])
 def test_exchange_gate_derives_head_shards_from_group(ranks, local_heads):
     namespace = dict(
@@ -115,7 +113,7 @@ def test_exchange_gate_derives_head_shards_from_group(ranks, local_heads):
         _MAX_LOCAL_HEADS=32,
         _MAX_DECODE_TOKENS=192,
     )
-    run = load_function("vllm_ascend/ops/triton/sfa_dcp_exchange.py", "can_exchange", namespace)
+    run = load_function("vllm_ascend/ops/triton/dcp/sfa_dcp_exchange.py", "can_exchange", namespace)
     device = SimpleNamespace(type="npu")
     heads = ranks * local_heads
     output = SimpleNamespace(device=device, dtype=torch.bfloat16, ndim=3, shape=(13, heads, 512))
@@ -123,28 +121,6 @@ def test_exchange_gate_derives_head_shards_from_group(ranks, local_heads):
     assert run(output, lse, ranks) is (local_heads <= 32 and local_heads & (local_heads - 1) == 0)
     output.shape = (13, heads + 1, 512)
     assert not run(output, lse, ranks)
-
-
-@pytest.mark.parametrize("token_dim", [1, 2])
-def test_merge_masks_invalid_rank_outputs_before_weighting(token_dim):
-    spec = importlib.util.spec_from_file_location("merge_under_test", ROOT / "vllm_ascend/ops/triton/sfa_dcp_merge.py")
-    assert spec is not None and spec.loader is not None
-    merge = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(merge)
-    parts = torch.full((8, 2, 3, 4), float("nan"))
-    lse = torch.full((8, 2, 3), float("-inf"))
-    lse[0] = float("nan")
-    lse[1] = float("inf")
-    parts[2] = 2.0
-    lse[2] = 0.0
-    parts[3] = 4.0
-    lse[3] = 0.0
-    # One position has no valid ranks; even NaN payloads must yield zero.
-    lse[:, 0, 0] = float("-inf")
-    expected = torch.full((2, 3, 4), 3.0)
-    expected[0, 0] = 0.0
-    expected = expected.movedim(token_dim - 1, 0).contiguous()
-    assert torch.equal(merge.fused_merge(parts, lse, token_dim), expected)
 
 
 def test_custom_op_fake_retains_shape_dtype_and_does_not_collect():
@@ -203,18 +179,17 @@ def test_new_main_merge_modes_never_take_output_only_fast_path(defer):
         object(),
         return_lse=not defer,
         defer_combine=defer,
-        decode_token_budget=192,
     )
     assert result.shape == (packed.shape if defer else (6, 8, 513))
     assert calls == (["collective"] if defer else ["collective", "merge_lse"])
 
 
-def test_registered_operator_forwards_budget_and_fake_keeps_shape():
+def test_registered_operator_forwards_group_and_fake_keeps_shape():
     group = SimpleNamespace(world_size=8, device_group=object())
     calls = []
 
     def combine(*args, **kwargs):
-        calls.append(kwargs["decode_token_budget"])
+        calls.append(args[2])
         return args[0]
 
     namespace = {"torch": torch, "_groups": {"dcp": lambda: group}, "dcp_a2a_fused_combine": combine}
@@ -222,23 +197,24 @@ def test_registered_operator_forwards_budget_and_fake_keeps_shape():
     fake = load_function("vllm_ascend/ops/triton/dcp/dcp_a2a.py", "dcp_a2a_fused_fake", {"torch": torch})
     output = torch.empty(48, 64, 512, dtype=torch.bfloat16)
     lse = torch.empty(48, 64, 1)
-    for budget in (32, 192):
-        run(output, lse, 8, 1, "dcp", decode_token_budget=budget)
-        result = fake(output, lse, 8, 1, "dcp", decode_token_budget=budget)
-        assert result.shape == (48, 8, 512) and result.dtype == output.dtype
-    assert calls == [32, 192]
+    for ranks in (2, 4, 8):
+        group.world_size = ranks
+        run(output, lse, ranks, 1, "dcp")
+        result = fake(output, lse, ranks, 1, "dcp")
+        assert result.shape == (48, 64 // ranks, 512) and result.dtype == output.dtype
+    assert calls == [2, 4, 8]
 
 
-def test_attention_passes_current_scheduler_budget_without_global_config():
+def test_attention_forwards_its_group_without_scheduler_config():
     source = ROOT / "vllm_ascend/attention/context_parallel/sfa_cp.py"
     cls = next(
         n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "AscendSFADCPImpl"
     )
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_merge_dcp_outputs")
-    budgets = []
+    calls = []
 
     def invoke(*args, **kwargs):
-        budgets.append(kwargs["decode_token_budget"])
+        calls.append((args[2], args[4]))
         return args[0]
 
     namespace: dict[str, Any] = {
@@ -247,13 +223,9 @@ def test_attention_passes_current_scheduler_budget_without_global_config():
     }
     future = ast.parse("from __future__ import annotations").body
     exec(compile(ast.Module(body=future + [method], type_ignores=[]), str(source), "exec"), namespace)
-    scheduler = SimpleNamespace(max_num_batched_tokens=48)
     state = SimpleNamespace(
         dcp_size=8,
         dcp_group=SimpleNamespace(unique_name="dcp"),
-        vllm_config=SimpleNamespace(scheduler_config=scheduler),
     )
-    for budget in (48, 128):
-        scheduler.max_num_batched_tokens = budget
-        namespace["_merge_dcp_outputs"](state, object(), object())
-    assert budgets == [48, 128]
+    namespace["_merge_dcp_outputs"](state, object(), object())
+    assert calls == [(8, "dcp")]

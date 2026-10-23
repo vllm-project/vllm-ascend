@@ -432,7 +432,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # PCP/DSA-CP and custom cache subclasses keep their established layout.
         fuse_store = (
             type(self) is AscendSFAIndexerBackend
-            and getattr(self, "_dcp_size", 1) == 8
             and not self._pcp_active
             and not self._dsa_cp_active
             and self.enable_sparse_li_c8
