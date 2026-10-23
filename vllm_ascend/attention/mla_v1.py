@@ -2990,6 +2990,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        # Release subsequent layer prefetches at the decode attention boundary,
+        # just as prefill and external FlashMLA do.
+        record_attention_compute_start()
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 

@@ -290,3 +290,54 @@ def test_connector_wait_noops_without_transfer_metadata(has_group, has_metadata)
     wait = load("vllm_ascend/attention/utils.py", "wait_for_kv_layer_from_connector", scope)
     wait("mla")
     connector.wait_for_layer_load.assert_not_called()
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_decode_attention_opens_gate_for_next_layer_prefetch(speculative):
+    # A real receiver waits on this boundary before copying the next layer.
+    # Without the signal, adding the MLA load wait deadlocks on layer 1.
+    gate = Event()
+    attention_calls = []
+
+    def attention(query, *_args, **_kwargs):
+        assert gate.is_set(), "decode left subsequent layer prefetch blocked"
+        attention_calls.append(True)
+        return query, None
+
+    state = SimpleNamespace(DecodeOnly=0, SpecDecoding=1, ChunkedPrefill=2, PrefillNoCache=3)
+    scope = {
+        "torch": torch,
+        "torch_npu": SimpleNamespace(npu_fused_infer_attention_score_v2=attention),
+        "AscendAttentionState": state,
+        "_EXTRA_CTX": SimpleNamespace(is_draft_model=False, capturing=False),
+        "get_graph_params": lambda: None,
+        "record_attention_compute_start": gate.set,
+    }
+    impl = SimpleNamespace(
+        fa_quant_layer=False,
+        enable_kv_nz=False,
+        kv_lora_rank=2,
+        qk_rope_head_dim=2,
+        num_heads=1,
+        num_heads_padded=1,
+        num_kv_heads=1,
+        head_padding=0,
+        scale=1.0,
+        speculative_config=object() if speculative else None,
+        _v_up_proj=lambda value: value,
+    )
+    result = SimpleNamespace(
+        ql_nope=torch.ones(4, 1, 2),
+        q_pe=torch.ones(4, 1, 2),
+        k_nope=torch.ones(1, 1, 128, 2),
+        k_pe=torch.ones(1, 1, 128, 2),
+        dequant_scale_q_nope=None,
+    )
+    metadata = SimpleNamespace(
+        attn_state=state.DecodeOnly,
+        causal=True,
+        decode=SimpleNamespace(block_table=None, seq_lens_list=[4], actual_seq_lengths_q=[4], attn_mask=None),
+    )
+    decode = load(MLA, "_forward_decode", scope, "AscendMLAImpl")
+    decode(impl, result, 128, metadata)
+    assert attention_calls == [True]

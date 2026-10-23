@@ -1,4 +1,4 @@
 pr: 19635
 entries:
   - category: bugfix
-    text: Fixed MLA decode paths skipping layerwise KV load waits, which could leave stale completion events and terminate the engine when a short prefill reuses external KV cache.
+    text: Fixed MLA decode paths skipping layerwise KV load waits and the decode prefetch-start signal, which could produce incorrect output, leave stale completion events, or block subsequent loads when a short prefill reuses external KV cache.
