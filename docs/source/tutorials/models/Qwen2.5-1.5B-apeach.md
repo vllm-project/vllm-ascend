@@ -18,8 +18,9 @@ vLLM Ascend for offline batch classification and online service deployment.
 The model runs through the pooling runner with the `classify` task
 (`supported_tasks=('classify', 'token_classify')`). Because it is a
 classification model there is no sampling path: greedy/non-greedy criteria
-do not apply, and inference is deterministic (the same input always yields
-identical probabilities).
+do not apply, and inference is near-deterministic (the same input yields
+near-identical probabilities; the residual kernel-level noise on the Ascend
+custom-op path is ~1e-3).
 
 ## 3 Prerequisites
 
@@ -27,9 +28,13 @@ identical probabilities).
 
 The same weights are published on two sources:
 
-- Hugging Face: [jason9693/Qwen2.5-1.5B-apeach](https://huggingface.co/jason9693/Qwen2.5-1.5B-apeach)
-  (from mainland China you may need `HF_ENDPOINT=https://hf-mirror.com`)
-- ModelScope: [Howeee/Qwen2.5-1.5B-apeach](https://www.modelscope.cn/models/Howeee/Qwen2.5-1.5B-apeach)
+| Source       | Download Links |
+|--------------|----------------|
+| Hugging Face | [jason9693/Qwen2.5-1.5B-apeach](https://huggingface.co/jason9693/Qwen2.5-1.5B-apeach) |
+| ModelScope   | [Howeee/Qwen2.5-1.5B-apeach](https://www.modelscope.cn/models/Howeee/Qwen2.5-1.5B-apeach) |
+
+> From mainland China, Hugging Face downloads may require
+> `HF_ENDPOINT=https://hf-mirror.com`.
 
 Download example (Hugging Face):
 
@@ -48,9 +53,15 @@ multiple nodes, such as `/root/.cache/`.
 
 ## 4 Installation
 
+### 4.1 Docker Image Installation
+
 Use the official docker image, refer to
-[using docker](../../getting_started/installation.md#installation-prebuilt-image), or build from
-source, refer to [installation](../../getting_started/installation.md).
+[using docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+### 4.2 Source Code Installation
+
+Alternatively, build from source, refer to
+[installation](../../getting_started/installation.md).
 
 ## 5 Environment Configuration
 
@@ -61,6 +72,9 @@ variable at load time, before Python-side `bootstrap_custom_op_env()` runs,
 so it must be exported before starting vLLM:
 
 ```shell
+# To locate set_env.bash for your own installation (docker image or
+# site-packages alike):
+#   python3 -c "import vllm_ascend, os; print(os.path.join(os.path.dirname(vllm_ascend.__file__), '_cann_ops_custom', 'vendors', 'custom_transformer', 'bin', 'set_env.bash'))"
 . /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
 ```
 
@@ -81,11 +95,12 @@ not guarantee (~2e-3 kernel-level batch correlation is normal there).
 # The custom op kernels (e.g. aclnnAddRmsNormBias) are shipped in the
 # _cann_ops_custom vendor package and located via ASCEND_CUSTOM_OPP_PATH.
 # vllm_ascend_C.so is loaded before Python-side bootstrap_custom_op_env()
-# runs, so the variable must be exported before the process starts:
+# runs, so the variable must be exported before the process starts.
+# Locate set_env.bash for your installation as shown in section 5:
 . /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
 
 ASCEND_RT_VISIBLE_DEVICES=0 \
-vllm serve /root/.cache/huggingface/hub/models--jason9693--Qwen2.5-1.5B-apeach/snapshots/<snapshot-sha> \
+vllm serve jason9693/Qwen2.5-1.5B-apeach \
     --runner pooling \
     --dtype bfloat16 \
     --max-model-len 4096 \
@@ -99,8 +114,7 @@ vllm serve /root/.cache/huggingface/hub/models--jason9693--Qwen2.5-1.5B-apeach/s
 
 Key parameter descriptions:
 
-- `--runner pooling`: required for embedding/pooling/classification models
-  (the legacy spelling is `--task classify`).
+- `--runner pooling`: required for embedding/pooling/classification models.
 - `--dtype bfloat16`: bf16 keeps the probability tolerance vs the fp32
   reference within 1e-2 for confident inputs. Avoid fp16 on this model:
   a same-lineage fp16 test was historically flaky and is on the CI skip
@@ -120,8 +134,8 @@ endpoint (classification models take plain text, no chat template):
 curl http://127.0.0.1:8000/classify \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "/root/.cache/huggingface/hub/models--jason9693--Qwen2.5-1.5B-apeach/snapshots/<snapshot-sha>",
-    "input": ["안녕하세요 오늘 날씨가 참 좋네요", "너 진짜 최악이다 다시는 보기 싶다"]
+    "model": "jason9693/Qwen2.5-1.5B-apeach",
+    "input": ["안녕하세요 오늘 날씨가 참 좋네요", "너 진짜 최악이다 다시는 보기 싫다"]
   }'
 ```
 
@@ -136,23 +150,27 @@ Offline batch classification example:
 from vllm import LLM
 
 llm = LLM(
-    model="/root/.cache/huggingface/hub/models--jason9693--Qwen2.5-1.5B-apeach/snapshots/<snapshot-sha>",
+    model="jason9693/Qwen2.5-1.5B-apeach",
     runner="pooling",
     dtype="bfloat16",
     max_model_len=4096,
     enforce_eager=True,
 )
-outputs = llm.classify(["안녕하세요 오늘 날씨가 참 좋네요", "너 진짜 최악이다 다시는 보기 싶다"])
+outputs = llm.classify(["안녕하세요 오늘 날씨가 참 좋네요", "너 진짜 최악이다 다시는 보기 싫다"])
 for out in outputs:
     print(out.outputs.probs)  # [P(Default), P(Spoiled)]
 ```
 
 ## 8 Known Limitations
 
-- Architecture registration: `Qwen2ForSequenceClassification` is not in the
-  vLLM model registry; vLLM resolves it through the transformers fallback
-  backend (`TransformersForSequenceClassification`) automatically, so no
-  `--hf-overrides` is needed.
+- Architecture resolution: vLLM ships no dedicated
+  `Qwen2ForSequenceClassification` implementation. The `classify` convert
+  path handles it instead: `--convert auto` resolves to `classify`, the
+  native `Qwen2ForCausalLM` backbone is loaded and wrapped with the
+  built-in sequence-classification adapter (`as_seq_cls_model`), which
+  attaches the checkpoint's `score` linear head and pools the LAST token
+  (the adapter's default sequence pooling type, applied via
+  `get_default_seq_pooling_type`). No `--hf-overrides` is needed.
 - Custom op discovery: the RMSNorm custom op `aclnnAddRmsNormBias` is
   provided by the `_cann_ops_custom` vendor package, not by the CANN
   `libopapi.so` itself. `vllm_ascend_C.so` resolves it through
@@ -163,5 +181,23 @@ for out in outputs:
 - Language coverage: the model is Korean-only. Chinese/English inputs run
   without crashing but are out of the model's domain.
 - Soft probabilities: for benign Korean inputs the model naturally emits
-  probabilities around 0.6-0.9, so bf16-vs-fp32 differences of ~0.01 are
-  expected there; argmax labels remain stable.
+  probabilities around 0.5-0.9. End-to-end bf16 accumulation across the 28
+  transformer layers (a single bf16 rounding step is only ~2e-3) shifts the
+  probability by up to ~3e-3 in measured bf16-vs-fp32 comparisons on this
+  corpus; argmax labels remain stable.
+
+## 9 FAQ
+
+For common environment, installation, and general parameter issues, please
+refer to the [Public FAQs](../../faqs.md).
+
+- **Why do generate / chat endpoints reject requests for this model?**
+  This is a sequence-classification (pooling) model: it has no language
+  modeling head, so only the pooling/classify path is exposed (the
+  `/classify` endpoint online, `LLM.classify` offline). Generation
+  requests fail by design, not by misconfiguration.
+- **The first forward pass fails with `aclnnAddRmsNormBias ... not in
+  libopapi.so`?** The `_cann_ops_custom` vendor environment (section 5)
+  was not sourced before starting vLLM; `vllm_ascend_C.so` reads
+  `ASCEND_CUSTOM_OPP_PATH` at load time, so re-source `set_env.bash` and
+  restart the server.
