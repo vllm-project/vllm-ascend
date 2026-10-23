@@ -74,6 +74,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configures entropy verification for speculative decoding. |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4. For PCP batches with global prefill, this option controls overlap of local Q projection with global cache preparation on nonempty query shards. Set it to `false` to run these operations serially.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
+| `sparse_kv_offload_config` | dict | `{}` | Sparse KV offload configuration; disabled by default. See [Sparse KV offload configuration](#sparse-kv-offload-configuration). |
 | `combine_quant_mode`                | int  | `0`     | Controls communication quantization for the MC2 combine operation. The default (`0`) lets the runtime select the mode. Set `2`, `3`, or `4` to override the `comm_quant_mode` argument to `torch_npu.npu_moe_distribute_combine_v2`. |
 
 The details of each configuration option are as follows:
@@ -409,3 +410,29 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+## Sparse KV offload configuration
+
+Set the following fields inside `sparse_kv_offload_config`:
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `host_backend` | str | `"memfabric"` | Host KV memory backend: `"memfabric"` or `"mooncake"`. Enabled Mooncake offload requires `use_fused_overlap=true` and `keep_device_kv_cache=false`. |
+| `lru_max_threads` | int | `8` | Positive integer limiting the fused-overlap CPU LRU planner's thread and workspace budget. The budget is also capped by the process CPU affinity, or CPU count when affinity is unavailable. Applies to both Host backends. |
+
+Host backend selection does not enable sparse KV offload by itself. Set the
+existing `enabled` field to `true` on a supported Decode consumer. The existing
+model, hardware and parallelism restrictions still apply. Mooncake Host memory
+allocation additionally requires the `mooncake.shared_segment` API with Ascend VMM
+support (`mmap=False, host_register=False`); it does not fall back to mmap and
+HostRegister. Full Mooncake offload inference also requires the Decode execution
+and connector support for that backend.
+
+With the default LRU setting, the workspace budget remains 8 when at least
+8 CPUs are available, and is reduced otherwise. Actual planner concurrency can
+be lower when fewer work rows are available. Changing the budget trades CPU
+parallelism against workspace size and thread contention.
+
+When CPU binding is enabled, enabled Mooncake Host offload retains thread and
+IRQ affinity while automatically skipping process-wide NUMA page migration.
+See [CPU Binding](../feature_guide/cpu_binding.md).
