@@ -758,10 +758,21 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         # FlashComm remains the SP MoE switch on Ascend.
-        flashcomm_explicitly_enabled = validate_additional_config_bool(
-            (vc.additional_config or {}).get("enable_flashcomm1", False),
-            "additional_config.enable_flashcomm1",
-        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        additional_config = vc.additional_config or {}
+        env_enabled = os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        if "enable_flashcomm1" in additional_config:
+            flashcomm_explicitly_enabled = validate_additional_config_bool(
+                additional_config["enable_flashcomm1"],
+                "additional_config.enable_flashcomm1",
+            )
+            if "VLLM_ASCEND_ENABLE_FLASHCOMM1" in os.environ and env_enabled != flashcomm_explicitly_enabled:
+                logger.warning_once(
+                    "additional_config.enable_flashcomm1=%s overrides VLLM_ASCEND_ENABLE_FLASHCOMM1=%s.",
+                    flashcomm_explicitly_enabled,
+                    os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"],
+                )
+        else:
+            flashcomm_explicitly_enabled = env_enabled
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
