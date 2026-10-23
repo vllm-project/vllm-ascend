@@ -575,13 +575,12 @@ class DeepseekV4Attention(nn.Module):
         else:
             rope_theta = config.rope_theta
             rope_groups = ["default"]
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.32.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.32.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
             layername=f"{prefix}.attn",
@@ -725,13 +724,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        # vLLM #61392 keys the checkpoint's YaRN values under the compressor
-        # (CSA/HCA) group; the v0.32.0 lane keeps a single flat dict.
+        # Both supported lanes accept flat and per-group checkpoint RoPE dicts.
+        # Use compressor (CSA/HCA) YaRN values when the nested group is present.
         yarn_rope_parameters = config.rope_parameters
-        if not vllm_version_is("0.32.0"):
-            compress_rope_parameters = yarn_rope_parameters.get("compress")
-            if isinstance(compress_rope_parameters, dict):
-                yarn_rope_parameters = compress_rope_parameters
+        compress_rope_parameters = yarn_rope_parameters.get("compress")
+        if isinstance(compress_rope_parameters, dict):
+            yarn_rope_parameters = compress_rope_parameters
         max_position_embeddings = yarn_rope_parameters.get(
             "original_max_position_embeddings", config.max_position_embeddings
         )
