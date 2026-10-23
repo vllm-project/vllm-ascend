@@ -135,9 +135,7 @@ class QuantizedAllReduce:
         # (MIN_NUMEL * 2 bytes of bf16 payload) take the int8 path. The
         # default is 64 MiB, the measured break-even rounded up; see the
         # module docstring for the sizing table and configuration guide.
-        self.min_numel = _env_int(
-            "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 32 * 1024 * 1024
-        )
+        self.min_numel = _env_int("VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", 32 * 1024 * 1024)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if input_.dtype != torch.bfloat16 or input_.numel() < self.min_numel:
