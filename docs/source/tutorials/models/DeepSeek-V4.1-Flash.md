@@ -744,6 +744,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     ```shell
     #!/usr/bin/env bash
 
+    set -euo pipefail
     unset https_proxy
     unset http_proxy
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -856,7 +857,8 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     ```shell
     #!/usr/bin/env bash
-
+    
+    set -euo pipefail
     unset https_proxy
     unset http_proxy
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -1418,6 +1420,7 @@ On the Prefill node, save the following script as `run_dp_template.sh`. Set
 ```shell
 #!/usr/bin/env bash
 
+set -euo pipefail
 unset https_proxy
 unset http_proxy
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -1524,6 +1527,7 @@ On the Decode node, save the following script as `run_dp_template.sh`. Set
 ```shell
 #!/usr/bin/env bash
 
+set -euo pipefail
 unset https_proxy
 unset http_proxy
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -1651,6 +1655,7 @@ Key pooling parameters:
 
     ```bash
     #!/usr/bin/env bash
+    
     set -euo pipefail
     NODE_RANK=0
 
