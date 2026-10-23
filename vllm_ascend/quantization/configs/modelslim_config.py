@@ -100,7 +100,7 @@ def _make_modelslim_moe_weight_loader(
         # what ``sanitize_layer_refs`` replaces with a sentinel.
         unbound_loader = weight_loader.__func__
 
-        def modelslim_moe_weight_loader(
+        def modelslim_moe_bound_weight_loader(
             self: Any,
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
@@ -119,7 +119,7 @@ def _make_modelslim_moe_weight_loader(
                 return_success=return_success,
             )
 
-        return modelslim_moe_weight_loader.__get__(weight_loader.__self__)
+        return modelslim_moe_bound_weight_loader.__get__(weight_loader.__self__)
 
     @wraps(weight_loader)
     def modelslim_moe_weight_loader(
