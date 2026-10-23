@@ -273,7 +273,7 @@ class TestAscendModelSlimConfig(TestBase):
         layer = Expert()
         meta_weight = None
         try:
-            loader = getattr(layer.weight, "weight_loader")
+            loader = layer.weight.weight_loader
             self.assertIsInstance(loader, MethodType)
             assert isinstance(loader, MethodType)
             self.assertIs(loader.__self__, layer)
@@ -294,12 +294,12 @@ class TestAscendModelSlimConfig(TestBase):
 
             layerwise.record_metadata_for_reloading(layer)
             meta_weight = layerwise.LAYERWISE_INFO[layer].restore_metadata[0]["weight"]
-            meta_loader = getattr(meta_weight, "weight_loader")
+            meta_loader = meta_weight.weight_loader
             assert isinstance(meta_loader, MethodType)
             self.assertIs(meta_loader.__self__, layer_ref_sentinel)
 
             restore_layer_refs(meta_weight, layer)
-            meta_loader = getattr(meta_weight, "weight_loader")
+            meta_loader = meta_weight.weight_loader
             assert isinstance(meta_loader, MethodType)
             reloaded = meta_loader(
                 param=meta_weight,
