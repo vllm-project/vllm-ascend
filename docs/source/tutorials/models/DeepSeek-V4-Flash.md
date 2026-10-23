@@ -33,6 +33,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
 | `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
+| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
@@ -52,6 +53,39 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 **Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
+
+=== "950DT products"
+
+    Start the Docker container on each server.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export NAME=vllm-ascend
+    docker run --rm \
+        --name $NAME \
+        --net=host \
+        --shm-size=512g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/hisi_hdc \
+        --device /dev/ummu \
+        --device /dev/uburma \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+        -itd $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -324,6 +358,47 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         }'
     ```
 
+=== "950DT products with DSpark"
+
+    Run the following script to execute PD-colocated online inference.
+
+    ```shell
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export HCCL_BUFFSIZE=1024
+    export ASCEND_PROCESS_LOG_PATH="${RUNTIME_DIR}/logs"
+
+    vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
+        --port 8000 \
+        --served-model-name dsv4 \
+        --data-parallel-size 8 \
+        --prefill-context-parallel-size 1 \
+        --enable-expert-parallel \
+        --enable-chunked-prefill \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 32 \
+        --gpu-memory-utilization 0.9 \
+        --block-size 32 \
+        --safetensors-load-strategy prefetch \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --api-server-count 1 \
+        --kv-cache-dtype fp8 \
+        --attention_config.indexer_kv_dtype fp8 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --no-disable-hybrid-kv-cache-manager \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+    ```
+
 Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
@@ -364,18 +439,18 @@ Expected Result:
 
 The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
-### 5.2 Multi-Node PD Separation Deployment
+### 5.2 PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+For standard PD disaggregation, we recommend using [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). Section 5.2.4 describes PD separation on one Ascend 950DT node, and Section 5.4 extends that topology with a Memcache-backed KV Cache Pool.
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
 1. **Prefill preemption interrupts Decode**: Prefill is a compute-intensive task that processes the entire input context at once, while Decode generates tokens one by one. When a new user request arrives, its Prefill phase can preempt and interrupt ongoing Decode tasks, causing jitter and higher time-per-output-token (TPOT) latency.
 2. **Inflexible resource allocation**: Prefill and Decode have fundamentally different computational characteristics — Prefill is compute-bound and memory-bandwidth-intensive, while Decode is memory-bandwidth-bound. Running them on the same hardware forces a compromise that satisfies neither optimally.
 
-PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
+PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated NPU groups, each configured independently, on one or more nodes. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
+The following sections describe multi-node PD separation deployment on Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8), and single-node PD separation on Ascend 950DT (96GB × 8).
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
@@ -1121,6 +1196,290 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 For ultra-long sequence scenarios, support can be achieved by adjusting the PD (Prefill/Decode) ratio and the model parallelism strategy. For example, in a 1M sequence scenario, a 1\*4P-1\*4D ratio can be used, with the model parallelism set to DP4TP8 mode.
 
+#### 5.2.4 950DT products PD Separation Deployment {: #524-950dt-series-pd-separation-deployment }
+
+This section describes PD separation on a single 950DT products node (96GB × 8). The Prefill instance uses DP1/TP1 with PCP4 on NPUs 0–3, while the Decode instances use DP4/TP1 with PCP1 on NPUs 4–7. KV Cache is transferred from Prefill to Decode using MooncakeConnectorV2.
+
+You can adjust the Prefill and Decode parallelism according to your workload and service requirements. The prefill and decode parallelism settings in --kv-transfer-config must match the actual engine configurations.
+
+Before starting the services, set VLLM_USE_V2_MODEL_RUNNER=1 in both templates to enable Model Runner V2. Replace nic_name, local_ip, and the model path with the appropriate values for your environment.
+
+Both Prefill and Decode use the same node IP (`<node_ip>`). The Prefill DP group uses RPC port `12321`, while the Decode DP group uses RPC port `12325`.
+
+Before you start, please:
+
+1. Prepare one shared `launch_online_dp.py` launcher for Prefill and Decode.
+
+    ```python
+    import argparse
+    import multiprocessing
+    import os
+    import subprocess
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--script", required=True, help="Prefill or Decode startup script.")
+    parser.add_argument("--dp-size", type=int, required=True)
+    parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--pcp-size", type=int, default=1)
+    parser.add_argument("--dp-size-local", type=int, default=-1)
+    parser.add_argument("--dp-rank-start", type=int, default=0)
+    parser.add_argument("--dp-address", required=True)
+    parser.add_argument("--dp-rpc-port", default="12345")
+    parser.add_argument("--vllm-start-port", type=int, default=9000)
+    args = parser.parse_args()
+
+    if args.dp_size_local == -1:
+        args.dp_size_local = args.dp_size
+
+
+    def run_command(visible_devices, dp_rank, port):
+        script_args = [
+            visible_devices,
+            str(port),
+            str(args.dp_size),
+            str(dp_rank),
+            args.dp_address,
+            args.dp_rpc_port,
+            str(args.tp_size),
+            str(args.pcp_size),
+        ]
+
+        if args.dp_size == 1:
+            with open(args.script, encoding="utf-8") as f:
+                script = f.read()
+            script = "\n".join(
+                line for line in script.splitlines()
+                if "--data-parallel-rank" not in line
+                and "--data-parallel-external-lb" not in line
+            )
+            command = ["bash", "-o", "pipefail", "-c", script, args.script, *script_args]
+        else:
+            command = ["bash", "-o", "pipefail", args.script, *script_args]
+
+        subprocess.run(command, check=True)
+
+
+    if __name__ == "__main__":
+        if not os.path.isfile(args.script):
+            sys.exit(f"Cannot find {args.script}")
+
+        processes = []
+        devices_per_rank = args.tp_size * args.pcp_size
+
+        for i in range(args.dp_size_local):
+            visible_devices = ",".join(
+                str(x)
+                for x in range(i * devices_per_rank, (i + 1) * devices_per_rank)
+            )
+            process = multiprocessing.Process(
+                target=run_command,
+                args=(
+                    visible_devices,
+                    args.dp_rank_start + i,
+                    args.vllm_start_port + i,
+                ),
+            )
+            processes.append(process)
+            process.start()
+
+        for process in processes:
+            process.join()
+
+        sys.exit(1 if any(p.exitcode != 0 for p in processes) else 0)
+    ```
+
+    Select the startup script with `--script`. When `--dp-size` is `1`, the launcher filters DP rank and external/hybrid load-balancing flags before running the script. It also propagates pipeline failures through `pipefail`.
+
+    Parameter descriptions:
+
+    | Parameter | Type | Required | Default | Description |
+    |---|---|---|---|---|
+    | `--script` | str | Yes | — | Path to the Prefill or Decode startup script. |
+    | `--dp-size` | int | Yes | — | Total number of DP ranks across all nodes. |
+    | `--tp-size` | int | No | `1` | Tensor parallel size for each DP rank. |
+    | `--pcp-size` | int | No | `1` | Prefill context parallel size. Each local DP rank is assigned `--tp-size` × `--pcp-size` devices. |
+    | `--dp-size-local` | int | No | `--dp-size` | Number of DP ranks launched on the current node. |
+    | `--dp-rank-start` | int | No | `0` | Starting DP rank for the current node. |
+    | `--dp-address` | str | Yes | — | IP address of the DP master node. |
+    | `--dp-rpc-port` | str | No | `12345` | RPC port for DP coordination. |
+    | `--vllm-start-port` | int | No | `9000` | Starting API port for local vLLM instances. Each subsequent instance uses the next port. |
+
+2. Prepare the P/D startup scripts.
+
+    Save the following templates as `run_prefill.sh` and `run_decode.sh` in the same directory as `launch_online_dp.py`. If you use different filenames or directories, pass their paths through `--script`; no launcher changes are required.
+
+    1. Prefill script: `run_prefill.sh`
+
+        ```shell
+        nic_name="xxxx" # change to your own nic name
+        local_ip=xx.xx.xx.1 # change to your own ip
+
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+
+        export VLLM_USE_V2_MODEL_RUNNER=1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_CONNECT_TIMEOUT=120
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=1024
+        export TASK_QUEUE_ENABLE=1
+        export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+
+        # With --pcp-size 4, the launcher passes 0,1,2,3 for this Prefill instance.
+        export ASCEND_RT_VISIBLE_DEVICES="$1"
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+        vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
+            --host "$local_ip" \
+            --port "$2" \
+            --served-model-name dsv4 \
+            --data-parallel-size "$3" \
+            --data-parallel-rank "$4" \
+            --data-parallel-address "$5" \
+            --data-parallel-rpc-port "$6" \
+            --tensor-parallel-size "$7" \
+            --prefill-context-parallel-size "$8" \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 1048576 \
+            --max-num-batched-tokens 8192 \
+            --max-num-seqs 16 \
+            --no-disable-hybrid-kv-cache-manager \
+            --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+            --trust-remote-code \
+            --block-size 32 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.9 \
+            --enforce-eager \
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
+            --kv-transfer-config '{
+                "kv_connector": "MooncakeConnectorV2",
+                "kv_role": "kv_producer",
+                "kv_port": "30000",
+                "kv_connector_extra_config": {
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 1
+                    }
+                }
+            }' \
+            2>&1 | tee v4_flash_p.log
+        ```
+
+    2. Decode script: `run_decode.sh`
+
+        ```shell
+        nic_name="xxxx" # change to your own nic name
+        local_ip=xx.xx.xx.1 # change to your own ip
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+
+        export VLLM_USE_V2_MODEL_RUNNER=1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_CONNECT_TIMEOUT=120
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=1024
+        export TASK_QUEUE_ENABLE=1
+
+        # The Decode group uses NPUs 4-7; each DP rank sees one of those NPUs.
+        export ASCEND_RT_VISIBLE_DEVICES="$(( $1 + 4 ))"
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+        vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
+            --host "$local_ip" \
+            --served-model-name dsv4 \
+            --port "$2" \
+            --data-parallel-size "$3" \
+            --data-parallel-rank "$4" \
+            --data-parallel-address "$5" \
+            --data-parallel-rpc-port "$6" \
+            --tensor-parallel-size "$7" \
+            --prefill-context-parallel-size "$8" \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 1048576 \
+            --max-num-batched-tokens 1024 \
+            --max-num-seqs 56 \
+            --async-scheduling \
+            --block-size 32 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
+            --no-enable-prefix-caching \
+            --no-disable-hybrid-kv-cache-manager \
+            --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+            --trust-remote-code \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --kv-transfer-config '{
+                "kv_connector": "MooncakeConnectorV2",
+                "kv_role": "kv_consumer",
+                "kv_port": "30100",
+                "kv_connector_extra_config": {
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 1
+                    }
+                }
+            }' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
+                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+            }' \
+            2>&1 | tee "v4_flash_d_dp${4}.log"
+        ```
+
+3. Start the services.
+
+    Open separate terminals in the same container and run the commands from the directory containing `launch_online_dp.py` and the startup scripts. Start Decode first. Wait for all four Decode API endpoints to become healthy, then start Prefill. Both roles use the same node IP but different DP RPC ports.
+
+    1. Decode (NPUs 4–7)
+
+        ```shell
+        # Change the IP address to your own.
+        python ./launch_online_dp.py --script ./run_decode.sh --dp-size 4 --tp-size 1 --pcp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12325 --vllm-start-port 7200
+        ```
+
+    2. Prefill (NPUs 0–3)
+
+        ```shell
+        # Change the IP address to your own.
+        python ./launch_online_dp.py --script ./run_prefill.sh --dp-size 1 --tp-size 1 --pcp-size 4 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+        ```
+
+4. Deploy the P-D disaggregation proxy.
+
+    Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+
 ### 5.3 A3 1P1D Deployment with Memcache KV Cache Pool
 
 This example deploys the DSpark checkpoint `DeepSeek-V4-Flash-0731-w8a8` on
@@ -1555,7 +1914,307 @@ Key pooling parameters:
 For capacity tuning, optional SSD configuration, and troubleshooting, refer to
 [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
+### 5.4 950DT Single-Node PD Separation Deployment
+
+This section extends [Section 5.2.4](#524-950dt-series-pd-separation-deployment) with a Memcache-backed KV Cache Pool on a single 950DT products node. Prefill uses NPUs `0,1,2,3`, while Decode uses NPUs `4,5,6,7`. The existing external DP load balancing, API ports, DP RPC ports, and proxy configuration remain unchanged.
+
+- `MooncakeConnectorV2` transfers KV Cache from Prefill to Decode for ongoing requests.
+- `AscendStoreConnector` integrates with the Memcache KV Cache Pool to support external KV Cache storage and reuse.
+- In this example, the Prefill instance is configured for pool lookup, loading, and storage, while Decode continues to receive KV Cache from Prefill.
+
+Reuse the shared `launch_online_dp.py` from [Section 5.2.4](#524-950dt-series-pd-separation-deployment). Save the pooled templates below as `run_prefill_memcache.sh` and `run_decode_memcache.sh`, and select them with `--script`. These templates use `MultiConnector` and the required Memcache environment variables.
+
+Keep `export VLLM_USE_V2_MODEL_RUNNER=1` in both pooled templates. PCP requires Model Runner V2. DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
+
+For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
+Compared with normal PD in [Section 5.2.4](#524-950dt-series-pd-separation-deployment), pay attention to these pooling-only requirements:
+
+| Item | Normal PD ([Section 5.2.4](#524-950dt-series-pd-separation-deployment)) | Pooled PD (this section) |
+| ---- | ------------------------- | ------------------------ |
+| Connector | `MooncakeConnectorV2` | `MultiConnector` wrapping `MooncakeConnectorV2` and `AscendStoreConnector` |
+| KV pool service | Not required | Start one Memcache MetaService before Decode and Prefill |
+| Additional environment | HCCL and Ascend direct-transfer variables | Also configure `MMC_LOCAL_CONFIG_PATH`, the Memcache library path, and `PYTHONHASHSEED` |
+| Startup order | Decode → Prefill → Proxy | MetaService → Decode → Prefill → Proxy |
+| Verification | Confirm P-to-D KV transfer | Also confirm an external KV Cache Pool hit with a repeated prefix |
+
+1. Prerequisites
+
+    Configure the Memcache environment and configuration files inside the container where both Prefill and Decode run. Then, open separate terminals in the same container to launch Prefill on NPUs 0–3 and Decode on NPUs 4–7.
+
+    Replace the paths below with the actual values in your environment. `INSTALL_PATH` is the `Location` reported by `pip show memcache_hybrid`. Set `MMC_LOCAL_CONFIG_PATH` to the absolute path of `mmc-local.conf`. Export the environment variables so they are inherited by the launcher and its child processes. Run these exports in each Prefill and Decode terminal before starting the corresponding launcher.
+
+    ```bash
+    # Set these variables to the actual paths in your environment.
+    export MEMCACHE_CONFIG_DIR="/absolute/path/to/memcache-config"
+    export INSTALL_PATH="<Location from pip show memcache_hybrid>"
+    export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+    export PYTHONHASHSEED=0
+    ```
+
+    Configure one `mmc-meta.conf` for the MetaService:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<metaservice_ip>:5000
+    ock.mmc.meta_service.config_store_url = tcp://<metaservice_ip>:6000
+    ock.mmc.meta_service.metrics_url = http://<metaservice_ip>:8000
+    ock.mmc.log_level = info
+    ```
+
+    Configure `mmc-local.conf` for both roles on this node:
+
+    ```ini
+    ock.mmc.meta_service_url = tcp://<metaservice_ip>:5000
+    ock.mmc.local_service.config_store_url = tcp://<metaservice_ip>:6000
+    ock.mmc.log_level = info
+    ock.mmc.local_service.world_size = 256
+    ock.mmc.local_service.protocol = device_urma
+    ock.mmc.local_service.dram.size = 40GB
+    ock.mmc.local_service.max.dram.size = 2049GB
+    ```
+
+    Use `device_urma` for 950DT products Device UB. For UBOE, replace it with `device_uboe`. Both roles must connect to the same MetaService and ConfigStore. `world_size` is the maximum number of LocalServices supported by the pool; it is not the number of NPUs used by this example.
+
+    This example uses the embedded LocalService mode. Each vLLM process initializes a LocalService by loading `mmc-local.conf` from `MMC_LOCAL_CONFIG_PATH`. Therefore, `ock.mmc.local_service.dram.size` must be greater than `0GB`. Do not start a separate standalone LocalService when using this configuration.
+
+    In this example, the Prefill instance uses PCP4 together with `AscendStoreConnector` in layerwise mode. This example sets `use_layerwise` to `true` and `layerwise_prefetch_layers` to `3`.
+
+2. Prepare the P/D startup scripts.
+
+    1. Prefill script: `run_prefill_memcache.sh`
+
+        Save the following template as `run_prefill_memcache.sh` in the same directory as the shared `launch_online_dp.py`.
+
+        ```bash
+        #!/usr/bin/env bash
+        source /root/.bashrc
+        nic_name="xxxx" # change to your own nic name
+        local_ip=xx.xx.xx.1 # change to your own ip
+
+        : "${MEMCACHE_CONFIG_DIR:?Set MEMCACHE_CONFIG_DIR before starting the launcher}"
+        export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+
+        export VLLM_USE_V2_MODEL_RUNNER=1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_CONNECT_TIMEOUT=120
+        export PYTHONHASHSEED=0
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=1024
+        export TASK_QUEUE_ENABLE=1
+        export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+        export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+
+        # With --pcp-size 4, the launcher passes 0,1,2,3 for this Prefill instance.
+        export ASCEND_RT_VISIBLE_DEVICES="$1"
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+        vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
+            --host "$local_ip" \
+            --port "$2" \
+            --served-model-name dsv4 \
+            --data-parallel-size "$3" \
+            --data-parallel-rank "$4" \
+            --data-parallel-address "$5" \
+            --data-parallel-rpc-port "$6" \
+            --tensor-parallel-size "$7" \
+            --prefill-context-parallel-size "$8" \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 1048576 \
+            --max-num-batched-tokens 8192 \
+            --max-num-seqs 16 \
+            --no-disable-hybrid-kv-cache-manager \
+            --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+            --trust-remote-code \
+            --block-size 32 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.9 \
+            --enforce-eager \
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}' \
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_producer",
+                "kv_load_failure_policy": "fail",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV2",
+                            "kv_role": "kv_producer",
+                            "kv_port": "30000",
+                            "kv_connector_extra_config": {
+                                "prefill": {
+                                    "dp_size": 1,
+                                    "tp_size": 1
+                                },
+                                "decode": {
+                                    "dp_size": 4,
+                                    "tp_size": 1
+                                }
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_producer",
+                            "kv_connector_extra_config": {
+                                "backend": "memcache",
+                                "use_layerwise": true,
+                                "layerwise_prefetch_layers": 3
+                            }
+                        }
+                    ]
+                }
+            }' \
+            2>&1 | tee v4_flash_p_memcache.log
+        ```
+
+    2. Decode script: `run_decode_memcache.sh`
+
+        Save the following template as `run_decode_memcache.sh` in the same directory as the shared `launch_online_dp.py`. It accepts the same eight arguments, maps device indices to NPUs `4`–`7`, and writes a separate log for each DP rank.
+
+        ```bash
+        #!/usr/bin/env bash
+        source /root/.bashrc
+        nic_name="xxxx" # change to your own nic name
+        local_ip=xx.xx.xx.1 # change to your own ip
+
+        export LD_LIBRARY_PATH="/usr/local/openssl-3.4/lib:${LD_LIBRARY_PATH}"
+        : "${MEMCACHE_CONFIG_DIR:?Set MEMCACHE_CONFIG_DIR before starting the launcher}"
+        export MMC_LOCAL_CONFIG_PATH="${MEMCACHE_CONFIG_DIR}/mmc-local.conf"
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+
+        export VLLM_USE_V2_MODEL_RUNNER=1
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_EXEC_TIMEOUT=204
+        export HCCL_CONNECT_TIMEOUT=120
+        export PYTHONHASHSEED=0
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=10
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=1024
+        export TASK_QUEUE_ENABLE=1
+
+        # The Decode group uses NPUs 4-7; each DP rank sees one of those NPUs.
+        export ASCEND_RT_VISIBLE_DEVICES="$(( $1 + 4 ))"
+        export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+        vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
+            --host "$local_ip" \
+            --served-model-name dsv4 \
+            --port "$2" \
+            --data-parallel-size "$3" \
+            --data-parallel-rank "$4" \
+            --data-parallel-address "$5" \
+            --data-parallel-rpc-port "$6" \
+            --tensor-parallel-size "$7" \
+            --prefill-context-parallel-size "$8" \
+            --enable-expert-parallel \
+            --seed 1024 \
+            --max-model-len 1048576 \
+            --max-num-batched-tokens 1024 \
+            --max-num-seqs 56 \
+            --async-scheduling \
+            --block-size 32 \
+            --kv-cache-dtype fp8 \
+            --attention_config.indexer_kv_dtype fp8 \
+            --no-enable-prefix-caching \
+            --no-disable-hybrid-kv-cache-manager \
+            --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+            --trust-remote-code \
+            --tokenizer-mode deepseek_v4 \
+            --tool-call-parser deepseek_v4 \
+            --enable-auto-tool-choice \
+            --reasoning-parser deepseek_v4 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --kv-transfer-config '{
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_consumer",
+                "kv_load_failure_policy": "fail",
+                "kv_connector_extra_config": {
+                    "connectors": [
+                        {
+                            "kv_connector": "MooncakeConnectorV2",
+                            "kv_role": "kv_consumer",
+                            "kv_port": "30100",
+                            "kv_connector_extra_config": {
+                                "prefill": {
+                                    "dp_size": 1,
+                                    "tp_size": 1
+                                },
+                                "decode": {
+                                    "dp_size": 4,
+                                    "tp_size": 1
+                                }
+                            }
+                        },
+                        {
+                            "kv_connector": "AscendStoreConnector",
+                            "kv_role": "kv_consumer",
+                            "kv_connector_extra_config": {
+                                "backend": "memcache"
+                            }
+                        }
+                    ]
+                }
+            }' \
+            --additional-config '{
+                "ascend_compilation_config": {"enable_npugraph_ex": true,"enable_static_kernel": false},
+                "enable_cpu_binding": true,"multistream_overlap_shared_expert": true,"recompute_scheduler_enable": true,"enable_shared_expert_dp": true,"combine_quant_mode": 4
+            }' \
+            2>&1 | tee "v4_flash_d_memcache_dp${4}.log"
+        ```
+
+3. Start and Verify the Services
+
+    1. Start one MetaService on the node containing `mmc-meta.conf`:
+
+        ```bash
+        export MMC_META_CONFIG_PATH="<directory containing mmc-meta.conf>/mmc-meta.conf"
+        python -c "from memcache_hybrid import MetaService; MetaService.main()"
+        ```
+        After the MetaService is ready, start Decode and Prefill in separate terminals in the same container, in this order: Decode → Prefill → P-D proxy. Before starting Prefill, wait for all four Decode API endpoints to become healthy.
+
+    2. Start Decode and Prefill in separate terminals in the same container. Run both commands from the directory containing the shared launcher and the pooled scripts. Replace `MEMCACHE_CONFIG_DIR` with the directory prepared above. Both roles use the same node IP but different DP RPC ports.
+
+        1. Decode (NPUs 4–7)
+
+            ```shell
+            # Change the IP address to your own.
+            python ./launch_online_dp.py --script ./run_decode_memcache.sh --dp-size 4 --tp-size 1 --pcp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12325 --vllm-start-port 7200
+            ```
+
+        2. Prefill (NPUs 0–3), after all four Decode API endpoints are healthy
+
+            ```shell
+            # Change the IP address to your own.
+            python ./launch_online_dp.py --script ./run_prefill_memcache.sh --dp-size 1 --tp-size 1 --pcp-size 4 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+            ```
+
+    3. Start the Proxy and Verify KV Cache Pool Reuse
+        Use the proxy configuration from [Section 5.2.4](#524-950dt-series-pd-separation-deployment) and send a generation request to `<proxy_ip>:1999` as described in [Section 6](#6-functional-verification). Confirm that the response contains generated text.
+
+        To verify KV Cache Pool reuse, send an initial request to warm up the cache, then send another request with the same identical token prefix. Check the Prefill logs for KV Pool lookup/get/put operations and cache-hit information. An HTTP 200 response alone does not confirm KV Cache Pool reuse. For details,refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
 ## 6 Functional Verification
+
+This section verifies basic inference functionality for all deployment modes. For Memcache pooled PD deployments, also verify external KV Cache Pool reuse using the [A3 startup and verification steps](#534-startup-and-verification) or the “Start the Proxy and Verify KV Cache Pool Reuse” step in the [950DT example](#54-950dt-single-node-pd-separation-deployment).
 
 Once your server is started, you can query the model with input prompts:
 
@@ -1598,6 +2257,7 @@ Here is the accuracy evaluation method using AISBench.
 | GPQA | - | accuracy | gen | 90.40 | A3 1P1D DSpark w8a8 |
 | SWE Multilingual | - | accuracy | gen | 68.33 | A3 1P1D DSpark w8a8 |
 | GPQA | - | accuracy | gen | 90.40 | 950PR&950DT Products, w4a4c8 |
+| GPQA | - | accuracy | gen | 90.91 | 950DT products DSpark, w4a8c8_mxfp |
 
 > **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
