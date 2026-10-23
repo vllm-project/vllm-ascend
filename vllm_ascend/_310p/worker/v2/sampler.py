@@ -4,9 +4,10 @@
 
 """Triton-free MRV2 sampler for Ascend 310P.
 
-Aligns temperature / top-k / top-p / min_p / penalties post-processing with
-MRV1's ``AscendSampler310`` (inverse-CDF random sampling) while keeping the
-MRV2 ``sampling_states`` surface required by MTP draft ``propose()``.
+Aligns temperature / top-k / top-p / min_p / penalties / allowed_token_ids
+post-processing with MRV1's ``AscendSampler310`` (inverse-CDF random sampling)
+while keeping the MRV2 ``sampling_states`` surface required by MTP draft
+``propose()``.
 """
 
 from __future__ import annotations
@@ -152,6 +153,10 @@ class Ascend310PSampler:
         self._frequency_penalty_np = np.zeros(max_num_reqs, dtype=np.float32)
         self._presence_penalty_np = np.zeros(max_num_reqs, dtype=np.float32)
         self._use_penalty = np.zeros(max_num_reqs, dtype=bool)
+        self._use_allowed = np.zeros(max_num_reqs, dtype=bool)
+        self._allowed_token_ids: dict[int, list[int]] = {}
+        # True = disallowed (masked to -inf), matching MRV1 allowed_token_ids_mask.
+        self._allowed_mask: torch.Tensor | None = None
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
@@ -173,14 +178,10 @@ class Ascend310PSampler:
         unsupported = []
         if sampling_params.logprobs is not None or sampling_params.prompt_logprobs is not None:
             unsupported.append("logprobs")
-        if (
-            getattr(sampling_params, "bad_words", None)
-            or getattr(sampling_params, "logit_bias", None)
-            or getattr(sampling_params, "allowed_token_ids", None)
-        ):
+        if getattr(sampling_params, "bad_words", None) or getattr(sampling_params, "logit_bias", None):
             unsupported.append("logits processors")
         if unsupported:
-            # TODO: Support logprobs / logits processors in a later 310P MRV2 iteration.
+            # TODO: Support logprobs / logit_bias / bad_words in a later 310P MRV2 iteration.
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
@@ -217,6 +218,18 @@ class Ascend310PSampler:
         self.repetition_penalty_cpu[req_idx] = repetition_penalty
         self.frequency_penalty_cpu[req_idx] = frequency_penalty
         self.presence_penalty_cpu[req_idx] = presence_penalty
+
+        allowed_token_ids = getattr(sampling_params, "allowed_token_ids", None)
+        if allowed_token_ids:
+            self._allowed_token_ids[req_idx] = list(allowed_token_ids)
+            self._use_allowed[req_idx] = True
+            if self.vocab_size > 0:
+                self._materialize_allowed_mask(req_idx)
+        else:
+            self._allowed_token_ids.pop(req_idx, None)
+            self._use_allowed[req_idx] = False
+            if self._allowed_mask is not None:
+                self._allowed_mask[req_idx].fill_(False)
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
@@ -257,6 +270,31 @@ class Ascend310PSampler:
         self._top_k_np[unset] = self.vocab_size
         self.top_k_cpu[unset] = self.vocab_size
         self.sampling_states.top_k.gpu[unset] = self.vocab_size
+        for req_idx in list(self._allowed_token_ids):
+            self._materialize_allowed_mask(req_idx)
+
+    def _ensure_allowed_mask(self) -> torch.Tensor:
+        if self._allowed_mask is None:
+            if self.vocab_size <= 0:
+                raise RuntimeError("allowed_token_ids requires vocab_size before apply.")
+            self._allowed_mask = torch.zeros(
+                self.max_num_reqs,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
+        return self._allowed_mask
+
+    def _materialize_allowed_mask(self, req_idx: int) -> None:
+        allowed = self._allowed_token_ids.get(req_idx)
+        if not allowed:
+            return
+        mask = self._ensure_allowed_mask()
+        mask[req_idx] = True
+        ids = torch.tensor(allowed, dtype=torch.int64, device=self.device)
+        ids = ids[(ids >= 0) & (ids < self.vocab_size)]
+        if ids.numel():
+            mask[req_idx, ids] = False
 
     def _batch_needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
         temp = self._temperature_np[idx_mapping_np]
@@ -266,6 +304,7 @@ class Ascend310PSampler:
             or np.any(self._top_p_np[idx_mapping_np] != 1.0)
             or np.any(self._min_p_np[idx_mapping_np] != 0.0)
             or np.any(self._use_penalty[idx_mapping_np])
+            or np.any(self._use_allowed[idx_mapping_np])
         )
 
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
@@ -345,6 +384,23 @@ class Ascend310PSampler:
         presence = self.sampling_states.presence_penalty.gpu[expanded_idx_mapping]
         apply_penalties_vllm(logits, prompt_t, output_t, presence, frequency, repetition)
 
+    def _apply_allowed_token_ids(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        """Mask disallowed tokens to -inf (MRV1 allowed_token_ids_mask)."""
+        if not np.any(self._use_allowed[idx_mapping_np]):
+            return
+        for req_idx in np.unique(idx_mapping_np):
+            req_idx = int(req_idx)
+            if req_idx >= 0 and self._use_allowed[req_idx] and req_idx in self._allowed_token_ids:
+                self._materialize_allowed_mask(req_idx)
+        assert self._allowed_mask is not None
+        row_mask = self._allowed_mask[expanded_idx_mapping]
+        logits.masked_fill_(row_mask, float("-inf"))
+
     def _apply_postprocess(
         self,
         logits: torch.Tensor,
@@ -353,7 +409,8 @@ class Ascend310PSampler:
         input_ids: torch.Tensor | None = None,
         expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Penalties → temperature → min_p → top-k/top-p (MRV1 / upstream MRV2)."""
+        """Allowed-ids → penalties → temperature → min_p → top-k/top-p."""
+        self._apply_allowed_token_ids(logits, expanded_idx_mapping, idx_mapping_np)
         self._apply_penalties_pytorch(
             logits,
             expanded_idx_mapping,
