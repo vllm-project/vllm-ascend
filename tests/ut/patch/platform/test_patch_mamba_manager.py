@@ -1,32 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU contract tests; hardware cache/CoW correctness is a separate gate."""
+"""CPU contracts for manager tails and their scheduler boundary producer.
 
+Hardware cache/CoW correctness is a separate gate.
+"""
+
+import ast
 import functools
-import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-# Execute the actual adapter function bodies against a lightweight upstream
-# contract. Avoid importing the NPU plugin in these CPU-only unit tests.
-source = (Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_mamba_reusable_tail.py").read_text()
-start = source.index("@functools.wraps(_split)")
-end = source.index("Scheduler._mamba_block_aligned_split = split")
+# Execute the owner modules' actual function bodies without importing the NPU plugin.
+platform = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform"
+source = (platform / "patch_mamba_manager.py").read_text()
+scheduler_source = (platform / "patch_mamba_block_aligned_split.py").read_text()
 scope = dict(
     functools=functools,
-    os=os,
-    _split=lambda s, r, n, *a: n,
+    Scheduler=NS,
+    Request=NS,
+    _original_mamba_block_aligned_split=lambda s, r, n, *a: n,
     _cache_tail=lambda *a: None,
+    _attention_tail=lambda *a: None,
     _skips_eagle_block_drop=lambda c: c is None or not c.is_kv_consumer,
     _get_sparse_index_kpool=lambda c: None,
     get_mamba_prefill_checkpoint_position=lambda n, u, d: max((n - 1) // u * u - (u if d else 0), 0),
     is_mamba_prefill_checkpoint_valid=lambda **kw: False,
 )
-exec(source[start:end], scope)
-scope["_attention_tail"] = lambda *a: None
-attention_start = source.index("@functools.wraps(_attention_tail)")
-attention_end = source.index("FullAttentionManager._cache_partial_tail_block = attention_tail")
-exec(source[attention_start:attention_end], scope)
+for module_source, names in (
+    (scheduler_source, {"_split_reusable_tail", "_mamba_block_aligned_split"}),
+    (source, {"cache_tail", "attention_tail"}),
+):
+    tree = ast.parse(module_source)
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    exec(compile(tree, "<patch-owner>", "exec"), scope)
+scope["split"] = scope["_mamba_block_aligned_split"]
 
 
 class Tests(unittest.TestCase):
@@ -161,10 +168,70 @@ class Tests(unittest.TestCase):
             MambaSpec=MambaSpec,
             FullAttentionSpec=FullAttentionSpec,
         )
-        body = source[source.index("_split = Scheduler.") : source.index("@functools.wraps(_split)")]
+        local.update(scope)
+        body = source[source.index("# v0.30 resolves") :]
         exec(body, local)
-        self.assertIs(local["MambaManager"], RegisteredMamba)
+        self.assertIs(local["_registered_mamba_manager"], RegisteredMamba)
         self.assertEqual(local["_cache_tail"](), "registered-mamba")
+        self.assertIs(RegisteredMamba._cache_partial_tail_block, local["cache_tail"])
+        self.assertIs(RegisteredAttention._cache_partial_tail_block, local["attention_tail"])
+        self.assertEqual(RegisteredMamba._cache_partial_tail_block(None, None, 0, None), "registered-mamba")
+
+    def test_sparse_path_does_not_apply_reusable_split(self):
+        scheduler = self.scheduler()
+        scheduler.block_size = 896
+        scheduler.use_eagle = True
+        original = scope["_get_sparse_index_kpool"]
+        scope["_get_sparse_index_kpool"] = lambda c: 4
+        try:
+            self.assertEqual(scope["split"](scheduler, self.req(128), 128), 128)
+        finally:
+            scope["_get_sparse_index_kpool"] = original
+
+    def test_split_restores_drop_flags_on_upstream_error(self):
+        scheduler = self.scheduler()
+        scheduler.use_eagle = True
+        original = scope["_original_mamba_block_aligned_split"]
+
+        def fail(*args):
+            raise RuntimeError("upstream error")
+
+        scope["_original_mamba_block_aligned_split"] = fail
+        try:
+            with self.assertRaisesRegex(RuntimeError, "upstream error"):
+                scope["split"](scheduler, self.req(128), 128)
+        finally:
+            scope["_original_mamba_block_aligned_split"] = original
+        self.assertTrue(scheduler.use_eagle)
+
+    def test_split_restores_drop_flags_before_fallback(self):
+        scheduler = self.scheduler()
+        scheduler.use_eagle = True
+        scheduler.use_eagle_block_drop = True
+        observed = []
+        original = scope["_original_mamba_block_aligned_split"]
+        scope["_original_mamba_block_aligned_split"] = lambda s, r, n, *a: (
+            observed.append((s.use_eagle, s.use_eagle_block_drop)) or n
+        )
+        try:
+            self.assertEqual(scope["split"](scheduler, self.req(128), 128), 112)
+        finally:
+            scope["_original_mamba_block_aligned_split"] = original
+        self.assertEqual(observed, [(False, False)])
+        self.assertTrue(scheduler.use_eagle)
+        self.assertTrue(scheduler.use_eagle_block_drop)
+
+    def test_attention_alias_registered_after_native_tail(self):
+        manager = self.manager()
+        calls = []
+        original = scope["_attention_tail"]
+        scope["_attention_tail"] = lambda *a: calls.append("native")
+        manager.block_pool.cache_partial_block = lambda **kw: calls.append(kw["num_tokens"])
+        try:
+            scope["attention_tail"](manager, self.req(128), 128)
+        finally:
+            scope["_attention_tail"] = original
+        self.assertEqual(calls, ["native", 112])
 
 
 if __name__ == "__main__":
