@@ -32,8 +32,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from vllm_ascend.device.hardware import AscendDeviceType
+
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
@@ -146,7 +146,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
         """The wrapper must use scale = amax / max_q and skip the clamp."""
         wrapper = _make(min_numel=8)
         x = torch.full((4, 8), 1.0, dtype=torch.bfloat16)  # x == amax
-        captured = {}
+        captured: dict[str, list[torch.Tensor]] = {}
 
         def fake_ar(t, group=None, op=None):
             captured.setdefault("payload", []).append(t.clone())
