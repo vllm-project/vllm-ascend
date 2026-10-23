@@ -344,6 +344,10 @@ class ChunkedTokenDatabase:
         self.metadata = metadata
         self.block_size = block_size
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        # Parallel to group_kv_caches_base_addr. Each entry identifies the
+        # backing storage and byte offset so selected pool ranges can also be
+        # exposed as int8 tensor views for TP collectives.
+        self.group_cache_storages: dict[int, list[tuple[Any, int, torch.device]]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
@@ -457,6 +461,7 @@ class ChunkedTokenDatabase:
         group_num_layers: dict[int, int] | None = None,
         group_layer_cache_entry_offsets: dict[int, list[int]] | None = None,
         group_cache_entry_segments: dict[int, list[tuple[int, int]]] | None = None,
+        group_cache_storages: dict[int, list[tuple[Any, int, torch.device]]] | None = None,
     ) -> None:
         if cache_role == "state":
             # Keep the interface for future explicit state groups, but this
@@ -468,6 +473,7 @@ class ChunkedTokenDatabase:
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
             self.group_cache_entry_segments = group_cache_entry_segments or {}
+            self.group_cache_storages = group_cache_storages or {}
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -485,7 +491,7 @@ class ChunkedTokenDatabase:
             self.group_block_stride.get(kv_cache_group_id),
         )
 
-    def prepare_value(
+    def _prepare_value_layout(
         self,
         start: int,
         end: int,
@@ -496,16 +502,18 @@ class ChunkedTokenDatabase:
     ):
         addr_list: list[int] = []
         size_list: list[int] = []
+        descriptor_indices: list[int] = []
+        byte_offsets: list[int] = []
         group_block_size = self.get_block_size(kv_cache_group_id)
         if block_id is None:
             block_idx = start // group_block_size
             if block_idx >= len(block_ids):
-                return addr_list, size_list, 0
+                return addr_list, size_list, descriptor_indices, byte_offsets, 0
             block_id = block_ids[block_idx]
         group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         if length == 0:
-            return addr_list, size_list, block_id
+            return addr_list, size_list, descriptor_indices, byte_offsets, block_id
         segments = self.group_cache_entry_segments.get(kv_cache_group_id)
         block_start = start // group_block_size * group_block_size
         start_in_block = start - block_start
@@ -522,10 +530,66 @@ class ChunkedTokenDatabase:
             block_stride = group_block_stride[index % length] if group_block_stride else block_len
             byte_start = block_len * (copy_start - segment_start) // segment_tokens
             byte_end = block_len * (copy_end - segment_start) // segment_tokens
-            addr = base_addr + block_id * block_stride + byte_start
+            byte_offset = block_id * block_stride + byte_start
+            addr = base_addr + byte_offset
             addr_list.append(addr)
             size_list.append(byte_end - byte_start)
-        return addr_list, size_list, block_id
+            descriptor_indices.append(index)
+            byte_offsets.append(byte_offset)
+        return addr_list, size_list, descriptor_indices, byte_offsets, block_id
+
+    def prepare_value(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        block_id: int | None = None,
+    ):
+        addrs, sizes, _, _, resolved_block_id = self._prepare_value_layout(
+            start,
+            end,
+            block_ids,
+            kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            block_id=block_id,
+        )
+        return addrs, sizes, resolved_block_id
+
+    def prepare_value_with_views(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        block_id: int | None = None,
+    ) -> tuple[list[int], list[int], list[torch.Tensor], int]:
+        """Return transfer ranges together with their local int8 views."""
+        addrs, sizes, descriptor_indices, byte_offsets, resolved_block_id = self._prepare_value_layout(
+            start,
+            end,
+            block_ids,
+            kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            block_id=block_id,
+        )
+        storages = self.group_cache_storages.get(kv_cache_group_id)
+        if addrs and storages is None:
+            raise RuntimeError("KV cache storage metadata is unavailable for read deduplication")
+
+        views: list[torch.Tensor] = []
+        for descriptor_index, byte_offset, size in zip(descriptor_indices, byte_offsets, sizes):
+            storage, storage_offset, device = storages[descriptor_index]  # type: ignore[index]
+            view = torch.empty(0, dtype=torch.int8, device=device).set_(
+                storage,
+                storage_offset + byte_offset,
+                (size,),
+                (1,),
+            )
+            views.append(view)
+        return addrs, sizes, views, resolved_block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)

@@ -106,6 +106,115 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
+def _all_gather_python_value(tp_group: Any, value: Any) -> list[Any]:
+    gathered: list[Any] = [None] * tp_group.world_size
+    all_gather_object = getattr(tp_group, "all_gather_object", None)
+    if callable(all_gather_object):
+        all_gather_object(gathered, value)
+    else:
+        torch.distributed.all_gather_object(gathered, value, group=tp_group.cpu_group)
+    return gathered
+
+
+def sharded_get_all_gather(
+    m_store: Backend,
+    tp_group: Any,
+    tp_rank: int,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+    block_ids: list[int],
+    views: list[list[torch.Tensor]],
+) -> tuple[bool, set[int], int]:
+    """Load a TP-disjoint KV shard and all-gather it into every local cache."""
+    if not (len(keys) == len(addrs) == len(sizes) == len(block_ids) == len(views)):
+        raise ValueError("KV shard metadata lengths do not match")
+    if not keys:
+        return False, set(), 0
+
+    world_size = tp_group.world_size
+    local_shape = (len(keys), tuple(sum(key_sizes) for key_sizes in sizes))
+    gathered_shapes = _all_gather_python_value(tp_group, local_shape)
+    if any(shape != local_shape for shape in gathered_shapes):
+        raise RuntimeError(f"KV read metadata diverged across TP ranks: {gathered_shapes}")
+
+    local_indices = list(range(tp_rank, len(keys), world_size))
+    local_keys = [keys[index] for index in local_indices]
+    local_addrs = [addrs[index] for index in local_indices]
+    local_sizes = [sizes[index] for index in local_indices]
+    local_block_ids = [block_ids[index] for index in local_indices]
+
+    ret = None
+    local_missing: set[int] = set()
+    local_failed = False
+    if local_keys:
+        try:
+            ret = m_store.get(local_keys, local_addrs, local_sizes)
+        except Exception:
+            logger.exception("KV read deduplication shard get failed")
+            ret = None
+        if ret is None or len(ret) != len(local_keys):
+            local_failed = isinstance(m_store, MemcacheBackend)
+            local_missing.update(local_block_ids)
+        else:
+            local_missing.update(record_failed_blocks(local_block_ids, list(ret)))
+            if isinstance(m_store, MemcacheBackend) and local_missing:
+                local_failed = True
+
+    local_bytes = sum(sum(sizes[index]) for index in local_indices)
+    gathered_meta = _all_gather_python_value(
+        tp_group,
+        (local_bytes, local_failed, sorted(local_missing)),
+    )
+    shard_lengths = [int(meta[0]) for meta in gathered_meta]
+    wire_bytes = max(shard_lengths, default=0)
+
+    if wire_bytes:
+        device = None
+        for key_views in views:
+            if key_views:
+                device = key_views[0].device
+                break
+        if device is None:
+            raise RuntimeError("KV read deduplication requires tensor views for all gathered ranges")
+
+        payload = torch.empty(wire_bytes, dtype=torch.int8, device=device)
+        cursor = 0
+        for key_index in local_indices:
+            for view in views[key_index]:
+                if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
+                    raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
+                end = cursor + view.numel()
+                payload[cursor:end].copy_(view)
+                cursor = end
+        if cursor != local_bytes:
+            raise RuntimeError(f"KV shard packing mismatch: expected={local_bytes} actual={cursor}")
+
+        gathered = tp_group.all_gather(payload, dim=0).flatten()
+        expected_numel = wire_bytes * world_size
+        if gathered.numel() != expected_numel:
+            raise RuntimeError(f"KV all-gather size mismatch: expected={expected_numel} actual={gathered.numel()}")
+
+        for owner in range(world_size):
+            shard_base = owner * wire_bytes
+            cursor = 0
+            for key_index in range(owner, len(keys), world_size):
+                for view in views[key_index]:
+                    end = cursor + view.numel()
+                    view.copy_(gathered[shard_base + cursor : shard_base + end])
+                    cursor = end
+            if cursor != shard_lengths[owner]:
+                raise RuntimeError(
+                    f"KV all-gather unpack mismatch for rank {owner}: expected={shard_lengths[owner]} actual={cursor}"
+                )
+
+    request_failed = any(bool(meta[1]) for meta in gathered_meta)
+    missing_block_ids: set[int] = set()
+    for meta in gathered_meta:
+        missing_block_ids.update(int(block_id) for block_id in meta[2])
+    return request_failed, missing_block_ids, len(local_keys)
+
+
 @dataclass(frozen=True)
 class _LayerRevokeTask:
     keys: tuple[str, ...]
@@ -1514,6 +1623,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        read_dedup: bool = False,
     ):
         super().__init__(
             m_store,
@@ -1529,6 +1639,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self.read_dedup = read_dedup
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1558,6 +1669,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
+            view_list: list[list[torch.Tensor]] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
@@ -1578,13 +1690,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     chunk_filter=chunk_filter,
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
-                    addr, size, block_id = self._prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
+                    if self.read_dedup:
+                        addr, size, views, block_id = self.token_database.prepare_value_with_views(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
+                        view_list.append(views)
+                    else:
+                        addr, size, block_id = self._prepare_value(
+                            start,
+                            end,
+                            block_ids,
+                            kv_cache_group_id=group_id,
+                            block_id=block_id,
+                        )
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
@@ -1592,6 +1714,33 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if not key_list:
                 self.set_finished_request(req_id)
                 return
+            if self.read_dedup:
+                if self.worker is None or not hasattr(self.worker, "_load_kv_read_dedup"):
+                    raise RuntimeError("KV read deduplication requires the KVPool worker")
+                load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
+                read_result = self.worker._load_kv_read_dedup(
+                    key_list,
+                    addr_list,
+                    size_list,
+                    block_id_list,
+                    view_list,
+                )
+                if read_result is not None:
+                    request_failed, missing_block_ids, local_key_count = read_result
+                    if self._record_operation_cb is not None:
+                        self._record_operation_cb(
+                            "load_get",
+                            time.perf_counter() - load_get_start,
+                            local_key_count,
+                        )
+                    if missing_block_ids:
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(missing_block_ids)
+                    if request_failed:
+                        self._mark_failed_requests([req_meta])
+                    self.set_finished_request(req_id)
+                    return
+                logger.debug("KV read deduplication unavailable; using legacy full read")
             key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
             addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
             size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
