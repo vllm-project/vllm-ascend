@@ -22,12 +22,13 @@ DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
-# Vocabulary sizes with more than one vocab block AND a partial tail block,
-# both asserted below rather than left implicit.
+# More than one vocab block, with a partial tail block.
 MULTI_BLOCK_VOCAB = [12800, 151936]
 
-# (repetition, frequency, presence). The kernel branches on each of these
-# independently, so they need explicit coverage rather than random values.
+# No tail: the last block's `block < vocab_size` mask is all true.
+EXACT_BLOCK_VOCAB = [16384]
+
+# (repetition, frequency, presence). The kernel branches on each independently.
 PENALTY_CONFIGS = {
     "none": (1.0, 0.0, 0.0),
     "rep_only": (1.1, 0.0, 0.0),
@@ -36,6 +37,10 @@ PENALTY_CONFIGS = {
     "rep_pres": (1.1, 0.0, 0.1),
     "all": (1.1, 0.1, 0.1),
 }
+
+# Label for the extra case that asks create_test_data for a batch with both
+# penalised and unpenalised requests, which no entry above produces.
+MIXED_PENALTY_CONFIG = "mixed"
 
 
 def pack_prompt_bin_mask(
@@ -148,6 +153,7 @@ def create_test_data(
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 42,
     penalty_config: tuple[float, float, float] | None = None,
+    mixed_penalties: bool = False,
     spec_decode_groups: bool = False,
 ):
     """Create test data for penalties.
@@ -156,6 +162,8 @@ def create_test_data(
         ``(repetition, frequency, presence)`` triple instead of random values.
         The kernel branches on each penalty independently, so pinning them is
         what makes per-branch coverage possible.
+    mixed_penalties: alternate requests between active and neutral, so a batch
+        has both. Takes precedence over penalty_config.
     spec_decode_groups: if True, lay the rows out the way ``expand_idx_mapping``
         actually does ``num_status`` runs of ``num_speculative_tokens + 1``
         rows, with ``expanded_local_pos`` ramping 0..k and a constant
@@ -168,7 +176,17 @@ def create_test_data(
 
     logits = torch.randn(num_tokens, vocab_size, device=device, dtype=dtype)
 
-    if penalty_config is None:
+    if mixed_penalties:
+        # A worker owning several rows must skip the neutral ones and process
+        # the rest; the random branch below hits that only ~7% of the time.
+        rep, freq, presence = PENALTY_CONFIGS["all"]
+        active = torch.arange(num_status, device=device) % 2 == 0
+        repetition_penalty = torch.where(
+            active, torch.full((num_status,), rep, device=device), torch.ones(num_status, device=device)
+        ).to(torch.float32)
+        frequency_penalty = (active * freq).to(torch.float32)
+        presence_penalty = (active * presence).to(torch.float32)
+    elif penalty_config is None:
         repetition_penalty = torch.ones(num_status, device=device, dtype=torch.float32)
         for i in range(num_status):
             if torch.rand(1) > 0.3:
@@ -300,7 +318,17 @@ class TestApplyPenalties:
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
     def test_apply_penalties(self, num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
-        data = create_test_data(
+        (
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        ) = create_test_data(
             num_tokens=num_tokens,
             vocab_size=vocab_size,
             num_status=num_status,
@@ -309,12 +337,32 @@ class TestApplyPenalties:
             dtype=dtype,
             seed=seed,
         )
-        logits_triton = data[0]
+
         logits_pytorch = logits_triton.clone()
 
-        apply_penalties(*data)
+        apply_penalties(
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
 
-        logits_pytorch_result = pytorch_apply_penalties(logits_pytorch, *data[1:])
+        logits_pytorch_result = pytorch_apply_penalties(
+            logits_pytorch,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
 
         atol = DEFAULT_ATOL
         rtol = DEFAULT_RTOL
@@ -322,12 +370,13 @@ class TestApplyPenalties:
             atol = 1e-02
             rtol = 1e-02
         assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
-        cleanup()
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
-    # The parametrised test above runs at vocab_size=1000, i.e. a single vocab
-    # block, so it never exercises the grid-stride loop, the per-block address
-    # arithmetic, or the masked tail. These shapes do.
-    @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB)
+    # The test above runs at vocab_size=1000, a single block, so it never
+    # exercises the per-block address arithmetic or the masked tail.
+    @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB + EXACT_BLOCK_VOCAB)
     @pytest.mark.parametrize("num_tokens", [1, 64])
     @pytest.mark.parametrize("num_speculative_tokens", [0, 3])
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -336,7 +385,7 @@ class TestApplyPenalties:
     def test_apply_penalties_multi_vocab_block(self, vocab_size, num_tokens, num_speculative_tokens, dtype, device):
         num_vocab_blocks = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
         assert num_vocab_blocks > 1, "this test is meant to cover more than one vocab block"
-        assert vocab_size % VOCAB_BLOCK_SIZE != 0, "this test is meant to cover the partial tail block"
+        assert (vocab_size % VOCAB_BLOCK_SIZE != 0) == (vocab_size in MULTI_BLOCK_VOCAB)
         num_status = max(1, num_tokens // (num_speculative_tokens + 1))
         data = create_test_data(
             num_tokens=num_tokens,
@@ -355,38 +404,35 @@ class TestApplyPenalties:
         expected = pytorch_apply_penalties(logits_pytorch, *data[1:])
 
         if dtype == torch.float32:
-            # fp32 end to end, so the comparison can be tight enough to be
-            # meaningful (bf16 rounding otherwise swamps any real difference).
+            # fp32 end to end, so the comparison can be tight.
             atol = rtol = 1e-5
         else:
             atol = rtol = 1e-2
         torch.testing.assert_close(logits_triton, expected, atol=atol, rtol=rtol)
         cleanup()
 
-    # The worker count only controls how the (token, vocab_block) tiles are
-    # split across programs; each tile is read-modify-written by exactly one
-    # worker, so the result must not depend on it. Pin that, because
-    # apply_penalties takes the count from get_vectorcore_num(), which varies
-    # by SKU. Counts coprime with num_vocab_blocks force workers to start and
-    # end mid-row, which is the only non-trivial indexing in the kernel.
-    @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB)
+    # Each tile is owned by exactly one worker, so the result must not depend
+    # on the count, which apply_penalties takes from get_vectorcore_num().
+    # One count per shape of the split: all on one worker, coprime with n so
+    # workers start mid-row, aligned to n, and more workers than tiles.
+    @pytest.mark.parametrize("vocab_size", [MULTI_BLOCK_VOCAB[-1]])
     @pytest.mark.parametrize("num_tokens", [1, 5, 64])
+    @pytest.mark.parametrize("num_speculative_tokens", [0, 3])
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
-    def test_apply_penalties_worker_invariance(self, vocab_size, num_tokens, device):
+    def test_apply_penalties_worker_invariance(self, vocab_size, num_tokens, num_speculative_tokens, device):
         n = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
         assert n > 1, "need more than one vocab block for this to mean anything"
 
-        # 7 and 40 are coprime with n = 38 for Qwen3; 100 exceeds the tile count
-        # at num_tokens = 1, leaving workers with nothing to do.
-        candidates = sorted({1, 2, 3, 7, n, 40, 48, 100})
+        candidates = sorted({1, 7, n, 100})
         assert len(candidates) > 1, "need at least two worker counts to compare"
 
+        num_status = max(1, num_tokens // (num_speculative_tokens + 1))
         data = create_test_data(
             num_tokens=num_tokens,
             vocab_size=vocab_size,
-            num_status=num_tokens,
-            num_speculative_tokens=0,
+            num_status=num_status,
+            num_speculative_tokens=num_speculative_tokens,
             device=device,
             dtype=torch.float32,
             seed=SEEDS[0],
@@ -410,23 +456,28 @@ class TestApplyPenalties:
                 )
         cleanup()
 
-    # Each penalty is a separate branch in the kernel; "none" must leave logits
-    # untouched via the early return.
-    @pytest.mark.parametrize("config_name", sorted(PENALTY_CONFIGS))
-    @pytest.mark.parametrize("vocab_size", [MULTI_BLOCK_VOCAB[0]])
+    # Each penalty is a separate branch; "none" must leave logits untouched via
+    # the early return. Run every config at 4 blocks and again at 38 with spec
+    # decoding, so the per-row skip is also hit inside a multi-row worker.
+    @pytest.mark.parametrize("config_name", sorted(PENALTY_CONFIGS) + [MIXED_PENALTY_CONFIG])
+    @pytest.mark.parametrize(
+        "vocab_size,num_speculative_tokens",
+        [(MULTI_BLOCK_VOCAB[0], 0), (MULTI_BLOCK_VOCAB[-1], 3)],
+    )
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
-    def test_apply_penalties_penalty_configs(self, config_name, vocab_size, device):
+    def test_apply_penalties_penalty_configs(self, config_name, vocab_size, num_speculative_tokens, device):
         num_tokens = 32
         data = create_test_data(
             num_tokens=num_tokens,
             vocab_size=vocab_size,
-            num_status=num_tokens,
-            num_speculative_tokens=0,
+            num_status=max(1, num_tokens // (num_speculative_tokens + 1)),
+            num_speculative_tokens=num_speculative_tokens,
             device=device,
             dtype=torch.float32,
             seed=SEEDS[0],
-            penalty_config=PENALTY_CONFIGS[config_name],
+            penalty_config=PENALTY_CONFIGS.get(config_name),
+            mixed_penalties=config_name == MIXED_PENALTY_CONFIG,
             spec_decode_groups=True,
         )
         logits_triton = data[0]
@@ -467,7 +518,17 @@ class TestApplyPenalties:
         seed,
         device,
     ):
-        data = create_test_data(
+        (
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        ) = create_test_data(
             num_tokens=num_tokens,
             vocab_size=vocab_size,
             num_status=num_status,
@@ -477,10 +538,32 @@ class TestApplyPenalties:
             seed=seed,
         )
 
-        apply_penalties(*data)
+        apply_penalties(
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
 
         # Make asynchronous kernel launch errors fail this test directly.
         torch.npu.synchronize()
 
-        del data
-        cleanup()
+        del (
+            logits_triton,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        )
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
