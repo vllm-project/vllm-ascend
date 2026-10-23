@@ -110,11 +110,14 @@ class Indexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         # Completed pools store BF16 vectors by default. With LI C8
         # (attention_config.indexer_kv_dtype=int8) each pooled row is
-        # stored as head_dim quantized bytes plus one packed FP32 scale.
+        # allocated with four scale bytes per row; the C8 adapter stores
+        # contiguous INT8 keys and FP16 scales separately within each page.
         li_c8_dtype = None
         if get_ascend_config().is_kpool_li_c8_enabled():
             li_c8_dtype = torch.int8
-            logger.info_once("GLM-Next KPool indexer LI C8 enabled: pooled rows store %s + FP32 scale.", li_c8_dtype)
+            logger.info_once(
+                "GLM-Next KPool indexer LI C8 enabled: pooled pages store %s keys + FP16 scales.", li_c8_dtype
+            )
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
             dtype=torch.bfloat16,

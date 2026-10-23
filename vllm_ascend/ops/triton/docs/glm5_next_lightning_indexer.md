@@ -12,30 +12,32 @@
 
 ## INT8 model execution
 
-LI C8 keeps pooled keys as 128 INT8 bytes plus one FP32 scale per row.
-For eager prefill with at least 512 query rows, 32 or 64 heads and head
-size 128, the model uses CANN QLI v2 when the operator is available. Queries
-are dynamically quantized per head. QK multiplication uses INT8 operands
-and INT32 accumulation, followed by per-head ReLU, scaled weights and the
-key scale. Selected pool IDs are expanded to token IDs with the causal tail.
-The cache gather copies INT8 bytes; it does not dequantize keys for the dot.
+All LI C8 queries use glm5_next_c8_quant_indexer: eager prefill,
+single-token decode, MTP, and FULL graph capture/replay. Q is dynamically
+quantized per head; CANN QLI v2 multiplies INT8 Q/K with INT32 accumulation,
+then applies scales, per-head ReLU and head weights. There is no floating
+QK fallback and no query-count or workspace-budget dispatch threshold.
+
+Within each cache page, B*128 contiguous INT8 key bytes are followed by B
+FP16 scales. The allocation retains B*132 bytes, with 2*B bytes reserved.
+The original block table and physical page strides are passed directly to
+QLI v2, avoiding history-sized gathering, dequantization or mirrored caches.
+This page layout replaces the previous interleaved key/FP32-scale format;
+workers must start with fresh caches when changing versions.
 
 The scoring relation is
-`score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k])))`.
-The per-head ReLU must precede the weighted reduction. Query quantization
-and the operator's FP16 scale/weight arithmetic add numerical rounding, so
-validation must include model accuracy as well as throughput.
+score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k]))).
+Query quantization and the operator's FP16 scale/weight arithmetic introduce
+rounding, so model accuracy and throughput both require validation.
 
-The contiguous INT8 keys and FP16 scales use at most 256 MiB of scratch.
-Scratch keys and query metadata are reused only between layers of the same
-eager forward. When QLI v2 is unavailable or its shape requirements are not
-met, eager batches with at least 32 queries dequantize live keys once per
-layer and use BF16 CANN PoolKeyIndexer. That BF16 working set has its own
-256 MiB budget. It is not a persistent BF16 copy of the full KV cache.
-If the working set cannot fit, selection falls back to the paged Triton
-scorer. Small batches and FULL graph capture/replay also retain the paged
-scorer. These paths introduce no device-to-host length reduction or global
-mutable scratch cache.
+The integer scorer requires QLI v2 and its metadata operator, 32/64 heads,
+head dimension 128, page rows divisible by 16 in [16,1024], a power-of-two
+pool size <=128, and at most 2048 selected pools. Unsupported configurations
+raise an error rather than silently switching to floating QK. Query metadata
+is shared only within a forward; capture records its device-side updates so
+sequence lengths and page-table contents can change on replay.
+
+The parameters and constraints below describe the legacy BF16 helper only.
 
 ## Parameters
 

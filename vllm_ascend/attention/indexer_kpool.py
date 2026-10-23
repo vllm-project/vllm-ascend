@@ -32,8 +32,6 @@ from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_curr
 from vllm_ascend.utils import _round_up, enable_dsa_cp, vllm_version_is
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
-C8_CANN_MIN_QUERY_TOKENS = 32
-C8_QUANT_MIN_QUERY_TOKENS = 512
 
 
 @dataclass
@@ -70,9 +68,7 @@ class AscendIndexerKPoolMetadata:
     keypool_start_offsets: torch.Tensor | None = None
     pooled_slot_mapping: torch.Tensor | None = None
     max_pool_seq_len: int | None = None
-    # Reused only between layers of this eager forward on the same stream.
-    c8_dequant_workspace: tuple[torch.Tensor, torch.Tensor] | None = None
-    c8_quant_workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    # Reused between layers; graph capture records the device-side updates.
     c8_quant_metadata: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
@@ -713,7 +709,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             raise TypeError("GLM KPool compressed cache must be bfloat16 or int8.")
         row_width = self.head_dim + (4 if indexer_cache.dtype == torch.int8 else 0)
         if indexer_cache.shape[-1] != row_width:
-            raise ValueError("GLM KPool cache rows must contain the key and any packed FP32 scale.")
+            raise ValueError("GLM KPool cache allocation must include the key and reserved scale bytes.")
         if tail_cache.dtype != torch.float32:
             raise TypeError("GLM KPool compressor tail must be float32.")
         if tail_cache.ndim != 3 or tail_cache.shape[1] < self.index_kpool or tail_cache.shape[2] != 2 * self.head_dim:
@@ -780,98 +776,24 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         if indexer_cache.dtype == torch.int8:
-            # Prefill dequantizes live keys for CANN; small or graph-captured
-            # queries score the packed INT8 cache directly.
-            from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore[import-untyped]
-                glm5_next_lightning_indexer_triton,
-            )
+            from vllm_ascend.ops.triton.glm5_next_quant_indexer import glm5_next_c8_quant_indexer
 
-            known_max_pools = indexer_metadata.max_pool_seq_len
-            # Captured graphs must cover future sequence growth, not only
-            # the sequence lengths used while warming up the graph.
-            if known_max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Capture must cover sequence growth on replay. The integer scorer
+            # reads the original pages directly, without a history-sized workspace.
+            max_pools = indexer_metadata.max_pool_seq_len
+            if max_pools is None or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
                 max_pools = int(indexer_metadata.block_table.shape[1] * indexer_cache.shape[1])
-            else:
-                max_pools = known_max_pools
-            # Amortize query quantization and cache gathering over a large
-            # prefill. QLI v2 keeps the QK multiplication in INT8 on A2/A3.
-            if (
-                num_tokens >= C8_QUANT_MIN_QUERY_TOKENS
-                and self.n_head in (32, 64)
-                and self.head_dim == 128
-                and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
-                and hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2")
-                and hasattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2_metadata")
-            ):
-                from vllm_ascend.ops.triton.glm5_next_quant_indexer import glm5_next_c8_quant_indexer
-
-                indices = glm5_next_c8_quant_indexer(
-                    q_values,
-                    indexer_cache,
-                    weights,
-                    indexer_metadata,
-                    query_metadata,
-                    max_pools,
-                    self.topk_tokens,
-                    self.index_kpool,
-                    self.topk_indices_buffer,
-                )
-                if indices is not None:
-                    return indices
-            # Dequantizing pools once per layer is cheaper than unpacking
-            # them for every prefill query. Capture keeps the paged INT8 scorer.
-            if (
-                num_tokens >= C8_CANN_MIN_QUERY_TOKENS
-                and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
-            ):
-                from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (
-                    glm5_next_c8_dequant_pool_key,
-                )
-
-                workspace = glm5_next_c8_dequant_pool_key(
-                    indexer_cache,
-                    indexer_metadata.block_table,
-                    indexer_metadata.seq_lens,
-                    max_pools,
-                    self.head_dim,
-                    indexer_metadata.c8_dequant_workspace,
-                )
-                if workspace is not None:
-                    indexer_metadata.c8_dequant_workspace = workspace
-                    pool_key, page_table = workspace
-                    indices, _ = self._pool_key_indexer(
-                        q_values.to(torch.bfloat16),
-                        pool_key,
-                        weights.to(torch.bfloat16),
-                        query_metadata.pool_tail,
-                        actual_seq_q=query_metadata.cum_query_lens,
-                        actual_seq_k=query_metadata.seq_lens,
-                        block_table=page_table,
-                        layout_q="TND",
-                        layout_k="PA_BBND",
-                        topk=self.topk_tokens,
-                        pool_size=self.index_kpool,
-                        mask_mode=3,
-                    )
-                    return self._pack_keypool_indices(
-                        indices, query_metadata, self.topk_tokens, self.index_kpool, self.topk_indices_buffer
-                    )
-            indices = glm5_next_lightning_indexer_triton(
+            return glm5_next_c8_quant_indexer(
                 q_values,
                 indexer_cache,
-                weights.to(q_values.dtype),
-                query_metadata.cum_query_lens,
-                query_metadata.seq_lens,
-                indexer_metadata.block_table,
-                query_metadata.positions,
-                index_topk=self.topk_tokens,
-                index_kpool=self.index_kpool,
-                max_pool_seq_len=max_pools,
-                output_buffer=self.topk_indices_buffer,
-                pack_tail=True,
-                allow_cache_packing=get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL,
+                weights,
+                indexer_metadata,
+                query_metadata,
+                max_pools,
+                self.topk_tokens,
+                self.index_kpool,
+                self.topk_indices_buffer,
             )
-            return indices
         query = q_values.to(indexer_cache.dtype)
         indices, _ = self._pool_key_indexer(
             query,

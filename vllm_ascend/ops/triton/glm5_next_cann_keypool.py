@@ -60,15 +60,18 @@ def _write_keypool_caches_kernel(
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
         row_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * CACHE_ROW
         if QUANT:
+            page_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE
+            row_base = page_base + slot % BLOCK_SIZE * HEAD_DIM
             values = pool_value.to(tl.float32)
             abs_max = tl.max(tl.abs(values))
             scale = tl.where(abs_max > 0, tl.div_rn(abs_max, 127.0), 1.0)
             quantized = tl.extra.cann.libdevice.nearbyint(tl.div_rn(values, scale))
             quantized = tl.minimum(tl.maximum(quantized, -127.0), 127.0).to(tl.int8)
             tl.store(row_base + cols, quantized, valid & (cols < HEAD_DIM))
-            scale_bits = tl.where(abs_max > 0, scale, 0.0).to(tl.int32, bitcast=True)
-            for byte in tl.static_range(4):
-                tl.store(row_base + HEAD_DIM + byte, ((scale_bits >> (8 * byte)) & 0xFF).to(tl.int8), valid)
+            scale_bits = tl.where(abs_max > 0, scale, 0.0).to(tl.float16).to(tl.int16, bitcast=True)
+            scale_base = page_base + BLOCK_SIZE * HEAD_DIM + slot % BLOCK_SIZE * 2
+            for byte in tl.static_range(2):
+                tl.store(scale_base + byte, ((scale_bits >> (8 * byte)) & 0xFF).to(tl.int8), valid)
         else:
             tl.store(row_base + cols, pool_value, valid & (cols < HEAD_DIM))
 

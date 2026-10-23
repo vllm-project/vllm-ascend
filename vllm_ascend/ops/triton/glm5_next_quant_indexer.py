@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""INT8 QK scoring for GLM KPool prefill on supported CANN QLI v2 kernels.
+"""Paged INT8 QK scoring for all GLM KPool queries, including graph replay.
 
-The persistent cache contains INT8 key bytes followed by an FP32 scale. Gather
-live rows into the separate key/FP16-scale layout required by QLI v2, quantize
-queries per head, and expand selected pools back into causal token indices.
-All scratch state belongs to one eager forward and is refilled between layers.
+Each cache page holds contiguous INT8 keys followed by FP16 scales. QLI v2
+reads these views directly through the original block table; no history-sized
+scratch or floating QK fallback is needed.
 """
 
 from __future__ import annotations
@@ -20,43 +19,6 @@ if TYPE_CHECKING:
 import torch
 import torch_npu
 from vllm.triton_utils import tl, triton
-
-
-@triton.jit(do_not_specialize=["requests", "pools_count"])
-def _gather_int8_pool_rows(
-    cache,
-    keys,
-    scales,
-    table,
-    lengths,
-    requests,
-    pools_count,
-    blocks_count,
-    HALF_DIM: tl.constexpr,
-    CACHE_BLOCK: tl.constexpr,
-    CACHE_SB: tl.constexpr,
-    CACHE_ST: tl.constexpr,
-    TABLE_SR: tl.constexpr,
-    TABLE_SP: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    chunks = tl.cdiv(pools_count, BLOCK)
-    for tile in range(tl.program_id(0), requests * chunks, tl.num_programs(0)):
-        request, chunk = tile // chunks, tile % chunks
-        pools = chunk * BLOCK + tl.arange(0, BLOCK)
-        valid = (pools < pools_count) & (pools < tl.load(lengths + request)) & (pools // CACHE_BLOCK < TABLE_WIDTH)
-        blocks = tl.load(table + request * TABLE_SR + (pools // CACHE_BLOCK) * TABLE_SP, valid, other=0)
-        blocks = tl.minimum(tl.maximum(blocks, 0), blocks_count - 1)
-        row = blocks.to(tl.int64) * CACHE_SB + (pools % CACHE_BLOCK) * CACHE_ST
-        lanes = tl.arange(0, HALF_DIM)
-        words = tl.load(cache + row[:, None] + lanes[None, :], valid[:, None], other=0)
-        lo = tl.load(cache + row + HALF_DIM, valid, other=0).to(tl.int32) & 0xFFFF
-        hi = tl.load(cache + row + HALF_DIM + 1, valid, other=0).to(tl.int32) & 0xFFFF
-        scale = (lo | (hi << 16)).to(tl.float32, bitcast=True)
-        outrow = request * pools_count + pools
-        tl.store(keys + outrow[:, None] * HALF_DIM + lanes[None, :], words, (pools < pools_count)[:, None])
-        tl.store(scales + outrow, scale, pools < pools_count)
 
 
 @triton.jit(do_not_specialize=["tokens"])
@@ -94,49 +56,30 @@ def _expand_quant_pool_indices(
         tl.store(output + token * OUT_STRIDE + cols, value, cols < OUT_WIDTH)
 
 
-def _prepare_quant_keys(
-    cache: torch.Tensor,
-    table: torch.Tensor,
-    lengths: torch.Tensor,
-    max_pools: int,
-    workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """Copy INT8 bytes without dequantizing; bound scratch to 256 MiB."""
-    requests = lengths.numel()
-    if requests == 0:
-        return None
-    pages = max(1, triton.cdiv(min(max_pools, table.shape[1] * cache.shape[1]), 128))
-    pools = pages * 128
-    dim = cache.shape[-1] - 4
-    shape = (requests * pages, 128, 1, dim)
-    if requests * pools * (dim + 2) > 256 * 1024 * 1024:
-        return None
-    if workspace is None:
-        keys = torch.empty(shape, device=cache.device, dtype=torch.int8)
-        scales = torch.empty(shape[:-1], device=cache.device, dtype=torch.float16)
-        packed_table = torch.arange(requests * pages, device=cache.device, dtype=torch.int32).view(requests, pages)
-        workspace = keys, scales, packed_table
-    keys, scales, packed_table = workspace
-    if keys.shape != shape or keys.device != cache.device:
-        raise ValueError("GLM KPool INT8 workspace does not match this forward.")
-    _gather_int8_pool_rows[(min(requests * pages, 256),)](
-        cache.view(torch.int16),
-        keys.view(torch.int16),
-        scales,
-        table,
-        lengths,
-        requests,
-        pools,
-        cache.shape[0],
-        dim // 2,
-        cache.shape[1],
-        cache.stride(0) // 2,
-        cache.stride(1) // 2,
-        *table.stride(),
-        table.shape[1],
-        128,
+def view_quant_kpool_cache(cache: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """View page-local keys/scales without copying, preserving physical strides.
+
+    The allocation retains 132 bytes per row. Within each page, B*128 key
+    bytes precede B FP16 scales; the remaining 2*B bytes are reserved.
+    """
+    if cache.dtype != torch.int8 or cache.ndim != 4 or cache.shape[2:] != (1, 132):
+        raise ValueError("GLM KPool C8 requires an INT8 [pages, rows, 1, 132] allocation.")
+    pages, rows = cache.shape[:2]
+    if (
+        rows % 16
+        or not 16 <= rows <= 1024
+        or cache.stride(0) < rows * 132
+        or cache.stride(0) % 2
+        or cache.storage_offset() % 2
+    ):
+        raise ValueError("GLM KPool C8 requires 16-aligned page rows and halfword-aligned storage.")
+    keys = cache.as_strided((pages, rows, 1, 128), (cache.stride(0), 128, 128, 1))
+    scales = cache.view(torch.float16).as_strided(
+        (pages, rows, 1),
+        (cache.stride(0) // 2, 1, 1),
+        (cache.storage_offset() + rows * 128) // 2,
     )
-    return workspace
+    return keys, scales
 
 
 def glm5_next_c8_quant_indexer(
@@ -149,24 +92,39 @@ def glm5_next_c8_quant_indexer(
     topk_tokens: int,
     pool_size: int,
     output: torch.Tensor | None,
-) -> torch.Tensor | None:
-    """Score with INT8 dot/INT32 accumulation, then scaled per-head ReLU.
-
-    Positive query scales can be folded into head weights after ReLU; the key
-    scale applies after the head reduction. Query quantization adds rounding
-    relative to the BF16 query path. This helper is for eager prefill only.
-    Return None when the bounded key workspace cannot fit.
-    """
-    # A2/A3 QLI v2 requires a power-of-two compression ratio and <=2048 pools.
-    if pool_size <= 0 or pool_size > 128 or pool_size & (pool_size - 1) or topk_tokens // pool_size > 2048:
-        return None
+) -> torch.Tensor:
+    """Quantize Q, multiply INT8 Q/K with INT32 accumulation, then scale scores."""
+    if (
+        pool_size <= 0
+        or pool_size > 128
+        or pool_size & (pool_size - 1)
+        or topk_tokens <= 0
+        or topk_tokens % pool_size
+        or topk_tokens // pool_size > 2048
+    ):
+        raise ValueError("GLM KPool C8 requires a power-of-two pool size <=128 and <=2048 selected pools.")
+    if q.shape[1] not in (32, 64) or q.shape[2] != 128:
+        raise ValueError("GLM KPool C8 integer scoring requires 32/64 query heads of dimension 128.")
+    if not all(
+        hasattr(torch.ops._C_ascend, op)
+        for op in ("npu_quant_lightning_indexer_v2", "npu_quant_lightning_indexer_v2_metadata")
+    ):
+        raise RuntimeError("GLM KPool C8 requires the QLI v2 integer operators; rebuild the Ascend custom operators.")
+    width = topk_tokens + pool_size - 1
+    if output is not None and (
+        output.ndim != 2
+        or output.dtype != torch.int32
+        or output.device != q.device
+        or output.stride(1) != 1
+        or output.shape[0] < q.shape[0]
+        or output.shape[1] < width
+        or (q.shape[0] > 1 and output.stride(0) < output.shape[1])
+    ):
+        raise ValueError("GLM KPool output requires int32 nonoverlapping rows covering queries and top-k width.")
     assert query_meta.cum_query_lens is not None
     assert query_meta.pool_tail is not None
-    workspace = _prepare_quant_keys(cache, meta.block_table, meta.seq_lens, max_pools, meta.c8_quant_workspace)
-    if workspace is None:
-        return None
-    meta.c8_quant_workspace = workspace
-    keys, scales, table = workspace
+    keys, scales = view_quant_kpool_cache(cache)
+    table = meta.block_table
     state = meta.c8_quant_metadata
     if state is None:
         ends = query_meta.cum_query_lens.to(torch.int32)
@@ -213,7 +171,6 @@ def glm5_next_c8_quant_indexer(
         cmp_ratio=pool_size,
         return_value=0,
     )
-    width = topk_tokens + pool_size - 1
     if output is None:
         output = torch.empty((q.shape[0], width), dtype=torch.int32, device=q.device)
     result = output[: q.shape[0]]

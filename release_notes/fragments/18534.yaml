@@ -5,6 +5,6 @@ entries:
     model: GLM-5.3-Flash
     hardware: [A3]
   - category: performance
-    text: Accelerated GLM-5.3-Flash long-context INT8 indexer prefill with integer QK scoring and bounded cache gathering, with a BF16 scorer fallback.
+    text: Unified GLM-5.3-Flash INT8 indexer prefill and decode on integer QK scoring with direct paged-cache reads, including graph replay.
     model: GLM-5.3-Flash
     hardware: [A3]

@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged GLM KPool scoring and fused token-index expansion.
-
-LI C8 pooled rows hold ``head_dim`` INT8 bytes plus one little-endian FP32
-scale. The score kernel reads such a row as ``head_dim / 2`` INT16 words and
-unpacks the byte pair of each word against the even and odd query lanes.
-INT16 loads avoid Ascend Triton's 1-byte tile-load limitation. Each head's
-dot product passes through ReLU before the weighted head reduction, matching
-CANN PoolKeyIndexer. The legacy BF16 helper retains its direct row loads.
-"""
+"""Legacy BF16 GLM KPool scoring and fused token-index expansion."""
 
 from __future__ import annotations
 
@@ -16,10 +8,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-C8_DEQUANT_PAGE_SIZE = 128
 TRITON_POOL_CHUNK_SIZE = 128
-# Bound the temporary tiles used by INT8 unpacking and per-head scoring.
-TRITON_POOL_CHUNK_SIZE_C8 = 64
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 TRITON_MAX_PROGRAMS = 256
 TRITON_INDEX_BLOCK = 256
@@ -29,129 +18,16 @@ TRITON_PREFILL_MIN_TOKENS = 32
 TRITON_PREFILL_POOL_TILE = 2048
 TRITON_PACKED_CACHE_BYTES = 256 * 1024 * 1024
 NEG_INF_SENTINEL = torch.finfo(torch.float32).min
-# LI C8 pooled rows end with one little-endian FP32 scale.
-LI_C8_SCALE_BYTES = 4
 # Masked request ends must sort after every valid token offset.
 QUERY_END_SENTINEL = torch.iinfo(torch.int32).max
-
-
-@triton.jit(do_not_specialize=["requests", "pools_count", "pool_stride"])
-def _c8_pack_pool_rows(
-    cache,
-    keys,
-    table,
-    lengths,
-    requests,
-    pools_count,
-    pool_stride,
-    blocks_count,
-    HALF_DIM: tl.constexpr,
-    CACHE_BLOCK: tl.constexpr,
-    CACHE_SB: tl.constexpr,
-    CACHE_ST: tl.constexpr,
-    TABLE_SR: tl.constexpr,
-    TABLE_SP: tl.constexpr,
-    BLOCK: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-):
-    """Unpack the pooled rows a request uses into contiguous BF16 keys."""
-    chunks = tl.cdiv(pools_count, BLOCK)
-    for tile in range(tl.program_id(0), requests * chunks, tl.num_programs(0)):
-        request, chunk = tile // chunks, tile % chunks
-        pools = chunk * BLOCK + tl.arange(0, BLOCK)
-        in_range = pools < pools_count
-        valid = in_range & (pools < tl.load(lengths + request)) & (pools // CACHE_BLOCK < TABLE_WIDTH)
-        blocks = tl.load(table + request * TABLE_SR + (pools // CACHE_BLOCK) * TABLE_SP, valid, other=0)
-        blocks = tl.minimum(tl.maximum(blocks, 0), blocks_count - 1)
-        slot = (pools % CACHE_BLOCK) * CACHE_ST
-        row = blocks.to(tl.int64) * CACHE_SB + slot
-        half = tl.arange(0, HALF_DIM)
-        words = tl.load(cache + row[:, None] + half[None, :], valid[:, None], other=0)
-        scale_low = tl.load(cache + row + HALF_DIM, valid, other=0).to(tl.int32) & 0xFFFF
-        scale_high = tl.load(cache + row + HALF_DIM + 1, valid, other=0).to(tl.int32) & 0xFFFF
-        scale = (scale_low | (scale_high << 16)).to(tl.float32, bitcast=True)
-        # INT16 arithmetic shifts sign-extend each packed byte in one op. The
-        # byte pair is then recombined as one INT32 word so the store runs at
-        # unit stride instead of stride two. Fold the row scale into the
-        # keys, which is what a BF16 scorer needs and is equivalent to scaling
-        # the score afterwards because the scale is positive.
-        even = ((words << 8) >> 8).to(tl.float32)
-        odd = (words >> 8).to(tl.float32)
-        even = even * scale[:, None]
-        odd = odd * scale[:, None]
-        even = even.to(tl.bfloat16).to(tl.int16, bitcast=True).to(tl.int32) & 0xFFFF
-        odd = odd.to(tl.bfloat16).to(tl.int16, bitcast=True).to(tl.int32) & 0xFFFF
-        tl.store(
-            keys + (request * pool_stride + pools[:, None]) * HALF_DIM + half[None, :],
-            even | (odd << 16),
-            in_range[:, None],
-        )
-
-
-def glm5_next_c8_dequant_pool_key(
-    indexer_cache: torch.Tensor,
-    indexer_block_table: torch.Tensor,
-    pool_lens: torch.Tensor,
-    max_pool_seq_len: int,
-    head_dim: int,
-    workspace: tuple[torch.Tensor, torch.Tensor] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Dequantize live pooled rows for CANN, without a device-to-host sync.
-
-    The caller may reuse the returned working set between layers of a single
-    forward on the same stream. It must not share it across concurrent forwards
-    or captured graphs. Return None when the bounded workspace cannot fit, so
-    the caller can use the paged scorer instead.
-    """
-    if indexer_cache.dtype != torch.int8:
-        raise TypeError("GLM KPool dequantization requires an int8 cache.")
-    row_width = indexer_cache.shape[-1]
-    if row_width != head_dim + LI_C8_SCALE_BYTES or head_dim % 2:
-        raise ValueError("GLM KPool dequantization requires aligned key rows with a packed FP32 scale.")
-    num_reqs = pool_lens.numel()
-    if num_reqs == 0:
-        return None
-    capacity = indexer_block_table.shape[1] * indexer_cache.shape[1]
-    pages = max(1, triton.cdiv(min(max_pool_seq_len, capacity), C8_DEQUANT_PAGE_SIZE))
-    pool_stride = pages * C8_DEQUANT_PAGE_SIZE
-    shape = (num_reqs * pages, C8_DEQUANT_PAGE_SIZE, 1, head_dim)
-    if num_reqs * pool_stride * head_dim * 2 > TRITON_PACKED_CACHE_BYTES:
-        return None
-    if workspace is None:
-        keys = torch.empty(shape, dtype=torch.bfloat16, device=indexer_cache.device)
-        table = torch.arange(num_reqs * pages, dtype=torch.int32, device=indexer_cache.device).view(num_reqs, pages)
-    else:
-        keys, table = workspace
-        if keys.shape != shape or keys.device != indexer_cache.device or table.shape != (num_reqs, pages):
-            raise ValueError("GLM KPool dequantization workspace does not match this forward.")
-    _c8_pack_pool_rows[(min(num_reqs * pages, TRITON_MAX_PROGRAMS),)](
-        indexer_cache.view(torch.int16),
-        keys.view(torch.int32),
-        indexer_block_table,
-        pool_lens,
-        num_reqs,
-        pool_stride,
-        pool_stride,
-        indexer_cache.shape[0],
-        head_dim // 2,
-        indexer_cache.shape[1],
-        indexer_cache.stride(0) // 2,
-        indexer_cache.stride(1) // 2,
-        *indexer_block_table.stride(),
-        C8_DEQUANT_PAGE_SIZE,
-        indexer_block_table.shape[1],
-    )
-    return keys, table
 
 
 @triton.jit(do_not_specialize=["requests", "pools_count", "blocks_count"])
 def _gather_pool_cache(
     cache,
-    i16_cache,
     table,
     lengths,
     packed,
-    i16_packed,
     requests,
     pools_count,
     blocks_count,
@@ -159,16 +35,11 @@ def _gather_pool_cache(
     CACHE_SB: tl.constexpr,
     CACHE_ST: tl.constexpr,
     CACHE_SD: tl.constexpr,
-    CACHE_SB_I16: tl.constexpr,
-    CACHE_ST_I16: tl.constexpr,
     TABLE_SR: tl.constexpr,
     TABLE_SP: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    HALF_DIM: tl.constexpr,
     BLOCK: tl.constexpr,
     ROW_WIDTH: tl.constexpr,
-    ROW_I16: tl.constexpr,
-    QUANT: tl.constexpr,
 ):
     chunks = tl.cdiv(pools_count, BLOCK)
     for tile in range(tl.program_id(0), requests * chunks, tl.num_programs(0)):
@@ -177,38 +48,20 @@ def _gather_pool_cache(
         valid = (pools < pools_count) & (pools < tl.load(lengths + request))
         blocks = tl.load(table + request * TABLE_SR + (pools // CACHE_BLOCK) * TABLE_SP, valid, other=0)
         blocks = tl.minimum(tl.maximum(blocks, 0), blocks_count - 1)
-        if QUANT:
-            # Copy the whole C8 row, scale included, through the INT16 views.
-            half = tl.arange(0, HALF_DIM)
-            src_row = blocks[:, None] * CACHE_SB_I16 + (pools % CACHE_BLOCK)[:, None] * CACHE_ST_I16
-            dst_row = (request * pools_count + pools[:, None]) * ROW_I16
-            words = tl.load(i16_cache + src_row + half[None, :], valid[:, None], other=0)
-            tl.store(i16_packed + dst_row + half[None, :], words, (pools < pools_count)[:, None])
-            # The row's FP32 scale occupies the two INT16 words after the row.
-            pair = tl.arange(0, 2)
-            scale_words = tl.load(i16_cache + src_row + HALF_DIM + pair[None, :], valid[:, None], other=0)
-            tl.store(
-                i16_packed + dst_row + HALF_DIM + pair[None, :],
-                scale_words,
-                (pools < pools_count)[:, None],
-            )
-        else:
-            dims = tl.arange(0, HEAD_DIM)
-            offsets = blocks[:, None] * CACHE_SB + (pools % CACHE_BLOCK)[:, None] * CACHE_ST
-            keys = tl.load(cache + offsets + dims[None, :] * CACHE_SD, valid[:, None], other=0.0)
-            tl.store(
-                packed + (request * pools_count + pools[:, None]) * ROW_WIDTH + dims[None, :],
-                keys,
-                (pools < pools_count)[:, None],
-            )
+        dims = tl.arange(0, HEAD_DIM)
+        offsets = blocks[:, None] * CACHE_SB + (pools % CACHE_BLOCK)[:, None] * CACHE_ST
+        keys = tl.load(cache + offsets + dims[None, :] * CACHE_SD, valid[:, None], other=0.0)
+        tl.store(
+            packed + (request * pools_count + pools[:, None]) * ROW_WIDTH + dims[None, :],
+            keys,
+            (pools < pools_count)[:, None],
+        )
 
 
 @triton.jit(do_not_specialize=["token_offset", "rows", "max_pool_seq_len", "num_reqs", "num_cache_blocks"])
 def _glm5_next_lightning_indexer_score_kernel(
     query,
-    weights,
     cache,
-    i16_cache,
     query_ends,
     pool_lens,
     block_table,
@@ -222,16 +75,12 @@ def _glm5_next_lightning_indexer_score_kernel(
     cache_stride_b: tl.constexpr,
     cache_stride_t: tl.constexpr,
     cache_stride_d: tl.constexpr,
-    cache_stride_b_i16: tl.constexpr,
-    cache_stride_t_i16: tl.constexpr,
     table_stride_r: tl.constexpr,
     table_stride_p: tl.constexpr,
     CACHE_BLOCK: tl.constexpr,
     QUERY_END_SENTINEL: tl.constexpr,
     REQ_POW2: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    HALF_DIM: tl.constexpr,
-    ROW_I16: tl.constexpr,
     POOL: tl.constexpr,
     BLOCK_POOL: tl.constexpr,
     LOWEST: tl.constexpr,
@@ -239,14 +88,6 @@ def _glm5_next_lightning_indexer_score_kernel(
     OUTER_POOL: tl.constexpr,
     PACKED_CACHE: tl.constexpr,
     ROW_WIDTH: tl.constexpr,
-    QUANT: tl.constexpr,
-    QUERY_STRIDE_T: tl.constexpr,
-    QUERY_STRIDE_H: tl.constexpr,
-    QUERY_STRIDE_D: tl.constexpr,
-    WEIGHT_STRIDE_T: tl.constexpr,
-    WEIGHT_STRIDE_H: tl.constexpr,
-    NUM_HEADS: tl.constexpr,
-    BLOCK_HEADS: tl.constexpr,
 ):
     chunks = tl.cdiv(max_pool_seq_len, OUTER_POOL)
     for tile in range(tl.program_id(0), rows * chunks, tl.num_programs(0)):
@@ -259,18 +100,7 @@ def _glm5_next_lightning_indexer_score_kernel(
         visible = tl.minimum((position + 1) // POOL, tl.load(pool_lens + request))
         live = token < tl.load(query_ends + num_reqs - 1)
         dims = tl.arange(0, HEAD_DIM)
-        if QUANT:
-            # Keep heads separate: CANN applies ReLU to each QK dot product
-            # before the weighted head reduction. Collapsing Q first changes
-            # pool selection when a dot product is negative.
-            half = tl.arange(0, HALF_DIM)
-            heads = tl.arange(0, BLOCK_HEADS)
-            query_base = query + row * QUERY_STRIDE_T + heads[:, None] * QUERY_STRIDE_H
-            query_even = tl.load(query_base + half[None, :] * 2 * QUERY_STRIDE_D, heads[:, None] < NUM_HEADS, 0)
-            query_odd = tl.load(query_base + (half[None, :] * 2 + 1) * QUERY_STRIDE_D, heads[:, None] < NUM_HEADS, 0)
-            head_weights = tl.load(weights + row * WEIGHT_STRIDE_T + heads * WEIGHT_STRIDE_H, heads < NUM_HEADS, 0)
-        else:
-            weighted_query = tl.load(query + row * HEAD_DIM + dims)
+        weighted_query = tl.load(query + row * HEAD_DIM + dims)
         sub_tiles = tl.cdiv(tl.minimum(max_pool_seq_len - chunk * OUTER_POOL, OUTER_POOL), BLOCK_POOL)
         for sub in range(sub_tiles):
             pool_start = chunk * OUTER_POOL + sub * BLOCK_POOL
@@ -278,64 +108,37 @@ def _glm5_next_lightning_indexer_score_kernel(
             scores = tl.full((BLOCK_POOL,), LOWEST, tl.float32)
             if live & (pool_start < visible):
                 valid = (pools < max_pool_seq_len) & (pools < visible)
-                if QUANT:
-                    if PACKED_CACHE:
-                        row_i16 = (request * max_pool_seq_len + pools) * ROW_I16
-                    else:
-                        pages = pools // CACHE_BLOCK
-                        blocks = tl.load(
-                            block_table + request * table_stride_r + pages * table_stride_p,
-                            valid,
-                            other=0,
-                        )
-                        blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
-                        row_i16 = blocks * cache_stride_b_i16 + (pools % CACHE_BLOCK) * cache_stride_t_i16
-                    words = tl.load(i16_cache + row_i16[:, None] + half[None, :], valid[:, None], other=0)
-                    words = words.to(tl.int32) & 0xFFFF
-                    low = words & 0xFF
-                    high = (words >> 8) & 0xFF
-                    # Two's-complement sign extension of each quantized byte.
-                    low = tl.where(low > 127, low - 256, low).to(tl.float32)
-                    high = tl.where(high > 127, high - 256, high).to(tl.float32)
-                    dots = tl.dot(query_even, tl.trans(low.to(query_even.dtype)))
-                    dots += tl.dot(query_odd, tl.trans(high.to(query_odd.dtype)))
-                    scores = tl.sum(tl.maximum(dots, 0.0) * head_weights[:, None].to(tl.float32), axis=0)
-                    # The row's FP32 scale occupies the two words after the row.
-                    scale_low = tl.load(i16_cache + row_i16 + HALF_DIM, valid, other=0).to(tl.int32) & 0xFFFF
-                    scale_high = tl.load(i16_cache + row_i16 + HALF_DIM + 1, valid, other=0).to(tl.int32) & 0xFFFF
-                    scores = scores * (scale_low | (scale_high << 16)).to(tl.float32, bitcast=True)
+                if PACKED_CACHE:
+                    k = tl.load(
+                        cache + (request * max_pool_seq_len + pools[:, None]) * ROW_WIDTH + dims[None, :],
+                        valid[:, None],
+                        other=0.0,
+                    )
+                elif INDEX32:
+                    pages = pools // CACHE_BLOCK
+                    blocks = tl.load(
+                        block_table + request * table_stride_r + pages * table_stride_p,
+                        valid,
+                        other=0,
+                    )
+                    blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
+                    offsets = blocks[:, None] * cache_stride_b + (pools % CACHE_BLOCK)[:, None] * cache_stride_t
+                    k = tl.load(cache + offsets + dims[None, :] * cache_stride_d, valid[:, None], other=0.0)
                 else:
-                    if PACKED_CACHE:
-                        k = tl.load(
-                            cache + (request * max_pool_seq_len + pools[:, None]) * ROW_WIDTH + dims[None, :],
-                            valid[:, None],
-                            other=0.0,
-                        )
-                    elif INDEX32:
-                        pages = pools // CACHE_BLOCK
-                        blocks = tl.load(
-                            block_table + request * table_stride_r + pages * table_stride_p,
-                            valid,
-                            other=0,
-                        )
-                        blocks = tl.minimum(tl.maximum(blocks, 0), num_cache_blocks - 1)
-                        offsets = blocks[:, None] * cache_stride_b + (pools % CACHE_BLOCK)[:, None] * cache_stride_t
-                        k = tl.load(cache + offsets + dims[None, :] * cache_stride_d, valid[:, None], other=0.0)
-                    else:
-                        # Large caches need a scalar int64 page base; vector offsets
-                        # remain within one page to avoid overflowing signed int32.
-                        block = tl.load(
-                            block_table + request * table_stride_r + (pool_start // CACHE_BLOCK) * table_stride_p
-                        )
-                        block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
-                        page_base = cache + block * cache_stride_b
-                        offsets = tl.arange(0, BLOCK_POOL)
-                        k = tl.load(
-                            page_base + offsets[:, None] * cache_stride_t + dims[None, :] * cache_stride_d,
-                            valid[:, None],
-                            other=0.0,
-                        )
-                    scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
+                    # Large caches need a scalar int64 page base; vector offsets
+                    # remain within one page to avoid overflowing signed int32.
+                    block = tl.load(
+                        block_table + request * table_stride_r + (pool_start // CACHE_BLOCK) * table_stride_p
+                    )
+                    block = tl.minimum(tl.maximum(block, 0), num_cache_blocks - 1).to(tl.int64)
+                    page_base = cache + block * cache_stride_b
+                    offsets = tl.arange(0, BLOCK_POOL)
+                    k = tl.load(
+                        page_base + offsets[:, None] * cache_stride_t + dims[None, :] * cache_stride_d,
+                        valid[:, None],
+                        other=0.0,
+                    )
+                scores = tl.sum(k.to(tl.float32) * weighted_query[None, :], axis=1)
                 scores = tl.where(valid & (scores == scores), tl.minimum(tl.maximum(scores, LOWEST), -LOWEST), LOWEST)
             tl.store(output + row * max_pool_seq_len + pools, scores, pools < max_pool_seq_len)
 
@@ -437,28 +240,11 @@ def glm5_next_lightning_indexer_triton(
         raise ValueError("GLM KPool nonempty queries require request boundaries.")
     cache_span = sum((size - 1) * stride for size, stride in zip(indexer_cache.shape, indexer_cache.stride()))
     index32 = cache_span <= torch.iinfo(torch.int32).max
-    # LI C8 rows pack head_dim quantized bytes plus one FP32 scale; the cache
-    # view's last extent is the physical row width in that case.
-    quant = indexer_cache.dtype in (torch.int8, torch.float8_e4m3fn)
+    if indexer_cache.dtype != torch.bfloat16:
+        raise TypeError("The legacy KPool scorer accepts BF16 only; LI C8 must use the integer scorer.")
     row_width = indexer_cache.shape[3]
-    if row_width != head_dim + (LI_C8_SCALE_BYTES if quant else 0):
-        raise ValueError(
-            f"GLM KPool cache row width {row_width} does not match head_dim {head_dim} for {indexer_cache.dtype}."
-        )
-    if quant:
-        # The score kernel reads C8 rows as INT16 word pairs, so every row
-        # address and the trailing scale must be 2-byte aligned.
-        if indexer_cache.dtype != torch.int8:
-            raise NotImplementedError(
-                f"GLM KPool LI C8 scoring supports int8 pooled rows only, got {indexer_cache.dtype}."
-            )
-        if head_dim % 2 or row_width % 2 or any(stride % 2 for stride in indexer_cache.stride()[:3]):
-            raise ValueError(
-                f"GLM KPool LI C8 requires 2-byte aligned rows: head_dim={head_dim}, row_width={row_width}, "
-                f"strides={tuple(indexer_cache.stride())}."
-            )
-        if not index32:
-            raise NotImplementedError("GLM KPool LI C8 requires a cache addressable with int32 offsets.")
+    if row_width != head_dim:
+        raise ValueError("GLM KPool BF16 cache width must match the query head dimension.")
     page_span = (indexer_cache.shape[1] - 1) * indexer_cache.stride(1) + (row_width - 1) * indexer_cache.stride(3)
     if page_span > torch.iinfo(torch.int32).max:
         raise ValueError("GLM KPool cache page offsets must fit in int32.")
@@ -484,11 +270,9 @@ def glm5_next_lightning_indexer_triton(
             (min(cum_query_lens.numel() * triton.cdiv(max_pool_seq_len, TRITON_POOL_CHUNK_SIZE), TRITON_MAX_PROGRAMS),)
         ](
             indexer_cache,
-            indexer_cache.view(torch.int16) if quant else indexer_cache,
             indexer_block_table,
             indexer_seq_lens,
             cache,
-            cache.view(torch.int16) if quant else cache,
             cum_query_lens.numel(),
             max_pool_seq_len,
             indexer_cache.shape[0],
@@ -496,15 +280,10 @@ def glm5_next_lightning_indexer_triton(
             indexer_cache.stride(0),
             indexer_cache.stride(1),
             indexer_cache.stride(3),
-            indexer_cache.stride(0) // 2,
-            indexer_cache.stride(1) // 2,
             *indexer_block_table.stride(),
             head_dim,
-            head_dim // 2,
             TRITON_POOL_CHUNK_SIZE,
             row_width,
-            row_width // 2,
-            quant,
         )
     else:
         cache = indexer_cache
@@ -514,25 +293,17 @@ def glm5_next_lightning_indexer_triton(
         if selected:
             query_rows = query[start : start + rows]
             weight_rows = weights[start : start + rows]
-            # The legacy BF16 helper keeps its existing formula; production
-            # BF16 selection uses CANN. INT8 must match CANN's per-head ReLU.
-            score_query = (
-                query_rows
-                if quant
-                else ((query_rows.float() * weight_rows.float().unsqueeze(-1)).sum(dim=1).contiguous())
-            )
+            score_query = (query_rows.float() * weight_rows.float().unsqueeze(-1)).sum(dim=1).contiguous()
             scores = torch.empty((rows, max_pool_seq_len), dtype=torch.float32, device=query.device)
             if index32:
-                block_pool = TRITON_POOL_CHUNK_SIZE_C8 if quant else TRITON_POOL_CHUNK_SIZE
+                block_pool = TRITON_POOL_CHUNK_SIZE
             else:
                 block_pool = indexer_cache.shape[1]
             outer_pool = max(TRITON_PREFILL_POOL_TILE, block_pool) if rows >= TRITON_PREFILL_MIN_TOKENS else block_pool
             chunks = triton.cdiv(max_pool_seq_len, outer_pool)
             _glm5_next_lightning_indexer_score_kernel[(min(rows * chunks, TRITON_MAX_PROGRAMS),)](
                 score_query,
-                weight_rows,
                 cache,
-                cache.view(torch.int16) if quant else cache,
                 cum_query_lens,
                 indexer_seq_lens,
                 indexer_block_table,
@@ -546,15 +317,11 @@ def glm5_next_lightning_indexer_triton(
                 0 if packed_cache else cache.stride(0),
                 cache.stride(1),
                 cache.stride(3),
-                0 if packed_cache else cache.stride(0) // 2,
-                cache.stride(1) // 2,
                 *indexer_block_table.stride(),
                 indexer_cache.shape[1],
                 QUERY_END_SENTINEL,
                 next_power_of_2(cum_query_lens.numel()),
                 head_dim,
-                head_dim // 2,
-                row_width // 2,
                 index_kpool,
                 block_pool,
                 NEG_INF_SENTINEL,
@@ -562,14 +329,6 @@ def glm5_next_lightning_indexer_triton(
                 outer_pool,
                 packed_cache,
                 row_width,
-                quant,
-                query.stride(0),
-                query.stride(1),
-                query.stride(2),
-                weights.stride(0),
-                weights.stride(1),
-                query.shape[1],
-                max(16, next_power_of_2(query.shape[1])),
             )
             topk_scores, pool_ids = torch.topk(scores, selected, dim=1)
             # Ascend scalarizes Triton's int64-to-int32 vector conversion.

@@ -110,8 +110,9 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         del vllm_config
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         if self.quant_dtype is not None:
-            # LI C8: every pooled row stores head_dim quantized bytes plus one
-            # packed fp32 scale at the row end.
+            # Reserve four scale bytes per row to preserve page allocation.
+            # The adapter places INT8 keys and FP16 scales in separate regions
+            # within each page; the remaining two bytes per row are reserved.
             ratio_kwargs["scale_dim"] = 1
             ratio_kwargs["scale_dtype"] = torch.float32
         return AscendMLAAttentionSpec(

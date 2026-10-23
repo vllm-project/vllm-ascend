@@ -380,29 +380,16 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
 )
 @pytest.mark.parametrize("reuse_output", [False, True])
 @pytest.mark.parametrize("quant", [False, True])
-@pytest.mark.parametrize(
-    "c8_path",
-    ["paged", "dequant", "over_budget", "integer", "integer_over_budget", "integer_unavailable", "integer_unsupported"],
-)
 def test_cann_indexer_writes_caches_before_optional_selection(
-    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output, quant, c8_path
+    monkeypatch, compute_topk, dsa_cp, actual_query_tokens, runtime_mode, reuse_output, quant
 ):
-    monkeypatch.setattr(backend_module, "C8_CANN_MIN_QUERY_TOKENS", 32 if c8_path == "paged" else 4)
-    monkeypatch.setattr(backend_module, "C8_QUANT_MIN_QUERY_TOKENS", 4 if c8_path.startswith("integer") else 512)
-    quant_ops = SimpleNamespace()
-    if c8_path != "integer_unavailable":
-        quant_ops.npu_quant_lightning_indexer_v2 = MagicMock()
-        quant_ops.npu_quant_lightning_indexer_v2_metadata = MagicMock()
-    monkeypatch.setattr(torch.ops, "_C_ascend", quant_ops)
     monkeypatch.setattr(
         backend_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
     )
     op = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(op)
-    op.topk_tokens, op.head_dim, op.index_kpool = 4, 2, 4
+    op.topk_tokens, op.head_dim, op.index_kpool = 4, 128, 4
     op.n_head = 32
-    if c8_path.startswith("integer"):
-        op.head_dim = 64 if c8_path == "integer_unsupported" else 128
     op._key_weight = torch.empty(2, 3, dtype=torch.bfloat16)
     op._gate_weight = torch.empty(2, 3, dtype=torch.bfloat16)
     op._norm_weight_f32 = op._norm_bias_f32 = None
@@ -445,16 +432,7 @@ def test_cann_indexer_writes_caches_before_optional_selection(
     tail_metadata = _tail_metadata()
     tail_metadata.cann_inputs = SimpleNamespace(retained_indices=None)
     cache = torch.empty(2, 2, 1, op.head_dim + (4 if quant else 0), dtype=torch.int8 if quant else torch.bfloat16)
-    select_int8 = MagicMock(return_value=packed)
-    calls.attach_mock(select_int8, "select_int8")
-    workspace = (torch.empty(2, 128, 1, 2, dtype=torch.bfloat16), torch.tensor([[0], [1]], dtype=torch.int32))
-    dequant = MagicMock(return_value=None if c8_path == "over_budget" else workspace)
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm_ascend.ops.triton.glm5_next_lightning_indexer",
-        SimpleNamespace(glm5_next_lightning_indexer_triton=select_int8, glm5_next_c8_dequant_pool_key=dequant),
-    )
-    select_int8dot = MagicMock(return_value=None if c8_path == "integer_over_budget" else packed)
+    select_int8dot = MagicMock(return_value=packed)
     calls.attach_mock(select_int8dot, "select_int8dot")
     monkeypatch.setitem(
         sys.modules,
@@ -493,45 +471,15 @@ def test_cann_indexer_writes_caches_before_optional_selection(
             assert torch.all(op.topk_indices_buffer[query_rows:] == 77)
             assert torch.all(storage[1::2] == 77)
             assert torch.all(storage[:, 11:] == 77)
-    elif compute_topk and quant and c8_path == "integer" and runtime_mode != CUDAGraphMode.FULL:
+    elif compute_topk and quant:
         assert result is packed
-        select_int8.assert_not_called()
-        dequant.assert_not_called()
         op._pool_key_indexer.assert_not_called()
         op._pack_keypool_indices.assert_not_called()
         assert select_int8dot.call_args.args[1] is cache
         assert select_int8dot.call_args.args[3] is metadata
         assert select_int8dot.call_args.args[4] is query_metadata
         assert select_int8dot.call_args.args[-1] is op.topk_indices_buffer
-    elif (
-        compute_topk
-        and quant
-        and c8_path in ("dequant", "integer_over_budget", "integer_unavailable", "integer_unsupported")
-        and runtime_mode != CUDAGraphMode.FULL
-    ):
-        assert result is packed
-        select_int8.assert_not_called()
-        assert metadata.c8_dequant_workspace is workspace
-        assert dequant.call_args.args[2] is metadata.seq_lens
-        assert dequant.call_args.args[-1] is None
-        assert op._pool_key_indexer.call_args.args[1] is workspace[0]
-        assert op._pool_key_indexer.call_args.kwargs["block_table"] is workspace[1]
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_q"] is query_metadata.cum_query_lens
-        assert op._pool_key_indexer.call_args.kwargs["actual_seq_k"] is query_metadata.seq_lens
-        assert op._pack_keypool_indices.call_args.args[1] is query_metadata
-    elif compute_topk and quant:
-        assert result is packed
-        assert names[3:] == ["select_int8"]
-        assert select_int8.call_args.args[1] is cache
-        assert select_int8.call_args.args[3] is query_metadata.cum_query_lens
-        assert select_int8.call_args.args[4] is query_metadata.seq_lens
-        assert select_int8.call_args.args[5] is metadata.block_table
-        assert select_int8.call_args.args[6] is query_metadata.positions
-        assert select_int8.call_args.kwargs["max_pool_seq_len"] == (2 if runtime_mode == CUDAGraphMode.FULL else 1)
-        assert select_int8.call_args.kwargs["pack_tail"]
-        assert select_int8.call_args.kwargs["allow_cache_packing"] == (runtime_mode != CUDAGraphMode.FULL)
-        op._pool_key_indexer.assert_not_called()
-        op._pack_keypool_indices.assert_not_called()
+        assert select_int8dot.call_args.args[5] == (2 if runtime_mode == CUDAGraphMode.FULL else 1)
     elif compute_topk:
         assert result is packed
         assert names[3:] == ["pool_key_indexer", "pack_keypool_indices"]
@@ -545,14 +493,5 @@ def test_cann_indexer_writes_caches_before_optional_selection(
         assert result is None
         op._pool_key_indexer.assert_not_called()
         op._pack_keypool_indices.assert_not_called()
-    if runtime_mode == CUDAGraphMode.FULL or not compute_topk or not quant or skip_empty_query or c8_path == "paged":
-        dequant.assert_not_called()
-
-    if (
-        runtime_mode == CUDAGraphMode.FULL
-        or not compute_topk
-        or not quant
-        or skip_empty_query
-        or c8_path not in ("integer", "integer_over_budget")
-    ):
+    if not compute_topk or not quant or skip_empty_query:
         select_int8dot.assert_not_called()
