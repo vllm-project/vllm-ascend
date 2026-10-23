@@ -12,7 +12,7 @@ Qwen3.6-35B-A3B is a sparse MoE model in the Qwen3.6 family, with 35B total para
 
 This document describes the main validation steps for the model, including supported features, prerequisites, installation, single-node online deployment, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
-The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use `v0.18.0rc1` or later for this model. For 950DT Products, use `v0.30.0rc2` or later for this model. The examples below use the version placeholder configured by the documentation build system.
+The `Qwen3.6-35B-A3B` model has been supported since vLLM-Ascend `v0.18.0rc1`. For 950DT Products, use `v0.30.0` or later. This guide's deployment examples target vLLM-Ascend `v0.30.0`; when using a newer version, check its release notes for configuration changes. The examples below use the version placeholder configured by the documentation build system.
 
 ## 2 Supported Features
 
@@ -271,7 +271,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
 === "A2 Series / A3 Series"
 
-    Run the following script to execute online inference with up to 135168 context length on 1 A3 Series (64G x 16).
+    Run the following script to execute online inference with up to 135168 context length on 1 A3 Series (64GB x 16).
 
     ```shell
     # Load model from ModelScope to speed up download.
