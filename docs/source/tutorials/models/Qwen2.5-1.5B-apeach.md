@@ -49,8 +49,8 @@ multiple nodes, such as `/root/.cache/`.
 ## 4 Installation
 
 Use the official docker image, refer to
-[using docker](../../installation.md#set-up-using-docker), or build from
-source, refer to [installation](../../installation.md).
+[using docker](../../getting_started/installation.md#installation-prebuilt-image), or build from
+source, refer to [installation](../../getting_started/installation.md).
 
 ## 5 Environment Configuration
 
