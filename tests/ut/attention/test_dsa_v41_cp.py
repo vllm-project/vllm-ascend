@@ -378,6 +378,10 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
         is_prefilling=torch.tensor(local_flags),
         attn_state=scenario,
     )
+    # Populate the new common-metadata interface while retaining keyword
+    # arguments at call sites for compatibility with the branch's runner.
+    local.pcp_context = context
+    local.pcp_cache_group_idx = 0
     return SimpleNamespace(
         local=local,
         context=context,

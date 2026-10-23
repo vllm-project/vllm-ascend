@@ -408,9 +408,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
     def _prepare_graph_pcp_context(
         self,
-        pcp_context: "AscendPCPAttentionContext",
+        pcp_context,
         full_graph_mode: bool,
-    ) -> "AscendPCPAttentionContext":
+    ):
         """Prepare graph-stable V4.1 tensors without changing the PCP batch layout."""
         global_batch = pcp_context.global_batch
         num_actual_tokens = global_batch.num_tokens
@@ -437,7 +437,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
     def _build_local_common_attn_metadata(
         self,
-        pcp_context: "AscendPCPAttentionContext",
+        pcp_context,
         common_attn_metadata: AscendCommonAttentionMetadata,
         cache_group_idx: int,
         has_prefill: bool,
@@ -474,8 +474,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         num_actual_reqs: int | None = None,
         **kwargs: Any,
     ) -> AscendDSAV41Metadata:
-        """Share batch coordinates while keeping each cache group's addressing."""
-        assert pcp_context is not None
+        assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
         assert pcp_cache_group_idx is not None
         batch_shared = kwargs.get("common_v41_batch_metadata")
         if batch_shared is None:
