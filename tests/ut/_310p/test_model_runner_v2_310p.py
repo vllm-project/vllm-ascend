@@ -659,6 +659,20 @@ def test_sampler_logit_bias_can_change_argmax() -> None:
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
+def test_sampler_bad_words_bans_token() -> None:
+    """Single-token bad_words_token_ids must mask that token to -inf."""
+    vocab_size = 4
+    req_states = _make_penalty_req_states(prompt_tokens=[0], output_tokens=[], vocab_size=vocab_size)
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=vocab_size, req_states=req_states)
+    params = SamplingParams(temperature=0)
+    params._bad_words_token_ids = [[1]]
+    _add_request(sampler, 0, 1, params)
+    sampler.apply_staged_writes()
+    logits = torch.tensor([[1.0, 5.0, 2.0, 0.0]], dtype=torch.float32)
+    out = sampler(logits.clone(), _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 2
+
+
 def _make_penalty_req_states(
     *,
     prompt_tokens: list[int],

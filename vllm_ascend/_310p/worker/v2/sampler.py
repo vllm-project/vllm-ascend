@@ -5,9 +5,9 @@
 """Triton-free MRV2 sampler for Ascend 310P.
 
 Aligns temperature / top-k / top-p / min_p / penalties / allowed_token_ids /
-logit_bias post-processing with MRV1's ``AscendSampler310`` (inverse-CDF
-random sampling) while keeping the MRV2 ``sampling_states`` surface required
-by MTP draft ``propose()``.
+logit_bias / bad_words post-processing with MRV1's ``AscendSampler310``
+(inverse-CDF random sampling) while keeping the MRV2 ``sampling_states``
+surface required by MTP draft ``propose()``.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from vllm.model_executor.layers.utils import apply_penalties as apply_penalties_vllm
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -159,6 +160,8 @@ class Ascend310PSampler:
         self._allowed_mask: torch.Tensor | None = None
         self._use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
         self._logit_bias: dict[int, dict[int, float]] = {}
+        self._use_bad_words = np.zeros(max_num_reqs, dtype=bool)
+        self._bad_words_token_ids: dict[int, list[list[int]]] = {}
         self._seeds_set = np.zeros(max_num_reqs, dtype=bool)
         # Source generators keyed by req_idx (MRV1 CPU RNG cache semantics).
         self._source_generators: dict[int, torch.Generator] = {}
@@ -180,10 +183,12 @@ class Ascend310PSampler:
         unsupported = []
         if sampling_params.logprobs is not None or sampling_params.prompt_logprobs is not None:
             unsupported.append("logprobs")
-        if getattr(sampling_params, "bad_words", None):
-            unsupported.append("bad_words")
+        bad_words = getattr(sampling_params, "bad_words", None) or []
+        bad_words_token_ids = getattr(sampling_params, "bad_words_token_ids", None)
+        if bad_words and not bad_words_token_ids:
+            unsupported.append("bad_words (not tokenized)")
         if unsupported:
-            # TODO: Support logprobs / bad_words in a later 310P MRV2 iteration.
+            # TODO: Support logprobs in a later 310P MRV2 iteration.
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
@@ -240,6 +245,13 @@ class Ascend310PSampler:
         else:
             self._logit_bias.pop(req_idx, None)
             self._use_logit_bias[req_idx] = False
+
+        if bad_words_token_ids:
+            self._bad_words_token_ids[req_idx] = [list(seq) for seq in bad_words_token_ids]
+            self._use_bad_words[req_idx] = True
+        else:
+            self._bad_words_token_ids.pop(req_idx, None)
+            self._use_bad_words[req_idx] = False
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
@@ -316,6 +328,7 @@ class Ascend310PSampler:
             or np.any(self._use_penalty[idx_mapping_np])
             or np.any(self._use_allowed[idx_mapping_np])
             or np.any(self._use_logit_bias[idx_mapping_np])
+            or np.any(self._use_bad_words[idx_mapping_np])
         )
 
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
@@ -433,6 +446,44 @@ class Ascend310PSampler:
                 if 0 <= token_id < logits.shape[-1]:
                     logits[row_idx, token_id] += bias
 
+    def _apply_bad_words_pytorch(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor | None = None,
+        expanded_local_pos: torch.Tensor | None = None,
+    ) -> None:
+        """Ban completing bad-word sequences (MRV1 ``apply_bad_words``)."""
+        if not np.any(self._use_bad_words[idx_mapping_np]):
+            return
+        if self.req_states is None:
+            raise RuntimeError("310P MRV2 bad_words require req_states bound on Ascend310PSampler.")
+        expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+        local_pos_np = None if expanded_local_pos is None else expanded_local_pos.detach().to("cpu").numpy()
+        input_ids_cpu = None if input_ids is None else input_ids.detach().to("cpu")
+        all_token_ids_cpu = self.req_states.all_token_ids.cpu
+        total_lens = self.req_states.total_len.np
+
+        bad_by_row: dict[int, list[list[int]]] = {}
+        past_tokens: list[list[int]] = []
+        for row_idx, req_idx in enumerate(expanded_np.tolist()):
+            req_idx = int(req_idx)
+            if req_idx < 0 or not self._use_bad_words[req_idx]:
+                past_tokens.append([])
+                continue
+            total_len = int(total_lens[req_idx])
+            past = all_token_ids_cpu[req_idx, :total_len].tolist()
+            if local_pos_np is not None and input_ids_cpu is not None:
+                pos = int(local_pos_np[row_idx])
+                if pos > 0:
+                    start_idx = row_idx - pos
+                    for prev_pos in range(pos):
+                        past.append(int(input_ids_cpu[start_idx + prev_pos + 1].item()))
+            past_tokens.append(past)
+            bad_by_row[row_idx] = self._bad_words_token_ids[req_idx]
+        apply_bad_words(logits, bad_by_row, past_tokens)
+
     def _apply_postprocess(
         self,
         logits: torch.Tensor,
@@ -441,9 +492,16 @@ class Ascend310PSampler:
         input_ids: torch.Tensor | None = None,
         expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Allowed-ids → logit_bias → penalties → temperature → min_p → top-k/top-p."""
+        """Allowed-ids → logit_bias → bad_words → penalties → temp → min_p → top-k/p."""
         self._apply_allowed_token_ids(logits, expanded_idx_mapping, idx_mapping_np)
         self._apply_logit_bias(logits, expanded_idx_mapping, idx_mapping_np)
+        self._apply_bad_words_pytorch(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            input_ids=input_ids,
+            expanded_local_pos=expanded_local_pos,
+        )
         self._apply_penalties_pytorch(
             logits,
             expanded_idx_mapping,
