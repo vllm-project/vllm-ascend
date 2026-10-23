@@ -2478,7 +2478,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if num_actual_tokens > num_decode_tokens:
             if attn_metadata.prefill is None or attn_metadata.prefill.cos is None or attn_metadata.prefill.sin is None:
                 raise RuntimeError("PROLOG_V3 prefill requires prefill cos/sin tables.")
-            wait_for_kv_layer_from_connector(self.layer_name)
             prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
             num_prefill_tokens = num_actual_tokens - num_decode_tokens
             # Metadata can include graph padding beyond the actual prefill rows.
@@ -3248,8 +3247,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         # Sharded decode writes other ranks' KV even without local queries.
         should_write_kv_cache = has_decode or has_prefill or self.is_pcp_decode_sharded
-        if has_prefill:
-            wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and should_write_kv_cache:
             # Q/KV projections above overlap the full-layer KV cache broadcast.
             # Wait for the broadcast before reading or updating the cache.
@@ -3343,6 +3340,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.use_output_gate:
             assert self.g_proj is not None
             gate = self.g_proj(hidden_states.contiguous())[0]
+
+        # Short prefills can use decode preprocessing while still loading KV
+        # from the connector. Wait once before any preprocessing path touches
+        # the cache; layerwise connectors also consume the load completion event.
+        wait_for_kv_layer_from_connector(layer_name)
 
         # MLA Preprocess
         decode_requires_current_kv = self._decode_requires_current_kv(attn_metadata)
