@@ -175,8 +175,8 @@ Measured during the local calibration rounds (TP2/8192, `gpu_memory_utilization=
 
 | Card | Paper budget (util 0.85) | Measured peak | Delta |
 |---|---|---|---|
-| NPU 0 | 54.4GB | 56.82GB (86.7% of 64GB) | +1.7% (activations / non-torch allocations) |
-| NPU 1 | 54.4GB | 56.58GB (86.3% of 64GB) | +1.7% |
+| NPU 0 | 55718MB (54.4GiB) | 56821MB (86.7% of 64GB) | +2.0% (activations / non-torch allocations) |
+| NPU 1 | 55718MB (54.4GiB) | 56583MB (86.3% of 64GB) | +1.6% |
 
 The measured peaks match the paper account within the expected overhead; no OOM occurred across the calibration rounds.
 
