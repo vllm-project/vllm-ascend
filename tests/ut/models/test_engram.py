@@ -37,6 +37,49 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("tokens", [0, 3])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tokens, quantized):
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.dim, table.block_size = 64, 32
+    table.n_hash_cols, table.part_n_hash_cols = 24, 24 // tp
+    table.head_start = 24 - table.part_n_hash_cols
+    table.vocab_start_idx, table.vocab_end_idx = 5, 8
+    table.tp_size, table.dp_size = tp, dp
+    table._codes_uva = None
+    codes = torch.arange(3 * 64).reshape(3, 64).remainder(31).sub(15)
+    table.weight = torch.nn.Parameter(codes.to(torch.int8 if quantized else torch.bfloat16), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.full((3, 2), 0.125), requires_grad=False) if quantized else None
+    # Match the non-contiguous layer slice passed by prepare_engram.
+    ids = torch.tensor([-1, 5, 6, 8]).repeat(tokens * dp * 12).reshape(tokens * dp, 2, 24)[:, 1]
+    columns = ids[:, table.head_start :]
+    owned = (columns >= 5) & (columns < 8)
+    local = torch.where(owned, columns - 5, 0)
+    expected = (codes[local].float() * (0.125 if quantized else 1)).bfloat16()
+    expected = torch.where(owned.unsqueeze(-1), expected, 0)
+    original_empty = torch.empty
+
+    def dirty_empty(*args, **kwargs):
+        return original_empty(*args, **kwargs).fill_(float("nan"))
+
+    def exchange(out, count):
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        return out[-count:] if count else out[:0]
+
+    def gather(out, dim):
+        torch.testing.assert_close(out, expected[:tokens], rtol=0, atol=0)
+        return torch.cat([out] * tp, dim=dim)
+
+    monkeypatch.setattr(embedding_mod.torch, "empty", dirty_empty)
+    monkeypatch.setattr(embedding_mod, "exchange_engram_rows", exchange)
+    monkeypatch.setattr(embedding_mod, "tensor_model_parallel_all_gather", gather)
+    result = table.embed_gathered(ids, tokens)
+    torch.testing.assert_close(result, torch.cat([expected[:tokens]] * tp, dim=1), rtol=0, atol=0)
+
+
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
     from vllm_ascend.models.deepseek_v41.engram import parallel
 
