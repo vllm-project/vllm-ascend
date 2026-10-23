@@ -15,6 +15,7 @@ class OscarRotationLoader:
     """Loads and caches OSCAR rotation matrices."""
 
     _instance: Optional["OscarRotationLoader"] = None
+    _from_env_signature: tuple | None = None
 
     def __init__(
         self,
