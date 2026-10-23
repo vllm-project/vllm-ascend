@@ -7,8 +7,10 @@ Everything here is OFF unless ``OSCAR_DIAG=1``; outputs land under
 ``OSCAR_DIAG_DIR`` (default ``/tmp/oscar_diag``). Compute paths never touch
 the filesystem through this module in the default configuration.
 """
+
 from __future__ import annotations
 
+import contextlib
 import os
 from contextlib import contextmanager
 
@@ -36,10 +38,8 @@ def write(relname: str, text: str) -> None:
 def dump_path(relname: str) -> str:
     """Path for binary/json diagnostic dumps (always under OSCAR_DIAG_DIR)."""
     d = diag_dir()
-    try:
+    with contextlib.suppress(Exception):
         os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
     return os.path.join(d, relname)
 
 
@@ -61,11 +61,15 @@ def open_diag(relname: str):
         return
     try:
         os.makedirs(diag_dir(), exist_ok=True)
-        f = open(os.path.join(diag_dir(), relname), "a")
     except Exception:
         yield _Sink()
         return
     try:
+        f = open(os.path.join(diag_dir(), relname), "a")  # noqa: SIM115
+    except Exception:
+        # Setup failures degrade to the sink; failures while the caller
+        # holds the file must propagate, so the yield is NOT in this try.
+        yield _Sink()
+        return
+    with contextlib.closing(f):
         yield f
-    finally:
-        f.close()
