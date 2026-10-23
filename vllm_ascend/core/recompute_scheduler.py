@@ -49,6 +49,15 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
 from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
 
+def _normalize_encoder_schedule_result(
+    result: tuple[list[int], int, int, list[int]] | tuple[list[int], int, int, list[int], list[int]],
+) -> tuple[list[int], int, int, list[int], list[int]]:
+    """Retain duplicate references on main; the release API has none."""
+    if len(result) == 4:
+        return (*result, [])
+    return result
+
+
 @dataclass
 class RecomputeSchedulerConfig(SchedulerConfig):
     scheduler_cls: str | type[object] = "vllm_ascend.core.recompute_scheduler.RecomputeScheduler"
@@ -92,6 +101,17 @@ class RecomputeScheduler(Scheduler):
     """
 
     prefill_capacity_bound: bool
+
+    def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
+        allocate = getattr(super(), "_allocate_encoder_inputs", None)
+        if allocate is not None:
+            allocate(request, input_ids, duplicate_input_ids)
+            return
+        # vLLM 0.31.0 has no native helper or duplicate-input return value.
+        for input_id in input_ids:
+            self.encoder_cache_manager.allocate(request, input_id)
+            if self.ec_connector is not None:
+                self.ec_connector.update_state_after_alloc(request, input_id)
 
     def _apply_load_balance_modifications(self) -> None:
         """Hook for DyntraLB to apply cross-rank scheduling decisions."""
@@ -305,12 +325,14 @@ class RecomputeScheduler(Scheduler):
                     new_encoder_compute_budget,
                     external_load_encoder_input,
                     duplicate_encoder_inputs,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_compute_budget,
-                    shift_computed_tokens=self.num_prefill_lookahead,
+                ) = _normalize_encoder_schedule_result(
+                    self._try_schedule_encoder_inputs(
+                        request,
+                        request.num_computed_tokens,
+                        num_new_tokens,
+                        encoder_compute_budget,
+                        shift_computed_tokens=self.num_prefill_lookahead,
+                    )
                 )
 
             # Multi-module MTP: avoid ending a prefill chunk within
@@ -701,12 +723,14 @@ class RecomputeScheduler(Scheduler):
                             new_encoder_compute_budget,
                             external_load_encoder_input,
                             duplicate_encoder_inputs,
-                        ) = self._try_schedule_encoder_inputs(
-                            request,
-                            num_computed_tokens,
-                            num_new_tokens,
-                            encoder_compute_budget,
-                            shift_computed_tokens=self.num_prefill_lookahead,
+                        ) = _normalize_encoder_schedule_result(
+                            self._try_schedule_encoder_inputs(
+                                request,
+                                num_computed_tokens,
+                                num_new_tokens,
+                                encoder_compute_budget,
+                                shift_computed_tokens=self.num_prefill_lookahead,
+                            )
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
