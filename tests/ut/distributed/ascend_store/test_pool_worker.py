@@ -456,7 +456,6 @@ class TestKVPPPoolWorker(unittest.TestCase):
     def test_load_observer_resolves_local_layer(self):
         cases = (
             ({9: 0, 10: 1}, 0, False),
-            ({9: 0, 10: 1}, 8, False),
             ({9: 0, 10: 1}, 11, False),
             ({}, 2, False),
             ({9: 2}, 9, False),

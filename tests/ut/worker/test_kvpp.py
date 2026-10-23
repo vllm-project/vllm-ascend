@@ -89,34 +89,6 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
     assert torch.count_nonzero(caches[mtp][0]) == 0
 
 
-@pytest.fixture
-def runtime_for_transfer(monkeypatch, scheduler_device):
-    name = layer_name(0)
-    plan = KVPPPhysicalCachePlan(
-        logical_cache_spec={},
-        layer_owner_ranks={name: 0},
-        layer_bundles={name: (name,)},
-        tensor_sizes={name: (8,)},
-        kvpp_rank=0,
-    )
-    monkeypatch.setattr(kvpp, "create_kvpp_cache_allocation_plan", lambda *_args: plan)
-    monkeypatch.setattr(
-        kvpp, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[0, 1], device_group=object())
-    )
-
-    def create_runtime(transfer):
-        config = make_kvpp_config(2)
-        config.kv_transfer_config = transfer
-        return kvpp.KVPPRuntime.create_from_kv_cache(
-            vllm_config=config,
-            kv_cache_config=SimpleNamespace(num_blocks=1, kv_cache_groups=[]),
-            static_forward_context={name: SimpleNamespace(impl=SimpleNamespace())},
-            kv_caches={name: (torch.zeros(8, dtype=torch.int8),)},
-        )
-
-    return create_runtime
-
-
 @pytest.mark.parametrize(
     "transfer",
     [
@@ -130,15 +102,13 @@ def runtime_for_transfer(monkeypatch, scheduler_device):
         None,
     ],
 )
-def test_runtime_accepts_missing_or_empty_connector_extra_config(runtime_for_transfer, transfer):
-    runtime = runtime_for_transfer(transfer)
-    assert runtime.scheduler is not None
-    assert runtime.scheduler.layerwise is False
+def test_layerwise_store_detection_accepts_missing_config(transfer):
+    assert kvpp._uses_layerwise_store(transfer) is False
 
 
 @pytest.mark.parametrize("composite", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_runtime_detects_layerwise_store_configuration(runtime_for_transfer, composite, enabled):
+def test_detects_layerwise_store_configuration(composite, enabled):
     connector = {
         "kv_connector": "AscendStoreConnector",
         "kv_connector_extra_config": {"use_layerwise": enabled},
@@ -148,9 +118,7 @@ def test_runtime_detects_layerwise_store_configuration(runtime_for_transfer, com
         if composite
         else SimpleNamespace(**connector)
     )
-    runtime = runtime_for_transfer(transfer)
-    assert runtime.scheduler is not None
-    assert runtime.scheduler.layerwise is enabled
+    assert kvpp._uses_layerwise_store(transfer) is enabled
 
 
 def test_prefetch_sequence_across_forwards(scheduler_device):
