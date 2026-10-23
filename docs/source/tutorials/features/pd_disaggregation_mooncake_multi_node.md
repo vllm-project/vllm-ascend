@@ -238,7 +238,6 @@ For an eight-device 950PR/950DT host, use the following command. Choose an image
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
 export NAME=vllm-ascend-950
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 docker run --rm \
     --name "$NAME" \
@@ -258,7 +257,6 @@ docker run --rm \
     --device /dev/hisi_hdc \
     --device /dev/ummu \
     --device /dev/uburma \
-    -e ASCEND_RT_VISIBLE_DEVICES \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
     -v /usr/local/dcmi:/usr/local/dcmi:ro \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
@@ -266,7 +264,7 @@ docker run --rm \
     -it "$IMAGE" bash
 ```
 
-Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`; `/dev/devmm_svm` is not needed. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
+Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` inside the container to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`; `/dev/devmm_svm` is not needed. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
 
 For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
