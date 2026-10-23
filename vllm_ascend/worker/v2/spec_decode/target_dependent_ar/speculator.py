@@ -375,7 +375,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # sync global tokens instead; leave the stash unset so their
         # publish keeps the raw-sync behavior.
         self._lmhead_tp_uniform_num_reqs = (
-            None if self.replicated_pcp or dp_sync_state is None else dp_sync_state.num_reqs
+            None if self.replicated_pcp or dp_sync_state is None else getattr(dp_sync_state, "num_reqs", None)
         )
         # Replicated drafts use global tokens, unlike the PCP-local target.
         # Every DP rank must take the draft sync, including decode and idle ranks.
