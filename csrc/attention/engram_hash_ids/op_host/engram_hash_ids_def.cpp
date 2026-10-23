@@ -44,6 +44,7 @@ public:
             .DynamicShapeSupportFlag(true)
             .NeedCheckSupportFlag(false)
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
+        this->AICore().AddConfig("ascend910b", config);
         this->AICore().AddConfig("ascend910_93", config);
         this->AICore().AddConfig("ascend950", config);
     }
