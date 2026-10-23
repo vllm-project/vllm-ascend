@@ -2470,13 +2470,13 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
         num_actual_reqs: int | None = None,
         common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
         full_graph_mode: bool = False,
         **kwargs: Any,
     ) -> dsa_v1.AscendDSAMetadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None

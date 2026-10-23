@@ -22,10 +22,12 @@
 # The generated matrix pins each architecture to a fixed self-hosted runner so
 # the local build cache on those runners keeps being reused by later builds.
 #
-# Ubuntu nightly images are test images pushed to
-# base_image/ascend-ci/vllm-ascend. openEuler nightly images keep the previous
-# multi-arch (amd64+arm64) contract and are pushed to atlas_inference/vllm-ascend
-# on swr.cn-north-12, then mirrored to swr.cn-north-4 by the sync-tools workflow.
+# Every nightly image is multi-arch (amd64+arm64). Ubuntu nightly images serve
+# the CI contract (test workflows pull from base_image/ascend-ci/vllm-ascend)
+# and are also pushed to atlas_inference/vllm-ascend; openEuler nightly images
+# are pushed to atlas_inference/vllm-ascend only. Everything under
+# atlas_inference/vllm-ascend on swr.cn-north-12 is mirrored to swr.cn-north-4
+# by the sync-tools workflow.
 #
 # Multi-arch ('full') builds follow the mainline nightly tag rule and publish
 # each image under two tags: the stable
@@ -239,11 +241,13 @@ jobs:
 
           if [ "${{ inputs.build_type }}" = "full" ]; then
             # Arch-specific images are pushed to the temp repo under the unique
-            # tag; the merge job creates both final multi-arch manifests.
+            # tag; the merge job creates the final multi-arch manifests. Ubuntu
+            # full builds are published to the CI repo and to atlas_inference
+            # (mirrored to swr.cn-north-4); openEuler only to atlas_inference.
             if [ -n "$OS_MARK" ]; then
               FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             else
-              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             fi
             PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
           else
@@ -315,16 +319,20 @@ jobs:
 
           MISSING_VARIANT=0
           MERGED_VARIANT=0
-          OPENEULER_MERGED=0
           for OS_NAME in $OS_LIST; do
             if [ "$OS_NAME" = "openeuler" ]; then
               OS_MARK="-openeuler"
-              DEST="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
               TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
+              # openEuler nightly images only live in the release-shaped repo
+              # that the sync-tools workflow mirrors to swr.cn-north-4.
+              DESTS="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             else
               OS_MARK=""
-              DEST="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend"
               TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
+              # ubuntu nightly images serve the CI contract (test workflows
+              # pull from ascend-ci) and the north-4 consumers through the
+              # atlas_inference mirror, matching the retired daily pipeline.
+              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
             # The build step pushed the per-arch images under the unique tag.
@@ -345,19 +353,18 @@ jobs:
               continue
             fi
 
-            # Publish both tags on the same manifest: the stable tag keeps being
-            # overwritten by the newest nightly, the unique tag preserves this
-            # build in history.
-            echo "Creating multi-arch manifests: ${DEST}:${TAG} and ${DEST}:${UNIQUE_TAG}"
-            docker buildx imagetools create \
-              -t "${DEST}:${TAG}" \
-              -t "${DEST}:${UNIQUE_TAG}" \
-              "${TEMP}-amd64" \
-              "${TEMP}-arm64"
+            # Publish both tags on the same manifest in every destination: the
+            # stable tag keeps being overwritten by the newest nightly, the
+            # unique tag preserves this build in history.
+            for DEST in $DESTS; do
+              echo "Creating multi-arch manifests: ${DEST}:${TAG} and ${DEST}:${UNIQUE_TAG}"
+              docker buildx imagetools create \
+                -t "${DEST}:${TAG}" \
+                -t "${DEST}:${UNIQUE_TAG}" \
+                "${TEMP}-amd64" \
+                "${TEMP}-arm64"
+            done
             MERGED_VARIANT=1
-            if [ -n "$OS_MARK" ]; then
-              OPENEULER_MERGED=1
-            fi
           done
 
           # No variant merged at all -> fail loudly so the job is not silently green.
@@ -369,10 +376,10 @@ jobs:
           if [ "${MISSING_VARIANT}" = "1" ]; then
             echo "::warning::Some variants were skipped due to missing arch images."
           fi
-          echo "openeuler_merged=${OPENEULER_MERGED}" >> "$GITHUB_OUTPUT"
+          echo "merged=${MERGED_VARIANT}" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch cn-north-4 sync
-        if: ${{ steps.merge.outputs.openeuler_merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
+        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}

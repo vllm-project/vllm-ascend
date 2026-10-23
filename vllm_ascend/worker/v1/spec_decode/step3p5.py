@@ -20,8 +20,8 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
 
 
 class AscendStep3p5MTPProposer(AscendEagleProposer):

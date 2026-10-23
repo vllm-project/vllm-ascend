@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, lmhead_tp_pad_rows, vllm_version_is
 
 
 class LmheadTPDraftSamplingMixin:
@@ -61,35 +61,88 @@ class LmheadTPDraftSamplingMixin:
                 "read the request mapping and write those buffers out of bounds."
             )
 
-    def sample_draft(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
-    ):
-        if not lmhead_tp_enable():
-            return super().sample_draft(  # type: ignore[misc]
-                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+    if vllm_version_is("0.31.0"):
+
+        def sample_draft(
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            draft_step: torch.Tensor,
+            draft_logits: torch.Tensor | None,
+        ):
+            if not lmhead_tp_enable():
+                return super().sample_draft(  # type: ignore[misc]
+                    hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+                )
+            if draft_logits is not None:
+                raise NotImplementedError(
+                    "lmhead TP does not support draft_sample_method='probabilistic': "
+                    "the gumbel path writes into fixed-size draft buffers that cannot "
+                    "hold the group-aligned padding rows."
+                )
+            num_logits = hidden_states.shape[0]
+            # Shared pad primitive (the runner's sample() pads the target head the
+            # same way); zero rows carry no draft token and are trimmed back off.
+            padded = lmhead_tp_pad_rows(
+                hidden_states,
+                self._lmhead_tp_max_num_logits(),
+                "max_num_reqs * (num_speculative_steps + 1)",
             )
-        if draft_logits is not None:
-            raise NotImplementedError(
-                "lmhead TP does not support draft_sample_method='probabilistic': "
-                "the gumbel path writes into fixed-size draft buffers that cannot "
-                "hold the group-aligned padding rows."
+            out = super().sample_draft(  # type: ignore[misc]
+                padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
             )
-        num_logits = hidden_states.shape[0]
-        # Shared pad primitive (the runner's sample() pads the target head the
-        # same way); zero rows carry no draft token and are trimmed back off.
-        padded = lmhead_tp_pad_rows(
-            hidden_states,
-            self._lmhead_tp_max_num_logits(),
-            "max_num_reqs * (num_speculative_steps + 1)",
-        )
-        out = super().sample_draft(  # type: ignore[misc]
-            padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
-        )
-        return out[:num_logits]
+            return out[:num_logits]
+
+    else:
+        # vLLM #59554 added `num_steps` to `Speculator.sample_draft`; DFlash
+        # passes it so the draft watermarker can key its draw by the step count.
+        def sample_draft(  # type: ignore[misc]
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            idx_mapping: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            draft_step: torch.Tensor,
+            draft_logits: torch.Tensor | None,
+            num_steps: int = 1,
+        ):
+            if not lmhead_tp_enable():
+                return super().sample_draft(  # type: ignore[misc]
+                    hidden_states,
+                    positions,
+                    idx_mapping,
+                    temperature,
+                    seeds,
+                    draft_step,
+                    draft_logits,
+                    num_steps=num_steps,
+                )
+            if draft_logits is not None:
+                raise NotImplementedError(
+                    "lmhead TP does not support draft_sample_method='probabilistic': "
+                    "the gumbel path writes into fixed-size draft buffers that cannot "
+                    "hold the group-aligned padding rows."
+                )
+            num_logits = hidden_states.shape[0]
+            # Shared pad primitive (the runner's sample() pads the target head the
+            # same way); zero rows carry no draft token and are trimmed back off.
+            padded = lmhead_tp_pad_rows(
+                hidden_states,
+                self._lmhead_tp_max_num_logits(),
+                "max_num_reqs * (num_speculative_steps + 1)",
+            )
+            out = super().sample_draft(  # type: ignore[misc]
+                padded,
+                positions,
+                idx_mapping,
+                temperature,
+                seeds,
+                draft_step,
+                draft_logits,
+                num_steps=num_steps,
+            )
+            return out[:num_logits]

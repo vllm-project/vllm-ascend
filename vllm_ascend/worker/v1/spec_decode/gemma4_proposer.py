@@ -30,7 +30,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 
 class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):

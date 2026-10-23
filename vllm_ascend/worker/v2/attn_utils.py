@@ -107,6 +107,7 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -333,6 +334,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
+        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
+        # the spec while specs are built. The v0.31.0 lane has no ``is_draft``
+        # field and annotates EAGLE groups through the packed hook, so only main
+        # propagates the flag here; without it no group is flagged as the draft
+        # model's and the coordinator fallback treats the target groups as
+        # EAGLE groups too.
+        if not vllm_version_is("0.31.0") and getattr(attn_module, "is_draft_layer", False):
+            spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -537,6 +546,8 @@ def build_attn_metadata(
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+            pcp_context=pcp_context,
+            pcp_cache_group_idx=i if pcp_context is not None else None,
             **common_attn_metadata_extra_kwargs,
         )
         if common_metadata_callback is not None:
@@ -558,7 +569,6 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -589,13 +599,6 @@ def build_attn_metadata(
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
-                )
-            # Parallel attention and cache-only backends opt in to the PCP
-            # context needed to construct their own metadata.
-            if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
-                attn_metadata_extra_kwargs.update(
-                    pcp_context=pcp_context,
-                    pcp_cache_group_idx=i,
                 )
 
             for variant_names, variant_common in metadata_variants:

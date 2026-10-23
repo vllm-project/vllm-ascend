@@ -1,12 +1,12 @@
 # Context Parallel
 
-The context parallel features include Prefill Context Parallel (PCP), Decode Context Parallel (DCP), and DSA-CP.
+The context parallel features include Prefill Context Parallel (PCP) and Decode Context Parallel (DCP).
 
 Prefill Context Parallel is supported with ModelRunner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). It splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
 
 Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
 
-This document describes PCP execution, DCP cache sharding, and the separate DSA-CP sparse-attention path. PCP uses ModelRunner V2 (MRV2); DCP is available in both MRV1 and MRV2. See the [MRV2 PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
+This document describes PCP execution and DCP cache sharding. PCP uses ModelRunner V2 (MRV2); DCP is available in both MRV1 and MRV2. See the [MRV2 PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
 ## KV-cache layout
 
@@ -165,17 +165,6 @@ The replicated indexer increases indexer-cache memory in proportion to the DCP w
 
 With PCP+DCP, the compact block-table plan is derived from the global request view. SFA PCP supports both KV-input gathering and fused prologs. A fused prolog first writes local cache rows; those rows are packed, gathered, and written to receiving caches. Indexer updates are synchronized separately.
 
-### SFA DSA-CP `o_proj` Path
-
-DSA-CP requires ModelRunner V1; set `VLLM_USE_V2_MODEL_RUNNER=0` before enabling `enable_dsa_cp`.
-
-SFA DSA-CP adapts the output projection to the attention output layout while retaining TP-sharded weights:
-
-- **Decode-only batches** exchange attention outputs across TP ranks to reuse the standard TP projection.
-- **Prefill or mixed batches** temporarily gather the projection weights so each rank can project its local tokens. This also applies to a prefill node in P/D disaggregation.
-
-Weights remain persistently TP-sharded; full-weight views are temporary. This supports token-parallel prefill while preserving the decode projection strategy and limiting persistent weight memory.
-
 ### DSA and DSA V4.1 PCP
 
 DSA PCP gathers hidden states and restores global order for cache updates, compression, and indexing. Attention then evaluates local query rows. DSA V4.1 follows the same local-query/global-cache structure with its sliding-window and compressor state, using backend-specific metadata.
@@ -199,7 +188,7 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
 - SFA DCP backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
-- DSA-CP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
+- DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`
 - Upstream PCP groups and virtual batches: `vllm/distributed/parallel_state.py`, `vllm/v1/worker/gpu/pcp_manager.py`
 - MRV2 PCP batch and metadata: `vllm_ascend/worker/v2/pcp_manager.py`, `vllm_ascend/worker/v2/attn_utils.py`
 - MRV2 slot mapping: `vllm_ascend/worker/v2/block_table.py`

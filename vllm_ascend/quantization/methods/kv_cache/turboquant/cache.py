@@ -11,7 +11,6 @@ import math
 from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -19,7 +18,16 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 from . import SLOT_BYTES, TURBOQUANT_CACHE_DTYPE
+
+# vLLM #61183 moved `may_override_num_blocks` to `kv_cache_planning` on main;
+# the v0.31.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
+else:
+    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 # PA attention's fast copy path requires aligned page starts. Preserve the
 # integral compact-row stride used by the scatter update path as well.

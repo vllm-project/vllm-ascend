@@ -23,7 +23,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -69,9 +69,20 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         max_model_len: int,
         causal: bool | Mapping[int, bool] = False,
         precompute_context_kv: Callable[[int], None] | None = None,
+        prepare_forward: Callable[[int, dict[str, Any] | None], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        """Capture ACL graphs for DFlash."""
+        """Capture ACL graphs for DFlash.
+
+        vLLM #60692 renamed ``precompute_context_kv(num_reqs)`` to
+        ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
+        one the installed vLLM expects.
+        """
+        prepare_kwargs: dict[str, Any] = (
+            {"precompute_context_kv": precompute_context_kv}
+            if vllm_version_is("0.31.0")
+            else {"prepare_forward": prepare_forward}
+        )
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
                 forward_fn,
@@ -81,8 +92,8 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 kv_cache_config,
                 max_model_len,
                 causal=causal,
-                precompute_context_kv=precompute_context_kv,
                 progress_bar_desc=progress_bar_desc,
+                **prepare_kwargs,
             )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:

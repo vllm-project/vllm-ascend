@@ -240,15 +240,15 @@ SERVICE_PROFILING_SYMBOLS_YAML = f"""
   min_version: "0.9.1"
   domain: Execute
   name: should_skip_allreduce_across_dp_group
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._propose
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._propose
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_propose
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._run_merged_draft
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer._run_merged_draft
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_model_forward
-- symbol: vllm_ascend.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
+- symbol: vllm_ascend.worker.v1.spec_decode.llm_base_proposer:AscendSpecDecodeBaseProposer.compute_draft_token_ids
   min_version: "0.9.1"
   domain: SpecDecode
   name: draft_compute_token_ids

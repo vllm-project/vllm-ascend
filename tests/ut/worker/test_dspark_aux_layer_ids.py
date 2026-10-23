@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 
 def _config(hf_config, *, explicit_ids=None):

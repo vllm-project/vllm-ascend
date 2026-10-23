@@ -9,8 +9,6 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
-DSA-CP is a separate sparse-attention optimization controlled by `additional_config.enable_dsa_cp`. Enabling it automatically enables FlashComm as the all2all backend; there is no need to set `enable_flashcomm1` separately. It will be removed once PCP support is stable. See [Additional Configuration](../configuration/additional_config.md) for its configuration and model requirements.
-
 ## Supported Scenarios
 
 ### Prefill Context Parallel
@@ -121,8 +119,6 @@ For either method, remove `--enforce-eager` and add the following option to use 
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
 - Dynamic draft lengths are outside the currently validated scope.
-- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA or
-  DSA V4.1 backend.
 
 ### Decode Context Parallel
 
@@ -172,31 +168,5 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
-
-### DSA-CP
-
-DSA-CP is supported only with ModelRunner V1. Set
-`VLLM_USE_V2_MODEL_RUNNER=0` when enabling `enable_dsa_cp`. Enabling DSA-CP
-with ModelRunner V2 raises a configuration error; use PCP instead.
-
-DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
-with support for some feature combinations still in progress.
-
-For DSA-CP with ModelRunner V1:
-
-```bash
-export VLLM_USE_V2_MODEL_RUNNER=0
-
-vllm serve <glm-5.2-model> \
-  --tensor-parallel-size <N> \
-  --block-size <B> \
-  --additional-config '{"enable_dsa_cp": true}'
-```
-
-To migrate to PCP with ModelRunner V2 and the same world size, set
-`VLLM_USE_V2_MODEL_RUNNER=1`, replace TP size `N > 1` with
-`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
-`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
-ranks. Check the compatibility and limitations above before migrating.
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).
