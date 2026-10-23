@@ -101,7 +101,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
     # deepseek-v4-flash uses the following image
-    export IMAGE=export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
 
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
