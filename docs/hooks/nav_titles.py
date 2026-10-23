@@ -112,10 +112,6 @@ TITLES = {
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
     "tutorials/models/DeepSeek-V4-Flash.md": {"en": "DeepSeek-V4-Flash", "zh": "DeepSeek-V4-Flash"},
-    "tutorials/models/DeepSeek-V4-Flash-Vision.md": {
-        "en": "DeepSeek-V4-Flash-Vision-Exp (Experimental)",
-        "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
-    },
     "tutorials/models/DeepSeek-V4.1-Flash.md": {
         "en": "DeepSeek-V4.1-Flash",
         "zh": "DeepSeek-V4.1-Flash",
