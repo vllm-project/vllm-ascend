@@ -69,7 +69,8 @@ def qsa_gbsa_attention(
     )
     has_residual_block = row_visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0)
     valid = (sparse_idx >= 0) & (sparse_idx < full_blocks.unsqueeze(1))
-    order = torch.argsort((~valid).to(torch.int32), dim=1, stable=True)
+    sort_key = (~valid).to(torch.float32)
+    order = torch.argsort(sort_key, dim=1, stable=True)
     sparse_idx = sparse_idx.gather(1, order)
     full_sparse_count = valid.sum(dim=1).to(torch.int32)
 
