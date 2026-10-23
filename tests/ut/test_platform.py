@@ -1042,12 +1042,17 @@ class TestNPUPlatform(TestBase):
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
     def test_piecewise_ep_keeps_dynamic_moe_outside_graph_capture(self):
-        for enable_expert_parallel in (False, True):
-            with self.subTest(enable_expert_parallel=enable_expert_parallel):
+        for cudagraph_mode, enable_expert_parallel in (
+            (CUDAGraphMode.PIECEWISE, False),
+            (CUDAGraphMode.PIECEWISE, True),
+            (CUDAGraphMode.FULL_AND_PIECEWISE, False),
+            (CUDAGraphMode.FULL_AND_PIECEWISE, True),
+        ):
+            with self.subTest(cudagraph_mode=cudagraph_mode, enable_expert_parallel=enable_expert_parallel):
                 vllm_config = TestNPUPlatform.mock_vllm_config()
                 compilation_config = vllm_config.compilation_config
                 compilation_config.mode = CompilationMode.VLLM_COMPILE
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                compilation_config.cudagraph_mode = cudagraph_mode
                 compilation_config.splitting_ops = []
                 vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
                 vllm_config.model_config.enforce_eager = False
@@ -1058,7 +1063,10 @@ class TestNPUPlatform(TestBase):
                     _setup_compile_backend(vllm_config, compile_backend="test_backend")
 
                 moe_ops = {"vllm::moe_forward", "vllm::moe_forward_shared"}
-                self.assertEqual(moe_ops.issubset(compilation_config.splitting_ops), enable_expert_parallel)
+                self.assertEqual(
+                    moe_ops.issubset(compilation_config.splitting_ops),
+                    enable_expert_parallel and cudagraph_mode == CUDAGraphMode.PIECEWISE,
+                )
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
