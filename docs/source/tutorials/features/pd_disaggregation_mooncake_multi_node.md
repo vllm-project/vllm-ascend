@@ -233,13 +233,13 @@ docker run --rm \
 
 ### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
 
-Use an image built for 950PR/950DT and compatible with the host driver. Set `IMAGE` to that image before running the following Bash example. This example assumes eight host device nodes, `/dev/davinci0` through `/dev/davinci7`; check the host inventory and adjust the mappings if it differs. Do not copy the A3 mappings for `/dev/davinci8` through `/dev/davinci15`, or `/dev/devmm_svm`, onto a host where these devices do not exist: Docker rejects missing device paths before starting the container.
+Use the dedicated 950PR/950DT image from `quay.io/ascend/vllm-ascend`, with a version compatible with the host driver. The example below uses the Ubuntu image; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag instead. This example assumes eight host device nodes, `/dev/davinci0` through `/dev/davinci7`; check the host inventory and adjust the mappings if it differs. Do not copy the A3 mappings for `/dev/davinci8` through `/dev/davinci15`, or `/dev/devmm_svm`, onto a host where these devices do not exist: Docker rejects missing device paths before starting the container.
 
 Mount the complete `/usr/local/Ascend/driver` directory. Mounting only `lib64`, `version.info`, and individual tools omits the topology files under `driver/topo/950`. Expose the host's physical NPU nodes and select the devices assigned to this service with `ASCEND_RT_VISIBLE_DEVICES`.
 
 ```bash
-: "${IMAGE:?Set IMAGE to a compatible 950PR/950DT image}"
-export NAME=vllm-ascend-a5
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+export NAME=vllm-ascend-950
 # Replace this list with the physical devices assigned to this service.
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
