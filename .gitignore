@@ -238,3 +238,6 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
+
+# Local experiment files
+/experiments/
