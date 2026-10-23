@@ -117,12 +117,16 @@ with the sleep-mode memory pool. The former top-level
 
 ### Weight transfer
 
-vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
+vLLM-Ascend exposes the following Ascend-specific weight-transfer backends:
 
 | Backend | Use case | Transport |
 | --- | --- | --- |
 | `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
+| `sparse_hccl` | Replace selected checkpoint weight values on separate NPUs | HCCL collectives |
+
+The table describes transport choices. Sparse transfer requires the trainer and
+rollout engine to start from the same checkpoint.
 
 Start an HCCL-enabled server with:
 
@@ -154,7 +158,7 @@ The control flow is:
 5. finish the weight update;
 6. resume generation.
 
-The repository contains runnable examples for both backends:
+The repository contains runnable examples for weight transfer:
 
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
@@ -163,6 +167,30 @@ The repository contains runnable examples for both backends:
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### Sparse HCCL
+
+For sparse checkpoint updates, follow the upstream [Sparse NCCL
+guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl)
+for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl`
+and enable RL mode:
+
+```bash
+vllm serve /path/to/checkpoint \
+    --weight-transfer-config '{"backend": "sparse_hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+Use the [HCCL example](https://github.com/vllm-project/vllm-ascend/blob/0ec6cf2e5ea5c7f750eabe9c8bdf37090aba113c/examples/rl/rlhf_sparse_hccl.py)
+for trainer initialization and TP2 launch commands. The example explicitly
+enables expert parallelism. Reserve a separate NPU for the trainer; the transfer
+group size is `1 + TP * DP`, with no additional EP factor. Pipeline parallelism
+is currently unsupported.
+
+Sparse HCCL requires unquantized ND weights and static expert placement with
+EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and packed
+sparse updates are unsupported. Updates apply in place: after a failed update,
+keep generation paused until the baseline is restored or the engine restarts.
 
 ### Pause and resume generation
 

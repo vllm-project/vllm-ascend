@@ -112,6 +112,8 @@ runner_mapping:
   # Run the TP=1 KV pool test on the smallest available A3 runner.
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy\.py$:
     default: a3-2
+  tests/e2e/pull_request/eight_card:
+    default: a3-8
   tests/e2e/pull_request/one_card/test_flash_attn_precision\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card:
@@ -128,6 +130,9 @@ runner_mapping:
 # Maps logical test buckets to exact labels from runner_label.json and controls
 # how many load-balanced groups are created for each bucket.
 partition:
+  a3-8:
+    runner_label: linux-aarch64-a3-8
+    count: 1
   a5-4:
     runner_label: linux-aarch64-a5-4
     count: 1
