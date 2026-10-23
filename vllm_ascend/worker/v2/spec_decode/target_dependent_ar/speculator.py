@@ -281,7 +281,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # sync global tokens instead; leave the stash unset so their
         # publish keeps the raw-sync behavior.
         self._lmhead_tp_uniform_num_reqs = (
-            None if self.pcp_manager is not None or dp_sync_state is None else dp_sync_state.num_reqs
+            None if self.pcp_manager is not None or dp_sync_state is None else getattr(dp_sync_state, "num_reqs", None)
         )
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
