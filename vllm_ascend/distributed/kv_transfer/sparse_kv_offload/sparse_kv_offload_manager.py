@@ -92,14 +92,6 @@ def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
 
 
-def resolve_lru_workspace_threads(configured_threads: int, available_cpus: int) -> int:
-    if configured_threads <= 0:
-        raise ValueError("sparse_kv_offload_config.lru_max_threads must be positive")
-    if available_cpus <= 0:
-        raise ValueError("available_cpus must be positive")
-    return min(configured_threads, available_cpus)
-
-
 def allocate_kv_offload_topk_buffer_pair(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
@@ -191,6 +183,32 @@ def empty_aligned_int8_cpu_tensors(
         allocate_tensors.append(raw_tensor[base_offset : base_offset + size])
         base_offset += chunk_num * alignment
     return allocate_tensors
+
+
+def empty_aligned_swapped_tensor(
+    shape: list[int],
+    dtype: torch.dtype,
+    alignment: int = _CPU_CACHE_ALIGNMENT,
+) -> torch.Tensor:
+    """Allocate aligned Host-backed storage exposed through an NPU tensor."""
+    empty_swapped = getattr(torch_npu, "empty_with_swapped_memory", None)
+    if empty_swapped is None:
+        raise RuntimeError("Mooncake fused membership requires torch_npu.empty_with_swapped_memory")
+    num_elements = int(np.prod(shape))
+    extra_elements = cdiv(alignment, dtype.itemsize)
+    raw = empty_swapped(
+        [num_elements + extra_elements],
+        dtype=dtype,
+        device=torch.device(f"npu:{torch_npu.npu.current_device()}"),
+    )
+    aligned_addr = (raw.data_ptr() + alignment - 1) // alignment * alignment
+    element_offset = (aligned_addr - raw.data_ptr()) // dtype.itemsize
+    aligned = raw[element_offset : element_offset + num_elements].view(shape)
+    if aligned.data_ptr() % alignment != 0:
+        raise RuntimeError(
+            f"Mooncake fused membership tensor is not aligned: ptr=0x{aligned.data_ptr():x}, alignment={alignment}"
+        )
+    return aligned
 
 
 class MemFabricHostKVAllocator:
@@ -320,6 +338,8 @@ def plan_sparse_kv_offload_memory(
 
 def get_sparse_kv_offload_cpu_pool_size_bytes(
     kv_cache_config: KVCacheConfig,
+    *,
+    include_mooncake_writeback_sinks: bool = False,
 ) -> int:
     """Return a safe upper bound for aligned host KV allocations."""
     layer_specs: dict[str, KVCacheSpec] = {}
@@ -333,7 +353,12 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
         raise ValueError("Sparse KV offload requires host-resident KV cache specs")
     raw_host_bytes = kv_cache_config.num_blocks * sum(spec.page_size_bytes for spec in host_specs)
     alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
-    return raw_host_bytes + alignment_reserve_bytes
+    writeback_sink_bytes = (
+        sum(spec.page_size_bytes // spec.block_size for spec in host_specs)
+        if include_mooncake_writeback_sinks
+        else 0
+    )
+    return raw_host_bytes + alignment_reserve_bytes + writeback_sink_bytes
 
 
 def allocate_kv_cache_tensors_for_sparse_kv_offload(
@@ -532,8 +557,14 @@ class SparseKVOffloadManager:
             self.max_num_tokens,
             self.max_num_reqs * decode_width,
         )
+        self.max_d2h_index_copy_tokens = self.max_num_topk_rows
         self.fused_overlap_membership_map: torch.Tensor | None = None
         self.fused_overlap_membership_map_rows = 0
+        self.fused_overlap_planner_membership_map: torch.Tensor | None = None
+        self.fused_overlap_membership_plan_device_staging: (
+            torch.Tensor | None
+        ) = None
+        self.fused_plan_broadcast_buffer: torch.Tensor | None = None
         self.fused_overlap_plan_owner_layer_id: int | None = None
         self.fused_overlap_plan_topk: int | None = None
         self.fused_overlap_plan_num_tokens = 0
@@ -556,7 +587,10 @@ class SparseKVOffloadManager:
         self._build_cpp()
 
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
-        planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
+        planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(
+            kv_cache_config,
+            include_mooncake_writeback_sinks=self.host_backend == "mooncake",
+        )
         if planned_pool_size_bytes > dram_limit_bytes:
             raise ValueError(
                 "Sparse KV offload planned CPU pool exceeds DRAM limit after "
@@ -571,6 +605,8 @@ class SparseKVOffloadManager:
         )
         self._host_kv_allocator: HostKVAllocator | None = None
         self._host_allocation_prepared = False
+        self._mooncake_writeback_raw_views: dict[int, torch.Tensor] = {}
+        self._mooncake_writeback_views: dict[int, torch.Tensor] = {}
         logger.info(
             "SparseKVOffloadManager starts CPU KV pool initialization: "
             "planned=%.2f GiB, configured_limit=%s GiB, num_blocks=%s.",
@@ -638,14 +674,116 @@ class SparseKVOffloadManager:
         allocator = self._host_kv_allocator
         if allocator is None:
             raise RuntimeError("prepare_host_kv_allocation must run before Host KV allocation")
-        return allocator.allocate_tensors(sizes, alignment)
+        if not isinstance(allocator, MooncakeHostPool):
+            return allocator.allocate_tensors(sizes, alignment)
+
+        logical_token_capacity = self.kv_cache_config.num_blocks * self.block_size
+        if logical_token_capacity <= 0:
+            raise ValueError(
+                "Mooncake Host-KV logical token capacity must be positive"
+            )
+        sink_sizes: list[int] = []
+        for size in sizes:
+            if size <= 0 or size % logical_token_capacity != 0:
+                raise ValueError(
+                    "Mooncake Host-KV allocation cannot derive one-token "
+                    f"sink size: size={size}, capacity={logical_token_capacity}"
+                )
+            sink_sizes.append(size // logical_token_capacity)
+
+        physical_sizes = [
+            size + sink_size
+            for size, sink_size in zip(sizes, sink_sizes, strict=True)
+        ]
+        physical_tensors = allocator.allocate_tensors(physical_sizes, alignment)
+        logical_tensors: list[torch.Tensor] = []
+        registry = getattr(self, "_mooncake_writeback_raw_views", None)
+        if registry is None:
+            registry = {}
+            self._mooncake_writeback_raw_views = registry
+        for logical_size, physical_tensor in zip(
+            sizes,
+            physical_tensors,
+            strict=True,
+        ):
+            logical_tensor = physical_tensor.narrow(0, 0, logical_size)
+            registry[int(logical_tensor.data_ptr())] = physical_tensor
+            logical_tensors.append(logical_tensor)
+        return logical_tensors
+
+    def _uses_mooncake_host_pool(self) -> bool:
+        return isinstance(
+            getattr(self, "_host_kv_allocator", None),
+            MooncakeHostPool,
+        )
+
+    def _get_mooncake_writeback_view(
+        self,
+        logical_tensor: torch.Tensor,
+        token_dim: int,
+    ) -> torch.Tensor:
+        """Return the logical Host-KV rows plus one private sink row."""
+        logical_ptr = int(logical_tensor.data_ptr())
+        cached_views = getattr(self, "_mooncake_writeback_views", {})
+        cached = cached_views.get(logical_ptr)
+        if cached is not None:
+            return cached
+        registry = getattr(self, "_mooncake_writeback_raw_views", {})
+        physical_raw = registry.get(logical_ptr)
+        if physical_raw is None:
+            raise RuntimeError(
+                "Mooncake Host-KV writeback storage is not registered"
+            )
+        if token_dim <= 0 or logical_tensor.numel() % token_dim != 0:
+            raise ValueError(
+                "Mooncake Host-KV tensor has an invalid token-row layout"
+            )
+        logical_rows = logical_tensor.numel() // token_dim
+        expected_bytes = (
+            logical_tensor.numel() + token_dim
+        ) * logical_tensor.element_size()
+        if physical_raw.numel() != expected_bytes:
+            raise RuntimeError(
+                "Mooncake Host-KV writeback storage has an unexpected size: "
+                f"expected={expected_bytes}, actual={physical_raw.numel()}"
+            )
+        writeback = physical_raw.view(logical_tensor.dtype).view(
+            logical_rows + 1,
+            token_dim,
+        )
+        if int(writeback.data_ptr()) != logical_ptr:
+            raise RuntimeError(
+                "Mooncake Host-KV logical and writeback views do not share "
+                "the same base address"
+            )
+        if not hasattr(self, "_mooncake_writeback_views"):
+            self._mooncake_writeback_views = {}
+        self._mooncake_writeback_views[logical_ptr] = writeback
+        return writeback
+
+    def _requires_fused_membership_staging(self) -> bool:
+        """Whether the active Host allocator needs a CPU planner bridge."""
+        return self._uses_mooncake_host_pool()
 
     def close(self) -> None:
         """Release backend-owned Host KV resources."""
+        self.fused_overlap_membership_map = None
+        self.fused_overlap_planner_membership_map = None
+        self.fused_overlap_membership_plan_device_staging = None
+        self.fused_plan_broadcast_buffer = None
+        self.fused_plan_metadata_npu = None
+        self.fused_plan_status_npu = None
+        self.fused_plan_current_linear_slots_npu = None
         allocator = self._host_kv_allocator
         if allocator is not None:
             allocator.close()
             self._host_kv_allocator = None
+        registry = getattr(self, "_mooncake_writeback_raw_views", None)
+        if registry is not None:
+            registry.clear()
+        views = getattr(self, "_mooncake_writeback_views", None)
+        if views is not None:
+            views.clear()
 
     def _build_cpp(self):
         os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
@@ -804,35 +942,127 @@ class SparseKVOffloadManager:
             return self.fused_overlap_membership_map
 
         shape = [row_capacity, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT]
-        owner_ptr = torch.zeros(1, dtype=torch.int64, device="npu")
-        membership_map = None
-        if self.tp_rank == 0:
-            membership_map = offload.empty(
-                [row_capacity * FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT],
-                dtype=torch.int16,
-                pin_memory=True,
-            ).view(shape)
-            membership_map.fill_(-1)
-            control = membership_map[
-                :,
-                FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
-                + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
-            ]
-            control[:, 1] = FSA_EXTERNAL_PLAN_READY_MARKER
-            control[:, 2] = self.topk
-            control[:, 3] = FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
-            control[:, 7] = FSA_PAIRED_SELECTION_COPY_MARKER
-            owner_ptr[0] = membership_map.data_ptr()
-        self.tp_group.broadcast(owner_ptr, src=0)
-        shared_ptr = int(owner_ptr.item())
-        if self.tp_rank != 0:
-            membership_map = self._restore_int16_tensor(shared_ptr, shape)
-        if membership_map is None:
-            raise RuntimeError("mapped membership storage was not initialized")
-        self.tp_group.barrier()
+        if self._requires_fused_membership_staging():
+            membership_map = empty_aligned_swapped_tensor(
+                shape,
+                torch.int16,
+            )
+            plan_width = self.topk + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT
+            plan_shape = [row_capacity, plan_width]
+            self._allocate_fused_plan_staging(row_capacity, membership_map.device)
+            planner_map = None
+            if self.tp_rank == 0:
+                planner_map = torch.empty(
+                    plan_shape,
+                    dtype=torch.int16,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                self._init_fused_overlap_plan_staging(planner_map)
+            self._init_fused_overlap_membership_control(membership_map)
+            torch_npu.npu.current_stream().synchronize()
+            self.tp_group.barrier()
+            self.fused_overlap_planner_membership_map = planner_map
+        else:
+            owner_ptr = torch.zeros(1, dtype=torch.int64, device="npu")
+            membership_map = None
+            if self.tp_rank == 0:
+                membership_map = offload.empty(
+                    [
+                        row_capacity
+                        * FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT
+                    ],
+                    dtype=torch.int16,
+                    pin_memory=True,
+                ).view(shape)
+                self._init_fused_overlap_membership_control(membership_map)
+                owner_ptr[0] = membership_map.data_ptr()
+            self.tp_group.broadcast(owner_ptr, src=0)
+            shared_ptr = int(owner_ptr.item())
+            if self.tp_rank != 0:
+                membership_map = self._restore_int16_tensor(shared_ptr, shape)
+            if membership_map is None:
+                raise RuntimeError(
+                    "mapped membership storage was not initialized"
+                )
+            self.tp_group.barrier()
+            self.fused_overlap_planner_membership_map = membership_map
+
         self.fused_overlap_membership_map = membership_map
         self.fused_overlap_membership_map_rows = row_capacity
         return membership_map
+
+    def _allocate_fused_plan_staging(self, row_capacity: int, device: torch.device) -> None:
+        """Preallocate one broadcast payload before graph capture.
+
+        Keep metadata as int32 and the encoded plan as an int16 view of the
+        same storage. Broadcasting int32 preserves both payloads bit-for-bit
+        without per-step packing, casts, or additional device allocations.
+        """
+        metadata = self.fused_plan_metadata_npu
+        metadata_elements = metadata.numel()
+        plan_width = self.topk + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT
+        plan_elements = row_capacity * plan_width
+        plan_bytes = plan_elements * torch.int16.itemsize
+        buffer = torch.zeros(
+            metadata_elements + cdiv(plan_bytes, torch.int32.itemsize),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.fused_plan_broadcast_buffer = buffer
+        self.fused_plan_metadata_npu = buffer[:metadata_elements]
+        self.fused_plan_metadata_npu.copy_(metadata)
+        self.fused_plan_status_npu = self.fused_plan_metadata_npu[:1]
+        self.fused_plan_current_linear_slots_npu = self.fused_plan_metadata_npu[1:]
+        self.fused_overlap_membership_plan_device_staging = (
+            buffer[metadata_elements:].view(torch.int16)[:plan_elements].view(row_capacity, plan_width)
+        )
+
+    def _init_fused_overlap_membership_control(
+        self,
+        membership_map: torch.Tensor,
+    ) -> None:
+        membership_map.fill_(-1)
+        control = membership_map[
+            :,
+            FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT:
+            FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
+            + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
+        ]
+        control[:, 1] = FSA_EXTERNAL_PLAN_READY_MARKER
+        control[:, 2] = self.topk
+        control[:, 3] = (
+            FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+        )
+        control[:, 7] = FSA_PAIRED_SELECTION_COPY_MARKER
+
+    def _init_fused_overlap_plan_staging(
+        self,
+        plan_staging: torch.Tensor,
+    ) -> None:
+        plan_staging.fill_(-1)
+        control = plan_staging[
+            :,
+            self.topk:
+            self.topk + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
+        ]
+        control[:, 1] = FSA_EXTERNAL_PLAN_READY_MARKER
+        control[:, 2] = self.topk
+        control[:, 3] = (
+            FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+        )
+        control[:, 7] = FSA_PAIRED_SELECTION_COPY_MARKER
+
+    def is_fused_membership_storage(self, tensor: torch.Tensor) -> bool:
+        if tensor.dtype != torch.int16:
+            return False
+        if self._requires_fused_membership_staging():
+            return (
+                self.fused_overlap_membership_map is not None
+                and tensor.data_ptr()
+                == self.fused_overlap_membership_map.data_ptr()
+            )
+        return tensor.device.type == "cpu"
 
     def get_fused_overlap_cpu_kv_inputs(
         self,
@@ -896,6 +1126,16 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
+        if self._uses_mooncake_host_pool():
+            token_dim_k = self.token_size_bytes_k // dtype.itemsize
+            token_dim_v = self.token_size_bytes_v // dtype.itemsize
+            for k_cache_cpu, v_cache_cpu in zip(
+                self.k_caches_cpu,
+                self.v_caches_cpu,
+                strict=True,
+            ):
+                self._get_mooncake_writeback_view(k_cache_cpu, token_dim_k)
+                self._get_mooncake_writeback_view(v_cache_cpu, token_dim_v)
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -925,10 +1165,17 @@ class SparseKVOffloadManager:
             self.fused_plan_status_npu = self.fused_plan_metadata_npu[:1]
             self.fused_plan_current_linear_slots_npu = self.fused_plan_metadata_npu[1:]
             self.current_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+            if self._uses_mooncake_host_pool() and self.tp_rank == 0:
+                self.d2h_dst_idx_npu = torch.empty(
+                    self.max_d2h_index_copy_tokens,
+                    dtype=torch.int64,
+                    device=device,
+                )
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
         self._initialize_fused_writeback_descriptors()
+        self._initialize_mooncake_index_copy_descriptors()
         self._initialize_paired_current_scatter()
         pages_per_row = self.topk_buffer_size // self.block_size
         self.current_slots_npu = torch.empty(
@@ -1077,20 +1324,21 @@ class SparseKVOffloadManager:
         assert self.num_tokens_buffer_npu.shape == torch.Size([1])
 
         # topk cache reuse related
-        # The native planner caps active threads by work rows; do not cap the
-        # workspace by max_num_reqs because fused overlap may use more rows.
+        # C++ caps active threads by work rows (token rows for fused overlap/MTP).
+        # Do not cap workspace threads by max_num_reqs: token rows can exceed it.
         try:
             available_cpus = len(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             available_cpus = os.cpu_count() or 1
         configured_threads = self.sparse_kv_offload_config.lru_max_threads
-        self.lru_workspace_threads = resolve_lru_workspace_threads(configured_threads, available_cpus)
+        self.lru_workspace_threads = max(1, min(configured_threads, available_cpus))
         logger.info(
             "LRU thread budget: configured=%s, available_cpus=%s, workspace_threads=%s",
             configured_threads,
             available_cpus,
             self.lru_workspace_threads,
         )
+
         self._warmup_external_lru_planner_threads()
         self.lru_topk_indices_cpu = torch.empty(
             [self.max_num_topk_rows, self.topk],
@@ -1279,6 +1527,25 @@ class SparseKVOffloadManager:
         self.fused_writeback_descriptor_builder = build_writeback_descriptors
         self.fused_reuse_writeback_layout = False
 
+    def _initialize_mooncake_index_copy_descriptors(self) -> None:
+        self.fused_index_copy_descriptor_builder = None
+        if (
+            not self.use_fused_overlap
+            or self.tp_rank != 0
+            or self.max_d2h_index_copy_tokens == 0
+            or not self._uses_mooncake_host_pool()
+        ):
+            return
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.index_copy_descriptors import (
+            build_index_copy_destinations,
+            warmup_index_copy_destinations,
+        )
+
+        warmup_index_copy_destinations(self)
+        self.fused_index_copy_descriptor_builder = (
+            build_index_copy_destinations
+        )
+
     def offload_new_kv(
         self,
         layer_name: str,
@@ -1292,9 +1559,15 @@ class SparseKVOffloadManager:
         has_prefill: bool = False,
         capturing: bool = False,
     ) -> None:
+        prepare_index_copy_descriptors = True
         if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
             layer_id = self._get_offload_layer_id(layer_name)
             self.current_kv_by_layer[layer_id] = (k, v)
+            # All decode layers share one slot mapping within a forward step.
+            prepare_index_copy_descriptors = layer_id == 0
+        use_mooncake_index_copy = (
+            self.use_fused_overlap and self._uses_mooncake_host_pool()
+        )
         if (
             capturing
             and not has_prefill
@@ -1306,7 +1579,13 @@ class SparseKVOffloadManager:
             if capture_token is not getattr(self, "fused_writeback_capture_token", None):
                 self.fused_writeback_capture_token = capture_token
                 self.fused_writeback_layouts = {}
-        use_side_stream = self.tp_rank == 0 and self.use_fused_overlap and capturing and not has_prefill
+        use_side_stream = (
+            self.tp_rank == 0
+            and self.use_fused_overlap
+            and capturing
+            and not has_prefill
+            and not use_mooncake_index_copy
+        )
         if not use_side_stream:
             self._offload_new_kv_on_current_stream(
                 slot_mapping,
@@ -1316,8 +1595,9 @@ class SparseKVOffloadManager:
                 v_cache_npu,
                 k,
                 v,
-                has_prefill,
+                has_prefill=has_prefill,
                 capturing=capturing,
+                prepare_index_copy_descriptors=prepare_index_copy_descriptors,
             )
             return
 
@@ -1332,8 +1612,9 @@ class SparseKVOffloadManager:
                 v_cache_npu,
                 k,
                 v,
-                has_prefill,
+                has_prefill=has_prefill,
                 capturing=capturing,
+                prepare_index_copy_descriptors=prepare_index_copy_descriptors,
             )
 
     def _offload_new_kv_on_current_stream(
@@ -1347,6 +1628,7 @@ class SparseKVOffloadManager:
         v: torch.Tensor | None,  # decode: k/v -> cache_cpu[slot]
         has_prefill: bool = False,
         capturing: bool = False,
+        prepare_index_copy_descriptors: bool = True,
     ) -> None:
         # the has_prefill path (NPU paged cache -> CPU pool D2H) only exists
         # for single-node PD-colocate debug.
@@ -1372,6 +1654,17 @@ class SparseKVOffloadManager:
             if k is None or v is None:
                 raise ValueError("decode offload requires current-token K/V")
             device = k.device
+            if self.use_fused_overlap and self._uses_mooncake_host_pool():
+                self._offload_new_kv_via_index_copy(
+                    slot_mapping=slot_mapping,
+                    k_cache_cpu=k_cache_cpu,
+                    v_cache_cpu=v_cache_cpu,
+                    k=k,
+                    v=v,
+                    capturing=capturing,
+                    prepare_descriptors=prepare_index_copy_descriptors,
+                )
+                return
 
         slots = slot_mapping.reshape(-1).to(device=device, dtype=torch.int64)
         token_count = slots.numel()
@@ -1497,6 +1790,115 @@ class SparseKVOffloadManager:
         )
         if result not in (None, 0):
             raise RuntimeError(f"memfabric D2H sparse_copy failed with result={result}")
+
+    def _offload_new_kv_via_index_copy(
+        self,
+        *,
+        slot_mapping: torch.Tensor,
+        k_cache_cpu: torch.Tensor,
+        v_cache_cpu: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        capturing: bool,
+        prepare_descriptors: bool = True,
+    ) -> None:
+        """Write current-token K/V into the Mooncake Shared Segment."""
+        token_dim_k = self.token_size_bytes_k // k.element_size()
+        token_dim_v = self.token_size_bytes_v // v.element_size()
+        k_rows = k.reshape(-1, token_dim_k)
+        v_rows = v.reshape(-1, token_dim_v)
+        if not k_rows.is_contiguous():
+            k_rows = k_rows.contiguous()
+        if not v_rows.is_contiguous():
+            v_rows = v_rows.contiguous()
+        flat_host_k = k_cache_cpu.reshape(-1, token_dim_k)
+        flat_host_v = v_cache_cpu.reshape(-1, token_dim_v)
+        slots = slot_mapping.reshape(-1).to(
+            device=k.device,
+            dtype=torch.int64,
+        )
+        token_count = slots.numel()
+        if token_count == 0:
+            return
+        if token_count > self.max_d2h_index_copy_tokens:
+            raise ValueError(
+                "Sparse KV offload rows exceed index_copy capacity, "
+                f"got {token_count}, "
+                f"capacity={self.max_d2h_index_copy_tokens}"
+            )
+        if k_rows.shape[0] != token_count or v_rows.shape[0] != token_count:
+            raise ValueError("decode K/V row counts must match slot_mapping")
+        if flat_host_k.device != k.device or flat_host_v.device != v.device:
+            raise RuntimeError(
+                "Mooncake Host views and current K/V must share one NPU device"
+            )
+        num_slots = flat_host_k.shape[0]
+        if num_slots != flat_host_v.shape[0] or num_slots <= 0:
+            raise ValueError(
+                "Mooncake Host K/V pools have incompatible token capacities"
+            )
+        writeback_host_k = self._get_mooncake_writeback_view(
+            k_cache_cpu,
+            token_dim_k,
+        )
+        writeback_host_v = self._get_mooncake_writeback_view(
+            v_cache_cpu,
+            token_dim_v,
+        )
+        if (
+            writeback_host_k.shape[0] != num_slots + 1
+            or writeback_host_v.shape[0] != num_slots + 1
+        ):
+            raise RuntimeError(
+                "Mooncake Host K/V writeback views must contain exactly "
+                "one private sink row"
+            )
+
+        if capturing:
+            current_kv_ready = torch_npu.npu.current_stream().record_event()
+            with torch_npu.npu.stream(self.current_kv_save_stream):
+                self.current_kv_save_stream.wait_event(current_kv_ready)
+                if prepare_descriptors:
+                    descriptor_builder = getattr(
+                        self,
+                        "fused_index_copy_descriptor_builder",
+                        None,
+                    )
+                    if descriptor_builder is None:
+                        raise RuntimeError(
+                            "Mooncake graph writeback requires the NPU "
+                            "index_copy descriptor builder"
+                        )
+                    descriptor_builder(
+                        slots,
+                        self.d2h_dst_idx_npu,
+                        num_slots,
+                    )
+                destinations = self.d2h_dst_idx_npu[:token_count]
+                writeback_host_k.index_copy_(
+                    0,
+                    destinations,
+                    k_rows,
+                )
+                writeback_host_v.index_copy_(
+                    0,
+                    destinations,
+                    v_rows,
+                )
+            return
+
+        valid = (slots >= 0) & (slots < num_slots)
+        destinations = slots.masked_fill(~valid, num_slots)
+        writeback_host_k.index_copy_(
+            0,
+            destinations,
+            k_rows,
+        )
+        writeback_host_v.index_copy_(
+            0,
+            destinations,
+            v_rows,
+        )
 
     def onload_topk_kv(
         self,
@@ -1642,12 +2044,91 @@ class SparseKVOffloadManager:
             selection_membership_map,
         )
         layer_id = self._get_offload_layer_id(layer_name)
-        plan_start = FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+        plan_start = (
+            FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+        )
+        plan_width = FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS - plan_start
         plan_storage = selection_membership_map[
             :num_tokens,
             plan_start:FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS,
         ]
-        encoded_plan_stride = selection_membership_map.stride(0)
+        planner_membership_map = self.fused_overlap_planner_membership_map
+        planner_plan_start = plan_start
+        if self.tp_rank == 0:
+            if planner_membership_map is None:
+                planner_membership_map = selection_membership_map
+            elif self._requires_fused_membership_staging():
+                planner_plan_start = 0
+            if (
+                planner_membership_map.dim() != 2
+                or planner_membership_map.shape[0] < num_tokens
+                or planner_membership_map.shape[1]
+                < planner_plan_start + plan_width
+                or planner_membership_map.dtype != torch.int16
+                or planner_membership_map.device.type != "cpu"
+            ):
+                raise ValueError(
+                    "external FSA planner requires CPU int16 storage: "
+                    f"shape={tuple(planner_membership_map.shape)}, "
+                    f"dtype={planner_membership_map.dtype}, "
+                    f"device={planner_membership_map.device}"
+                )
+            planner_storage = planner_membership_map[
+                :num_tokens,
+                planner_plan_start:planner_plan_start + plan_width,
+            ]
+            if (
+                self._requires_fused_membership_staging()
+                and not planner_storage.is_contiguous()
+            ):
+                raise RuntimeError(
+                    "Mooncake external FSA planner staging must be compact "
+                    "and contiguous"
+                )
+            encoded_plan_stride = planner_membership_map.stride(0)
+        else:
+            # Only TP0 owns and runs the CPU planner. Other TP ranks consume
+            # the published plan after the metadata broadcast.
+            planner_storage = plan_storage
+            encoded_plan_stride = selection_membership_map.stride(0)
+
+        def stage_plan(non_blocking: bool) -> None:
+            if not self._requires_fused_membership_staging():
+                return
+            device_staging = (
+                self.fused_overlap_membership_plan_device_staging
+            )
+            if device_staging is None:
+                raise RuntimeError(
+                    "external FSA plan requires an NPU staging buffer when "
+                    "planner and operator membership storage are separate"
+                )
+            device_plan_storage = device_staging[:num_tokens, :plan_width]
+            device_plan_storage.copy_(
+                planner_storage,
+                non_blocking=non_blocking,
+            )
+
+        def publish_staged_plan(non_blocking: bool) -> None:
+            if not self._requires_fused_membership_staging():
+                return
+            device_staging = self.fused_overlap_membership_plan_device_staging
+            if device_staging is None:
+                raise RuntimeError(
+                    "external FSA plan requires an NPU staging buffer when "
+                    "planner and operator membership storage are separate"
+                )
+            device_plan_storage = device_staging[:num_tokens, :plan_width]
+            plan_storage.copy_(
+                device_plan_storage,
+                non_blocking=non_blocking,
+            )
+
+        broadcast_buffer = self.fused_plan_metadata_npu
+        if self._requires_fused_membership_staging():
+            broadcast_buffer = self.fused_plan_broadcast_buffer
+            if broadcast_buffer is None:
+                raise RuntimeError("Mooncake external FSA plan requires a preallocated broadcast buffer")
         async_plan = capturing or self.fused_async_plan
 
         owner_layer_id = self.fused_overlap_plan_owner_layer_id
@@ -1697,7 +2178,7 @@ class SparseKVOffloadManager:
                 self.lru_epochs_ptr,
                 self.lru_physical_row_workspace_ptr,
                 self.max_num_topk_rows,
-                plan_storage.data_ptr(),
+                planner_storage.data_ptr(),
                 encoded_plan_stride,
                 num_tokens,
                 self.topk,
@@ -1732,9 +2213,12 @@ class SparseKVOffloadManager:
                         ],
                         non_blocking=True,
                     )
+                    stage_plan(non_blocking=True)
                     if capturing and self.tp_size > 1:
                         self.fused_plan_stream.wait_stream(self.current_kv_save_stream)
-                self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
+                self.tp_group.broadcast(broadcast_buffer, src=0)
+                publish_staged_plan(non_blocking=True)
+            torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
             self.fused_overlap_plan_owner_layer_id = layer_id
             self.fused_overlap_plan_topk = self.topk
             self.fused_overlap_plan_num_tokens = num_tokens
@@ -1752,10 +2236,11 @@ class SparseKVOffloadManager:
                         self.max_num_topk_rows * 2 : self.max_num_topk_rows * 2 + num_tokens
                     ]
                 )
+                stage_plan(non_blocking=False)
             except Exception as exc:
                 planner_error = exc
                 self.fused_plan_status_npu.fill_(1)
-        self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
+        self.tp_group.broadcast(broadcast_buffer, src=0)
         if int(self.fused_plan_status_npu.item()) != 0:
             detail = (
                 f"{type(planner_error).__name__}: {planner_error}"
@@ -1765,6 +2250,7 @@ class SparseKVOffloadManager:
             raise RuntimeError(
                 f"SFA fused_overlap external planner failed: layer={layer_name}, tp_rank={self.tp_rank}, {detail}"
             ) from planner_error
+        publish_staged_plan(non_blocking=False)
         self.fused_overlap_plan_owner_layer_id = layer_id
         self.fused_overlap_plan_topk = self.topk
         self.fused_overlap_plan_num_tokens = num_tokens
@@ -1815,10 +2301,12 @@ class SparseKVOffloadManager:
             or selection_membership_map.shape[0] < num_tokens
             or selection_membership_map.shape[1] < FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS
             or selection_membership_map.dtype != torch.int16
-            or selection_membership_map.device.type != "cpu"
+            or not self.is_fused_membership_storage(
+                selection_membership_map
+            )
         ):
             raise ValueError(
-                "external FSA plan requires mapped CPU int16 membership storage: "
+                "external FSA plan requires registered int16 membership storage: "
                 f"min_shape=({num_tokens}, {FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS}), "
                 f"actual_shape={tuple(selection_membership_map.shape)}, "
                 f"dtype={selection_membership_map.dtype}, "
@@ -1857,7 +2345,11 @@ class SparseKVOffloadManager:
         torch_npu.npu_scatter_nd_update_(flat_rope, indices, current_rope)
 
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
-        if self.use_fused_overlap and capturing and self.tp_rank == 0:
+        if (
+            self.use_fused_overlap
+            and capturing
+            and self.tp_rank == 0
+        ):
             torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
 
     def _onload_topk_kv_cpu(self, args):

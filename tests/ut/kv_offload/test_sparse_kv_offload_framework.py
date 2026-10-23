@@ -16,8 +16,10 @@ def make_manager():
     manager.tp_rank = 0
     manager.tp_size = 1
     manager.tp_group = MagicMock()
-    manager.fused_plan_status_npu = torch.zeros(1, dtype=torch.int32)
+    manager.fused_plan_metadata_npu = torch.zeros(5, dtype=torch.int32)
+    manager.fused_plan_status_npu = manager.fused_plan_metadata_npu[:1]
     manager.fused_overlap_plan_owner_layer_id = None
+    manager.fused_overlap_planner_membership_map = None
     manager.fused_async_plan = False
     manager.current_kv_by_layer = {}
     manager.layer_name_to_offload_id = {"layer.0": 0, "layer.1": 1}

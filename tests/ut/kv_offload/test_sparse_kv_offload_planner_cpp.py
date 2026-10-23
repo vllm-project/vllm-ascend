@@ -171,6 +171,80 @@ class PlannerState:
         ]
 
 
+def test_current_kv_index_copy_descriptors_pad_last_valid(planner_helper):
+    slot_mapping = torch.tensor([7, -1, 3, 99], dtype=torch.int64)
+    max_num_tokens = 6
+    src_idx = torch.full((max_num_tokens,), -1, dtype=torch.int64)
+    dst_idx = torch.full((max_num_tokens,), -1, dtype=torch.int64)
+    count = torch.zeros(1, dtype=torch.int32)
+
+    result = planner_helper.compute_current_kv_index_copy_descriptors(
+        slot_mapping,
+        4,
+        max_num_tokens,
+        16,
+        src_idx,
+        dst_idx,
+        count,
+    )
+
+    assert result == 2
+    assert count.tolist() == [2]
+    assert src_idx.tolist() == [0, 2, 2, 2, 2, 2]
+    assert dst_idx.tolist() == [7, 3, 3, 3, 3, 3]
+
+
+def test_current_kv_index_copy_descriptors_survive_graph_replays(
+    planner_helper,
+):
+    if not torch_npu.npu.is_available():
+        pytest.skip("Ascend NPU is unavailable")
+
+    max_num_tokens = 4
+    slot_mapping = torch.zeros(max_num_tokens, dtype=torch.int64)
+    src_idx = torch.zeros(max_num_tokens, dtype=torch.int64)
+    dst_idx = torch.zeros(max_num_tokens, dtype=torch.int64)
+    count = torch.zeros(1, dtype=torch.int32)
+    side_stream_marker = torch.zeros(1, device="npu")
+    graph = torch.npu.NPUGraph()
+    current_stream = torch_npu.npu.current_stream()
+    save_stream = torch_npu.npu.Stream()
+    try:
+        with torch.npu.graph(graph):
+            planner_helper.enqueue_current_kv_index_copy_descriptors(
+                slot_mapping,
+                max_num_tokens,
+                max_num_tokens,
+                16,
+                src_idx,
+                dst_idx,
+                count,
+            )
+            descriptors_ready = current_stream.record_event()
+            with torch_npu.npu.stream(save_stream):
+                save_stream.wait_event(descriptors_ready)
+            current_stream.wait_stream(save_stream)
+        torch_npu.npu.synchronize()
+
+        slot_mapping.copy_(torch.tensor([7, -1, 3, 99]))
+        graph.replay()
+        torch_npu.npu.synchronize()
+        assert count.tolist() == [2]
+        assert src_idx.tolist() == [0, 2, 2, 2]
+        assert dst_idx.tolist() == [7, 3, 3, 3]
+
+        slot_mapping.copy_(torch.tensor([5, 4, 3, 2]))
+        graph.replay()
+        torch_npu.npu.synchronize()
+        assert count.tolist() == [4]
+        assert src_idx.tolist() == [0, 1, 2, 3]
+        assert dst_idx.tolist() == [5, 4, 3, 2]
+    finally:
+        graph.reset()
+        torch_npu.npu.synchronize()
+
+
+
 def test_stable_rows_suffix_invalidation_and_plan_encoding(planner_helper):
     state = PlannerState()
     first = torch.stack([torch.arange(0, TOPK), torch.arange(TOPK, TOPK * 2)]).to(torch.int32)

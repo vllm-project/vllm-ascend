@@ -104,6 +104,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
+    # 0 (default): auto-detect from device properties, falling back to 192 KB
+    # (safe for Ascend 910B/A3). Set to a positive value to override when
+    # auto-detection is unavailable or for debugging UB overflow issues.
+    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Skip process-wide NUMA page migration when a Mooncake shared segment
+    # falls back to mmap + HostRegister. CPU thread binding remains enabled.
+    "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
     # Non-sensitive FSA scheduling: 1 (default) enables the dynamic planner stream; 0 disables it.
     "VLLM_ASCEND_FSA_ASYNC_PLAN": lambda: bool(int(os.getenv("VLLM_ASCEND_FSA_ASYNC_PLAN", "1"))),
     # Non-sensitive FSA layout reuse within a graph capture: 1 (default); 0 disables it.
@@ -122,14 +130,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", "0"))
     ),
-    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
-    # 0 (default): auto-detect from device properties, falling back to 192 KB
-    # (safe for Ascend 910B/A3). Set to a positive value to override when
-    # auto-detection is unavailable or for debugging UB overflow issues.
-    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
-    # Skip process-wide NUMA page migration when a Mooncake shared segment
-    # falls back to mmap + HostRegister. CPU thread binding remains enabled.
-    "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
 }
 
 # end-env-vars-definition
