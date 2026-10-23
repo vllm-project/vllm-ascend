@@ -98,7 +98,7 @@ images.
     server.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -143,7 +143,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
