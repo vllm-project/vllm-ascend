@@ -24,7 +24,7 @@ a continuously adjustable reasoning effort from 1 to 100.
 
 vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
 guide provides a single-node colocated A3 configuration and a two-node A3
-Prefill-Decode (PD) disaggregated configuration.
+Prefill-Decode (PD) disaggregated configuration. It also supports a two-node hybrid A2 configuration and a four-node Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash support requires the `main` branch of vLLM Ascend and an
 upstream vLLM revision dated September 11, 2026 or later. vLLM v0.30.0 is
@@ -67,9 +67,8 @@ Use one of the following hardware configurations:
 - **A3 single-node colocated**: one Atlas 800I A3 server with 8 NPUs and 128GB
   memory per NPU. The server exposes 16 logical devices to the container.
 - **A3 1P1D**: two Atlas 800I A3 servers with the same device configuration.
-- **A2 series**: four Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
-  memory per NPU and exposes 8 devices to the container. Its deployment
-  configuration is retained unchanged in this update.
+- **A2 series**: two Atlas 800I A2 servers. Each server has 8 NPUs with 64GB
+  memory per NPU and exposes 8 devices to the container.
 - **A2 1P1D**: four Atlas 800I A2 servers with the same device configuration.
 
 Store the checkpoint in a shared directory or copy it to the same absolute
@@ -745,7 +744,9 @@ and use the `main` branch with the matching vLLM revision recorded in
     ```shell
     #!/usr/bin/env bash
 
-    set -euo pipefail
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<LOCAL_PREFILL_NODE_IP>"
@@ -764,7 +765,9 @@ and use the `main` branch with the matching vLLM revision recorded in
     export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve "$MODEL_PATH" \
@@ -779,7 +782,7 @@ and use the `main` branch with the matching vLLM revision recorded in
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 8192 \
+        --max-num-batched-tokens 4096 \
         --max-num-seqs 16 \
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --trust-remote-code \
@@ -804,6 +807,7 @@ and use the `main` branch with the matching vLLM revision recorded in
             "kv_connector":"MooncakeHybridConnector",
             "kv_role":"kv_producer",
             "kv_port":"30000",
+            "engine_id":"0",
             "kv_connector_extra_config":{
                 "prefill":{"dp_size":4,"tp_size":4},
                 "decode":{"dp_size":8,"tp_size":2}
@@ -831,6 +835,8 @@ and use the `main` branch with the matching vLLM revision recorded in
     the first Prefill node:
 
     ```shell
+    PREFILL_NODE_1_IP="<PREFILL_NODE_1_IP>"
+
     python launch_online_dp.py \
         --dp-size 4 \
         --tp-size 4 \
@@ -851,7 +857,9 @@ and use the `main` branch with the matching vLLM revision recorded in
     ```shell
     #!/usr/bin/env bash
 
-    set -euo pipefail
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
     NIC_NAME="<NETWORK_INTERFACE>"
     LOCAL_IP="<LOCAL_DECODE_NODE_IP>"
@@ -869,7 +877,9 @@ and use the `main` branch with the matching vLLM revision recorded in
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve "$MODEL_PATH" \
@@ -903,6 +913,7 @@ and use the `main` branch with the matching vLLM revision recorded in
             "kv_connector":"MooncakeHybridConnector",
             "kv_role":"kv_consumer",
             "kv_port":"30100",
+            "engine_id":"1",
             "kv_connector_extra_config":{
                 "prefill":{"dp_size":4,"tp_size":4},
                 "decode":{"dp_size":8,"tp_size":2}
@@ -940,6 +951,8 @@ and use the `main` branch with the matching vLLM revision recorded in
     the first Decode node:
 
     ```shell
+    DECODE_NODE_1_IP="<DECODE_NODE_1_IP>"
+
     python launch_online_dp.py \
         --dp-size 8 \
         --tp-size 2 \
@@ -1220,7 +1233,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.1 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.1.2 after all Decode engines are ready.
 
 #### 5.3.3 Start the Decode Node with Pooling
 
@@ -1322,7 +1335,7 @@ vllm serve "$MODEL_PATH" \
 ```
 
 Start the eight DP8/TP2 Decode engines with the launcher command from Section
-5.2.3.
+5.2.1.3.
 
 #### 5.3.4 Startup and Verification
 
@@ -1365,7 +1378,7 @@ CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
 Before starting vLLM, configure `mooncake.json`, and start the
-mooncake_master Service. The Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH` .
+mooncake_master Service. The Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH`.
 
 #### 5.4.1 Prepare the Mooncake Services
 
@@ -1407,6 +1420,7 @@ On the Prefill node, save the following script as `run_dp_template.sh`. Set
 
 unset https_proxy
 unset http_proxy
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<PREFILL_NODE_IP>"
@@ -1423,12 +1437,13 @@ export VLLM_ENGINE_READY_TIMEOUT_S=360000
 export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 # Parameters required by the Mooncake KV Cache Pool.
@@ -1447,7 +1462,7 @@ vllm serve "$MODEL_PATH" \
     --seed 1024 \
     --served-model-name dsv41 \
     --max-model-len 1048576 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 4096 \
     --max-num-seqs 16 \
     --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
     --trust-remote-code \
@@ -1472,6 +1487,7 @@ vllm serve "$MODEL_PATH" \
         "kv_connector":"MultiConnector",
         "kv_role":"kv_producer",
         "kv_port":"30000",
+        "engine_id":"0",
         "kv_connector_extra_config":{
             "connectors":[
                 {
@@ -1497,7 +1513,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.1 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.2 after all Decode engines are ready.
 
 #### 5.4.3 Start the Decode Node with Pooling
 
@@ -1510,6 +1526,7 @@ On the Decode node, save the following script as `run_dp_template.sh`. Set
 
 unset https_proxy
 unset http_proxy
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
 
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<DECODE_NODE_IP>"
@@ -1529,9 +1546,10 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 # Parameters required by the Mooncake KV Cache Pool.
@@ -1569,6 +1587,7 @@ vllm serve "$MODEL_PATH" \
         "kv_connector":"MultiConnector",
         "kv_role":"kv_consumer",
         "kv_port":"30100",
+        "engine_id":"1",
         "kv_connector_extra_config":{
             "connectors":[
                 {
@@ -1604,11 +1623,11 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2.2.1.
+Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2.2.3.
 
 #### 5.4.4 Startup and Verification
 
-Start the components in this order: Mooncake Master Service, standalone Mooncake Store on both Prefill and Decode nodes, Decode engines, Prefill engines, and then the PD proxy.
+Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
 Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in Section 5.2.2.4.
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs show Mooncake lookup, get, put, and hit activity, and that Decode logs still show normal Prefill-to-Decode KV transfer.
@@ -1623,32 +1642,39 @@ Key pooling parameters:
 
 === "A2 series"
 
-    The existing A2 configuration is retained unchanged in this update. It uses
-    four Atlas 800 A2 servers with one local DP rank per server and a global
-    DP4/TP8/EP32 topology.
+    This two-node configuration uses two Atlas 800 A2 servers with one
+    local DP rank per server and a global DP2/TP8/EP topology.
 
-    Run this script on all four A2 servers. Set `NODE_RANK` to `0`, `1`, `2`, or
-    `3` on the corresponding node. Set `NODE0_IP` to the IP address of Node 0 and
+    Run this script on both A2 servers. Set `NODE_RANK` to `0` or
+    `1` on the corresponding node. Set `NODE0_IP` to the IP address of Node 0 and
     set `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` for each node.
 
     ```bash
     #!/usr/bin/env bash
     set -euo pipefail
-
     NODE_RANK=0
+
     NODE0_IP="<NODE0_IP>"
     LOCAL_IP="<LOCAL_IP>"
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
-    # Allow time for weight loading and graph capture on large models.
-    export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_HOST_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_ENGINE_READY_TIMEOUT_S=360000
+    export VLLM_USE_V2_MODEL_RUNNER=0
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
 
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
@@ -1661,31 +1687,40 @@ Key pooling parameters:
       "${HEADLESS_ARGS[@]}" \
       --data-parallel-address "$NODE0_IP" \
       --data-parallel-rpc-port 13399 \
-      --data-parallel-size 4 \
+      --data-parallel-size 2 \
       --data-parallel-size-local 1 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --served-model-name deepseek-v41 \
+      --seed 1024 \
+      --served-model-name dsv41 \
       --max-model-len 1048576 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 32 \
-      --gpu-memory-utilization 0.90 \
+      --async-scheduling \
       --block-size 128 \
+      --enable-prefix-caching \
+      --trust-remote-code \
       --tokenizer-mode deepseek_v41 \
       --reasoning-parser deepseek_v41 \
       --tool-call-parser deepseek_v41 \
       --enable-auto-tool-choice \
-      --trust-remote-code \
       --safetensors-load-strategy lazy \
+      --gpu-memory-utilization 0.9 \
       --quantization ascend \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
-      --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+      --additional-config '{
+          "ascend_compilation_config":{
+              "enable_npugraph_ex":true,
+              "enable_static_kernel":false
+          },
+          "enable_cpu_binding":true,
+          "multistream_overlap_shared_expert":true
+      }'
     ```
 
-    Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, followed by
-    Nodes 1 through 3. Only Node 0 exposes the API endpoint. Each server contributes
-    one TP8 rank to the global DP4 topology.
+    Omit `--data-parallel-start-rank` on Node 0. Start Node 0 first, then start Node 1. Only Node 0 exposes the API endpoint. Each server contributes one TP8 rank to the global DP2 topology.
 
 ### 5.6 Service Verification
 
