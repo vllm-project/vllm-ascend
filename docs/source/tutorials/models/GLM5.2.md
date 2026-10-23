@@ -1386,7 +1386,8 @@ layerwise setting and topology.
       `FULL_DECODE_ONLY` graph mode.
     - `MooncakeConnectorV1` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30000` and `30300`, respectively.
-      Both roles declare Prefill DP1/PP2/TP8 and Decode DP16/TP1.
+      The connector describes each Prefill instance as DP1/PP2/TP8 and
+      the shared Decode group as DP16/TP1.
     - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 2`.
       Decode enables MLAPO. Both roles enable shared-expert multistream
       overlap, prefix caching and recomputation scheduling.
@@ -4815,16 +4816,23 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ## 9 Performance Tuning
 
 The following settings summarize the hardware-specific deployment scripts in
-Sections 5.1 and 5.2. Global DP includes all nodes of one role; local DP is
-the number of ranks on one node. Scheduler limits are per engine.
+Sections 5.1 and 5.2. Global DP includes all nodes within one DP group;
+independent instances are listed per instance. Local DP is the number of
+ranks on one node. Scheduler limits are per engine.
+
+For 950DT ordinary PD, the two independent PP2/TP8 Prefill instances use
+four Prefill nodes in total (P0/P1 and P2/P3). The Prefill row below gives
+DP1 and scheduler limits per instance; it does not combine them into a DP2
+group. The single DP16/TP1 Decode group spans D0/D1. Pooling and 1M rows
+refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 
 ### 9.1 Recommended Configurations {: #91-detailed-node-configuration }
 
 | Scenario | Hardware | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
-| Ordinary PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
-| Ordinary PD | 950DT | Decode | 1 | 32 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
+| Ordinary PD | 950DT | Prefill (2 instances) | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
+| Ordinary PD | 950DT | Decode | 1 | 16 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
 | Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 8 | 4096 | 1048576 | 1 |
 | Pooled PD | 950DT | Decode | 2 | 16 | 4 | 1 | 1 | 10 | 60 | 1048576 | 5 |
 | 1M PD | 950DT | Prefill | 8 | 2 | 1 | 1 | 1 | 64 | 32768 | 1046576 | 1 |
