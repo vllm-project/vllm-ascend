@@ -240,8 +240,11 @@ class VllmEplbAdaptor:
             logger.debug("Expert tensor shape is :%s", expert_tensor.shape)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+        log2phy = self.log2phy_map_per_layer[layer_id]
+        if log2phy is not None:
+            if updated_log2phy_map.device.type == "cpu":
+                updated_log2phy_map = updated_log2phy_map.to(dtype=log2phy.dtype).pin_memory()
+            log2phy.copy_(updated_log2phy_map, non_blocking=True)
 
     def get_global_expert_map(self):
         all_layer_global_expert_map = []

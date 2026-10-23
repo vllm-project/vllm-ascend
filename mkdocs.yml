@@ -89,6 +89,8 @@ hooks:
   # Sets per-page and per-section titles for the active language.
   # See docs/hooks/nav_titles.py for the title mapping.
   - docs/hooks/nav_titles.py
+  # Extend the TOC only on MiniMax-M3; other pages keep the site-wide depth.
+  - docs/hooks/minimax_m3_toc.py
 
 # ---- Markdown extensions ----
 markdown_extensions:
@@ -102,7 +104,9 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-      toc_depth: 5
+      # Site-wide TOC display depth: affects every model guide.
+      # Do not change this value to customize a single model's TOC.
+      toc_depth: 3
   # Python Markdown Extensions
   - pymdownx.arithmatex:
       generic: true

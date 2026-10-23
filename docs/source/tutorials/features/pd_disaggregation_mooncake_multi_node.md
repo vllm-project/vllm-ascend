@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallelism) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
 Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
@@ -1095,7 +1095,7 @@ They use FP8 indexer cache on Atlas 850E, not the INT8 indexer setting from the
 A2/A3 examples; see the [W4A4C8 FAQ](../models/DeepSeek-V4-Flash.md#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 P uses eager execution and D uses `FULL_DECODE_ONLY` graphs.
 
-The context limit is 133120 tokens, enough for 128K input plus 1K output, including
+The context limit is 133120 tokens, enough for 128k input plus 1k output, including
 any prompt-template tokens within that limit.
 Adjust `--gpu-memory-utilization` directly if needed.
 Reducing it reduces available KV capacity and can reduce D's staging allocation;

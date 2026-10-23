@@ -1741,3 +1741,19 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: platform/patch_shm_notify.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.__init__`
+#   2. `vllm.distributed.device_communicators.shm_broadcast.SpinCondition.record_read`
+#    Why:
+#       Sustained SHM fast-path reads bypass notification polling. CONFLATE
+#       limits payloads but internal activate_read commands can accumulate.
+#    How:
+#       Backport upstream initialization and poll/recv behavior, servicing the
+#       notification socket every two seconds during successful reads.
+#       SHM and cancellation logic are unchanged.
+#    Related PR (if no, explain why):
+#       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
+#    Future Plan:
+#       Remove once the supported vLLM version includes upstream PR #63165.
