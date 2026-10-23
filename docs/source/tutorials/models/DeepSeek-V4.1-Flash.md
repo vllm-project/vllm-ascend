@@ -24,7 +24,7 @@ a continuously adjustable reasoning effort from 1 to 100.
 
 vLLM Ascend supports W8A8 deployment on Atlas 800 A3 and A2 servers. This
 guide provides a single-node colocated A3 configuration and a two-node A3
-Prefill-Decode (PD) disaggregated configuration.It also supports a two-node hybrid A2 configuration and a four-node Prefill-Decode (PD) disaggregated configuration.
+Prefill-Decode (PD) disaggregated configuration. It also supports a two-node hybrid A2 configuration and a four-node Prefill-Decode (PD) disaggregated configuration.
 
 DeepSeek-V4.1-Flash is supported in **vLLM Ascend v0.30.0rc1 and later**. This guide uses **vLLM Ascend
 v0.30.0rc2** as its documentation and model-validation baseline. To use the
@@ -1343,7 +1343,7 @@ vllm serve "$MODEL_PATH" \
 ```
 
 Start the eight DP8/TP2 Decode engines with the launcher command from Section
-5.2.3.
+5.2.1.3.
 
 #### 5.3.4 Startup and Verification
 
@@ -1386,7 +1386,7 @@ CED hybrid-attention model structure is incompatible with layer-by-layer KV
 save and load. Keep `use_layerwise` set to `false` on both Prefill and Decode.
 
 Before starting vLLM, configure `mooncake.json`, and start the
-mooncake_master Service. The Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH` .
+mooncake_master Service. The Prefill and Decode nodes must export `MOONCAKE_CONFIG_PATH`.
 
 #### 5.4.1 Prepare the Mooncake Services
 
