@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
@@ -11,6 +12,7 @@ import torch
 from safetensors.torch import save_file
 
 import vllm_ascend.models.deepseek_v41.engram.elastic as offload
+from vllm_ascend.models.deepseek_v41.engram import diagnostics
 from vllm_ascend.models.deepseek_v41.engram.diagnostics import log_engram_runtime
 from vllm_ascend.models.deepseek_v41.engram.elastic import ElasticEngramEmbedding, EngramTableState
 
@@ -73,6 +75,8 @@ def _install_buffer(monkeypatch, global_codes, *, corruption=None):
             self.scale = sf
 
         def engram_fetch(self, ids):
+            if corruption == "submit":
+                raise RuntimeError("Check executor != nullptr failed")
             codes = global_codes[ids.long()].clone()
             scales = self.scale.view(torch.uint8)[ids.long()].clone()
             if corruption == "codes":
@@ -176,14 +180,16 @@ def test_fp8_offload_probe_and_inference_match_bf16(tmp_path, monkeypatch, caplo
     assert buffer.destroyed and table._scale is None
 
 
-@pytest.mark.parametrize("corruption", ["write", "codes", "scales", "wait"])
+@pytest.mark.parametrize("corruption", ["write", "codes", "scales", "submit", "wait"])
 def test_write_or_probe_failure_cleans_up(tmp_path, monkeypatch, corruption):
     codes, _ = _checkpoint(tmp_path)
     buffer_cls = _install_buffer(monkeypatch, codes, corruption=corruption)
     table = _table()
     table.load_checkpoint(tmp_path, WEIGHT_KEY)
     monkeypatch.setattr(table, "_check_fp8_runtime", lambda cls: None)
-    with pytest.raises(RuntimeError, match="OPP write failure|startup probe|fetch/wait failed"):
+    with pytest.raises(
+        RuntimeError, match="OPP write failure|startup probe|fetch submission failed|fetch completion failed"
+    ):
         table.offload_weights()
     assert buffer_cls.instance.destroyed
     assert table.state is EngramTableState.POISONED
@@ -299,9 +305,10 @@ def test_fetch_failure_poisons_table_without_retry(cause):
 
     table.engram_buffer = SimpleNamespace(engram_fetch=fetch)
     table._state = EngramTableState.READY
-    with pytest.raises(RuntimeError, match="Only FP8 storage is supported") as error:
+    with pytest.raises(RuntimeError, match="stage=fetch-submit") as error:
         table(torch.tensor([0]))
     assert str(error.value.__cause__) == cause
+    assert "Install matching" not in str(error.value)
     assert len(calls) == 1 and table.state is EngramTableState.POISONED
 
 
@@ -336,6 +343,153 @@ def test_runtime_diagnostics_survive_missing_metadata(caplog):
     log_engram_runtime(1, 0, stage="test")
     assert "FOR-ENGRAM runtime:" in caplog.text
     assert '"opp_aclnn_version"' in caplog.text
+
+
+@pytest.mark.parametrize(
+    "corruption,stage,cause",
+    [("submit", "fetch-submit", "Check executor != nullptr failed"), ("wait", "fetch-wait", "OPP wait failure")],
+)
+def test_native_failure_logs_once_at_info_and_preserves_cause(tmp_path, monkeypatch, caplog, corruption, stage, cause):
+    caplog.set_level(logging.INFO)
+    codes, _ = _checkpoint(tmp_path)
+    buffer_cls = _install_buffer(monkeypatch, codes, corruption=corruption)
+    table = _table()
+    table.load_checkpoint(tmp_path, WEIGHT_KEY)
+    monkeypatch.setattr(table, "_check_fp8_runtime", lambda cls: None)
+
+    with pytest.raises(RuntimeError, match=f"stage={stage}") as error:
+        table.offload_weights()
+
+    assert str(error.value.__cause__) == cause
+    records = [record for record in caplog.records if record.msg.startswith("FOR-ENGRAM runtime:")]
+    assert len(records) == 1 and records[0].levelno == logging.ERROR
+    assert records[0].args[2] == stage
+    details = json.loads(records[0].args[-1])
+    assert details["tensors"]["indices"]["shape"] == [4]
+    assert details["tensors"]["indices"]["dtype"] == "torch.int32"
+    assert details["tensors"]["sf_table"]["shape"] == [6, 2]
+    assert details["parameters"]["hidden_size"] == 4
+    assert details["parameters"]["num_entries_per_rank"] == 3
+    assert details["parameters"]["expected_fetch_shape"] == [4, 4]
+    assert "not distinguished" in details["native_call"]["stage"]
+    assert "not determined" in details["native_call"]["function_providers"]
+    assert table.state is EngramTableState.POISONED and buffer_cls.instance.destroyed
+
+
+def test_byte_validation_failure_logs_actual_outputs_at_info(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    codes, _ = _checkpoint(tmp_path)
+    _install_buffer(monkeypatch, codes, corruption="codes")
+    table = _table()
+    table.load_checkpoint(tmp_path, WEIGHT_KEY)
+    monkeypatch.setattr(table, "_check_fp8_runtime", lambda cls: None)
+    with pytest.raises(RuntimeError, match="fetched E4M3 bytes differ"):
+        table.offload_weights()
+    records = [record for record in caplog.records if record.msg.startswith("FOR-ENGRAM runtime:")]
+    assert len(records) == 1 and records[0].args[2] == "fp8-runtime-probe"
+    details = json.loads(records[0].args[-1])
+    assert details["tensors"]["fetched"]["dtype"] == "torch.float8_e4m3fn"
+    assert details["tensors"]["fetched_sf"]["dtype"] == "torch.float8_e8m0fnu"
+
+
+def test_failure_diagnostics_read_descriptors_without_tensor_values(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    tensor = torch.empty((4, 3), device="meta").t()
+    forbidden = MagicMock(side_effect=AssertionError("diagnostics must not read or copy tensor data"))
+    for name in ("item", "cpu", "numpy", "tolist", "to"):
+        monkeypatch.setattr(torch.Tensor, name, forbidden)
+    log_engram_runtime(1, 0, stage="fetch-submit", failure=True, tensors={"indices": tensor})
+    forbidden.assert_not_called()
+    record = next(record for record in caplog.records if record.msg.startswith("FOR-ENGRAM runtime:"))
+    details = json.loads(record.args[-1])
+    assert details["tensors"]["indices"]["shape"] == [3, 4]
+    assert details["tensors"]["indices"]["stride"] == [1, 3]
+    assert details["tensors"]["indices"]["contiguous"] is False
+
+
+def test_device_metadata_failure_preserves_other_diagnostics(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(is_available=lambda: True, current_device=MagicMock(side_effect=RuntimeError("device lost"))),
+        raising=False,
+    )
+    monkeypatch.setattr(diagnostics, "_loaded_libraries", lambda: ["/test/libcust_opapi.so"])
+    log_engram_runtime(1, 0, stage="fetch-submit", buffer=object(), failure=True, tensors={"indices": torch.empty(2)})
+    record = next(record for record in caplog.records if record.msg.startswith("FOR-ENGRAM runtime:"))
+    details = json.loads(record.args[-1])
+    assert details["device_metadata_error"] == "device lost"
+    assert details["loaded_libraries"] == ["/test/libcust_opapi.so"]
+    assert details["tensors"]["indices"]["shape"] == [2]
+    assert "write_signature_error" in details
+
+
+def test_debug_diagnostics_skip_collection_at_info(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    collect = MagicMock(side_effect=AssertionError("DEBUG collection should be skipped"))
+    monkeypatch.setattr(diagnostics, "_loaded_libraries", collect)
+    log_engram_runtime(1, 0, stage="post-probe")
+    collect.assert_not_called()
+
+
+def test_broken_diagnostics_do_not_replace_native_error(caplog):
+    caplog.set_level(logging.INFO)
+
+    class Buffer:
+        @property
+        def _engram_context_tensor(self):
+            raise RuntimeError("context metadata unavailable")
+
+        def engram_fetch(self, ids):
+            raise RuntimeError("original native failure")
+
+    table = _table()
+    table.engram_buffer = Buffer()
+    table._state = EngramTableState.READY
+    with pytest.raises(RuntimeError, match="stage=fetch-submit") as error:
+        table(torch.tensor([0]))
+    assert str(error.value.__cause__) == "original native failure"
+    assert "context metadata unavailable" in caplog.text
+    assert table.state is EngramTableState.POISONED
+
+
+def test_inference_validation_failure_logs_actual_dtype(caplog):
+    caplog.set_level(logging.INFO)
+    table = _table()
+    table._scale_block_size = 2
+    table._state = EngramTableState.READY
+    table.engram_buffer = SimpleNamespace(
+        engram_fetch=lambda ids: (
+            lambda: (
+                torch.ones((ids.numel(), 4), dtype=torch.bfloat16),
+                torch.full((ids.numel(), 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+            )
+        )
+    )
+    with pytest.raises(RuntimeError, match="fetch expects contiguous E4M3"):
+        table(torch.tensor([0]))
+    record = next(record for record in caplog.records if record.msg.startswith("FOR-ENGRAM runtime:"))
+    assert record.args[2] == "fetch-validation"
+    details = json.loads(record.args[-1])
+    assert details["tensors"]["fetched"]["dtype"] == "torch.bfloat16"
+    assert table.state is EngramTableState.POISONED
+
+
+def test_loaded_library_paths_preserve_spaces_and_deleted_marker(monkeypatch):
+    monkeypatch.setattr(
+        diagnostics.Path,
+        "read_text",
+        lambda _: (
+            "1000-2000 r-xp 00000000 08:01 123 /opt/vendor with spaces/libcust_opapi.so (deleted)\n"
+            "2000-3000 r-xp 00000000 08:01 124 /opt/libnpu_elastic_buffer.so\n"
+            "3000-4000 r-xp 00000000 08:01 125 /opt/other.so\n"
+        ),
+    )
+    assert diagnostics._loaded_libraries() == [
+        "/opt/libnpu_elastic_buffer.so",
+        "/opt/vendor with spaces/libcust_opapi.so (deleted)",
+    ]
 
 
 def test_preflight_accepts_native_tensor_scale_abi(monkeypatch, caplog):

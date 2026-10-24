@@ -186,6 +186,7 @@ class ElasticEngramEmbedding(nn.Module):
         self._probe_codes: torch.Tensor | None = None
         self._probe_scales: torch.Tensor | None = None
         self._fetch_logged = False
+        self._failure_diagnostics_logged = False
         self.engram_buffer = None
         self._fetch_in_flight = False
         self._state = EngramTableState.EMPTY
@@ -556,6 +557,8 @@ class ElasticEngramEmbedding(nn.Module):
     def _verify_fp8_runtime(self, buffer) -> None:
         """Check actual FP8 reads and dequantization once, before serving requests."""
         local_error = None
+        ids = None
+        output = None
         try:
             assert self._probe_ids is not None and self._probe_codes is not None and self._probe_scales is not None
             ids = self._probe_ids.to(device=self._target_device())
@@ -580,9 +583,11 @@ class ElasticEngramEmbedding(nn.Module):
                 raise RuntimeError("Engram FP8 startup probe: BF16 output differs from CPU checkpoint decode")
         except Exception as exc:
             local_error = exc
+            self._log_fp8_failure(buffer, ids, stage="fp8-runtime-probe", output=output)
             logger.exception("FOR-ENGRAM FP8 runtime probe failed: layer=%s tp_rank=%d", self.layer_id, self.rank)
         finally:
-            log_engram_runtime(self.layer_id, self.rank, stage="post-probe", buffer=buffer)
+            if local_error is None:
+                log_engram_runtime(self.layer_id, self.rank, stage="post-probe", buffer=buffer)
         all_succeeded = self._sync_phase_status(local_error is None, "fp8-runtime-probe")
         if local_error is not None:
             raise local_error
@@ -836,6 +841,58 @@ class ElasticEngramEmbedding(nn.Module):
             .to(torch.bfloat16)
         )
 
+    def _log_fp8_failure(self, buffer, ids, *, stage: str, output=None) -> None:
+        """Report the first failure per table using descriptors, without device sync."""
+        if self._failure_diagnostics_logged:
+            return
+        self._failure_diagnostics_logged = True
+        try:
+            tensors = {
+                "indices": ids,
+                "staged_weight": self._host_weight,
+                "sf_table": self._scale,
+                "context": getattr(buffer, "_engram_context_tensor", None),
+                "buffer_sf_table": getattr(buffer, "_engram_sf", None),
+            }
+            if isinstance(output, tuple) and len(output) == 2:
+                tensors.update(fetched=output[0], fetched_sf=output[1])
+            rows = ids.numel() if isinstance(ids, torch.Tensor) else None
+            log_engram_runtime(
+                self.layer_id,
+                self.rank,
+                stage=stage,
+                buffer=buffer,
+                failure=True,
+                tensors=tensors,
+                parameters={
+                    "storage": self.storage_format,
+                    "table_state": self._state.value,
+                    "group_size": self.engram_tp_size,
+                    "global_rows": self.rows,
+                    "padded_rows": self.padded_rows,
+                    "num_entries_per_rank": self.shard_rows,
+                    "hidden_size": self.width,
+                    "buffer_num_entries_per_rank": getattr(buffer, "_engram_num_entries", None),
+                    "buffer_hidden_size": getattr(buffer, "_engram_hidden_size", None),
+                    "buffer_dtype": str(getattr(buffer, "_engram_dtype", "unavailable")),
+                    "scale_block_size": self._scale_block_size,
+                    "expected_fetch_shape": (rows, self.width),
+                    "expected_fetch_dtype": str(torch.float8_e4m3fn),
+                    "expected_fetched_sf_shape": (
+                        (rows, self.width // self._scale_block_size) if self._scale_block_size > 0 else None
+                    ),
+                    "expected_fetched_sf_dtype": str(getattr(torch, "float8_e8m0fnu", "unavailable")),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "FOR-ENGRAM failure diagnostics unavailable: layer=%s tp_rank=%d stage=%s reason=%s",
+                self.layer_id,
+                self.rank,
+                stage,
+                exc,
+            )
+
     def _start_fetch_fp8(
         self,
         buffer,
@@ -844,22 +901,24 @@ class ElasticEngramEmbedding(nn.Module):
         try:
             wait = buffer.engram_fetch(flat_ids)
         except Exception as exc:
+            self._log_fp8_failure(buffer, flat_ids, stage="fetch-submit")
             raise RuntimeError(
-                "Engram MXFP8 fetch/wait failed. Install matching cann_ops_transformer Python/C++ "
-                "and OPP/ACLNN libraries with the tensor-scale EngramFetch ABI. "
-                "Only FP8 storage is supported; see FOR-ENGRAM runtime logs."
+                "Engram MXFP8 fetch submission failed (stage=fetch-submit). "
+                "See the chained native error and FOR-ENGRAM runtime diagnostics. "
+                "The native GetWorkspaceSize/execute stage is not determined by this wrapper."
             ) from exc
         if not callable(wait):
+            self._log_fp8_failure(buffer, flat_ids, stage="fetch-submit")
             raise RuntimeError("Engram MXFP8 fetch must return a completion callback")
 
         def wait_for_result() -> tuple[torch.Tensor, torch.Tensor]:
             try:
                 return wait()
             except Exception as exc:
+                self._log_fp8_failure(buffer, flat_ids, stage="fetch-wait")
                 raise RuntimeError(
-                    "Engram MXFP8 fetch/wait failed. Install matching cann_ops_transformer Python/C++ "
-                    "and OPP/ACLNN libraries with the tensor-scale EngramFetch ABI. "
-                    "Only FP8 storage is supported; see FOR-ENGRAM runtime logs."
+                    "Engram MXFP8 fetch completion failed (stage=fetch-wait). "
+                    "See the chained native error and FOR-ENGRAM runtime diagnostics."
                 ) from exc
 
         return wait_for_result
@@ -913,6 +972,7 @@ class ElasticEngramEmbedding(nn.Module):
         try:
             result = self._validate_fetch(output, handle.flat_ids.numel())
         except Exception:
+            self._log_fp8_failure(self.engram_buffer, handle.flat_ids, stage="fetch-validation", output=output)
             self._state = EngramTableState.POISONED
             logger.exception(
                 "FOR-ENGRAM ElasticBuffer fetch ABI validation failed: layer=%s tp_rank=%d storage=%s",
