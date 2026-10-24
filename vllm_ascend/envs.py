@@ -72,6 +72,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Fuse Direct MLAPO CPU KV writes into the producer kernel on TP0.
+    # Non-sensitive. Only "1" enables it; default "0" uses external writeback.
+    # Requires the fused-overlap sparse KV offload path and mapped BF16 pools.
+    "VLLM_ASCEND_MLAPO_FUSED_CPU_WRITEBACK": lambda: os.getenv("VLLM_ASCEND_MLAPO_FUSED_CPU_WRITEBACK", "0") == "1",
+    # Non-sensitive diagnostic switch shared with the source patch: only "1"
+    # enables one-time INFO path logs; unset or any other value disables them.
+    "VLLM_PATCH_TRACE": lambda: os.getenv("VLLM_PATCH_TRACE", "0") == "1",
 }
 
 # end-env-vars-definition

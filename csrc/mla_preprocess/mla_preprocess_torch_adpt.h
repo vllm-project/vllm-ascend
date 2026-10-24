@@ -17,6 +17,8 @@
 #ifndef MLA_PREPROCESS_TORCH_ADPT_H
 #define MLA_PREPROCESS_TORCH_ADPT_H
 
+#include "mla_preprocess_direct_check.h"
+
 namespace vllm_ascend {
 namespace mla_preprocess_detail {
 
@@ -129,6 +131,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const int64_t quantMode = mla_preprocess_detail::ParseQuantMode(quant_mode);
     const bool enableInnerOut = enable_inner_out.value_or(false);
     const bool enableRope = cos.has_value();
+    const bool directOutput = false;
+    const int64_t noWriteback = 0;
     const at::Tensor slotMapping =
         slotmapping.scalar_type() == at::kLong ? slotmapping.to(at::kInt) : slotmapping;
 
@@ -183,6 +187,10 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         enableRope,
         kvCacheStride0,
         kvCacheRopeStride0,
+        directOutput,
+        noWriteback,
+        noWriteback,
+        noWriteback,
         q_out0,
         kv_cache_out0,
         q_out1,
@@ -190,6 +198,80 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         inner_out);
 
     return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
+}
+
+std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
+mla_preprocess_without_kv_cache_write(
+    const at::Tensor &hiddenState, const at::Tensor &wdqkv,
+    const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1,
+    const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
+    const c10::optional<at::Tensor> &descale1, const at::Tensor &gamma2,
+    const c10::optional<at::Tensor> &cos, const c10::optional<at::Tensor> &sin,
+    const at::Tensor &wuk, const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0, const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1, const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1, const c10::optional<at::Tensor> &ctkv_scale,
+    const c10::optional<at::Tensor> &q_nope_scale, c10::optional<c10::string_view> quant_mode,
+    at::Tensor &q_out0, at::Tensor &q_out1, at::Tensor &inner_out,
+    at::Tensor &current_k, at::Tensor &current_rope,
+    const c10::optional<at::Tensor> &writeback_slots,
+    int64_t writeback_k_base, int64_t writeback_rope_base, int64_t writeback_capacity)
+{
+    CheckDirectMlapo(hiddenState, wdqkv, descale0, gamma1, beta1, wuq, descale1, gamma2,
+                     cos, sin, wuk, quant_scale0, quant_offset0, bias0, quant_scale1,
+                     quant_offset1, bias1, quant_mode, q_out0, q_out1, inner_out,
+                     current_k, current_rope);
+    CheckDirectMlapoWriteback(hiddenState, writeback_slots, writeback_k_base,
+                             writeback_rope_base, writeback_capacity);
+    TORCH_CHECK(hiddenState.device().type() == c10::DeviceType::PrivateUse1,
+                "mla_preprocess_without_kv_cache_write requires NPU tensors");
+    // Each scale is a scalar view into an expanded copy of the original MLAPO scale.
+    // The existing kernel copy reads a full block, so validate physical backing.
+    for (const at::Tensor *scale : {&quant_scale0.value(), &quant_scale1.value()}) {
+        const auto offset = scale->storage_offset() * scale->element_size();
+        const auto bytes = scale->storage().nbytes();
+        TORCH_CHECK(bytes >= offset && bytes - offset >= 32,
+                    "mla_preprocess_without_kv_cache_write: scale view requires at least "
+                    "32 readable storage bytes; pass a view of the expanded original scale buffer");
+    }
+    // Contiguous logical strides alone do not prove the storage has ND layout.
+    for (const at::Tensor *tensor : std::initializer_list<const at::Tensor *>{&hiddenState, &wuk, &gamma1, &gamma2,
+             &beta1.value(), &descale0.value(), &descale1.value(), &cos.value(), &sin.value(),
+             &quant_scale0.value(), &quant_scale1.value(), &quant_offset0.value(), &quant_offset1.value(),
+             &bias0.value(), &bias1.value(), &q_out0, &q_out1, &inner_out, &current_k, &current_rope}) {
+        const auto format = at_npu::native::custom_ops::get_npu_format(*tensor);
+        TORCH_CHECK(format == ACL_FORMAT_ND || format == ACL_FORMAT_NCHW,
+                    "mla_preprocess_without_kv_cache_write requires ND-compatible input and output storage");
+    }
+    TORCH_CHECK(at_npu::native::custom_ops::get_npu_format(wdqkv) == ACL_FORMAT_FRACTAL_NZ &&
+                at_npu::native::custom_ops::get_npu_format(wuq) == ACL_FORMAT_FRACTAL_NZ,
+                "mla_preprocess_without_kv_cache_write requires transformed NZ projection weights");
+    if (writeback_slots.has_value()) {
+        const auto format = at_npu::native::custom_ops::get_npu_format(writeback_slots.value());
+        TORCH_CHECK(format == ACL_FORMAT_ND || format == ACL_FORMAT_NCHW,
+                    "MLAPO writeback_slots requires ND-compatible storage");
+    }
+    // Reuse main's ACLNN tiling/workspace lifecycle. The original operator
+    // remains in its default paged-cache mode; this call selects Direct rows.
+    const at::Tensor slots = writeback_slots.has_value()
+        ? writeback_slots.value()
+        : at::empty({hiddenState.size(0)}, hiddenState.options().dtype(at::kInt));
+    const int64_t cacheMode = 1;
+    const int64_t quantMode = 0;
+    const bool enableInnerOut = true;
+    const bool enableRope = true;
+    const bool directOutput = true;
+    const int64_t kvStride0 = current_k.stride(0);
+    const int64_t ropeStride0 = current_rope.stride(0);
+    EXEC_NPU_CMD(
+        aclnnMlaPreprocess,
+        hiddenState, quant_scale0, quant_offset0, wdqkv, bias0, gamma1, beta1,
+        quant_scale1, quant_offset1, gamma2, sin, cos, sin, cos,
+        current_k, slots, wuq, bias1, wuk, descale0, descale1, ctkv_scale, q_nope_scale,
+        cacheMode, quantMode, enableInnerOut, enableRope, kvStride0, ropeStride0,
+        directOutput, writeback_k_base, writeback_rope_base, writeback_capacity,
+        q_out0, current_k, q_out1, current_rope, inner_out);
+    return std::forward_as_tuple(q_out0, q_out1, inner_out, current_k, current_rope);
 }
 
 }  // namespace vllm_ascend

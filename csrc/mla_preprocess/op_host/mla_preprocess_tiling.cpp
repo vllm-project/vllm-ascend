@@ -30,6 +30,7 @@ constexpr size_t INPUT_HIDDEN_STATE = 0;
 constexpr size_t INPUT_WDQKV = 3;
 constexpr size_t INPUT_GAMMA1 = 5;
 constexpr size_t INPUT_KV_CACHE = 14;
+constexpr size_t INPUT_SLOT_MAPPING = 15;
 constexpr size_t INPUT_WUK = 18;
 constexpr size_t OUTPUT_KV_CACHE_ROPE = 3;
 
@@ -39,6 +40,10 @@ constexpr size_t ATTR_ENABLE_INNER_OUT = 2;
 constexpr size_t ATTR_ENABLE_ROPE = 3;
 constexpr size_t ATTR_KV_CACHE_STRIDE0 = 4;
 constexpr size_t ATTR_KV_CACHE_ROPE_STRIDE0 = 5;
+constexpr size_t ATTR_DIRECT_OUTPUT = 6;
+constexpr size_t ATTR_WRITEBACK_K_BASE = 7;
+constexpr size_t ATTR_WRITEBACK_ROPE_BASE = 8;
+constexpr size_t ATTR_WRITEBACK_CAPACITY = 9;
 
 constexpr int64_t CACHE_MODE_MIN = 0;
 constexpr int64_t CACHE_MODE_MAX = 3;
@@ -101,12 +106,20 @@ ge::graphStatus ParseShapesAndAttrs(gert::TilingContext *context, mlapo::OpParam
     const bool *enableRopePtr = attrs->GetBool(ATTR_ENABLE_ROPE);
     const int64_t *kvCacheStride0Ptr = attrs->GetInt(ATTR_KV_CACHE_STRIDE0);
     const int64_t *kvCacheRopeStride0Ptr = attrs->GetInt(ATTR_KV_CACHE_ROPE_STRIDE0);
+    const bool *directOutputPtr = attrs->GetBool(ATTR_DIRECT_OUTPUT);
+    const int64_t *writebackKBasePtr = attrs->GetInt(ATTR_WRITEBACK_K_BASE);
+    const int64_t *writebackRopeBasePtr = attrs->GetInt(ATTR_WRITEBACK_ROPE_BASE);
+    const int64_t *writebackCapacityPtr = attrs->GetInt(ATTR_WRITEBACK_CAPACITY);
     OP_CHECK_NULL_WITH_CONTEXT(context, cacheModePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, quantModePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, enableInnerOutPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, enableRopePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, kvCacheStride0Ptr);
     OP_CHECK_NULL_WITH_CONTEXT(context, kvCacheRopeStride0Ptr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, directOutputPtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, writebackKBasePtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, writebackRopeBasePtr);
+    OP_CHECK_NULL_WITH_CONTEXT(context, writebackCapacityPtr);
 
     const int64_t cacheMode = *cacheModePtr;
     const int64_t quantMode = *quantModePtr;
@@ -134,14 +147,15 @@ ge::graphStatus ParseShapesAndAttrs(gert::TilingContext *context, mlapo::OpParam
                         mlapo::MAX_SUPPORT_TOKEN_NUMS, tokenNum),
                 return ge::GRAPH_FAILED);
 
-    const int64_t kvCacheBlockSize = IsPhysicalNzCache(kvCacheShape, cacheMode)
-                                         ? kvCacheShape.GetDim(2)
-                                         : kvCacheShape.GetDim(1);
+    const bool directOutput = *directOutputPtr;
+    const int64_t kvCacheBlockSize = directOutput ? 0 : (IsPhysicalNzCache(kvCacheShape, cacheMode)
+                                                           ? kvCacheShape.GetDim(2)
+                                                           : kvCacheShape.GetDim(1));
     int64_t qkRopeHeadDim = kvCacheRopeShape.GetDim(kvCacheRopeShape.GetDimNum() - 1);
     if (IsPhysicalNzCache(kvCacheRopeShape, cacheMode)) {
         qkRopeHeadDim = kvCacheRopeShape.GetDim(1) * kvCacheRopeShape.GetDim(3);
     }
-    OP_CHECK_IF(!IsPositiveU32(kvCacheBlockSize) || !IsPositiveU32(qkRopeHeadDim),
+    OP_CHECK_IF((!directOutput && !IsPositiveU32(kvCacheBlockSize)) || !IsPositiveU32(qkRopeHeadDim),
                 OP_LOGE(context, "cache block size and RoPE head dimension must be positive uint32 values."),
                 return ge::GRAPH_FAILED);
 
@@ -166,6 +180,52 @@ ge::graphStatus ParseShapesAndAttrs(gert::TilingContext *context, mlapo::OpParam
                                                  : mlapo::OpParam::InputDtype::FLOAT16;
     opParam.enableInnerOut = *enableInnerOutPtr;
     opParam.enableRope = *enableRopePtr;
+    opParam.directOutput = directOutput;
+    const int64_t kBase = *writebackKBasePtr;
+    const int64_t ropeBase = *writebackRopeBasePtr;
+    const int64_t capacity = *writebackCapacityPtr;
+    OP_CHECK_IF(kBase < 0 || ropeBase < 0 || capacity < 0,
+                OP_LOGE(context, "Direct CPU writeback bases and capacity must be non-negative."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF((capacity == 0 && (kBase != 0 || ropeBase != 0)) ||
+                    (capacity != 0 && (!directOutput || kBase == 0 || ropeBase == 0 ||
+                                      kBase % 32 != 0 || ropeBase % 32 != 0)),
+                OP_LOGE(context, "CPU writeback requires Direct mode and aligned mapped pool bases."),
+                return ge::GRAPH_FAILED);
+    if (directOutput) {
+        OP_CHECK_IF(hiddenDtype != ge::DT_BF16 || wdqkvDesc->GetDataType() != ge::DT_INT8 ||
+                        cacheMode != 1 || quantMode != 0 ||
+                        !*enableInnerOutPtr || !*enableRopePtr || hiddenStateDim != 6144 ||
+                        qLoraRank != 2048 || kvLoraRank != 512 || qkNopeHeadDim != 192 ||
+                        qkRopeHeadDim != 64 || kvCacheShape.GetDimNum() != 2 ||
+                        kvCacheShape.GetDim(0) != tokenNum || kvCacheShape.GetDim(1) != kvLoraRank ||
+                        kvCacheRopeShape.GetDimNum() != 2 || kvCacheRopeShape.GetDim(0) != tokenNum ||
+                        headNum > std::numeric_limits<uint32_t>::max() / 512 ||
+                        headNum > std::numeric_limits<uint32_t>::max() / tokenNum,
+                    OP_LOGE(context, "Unsupported BF16 W8A8 Direct MLA shape or mode."),
+                    return ge::GRAPH_FAILED);
+        if (capacity != 0) {
+            const gert::StorageShape *slotStorage = context->GetInputShape(INPUT_SLOT_MAPPING);
+            OP_CHECK_NULL_WITH_CONTEXT(context, slotStorage);
+            const gert::Shape &slotShape = slotStorage->GetOriginShape();
+            OP_CHECK_IF(slotShape.GetDimNum() != 1 || slotShape.GetDim(0) != tokenNum,
+                        OP_LOGE(context, "Direct CPU writeback requires one dynamic slot per token."),
+                        return ge::GRAPH_FAILED);
+        }
+        constexpr int64_t kBytes = 512 * 2;
+        constexpr int64_t ropeBytes = 64 * 2;
+        const int64_t limit = std::numeric_limits<int64_t>::max();
+        OP_CHECK_IF(capacity > (limit - kBase) / kBytes || capacity > (limit - ropeBase) / ropeBytes,
+                    OP_LOGE(context, "Direct CPU writeback address range overflows int64."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(capacity != 0 && !(kBase + capacity * kBytes <= ropeBase ||
+                                      ropeBase + capacity * ropeBytes <= kBase),
+                    OP_LOGE(context, "Direct CPU K and RoPE pool ranges overlap."),
+                    return ge::GRAPH_FAILED);
+    }
+    opParam.writebackKBase = static_cast<uint64_t>(kBase);
+    opParam.writebackRopeBase = static_cast<uint64_t>(ropeBase);
+    opParam.writebackCapacity = static_cast<uint64_t>(capacity);
     opParam.qLoraRank = static_cast<uint32_t>(qLoraRank);
     opParam.qkNopeHeadDim = static_cast<uint32_t>(qkNopeHeadDim);
     opParam.qkRopeHeadDim = static_cast<uint32_t>(qkRopeHeadDim);

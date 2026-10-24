@@ -792,6 +792,7 @@ class SparseKVOffloadManager:
             self.fused_plan_status_npu = self.fused_plan_metadata_npu[:1]
             self.fused_plan_current_linear_slots_npu = self.fused_plan_metadata_npu[1:]
             self.current_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+            self.direct_kv_output_layers: set[int] = set()
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
@@ -1121,10 +1122,28 @@ class SparseKVOffloadManager:
         v: torch.Tensor | None,
         has_prefill: bool = False,
         capturing: bool = False,
+        writeback_in_producer: bool = False,
+        direct_kv_output: bool = False,
     ) -> None:
+        if writeback_in_producer and (has_prefill or not self.use_fused_overlap or k is None or v is None):
+            raise ValueError("Producer KV writeback requires current decode KV in fused-overlap mode")
+        if writeback_in_producer and self.tp_rank == 0 and (k_cache_cpu is None or v_cache_cpu is None):
+            raise ValueError("Producer KV writeback requires registered CPU KV pools on TP0")
         if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
             layer_id = self._get_offload_layer_id(layer_name)
             self.current_kv_by_layer[layer_id] = (k, v)
+            if direct_kv_output or writeback_in_producer:
+                self.direct_kv_output_layers.add(layer_id)
+            else:
+                self.direct_kv_output_layers.discard(layer_id)
+        if writeback_in_producer:
+            # The producer's completion covers its mapped-CPU stores. Publish
+            # that completion through the same stream as external writeback.
+            if self.tp_rank == 0 and capturing:
+                current_kv_ready = torch_npu.npu.current_stream().record_event()
+                with torch_npu.npu.stream(self.current_kv_save_stream):
+                    self.current_kv_save_stream.wait_event(current_kv_ready)
+            return
         use_side_stream = self.tp_rank == 0 and self.use_fused_overlap and capturing and not has_prefill
         if not use_side_stream:
             self._offload_new_kv_on_current_stream(
@@ -1348,6 +1367,10 @@ class SparseKVOffloadManager:
                         ],
                         non_blocking=True,
                     )
+                    # FSA on peer TP ranks can read the shared CPU pool after
+                    # this broadcast, including the rewritten MTP suffix.
+                    if self.tp_size > 1 and layer_id in self.direct_kv_output_layers:
+                        self.fused_plan_stream.wait_stream(self.current_kv_save_stream)
                 self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
             self.fused_overlap_plan_owner_layer_id = layer_id
             self.fused_overlap_plan_topk = self.topk
@@ -1465,6 +1488,14 @@ class SparseKVOffloadManager:
         flat_rope = selection_k_rope.reshape(-1, selection_k_rope.shape[-1])
         torch_npu.npu_scatter_nd_update_(flat_kv, indices, current_k)
         torch_npu.npu_scatter_nd_update_(flat_rope, indices, current_rope)
+        if layer_id in self.direct_kv_output_layers:
+            # Direct KV scatter can overlap the CPU save. The owner planner's
+            # broadcast publishes completed writes; reuse layers need their own
+            # publication, including eager calls whose saves use this stream.
+            if self.tp_rank == 0 and capturing:
+                torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
+            if self.tp_size > 1 and layer_id != self.fused_overlap_plan_owner_layer_id:
+                self.tp_group.broadcast(self.fused_plan_status_npu, src=0)
 
     def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
         if self.use_fused_overlap and capturing and self.tp_rank == 0:
