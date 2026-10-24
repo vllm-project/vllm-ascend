@@ -29,25 +29,18 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 # kernel-sized block table supplied by the upstream caller.
 if vllm_version_is("0.31.0"):
 
-    def prepare_dflash_inputs_factory(kv_cache_block_size: int | dict[int, int]) -> Callable[..., None]:
+    def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
         # v0.31.0's DFlash caller already forwards the kernel block size, so the
         # Ascend block table is indexed with the right granularity.
         def prepare_with_block_size(*args: Any, **kwargs: Any) -> None:
-            physical_block_size = kv_cache_block_size
-            if isinstance(kv_cache_block_size, dict):
-                block_table = kwargs.get("block_table", args[16] if len(args) > 16 else None)
-                try:
-                    physical_block_size = kv_cache_block_size[id(block_table)]
-                except KeyError as error:
-                    raise RuntimeError("DFlash received a block table without a physical KV block size") from error
-            prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=physical_block_size)
+            prepare_dflash_inputs(*args, **kwargs, kv_cache_block_size=kv_cache_block_size)
 
         return prepare_with_block_size
 
 else:
 
     def prepare_dflash_inputs_factory(  # type: ignore[misc]
-        kv_cache_block_size: int | dict[int, int],
+        kv_cache_block_size: int,
         block_tables: Any | None = None,
     ) -> Callable[..., None]:
         # vLLM main (#57169) dropped ``kernel_block_sizes`` from ``BlockTables``
@@ -110,12 +103,6 @@ else:
                     raise RuntimeError("DFlash received a block table unknown to AscendBlockTables")
                 # No Ascend block tables were supplied; keep the caller's size.
                 kernel_block_size = block_size
-            physical_block_size = kv_cache_block_size
-            if isinstance(kv_cache_block_size, dict):
-                try:
-                    physical_block_size = kv_cache_block_size[id(block_table)]
-                except KeyError as error:
-                    raise RuntimeError("DFlash received a block table without a physical KV block size") from error
             prepare_dflash_inputs(
                 input_buffers,
                 query_slot_mapping,
@@ -145,7 +132,7 @@ else:
                 max_num_tokens,
                 max_model_len,
                 sample_from_anchor,
-                kv_cache_block_size=physical_block_size,
+                kv_cache_block_size=kv_cache_block_size,
             )
 
         return prepare_with_block_size

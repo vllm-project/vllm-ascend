@@ -65,9 +65,10 @@ implementation constraint; a missing hardware result is a validation boundary.
 | DSpark | Same checkpoint, DeepSeek V4 draft architecture, eager draft, fixed verification, one request | Validate other draft architectures and concurrent drafting separately |
 | Other target model names | Accepted only when every layer satisfies the adapter contract | Run matching checkpoint, eager/graph and offload-disabled acceptance |
 
-The generic DSpark physical/kernel KV block-size correction is independent of
-expert offload. Each draft group uses its own physical block size and preserves
-kernel-addressed block tables, including when expert offload is disabled.
+DSpark KV-cache input preparation follows the main implementation unchanged.
+Expert offload only adds target/draft expert bindings, serialized draft
+execution and runner-owned cleanup; it does not change KV block sizing or
+slot-mapping semantics.
 
 ### Manager lifecycle
 
@@ -97,7 +98,7 @@ The supported speculative configuration is the DeepSeek V4 checkpoint's own DSpa
 --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6]}'
 ```
 
-The runner adopts both target and draft expert layers after the parent loader finishes. Each layer keeps its own residency map and prepared host bundle; compatible layers reuse the same full-expert pool. The DSpark proposer owns a separate serialized execution scope because drafting occurs after the target forward. Its query block uses resident slots even when prompt auxiliary states initialize draft KV; profiling and route capacity overflow still use the full pool. Failures invalidate the shared manager, and shutdown releases both sets of layers. Draft input preparation uses the loaded draft KV groups' physical block size, rather than the target's requested block size. This preparation currently requires one physical block size across the draft groups.
+The runner adopts both target and draft expert layers after the parent loader finishes. Each layer keeps its own residency map and prepared host bundle; compatible layers reuse the same full-expert pool. The DSpark proposer owns a separate serialized execution scope because drafting occurs after the target forward. Its query block uses resident slots even when prompt auxiliary states initialize draft KV; profiling and route capacity overflow still use the full pool. Failures invalidate the shared manager, and shutdown releases both sets of layers. Draft KV input preparation retains the main path.
 
 Uniform verification descriptors can contain several tokens per request. Capture and dispatch include every verification and padding row in the existing capacity bound. Five draft tokens plus the new target token require at least 36 slots at top-k six for a six-token target graph. Adding the draft also increases model and KV memory; a slot count that fits ordinary decode is not guaranteed to fit DSpark. This integration does not enable LRC, expert prefetch or hot-expert preload.
 
@@ -158,7 +159,6 @@ In an installed Ascend/vLLM development environment:
 
 ```bash
 pytest -q tests/ut/expert_offload
-pytest -q tests/ut/spec_decode/test_dspark_kv_block_sizes.py
 pytest -q tests/ut/worker/test_model_runner_v2.py
 pytest -q tests/ut/quantization/test_method_adapters.py
 pytest -q tests/e2e/pull_request/one_card/expert_offload/test_expert_copy.py

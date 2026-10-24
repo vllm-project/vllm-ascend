@@ -6,7 +6,6 @@ or NPU kernel execution. Full runner tests remain part of the hardware gate.
 """
 
 import ast
-import inspect
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -260,56 +259,6 @@ def test_dspark_propose_owns_draft_lifecycle_and_preserves_parent_arguments(prof
     assert manager.state is (OffloadState.FAILED if failed else OffloadState.READY)
 
 
-@pytest.mark.parametrize("sizes", [(128, 128), (128, 256)])
-@pytest.mark.parametrize("release", [False, True])
-@pytest.mark.parametrize("offload_enabled", [False, True])
-def test_dspark_input_preparation_uses_actual_draft_physical_kv_blocks(sizes, release, offload_enabled):
-    class Parent:
-        def set_attn(self, *_args):
-            self.draft_kv_cache_group_ids = [1, 2]
-
-    backend = type("Backend", (), {})
-    factory = Mock(return_value=object())
-    patched_module = SimpleNamespace()
-    cls = load_hook_class(
-        "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py",
-        "AscendDSparkSpeculator",
-        {"set_attn"},
-        Parent,
-        {
-            "set_current_vllm_config": lambda *_a: nullcontext(),
-            "Any": object,
-            "cast": lambda _t, v: v,
-            "AttentionLayerBase": object,
-            "get_layers_from_vllm_config": lambda *_a: {},
-            "_get_graph_update_backend": lambda *_a: backend,
-            "AscendMLABackend": backend,
-            "AscendAttentionBackend": backend,
-            "dflash_speculator": patched_module,
-            "prepare_dflash_inputs_factory": factory,
-            "torch": torch,
-            "vllm_version_is": lambda _version: release,
-        },
-    )
-    draft = cls()
-    draft.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
-    draft.expert_offload_manager = object() if offload_enabled else None
-    draft.attn_vllm_config = object()
-    draft._context_slot_mappings = torch.zeros(1, dtype=torch.long)
-    draft.draft_attn_layer_names = set()
-    draft.attn_groups = []
-    cache = SimpleNamespace(
-        kv_cache_groups=[
-            SimpleNamespace(layer_names=[], kv_cache_spec=SimpleNamespace(block_size=size)) for size in (32, *sizes)
-        ]
-    )
-    tables = SimpleNamespace(input_block_tables=[object(), object(), object()])
-    draft.set_attn(None, cache, tables, None, None)
-    expected = {id(tables.input_block_tables[group]): size for group, size in enumerate(sizes, start=1)}
-    factory.assert_called_once_with(*((expected,) if release else (expected, tables)))
-    assert patched_module.prepare_dflash_inputs is factory.return_value
-
-
 def test_disabled_load_does_not_allocate_or_finalize_offload():
     runner, events = make_runner()
     runner.load_model(True)
@@ -359,37 +308,6 @@ def test_pool_accounting_starts_after_both_warmups(warmups):
     runner.load_model()
     assert [entry[0] for entry in order.mock_calls] == ["join_nz", "join_early", "finalize"]
     assert runner.model_memory_usage == 1064
-
-
-@pytest.mark.parametrize("release", [False, True])
-@pytest.mark.parametrize("per_group", [False, True])
-def test_dflash_factory_preserves_physical_and_kernel_block_sizes(release, per_group):
-    path = ROOT / "vllm_ascend/worker/v2/spec_decode/dflash/speculator.py"
-    functions = [
-        node
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.FunctionDef) and node.name == "prepare_dflash_inputs_factory"
-    ]
-    function = next(node for node in functions if len(node.args.args) == (1 if release else 2))
-    module = ast.parse("from __future__ import annotations\n")
-    module.body.append(function)
-    prepare = Mock()
-    namespace = {"prepare_dflash_inputs": prepare}
-    exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
-    factory = namespace[function.name]
-    tables = SimpleNamespace(kernel_block_sizes=[32, 64], input_block_tables=[object(), object()])
-    sizes = {id(table): size for table, size in zip(tables.input_block_tables, (128, 256))} if per_group else 128
-    wrapper = factory(sizes) if release else factory(sizes, tables)
-    for table, kernel_size, physical_size in zip(tables.input_block_tables, (32, 64), (128, 256)):
-        if release:
-            wrapper(block_table=table, block_size=kernel_size)
-            assert prepare.call_args.kwargs["block_size"] == kernel_size
-        else:
-            arguments = dict.fromkeys(inspect.signature(wrapper).parameters)
-            arguments.update(block_table=table, block_size=physical_size)
-            wrapper(**arguments)
-            assert prepare.call_args.args[17] == kernel_size
-        assert prepare.call_args.kwargs["kv_cache_block_size"] == (physical_size if per_group else 128)
 
 
 @pytest.mark.parametrize(
