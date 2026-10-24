@@ -450,7 +450,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated NPU groups, each configured independently, on one or more nodes. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
+The following sections describe multi-node PD separation deployment on Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8), and single-node PD separation on 950DT products (96GB × 8).
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
