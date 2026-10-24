@@ -79,7 +79,10 @@ def _validate_elastic(config, vllm_config) -> int:
         raise ValueError("Engram backend='elastic' requires cpu_offload=True")
     if config.dp_shared_memory:
         raise ValueError("ElasticBuffer row sharding cannot be combined with dp_shared_memory")
-    parallel = vllm_config.parallel_config
+    # DSpark reconstructs VllmConfig with the draft TP but retains the
+    # target's Engram tables and communication domain.
+    target_parallel = getattr(vllm_config.speculative_config, "target_parallel_config", None)
+    parallel = target_parallel if target_parallel is not None else vllm_config.parallel_config
     if any(
         getattr(parallel, key, 1) != 1
         for key in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size")

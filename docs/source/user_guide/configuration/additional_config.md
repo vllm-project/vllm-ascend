@@ -406,8 +406,10 @@ HBM tables instead use independent local replicas where needed.
 
 Elastic requires native `cpu_offload=true`, `dp_shared_memory=false`, at least
 two participating ranks on the same host and PP=PCP=DCP=1. Group size is derived
-from `world_size_across_dp`. It rejects dummy weights, MoE sequence parallelism
-and unsupported speculative combinations. These checks do not select a proposer.
+from the target model's `world_size_across_dp`, including when DSpark rebuilds
+its draft configuration with a different TP size. It rejects dummy weights,
+MoE sequence parallelism and unsupported speculative combinations. These checks
+do not select a proposer.
 
 Move `enabled`, `backend` and `overlap` out of the native option into the nested
 additional-config object. The previous flat `enable_engram`,

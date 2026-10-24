@@ -590,7 +590,6 @@ class NPUPlatform(Platform):
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
-        engram_config = _validate_engram_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -602,6 +601,9 @@ class NPUPlatform(Platform):
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
+        # Native Engram validation reads use_ubatching. Normalize Ascend's
+        # ignored DBO/microbatch options before invoking the upstream resolver.
+        engram_config = _validate_engram_config(vllm_config)
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)

@@ -3,9 +3,10 @@
 
 import ast
 import copy
-from dataclasses import FrozenInstanceError, fields, make_dataclass
+import sys
+from dataclasses import FrozenInstanceError, dataclass, fields, make_dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,6 +18,36 @@ from vllm_ascend.engram_config import (
     AscendEngramConfig,
     resolve_engram_config,
 )
+
+
+@dataclass
+class _ParallelConfig:
+    tensor_parallel_size: int = 8
+    data_parallel_size: int = 1
+    data_parallel_size_local: int = 1
+    pipeline_parallel_size: int = 1
+    prefill_context_parallel_size: int = 1
+    decode_context_parallel_size: int = 1
+    enable_elastic_ep: bool = False
+    use_sequence_parallel_moe: bool = False
+    enable_dbo: bool = False
+    ubatch_size: int = 0
+
+    @property
+    def world_size(self):
+        return self.tensor_parallel_size * self.pipeline_parallel_size * self.prefill_context_parallel_size
+
+    @property
+    def world_size_across_dp(self):
+        return self.world_size * self.data_parallel_size
+
+    @property
+    def local_world_size(self):
+        return self.world_size
+
+    @property
+    def use_ubatching(self):
+        return self.enable_dbo or self.ubatch_size > 1
 
 
 @pytest.fixture
@@ -292,6 +323,121 @@ def test_validation_failure_does_not_erase_explicit_native_input(native):
     with pytest.raises(ValueError, match="embedding_across_dp"):
         resolve_engram_config(config)
     assert config.engram_config is supplied
+
+
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("draft_model_config", [False, True])
+def test_elastic_keeps_target_domain_when_dspark_reconstructs_with_tp1(dp, draft_model_config):
+    from vllm.config import replace
+
+    target = vc({"enabled": True, "backend": "elastic", "overlap": False}, dp=dp)
+    parallel = _ParallelConfig(data_parallel_size=dp, data_parallel_size_local=dp)
+    target.parallel_config = parallel
+    draft_model = SimpleNamespace(
+        architecture="DeepseekV41DSparkModel", hf_text_config=SimpleNamespace(engram_layer_ids=[])
+    )
+    target.speculative_config = SimpleNamespace(
+        method="dspark",
+        num_speculative_tokens=5,
+        target_model_config=target.model_config,
+        draft_model_config=draft_model,
+        target_parallel_config=parallel,
+    )
+    expected = resolve_engram_config(target)
+    assert expected.group_size == 8 * dp
+    draft = replace(
+        target,
+        model_config=draft_model if draft_model_config else target.model_config,
+        parallel_config=replace(parallel, tensor_parallel_size=1),
+    )
+    assert draft.parallel_config.world_size_across_dp == dp
+    assert resolve_engram_config(draft).group_size == expected.group_size
+    assert parallel.tensor_parallel_size == 8
+
+
+def test_elastic_rejects_invalid_target_domain_even_if_draft_world_is_larger():
+    value = vc({"enabled": True, "backend": "elastic", "overlap": False}, dp=1)
+    value.parallel_config = _ParallelConfig()
+    value.speculative_config = SimpleNamespace(
+        method="dspark",
+        num_speculative_tokens=5,
+        target_model_config=value.model_config,
+        draft_model_config=SimpleNamespace(architecture="DeepseekV41DSparkModel"),
+        target_parallel_config=_ParallelConfig(tensor_parallel_size=1),
+    )
+    with pytest.raises(ValueError, match=">=2"):
+        resolve_engram_config(value)
+
+
+def _platform_config_update(monkeypatch):
+    from vllm.logger import logger
+
+    # Isolate logging, quantization and unrelated platform validators, while
+    # executing the full production update and parameter-normalization methods.
+    noop = Mock()
+    for name, exports in (
+        ("vllm_ascend.logger", {"configure_ascend_file_logging": noop, "configure_ascend_logging": noop}),
+        ("vllm_ascend.quantization.utils", {"maybe_auto_detect_quantization": noop}),
+        ("vllm_ascend.quantization.methods.kv_cache.turboquant.config", {"validate_turboquant": noop}),
+    ):
+        module = ModuleType(name)
+        module.__dict__.update(exports)
+        monkeypatch.setitem(sys.modules, name, module)
+    namespace = {
+        name: noop
+        for name in (
+            "_validate_model_runner_config",
+            "_validate_routing_replay_config",
+            "_validate_pcp_dcp_config",
+            "_validate_draft_decode_context_parallel_config",
+            "_validate_parallel_config",
+            "_validate_eplb_config",
+            "_configure_minimax_m3_a5_mixed_kv_cache",
+        )
+    }
+    namespace.update(
+        logger=logger,
+        envs_vllm=SimpleNamespace(VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000),
+        _validate_engram_config=resolve_engram_config,
+        init_ascend_config=lambda value, *, engram_config: engram_config,
+    )
+    path = "vllm_ascend/platform.py"
+    production_function(path, "_fix_incompatible_config", namespace)
+    update = production_function(path, "check_and_update_config", namespace, "NPUPlatform")
+    platform = SimpleNamespace(device_type="npu", _validate_indexer_pp_config=noop)
+    return update, platform, namespace
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("dbo,ubatch", [(True, 0), (False, 2), (True, 2)])
+def test_platform_normalizes_microbatch_options_before_native_engram_validation(monkeypatch, enabled, dbo, ubatch):
+    from vllm.config import EngramConfig, VllmConfig
+
+    update, platform, namespace = _platform_config_update(monkeypatch)
+    value = vc({"enabled": enabled, "overlap": False}, native=EngramConfig(cpu_offload=True), dp=1)
+    value.parallel_config = _ParallelConfig(tensor_parallel_size=1, enable_dbo=dbo, ubatch_size=ubatch)
+    value.cache_config = SimpleNamespace(cache_dtype="auto")
+    value.attention_config = SimpleNamespace(indexer_kv_dtype="auto")
+    value.scheduler_config = value.observability_config = value.kv_transfer_config = value.compilation_config = None
+
+    class ConfigurationVerified(Exception):
+        pass
+
+    def check(config, resolved):
+        assert resolved.enabled is enabled
+        assert not config.parallel_config.use_ubatching
+        raise ConfigurationVerified
+
+    # Stop after actual configuration validation, before compiler/worker setup.
+    namespace["_check_ascend_config"] = check
+    with pytest.raises(ConfigurationVerified):
+        update(platform, value)
+    assert value.parallel_config.enable_dbo is False
+    assert value.parallel_config.ubatch_size == 0
+    # VllmConfig.__post_init__ performs this upstream check after the platform
+    # hook returns. The normalized values must also pass that second check.
+    VllmConfig._resolve_and_verify_engram_config(value)
+    assert (value.engram_config is not None) is enabled
 
 
 def production_function(path, name, namespace, class_name=None):
