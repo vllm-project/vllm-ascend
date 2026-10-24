@@ -1365,6 +1365,10 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
+        if self.use_kvpp:
+            assert self.layer_load_finished_events is not None
+            for event in self.layer_load_finished_events:
+                event.clear()
         self._attention_saved_layers = set()
         self._save_disabled.clear()
         if self.kv_recv_thread is not None:
@@ -3107,6 +3111,28 @@ class KVPoolWorker:
             self.next_layer_to_submit += 1
             submit_layer_load(layer_id)
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        physical_layer = self._extract_physical_layer_index(layer_name)
+        layer_id = self._global_to_local_layer.get(physical_layer)
+        if layer_id is None:
+            if self._global_to_local_layer:
+                return
+            layer_id = physical_layer
+        if not 0 <= layer_id < len(self.layer_load_tasks):
+            return
+        if self.kv_recv_thread is None:
+            raise RuntimeError("kv_recv_thread is not initialized")
+        self.kv_recv_thread.raise_if_failed()
+        if not self.layer_load_tasks[layer_id] and layer_id not in self.prefetch_layer_map:
+            return
+        if self.layer_load_finished_events is None:
+            raise RuntimeError("layer_load_finished_events is not initialized")
+        while not self.layer_load_finished_events[layer_id].wait(timeout=1):
+            self.kv_recv_thread.raise_if_failed()
+            if self._layer_load_aborted.is_set():
+                raise RuntimeError("Layerwise load aborted before KVPP broadcast")
+        self.kv_recv_thread.raise_if_failed()
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -3151,8 +3177,12 @@ class KVPoolWorker:
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        self.layer_load_finished_events[self.current_layer].clear()
-        if getattr(self, "block_key_hybrid", False) and self.current_layer == self.num_layers - 1:
+        # KVPP can observe completion after attention; reset at the next bind.
+        if not self.use_kvpp:
+            self.layer_load_finished_events[self.current_layer].clear()
+        if (
+            getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
+        ) and self.current_layer == self.num_layers - 1:
             # The final model layer can have no reachable load rows. Completion
             # belongs to the whole request, not whichever group happens to end here.
             for req_id in self._current_layerwise_last_chunk_req_ids:

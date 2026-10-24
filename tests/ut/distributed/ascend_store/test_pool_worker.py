@@ -416,6 +416,80 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    def test_load_completion_is_shared_and_reset_at_step_binding(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker._global_to_local_layer = {9: 0, 10: 1}
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.layer_load_finished_events[0].set()
+        worker.current_layer = 0
+        worker.kv_recv_thread = MagicMock()
+        worker.external_slot_release_waiter = None
+        worker._submit_ready_layer_loads = MagicMock()
+        worker._finish_current_layerwise_load_sessions = MagicMock()
+        worker.wait_for_layer_load()
+        # Both observers can see the same completion, in either order.
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+        self.assertTrue(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.current_layer, 0)
+        # Non-owners have no tasks or signal to wait on.
+        worker.wait_for_layer_load_ready("model.layers.10.self_attn.attn")
+        worker.current_layer = 1
+        worker._current_layerwise_last_chunk_req_ids = {"loaded-request"}
+        worker.wait_for_layer_load()
+        worker.kv_recv_thread.set_finished_request.assert_called_once_with("loaded-request")
+        worker.process_layer_data = MagicMock()
+        worker.prepare_layerwise_step(AscendConnectorMetadata(preempted_req_ids=set()))
+        self.assertFalse(worker.layer_load_finished_events[0].is_set())
+        self.assertEqual(worker.next_layer_to_submit, 0)
+
+    def test_load_observer_surfaces_receive_failure(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+        worker.layer_load_tasks[0] = [MagicMock()]
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker.kv_recv_thread = MagicMock()
+        worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("receive failed")
+        with self.assertRaisesRegex(RuntimeError, "receive failed"):
+            worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
+
+    def test_load_observer_resolves_local_layer(self):
+        cases = (
+            ({9: 0, 10: 1}, 0, False),
+            ({9: 0, 10: 1}, 11, False),
+            ({}, 2, False),
+            ({9: 2}, 9, False),
+            ({9: -1}, 9, False),
+            ({}, 1, True),
+        )
+        for mapping, physical_layer, local in cases:
+            with self.subTest(mapping=mapping, physical_layer=physical_layer):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+                worker._global_to_local_layer = mapping
+                worker.layer_load_tasks = [[MagicMock()], [MagicMock()]]
+                worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+                worker.layer_load_finished_events[1].set()
+                worker.kv_recv_thread = MagicMock()
+                if not local:
+                    worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("unexpected receive check")
+                worker.wait_for_layer_load_ready(f"model.layers.{physical_layer}.self_attn.attn")
+                if local:
+                    worker.kv_recv_thread.raise_if_failed.assert_called()
+                    self.assertTrue(worker.layer_load_finished_events[1].is_set())
+                else:
+                    worker.kv_recv_thread.raise_if_failed.assert_not_called()
+
+    def test_load_observer_requires_initialized_dependencies(self):
+        for missing in ("kv_recv_thread", "layer_load_finished_events"):
+            with self.subTest(missing=missing):
+                worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True, use_layerwise=True)
+                worker._global_to_local_layer = {9: 0}
+                worker.layer_load_tasks[0] = [MagicMock()]
+                worker.kv_recv_thread = MagicMock()
+                setattr(worker, missing, None)
+                with self.assertRaisesRegex(RuntimeError, f"{missing} is not initialized"):
+                    worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
 
@@ -651,6 +725,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
     def test_wait_for_layer_load_fallback_waits_for_reuse(self):
         cls = self._make_worker_class()
         worker = cls.__new__(cls)
+        worker.use_kvpp = False
         worker.current_layer = 0
         worker.num_layers = 1
         worker.layer_load_tasks = [[]]
