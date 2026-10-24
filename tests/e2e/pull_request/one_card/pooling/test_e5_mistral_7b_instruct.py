@@ -33,9 +33,9 @@ Assertion set (issue #10679):
      and every query retrieves its intended passage (40/40);
   5. token-id alignment between vLLM and the HF tokenizer (BOS and the
      last real token; neither side appends </s>);
-  6. > max_model_len raises ValueError (no silent truncation); empty /
-     whitespace-only input behavior is documented (vLLM 0.26 tokenizes it to
-     a single BOS token and pools from it instead of raising);
+  6. > max_model_len raises a validation error (no silent truncation); the
+     empty / whitespace-only behavior is documented: vLLM 0.26 tokenizes it to
+     a single BOS token and pools from it, vLLM >= 0.31 rejects it;
   7. non-string inputs (scalar, bytes, dict, mixed list) are rejected with
      TypeError / ValueError instead of returning an embedding.
 
@@ -61,6 +61,19 @@ from transformers import AutoModel, AutoTokenizer
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import check_embeddings_close
+
+try:
+    # vLLM >= 0.31 wraps prompt-validation failures in VLLMValidationError,
+    # which no longer derives from ValueError there, while older pins only
+    # raise ValueError. Probe the symbol instead of importing it blindly.
+    from vllm.exceptions import VLLMValidationError
+except ImportError:  # pragma: no cover - depends on the vLLM pin
+    VLLMValidationError = None  # type: ignore[assignment,misc]
+
+#: Exceptions that count as "input rejected" by the prompt-validation tests.
+EXPECTED_VALIDATION_ERRORS: tuple[type[BaseException], ...] = (ValueError,)
+if VLLMValidationError is not None:
+    EXPECTED_VALIDATION_ERRORS = (ValueError, VLLMValidationError)
 
 MODEL = "intfloat/e5-mistral-7b-instruct"
 # Point this at a local copy of the weight to skip the hub lookup entirely
@@ -681,13 +694,15 @@ def test_e5_mistral_token_id_alignment():
 def test_e5_mistral_invalid_inputs():
     """Negative / boundary input behavior.
 
-    - Inputs beyond max_model_len raise ValueError (no silent truncation).
+    - Inputs beyond max_model_len are rejected (no silent truncation). The
+      exception type follows the vLLM pin: a plain ValueError on 0.26, a
+      VLLMValidationError on >= 0.31 (see EXPECTED_VALIDATION_ERRORS).
     - Empty / whitespace-only input: issue #10679 asks for an explicit error.
-      Measured behavior on vLLM 0.26 (offline LLM.embed and /v1/embeddings
-      alike): an empty or whitespace-only string tokenizes to a single BOS
-      token and the engine returns a valid (1, 4096) embedding pooled from
-      that BOS token instead of raising. This test records the measured
-      behavior so a future vLLM input-validation change is caught by CI.
+      Measured on vLLM 0.26 (offline LLM.embed and /v1/embeddings alike): the
+      string tokenizes to a single BOS token and the engine returns a valid
+      (1, 4096) embedding pooled from it instead of raising. vLLM >= 0.31
+      rejects it during prompt validation, so both outcomes are accepted;
+      what must not happen is a crash of another kind or a wrong shape.
     """
     with VllmRunner(
         _model_path(),
@@ -697,11 +712,16 @@ def test_e5_mistral_invalid_inputs():
         enforce_eager=True,
         pooler_config={"pooling_type": "LAST"},  # v0.26+: embed head L2-normalizes by default
     ) as runner:
-        with pytest.raises(ValueError, match="(?i)too long|maximum context|longer than"):
+        with pytest.raises(EXPECTED_VALIDATION_ERRORS, match="(?i)too long|maximum context|longer than"):
             runner.embed([OVERSIZE_TEXT])
 
         for empty_text in ("", "   \n\t  "):
-            outputs = runner.embed([empty_text])
+            try:
+                outputs = runner.embed([empty_text])
+            except EXPECTED_VALIDATION_ERRORS:
+                # vLLM >= 0.31 rejects empty prompts in validation; 0.26
+                # tokenizes them to a single BOS token and pools from it.
+                continue
             assert len(outputs) == 1
             assert len(outputs[0]) == HIDDEN_SIZE
 
@@ -734,6 +754,7 @@ def test_e5_mistral_non_string_inputs():
         enforce_eager=True,
         pooler_config={"pooling_type": "LAST"},  # v0.26+: embed head L2-normalizes by default
     ) as runner:
+        rejected: tuple[type[BaseException], ...] = (TypeError,) + EXPECTED_VALIDATION_ERRORS
         for bad_input in (123, None, b"hello", {"input": "hello"}, ["valid text", 123]):
-            with pytest.raises((TypeError, ValueError)):
+            with pytest.raises(rejected):
                 runner.embed([bad_input])
