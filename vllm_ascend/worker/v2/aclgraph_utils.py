@@ -141,9 +141,6 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    _capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]]
-    _candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]]
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -171,20 +168,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.update_stream = self.model_runner.update_stream
         offload = getattr(model_runner, "expert_offload_manager", None)
         if offload is not None:
-            from vllm_ascend.expert_offload.graph import supports_descriptor
-
-            bindings = tuple(offload.bindings.values())
-            # Use the actual padded descriptors for capture and dispatch alike.
-            self._capture_descs = {
-                mode: [desc for desc in descs if supports_descriptor(bindings, desc)]
-                for mode, descs in self._capture_descs.items()
-            }
-            self._candidates = {
-                key: [desc for desc in descs if supports_descriptor(bindings, desc)]
-                for key, descs in self._candidates.items()
-            }
-            if offload.graph_load_stream is None and super().needs_capture():
-                offload.graph_load_stream = torch.npu.Stream(device=device)
+            offload.prepare_graph_capture(self, super().needs_capture)
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)

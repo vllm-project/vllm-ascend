@@ -152,6 +152,22 @@ class ExpertOffloadManager:
             self.state = OffloadState.FAILED
             raise RuntimeError("expert graph callback failed; rejecting execution output") from self.graph_error
 
+    def prepare_graph_capture(self, graph_manager, needs_capture) -> None:
+        from .graph import supports_descriptor
+
+        bindings = tuple(self.bindings.values())
+        # Capture and dispatch must use the same padded descriptor capacity.
+        graph_manager._capture_descs = {
+            mode: [desc for desc in descs if supports_descriptor(bindings, desc)]
+            for mode, descs in graph_manager._capture_descs.items()
+        }
+        graph_manager._candidates = {
+            key: [desc for desc in descs if supports_descriptor(bindings, desc)]
+            for key, descs in graph_manager._candidates.items()
+        }
+        if self.graph_load_stream is None and needs_capture():
+            self.graph_load_stream = torch.npu.Stream(device=graph_manager.device)
+
     @contextmanager
     def graph_capture(self):
         self.begin_execution()

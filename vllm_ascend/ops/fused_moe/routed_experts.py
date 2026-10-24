@@ -34,6 +34,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.expert_offload.quantization import maybe_offload_quant_method
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -433,12 +434,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
         self.n_shared_experts = n_shared_experts
-        if (
-            ascend_config.expert_offload_config.enabled
-            and self._expert_offload_enabled
-            and getattr(self, "_expert_offload_binding", None) is None
-        ):
-            raise ValueError("expert offload requires a W4A8 MXFP offload binding for every routed expert layer")
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
@@ -595,21 +590,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.register_buffer(name, tensor)
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
-        offload_config = get_ascend_config().expert_offload_config
-        offload_enabled = offload_config.enabled and self._expert_offload_enabled
         if quant_config is None:
-            if offload_enabled:
-                raise ValueError(
-                    "expert offload requires W4A8 MXFP quantized routed experts; unquantized experts have no adapter"
-                )
-            return super()._get_quant_method(prefix, quant_config, moe_config)
-        method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
-        if offload_enabled:
-            configure_offload = getattr(method, "configure_expert_offload", None)
-            if configure_offload is None:
-                raise ValueError("selected quantization method does not support expert offload")
-            configure_offload(offload_config)
-        return method
+            method = super()._get_quant_method(prefix, quant_config, moe_config)
+        else:
+            method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+        return maybe_offload_quant_method(self, method)
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""
@@ -757,14 +742,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
-        execution_layer = self
-        binding = getattr(self, "_expert_offload_binding", None)
         try:
-            if binding is not None:
-                execution_layer, topk_ids, execution_comm = binding.prepare(self, topk_ids)
-                _EXTRA_CTX.moe_comm_method = execution_comm
             fused_experts_results: FusedExpertsResult = self.quant_method.apply(
-                layer=execution_layer,
+                layer=self,
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -772,7 +752,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 shared_experts_input=None,
             )
         finally:
-            _EXTRA_CTX.moe_comm_method = moe_comm_method
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 

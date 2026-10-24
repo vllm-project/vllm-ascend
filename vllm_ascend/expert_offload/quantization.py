@@ -6,6 +6,22 @@ from types import SimpleNamespace
 import torch
 
 
+def maybe_offload_quant_method(layer, method):
+    if not getattr(layer, "_expert_offload_enabled", False):
+        return method
+
+    # Called during RoutedExperts construction, after Ascend config is ready.
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    config = getattr(get_ascend_config(), "expert_offload_config", None)
+    if config is None or not config.enabled:
+        return method
+
+    from .method import ExpertOffloadMoEMethod
+
+    return ExpertOffloadMoEMethod(method, layer.moe_config, config)
+
+
 class MXFP4ExpertAdapter:
     """Reuse the supported scheme's exact post-processing on bounded expert chunks."""
 

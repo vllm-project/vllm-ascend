@@ -570,9 +570,8 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: (
-            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        )
+        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
+        == DeviceAdaptorFamily.FP8_OPTIMIZED
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False

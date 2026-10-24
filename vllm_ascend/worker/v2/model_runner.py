@@ -147,13 +147,14 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    expert_offload_manager: ExpertOffloadManager | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        self.expert_offload_manager = (
-            ExpertOffloadManager() if self.ascend_config.expert_offload_config.enabled else None
-        )
+        offload_config = getattr(self.ascend_config, "expert_offload_config", None)
+        if offload_config is not None and offload_config.enabled:
+            self.expert_offload_manager = ExpertOffloadManager()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query

@@ -10,14 +10,14 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
-from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
+from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter, maybe_offload_quant_method
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -40,7 +40,9 @@ def load_hook_class(path, class_name, methods, parent, namespace):
     assert len(selected) == len(methods)
     for method in selected:
         method.decorator_list = []
-    class_body: list[ast.stmt] = list(selected)
+    class_body: list[ast.stmt] = [
+        field for field in node.body if isinstance(field, ast.AnnAssign) and isinstance(field.value, ast.Constant)
+    ] + list(selected)
     # Parsing initializes version-specific AST fields, including 3.12 type_params.
     isolated_class = ast.parse(f"class {class_name}(Parent):\n    pass\n").body[0]
     assert isinstance(isolated_class, ast.ClassDef)
@@ -96,22 +98,23 @@ def test_graph_manager_filters_padded_candidates_and_subscribes_actual_npu_strea
     manager.subscribe_graph_stream = Mock()
     runner = SimpleNamespace(expert_offload_manager=manager, update_stream=object())
     graph_params = Mock()
+    fake_torch = SimpleNamespace(npu=SimpleNamespace(Stream=Mock(), current_stream=Mock(return_value=actual_stream)))
     cls = load_hook_class(
         "vllm_ascend/worker/v2/aclgraph_utils.py",
         "ModelAclGraphManager",
         {"__init__", "_capture_stream"},
         Parent,
         {
-            "torch": SimpleNamespace(
-                npu=SimpleNamespace(Stream=Mock(), current_stream=Mock(return_value=actual_stream))
-            ),
+            "torch": fake_torch,
             "collect_sorted_captured_token_sizes": lambda groups: sorted(
                 d.num_tokens for ds in groups.values() for d in ds
             ),
             "set_graph_params": graph_params,
         },
     )
-    graph = cls(object(), "npu:0", CUDAGraphMode.FULL_DECODE_ONLY, 1, runner)
+    with patch("vllm_ascend.expert_offload.expert_offload_manager.torch", fake_torch):
+        graph = cls(object(), "npu:0", CUDAGraphMode.FULL_DECODE_ONLY, 1, runner)
+    fake_torch.npu.Stream.assert_called_once_with(device="npu:0")
     assert graph.capture_sizes == [1, 2]
     assert graph._candidates[(3, 0)] == []  # Three actual tokens round up to four.
     graph_params.assert_called_once_with([1, 2])
@@ -300,16 +303,24 @@ def test_shutdown_preserves_c8_cleanup_without_an_initialized_offload_manager():
     assert events == ["parent_shutdown"]
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("is_draft", [False, True])
-def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(enabled, is_draft):
+def test_runner_defaults_to_no_offload_even_when_init_is_skipped():
+    runner, _ = make_runner()
+    del runner.expert_offload_manager
+    assert runner.expert_offload_manager is None
+    runner.load_model()
+    scheduler = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1})
+    assert runner.execute_model(scheduler, dummy_run=False) == "result"
+    assert "expert_offload_manager" not in vars(runner)
+
+
+@pytest.fixture
+def quant_methods(monkeypatch):
     class Parent:
         requires_device_loading = True
 
         def __init__(self, moe_config):
             pass
 
-    config = ExpertOffloadConfig(enabled=enabled, num_device_experts=2 if enabled else None)
     binding_factory = Mock()
 
     def set_attrs(param, attrs):
@@ -326,39 +337,78 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(enabled, 
         },
         process_weights_after_loading=Mock(),
     )
-    cls = load_hook_class(
+    native_cls = load_hook_class(
         "vllm_ascend/quantization/method_adapters.py",
         "AscendFusedMoEMethod",
-        {"__init__", "configure_expert_offload", "create_weights", "_create_weights", "process_weights_after_loading"},
+        {"__init__", "create_weights", "apply", "process_weights_after_loading"},
         Parent,
         {
             "torch": torch,
-            "nullcontext": nullcontext,
             "set_weight_attrs": set_attrs,
-            "ExpertOffloadConfig": ExpertOffloadConfig,
-            "LayerOffloadBinding": binding_factory,
-            "MXFP4ExpertAdapter": MXFP4ExpertAdapter,
-            "QuantType": SimpleNamespace(W4A8MXFP="mxfp4"),
             "FusedMoeWeightScaleSupported": SimpleNamespace(
                 CHANNEL=SimpleNamespace(value="channel"),
                 GROUP=SimpleNamespace(value="group"),
             ),
         },
     )
-    method = cls(scheme, object())
+    offload_cls = load_hook_class(
+        "vllm_ascend/expert_offload/method.py",
+        "ExpertOffloadMoEMethod",
+        {"__init__", "create_weights", "apply", "process_weights_after_loading"},
+        native_cls,
+        {
+            "AscendFusedMoEMethod": native_cls,
+            "torch": torch,
+            "LayerOffloadBinding": binding_factory,
+            "MXFP4ExpertAdapter": MXFP4ExpertAdapter,
+            "QuantType": SimpleNamespace(W4A8MXFP="mxfp4"),
+        },
+    )
+    state = SimpleNamespace(config=None)
+    config_module = ModuleType("vllm_ascend.ascend_config")
+    monkeypatch.setattr(
+        config_module, "get_ascend_config", lambda: SimpleNamespace(expert_offload_config=state.config), raising=False
+    )
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    method_module = ModuleType("vllm_ascend.expert_offload.method")
+    monkeypatch.setattr(method_module, "ExpertOffloadMoEMethod", offload_cls, raising=False)
+    monkeypatch.setitem(sys.modules, method_module.__name__, method_module)
+
+    class OwnerParent(torch.nn.Module):
+        def _get_quant_method(self, prefix, quant_config, moe_config):
+            return object()
+
     owner_cls = load_hook_class(
         "vllm_ascend/ops/fused_moe/routed_experts.py",
         "AscendRoutedExperts",
         {"_get_quant_method"},
-        torch.nn.Module,
-        {"get_ascend_config": lambda: SimpleNamespace(expert_offload_config=config)},
+        OwnerParent,
+        {"maybe_offload_quant_method": maybe_offload_quant_method},
     )
     layer = owner_cls()
     layer.tid2eid = None
+    layer.moe_config = object()
+    return SimpleNamespace(
+        native_cls=native_cls, offload_cls=offload_cls, layer=layer, state=state, scheme=scheme, binding=binding_factory
+    )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(quant_methods, enabled, is_draft):
+    q = quant_methods
+    config = ExpertOffloadConfig(enabled=enabled, num_device_experts=2 if enabled else None)
+    q.state.config = config
+    layer = q.layer
     layer._expert_offload_enabled = not is_draft
-    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_kw: method)
-    assert layer._get_quant_method("experts", quant_config, object()) is method
+    native = q.native_cls(q.scheme, layer.moe_config)
+    quant_config = SimpleNamespace(get_quant_method=Mock(return_value=native))
+    method = layer._get_quant_method("experts", quant_config, layer.moe_config)
+    quant_config.get_quant_method.assert_called_once_with(layer, "experts", tid2eid=None)
     offloaded = enabled and not is_draft
+    assert isinstance(method, q.offload_cls) is offloaded
+    if not offloaded:
+        assert method is native
     layer.top_k = 2
     with torch.device("meta"):
         method.create_weights(layer, 6, 3, 2, torch.float32, weight_loader=object())
@@ -366,52 +416,28 @@ def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(enabled, 
     assert method.requires_device_loading is not offloaded
     assert layer.w13_weight.shape[0] == 6
     if offloaded:
-        binding_factory.assert_called_once_with(layer, scheme, config)
+        q.binding.assert_called_once_with(layer, q.scheme, config)
         method.process_weights_after_loading(layer)
-        binding_factory.return_value.process_weights_after_loading.assert_called_once_with(layer)
-        scheme.process_weights_after_loading.assert_not_called()
+        q.binding.return_value.process_weights_after_loading.assert_called_once_with(layer)
+        q.scheme.process_weights_after_loading.assert_not_called()
     else:
-        binding_factory.assert_not_called()
+        q.binding.assert_not_called()
         assert not hasattr(layer, "_expert_offload_binding")
         method.process_weights_after_loading(layer)
-        scheme.process_weights_after_loading.assert_called_once_with(layer)
+        q.scheme.process_weights_after_loading.assert_called_once_with(layer)
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("is_draft", [False, True])
-def test_routed_owner_injects_offload_before_weight_creation(enabled, is_draft):
-    offload_config = ExpertOffloadConfig(enabled=enabled, num_device_experts=2 if enabled else None)
-    method = Mock()
-    quant_config = SimpleNamespace(get_quant_method=Mock(return_value=method))
-    cls = load_hook_class(
-        "vllm_ascend/ops/fused_moe/routed_experts.py",
-        "AscendRoutedExperts",
-        {"_get_quant_method"},
-        object,
-        {"get_ascend_config": lambda: SimpleNamespace(expert_offload_config=offload_config)},
-    )
-    layer = cls()
-    layer.tid2eid = None
-    layer._expert_offload_enabled = not is_draft
-    assert layer._get_quant_method("model.layers.0.mlp.experts", quant_config, "moe_config") is method
-    quant_config.get_quant_method.assert_called_once_with(layer, "model.layers.0.mlp.experts", tid2eid=None)
-    if enabled and not is_draft:
-        method.configure_expert_offload.assert_called_once_with(offload_config)
-    else:
-        method.configure_expert_offload.assert_not_called()
+def test_missing_offload_config_preserves_native_method(quant_methods):
+    layer = quant_methods.layer
+    layer._expert_offload_enabled = True
+    native = object()
+    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_k: native)
+    assert layer._get_quant_method("experts", quant_config, None) is native
 
 
-def test_routed_owner_rejects_unquantized_or_unsupported_adapter():
-    offload_config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
-    cls = load_hook_class(
-        "vllm_ascend/ops/fused_moe/routed_experts.py",
-        "AscendRoutedExperts",
-        {"_get_quant_method"},
-        object,
-        {"get_ascend_config": lambda: SimpleNamespace(expert_offload_config=offload_config)},
-    )
-    layer = cls()
-    layer.tid2eid = None
+def test_routed_owner_rejects_unquantized_or_unsupported_adapter(quant_methods):
+    quant_methods.state.config = ExpertOffloadConfig(enabled=True, num_device_experts=2)
+    layer = quant_methods.layer
     layer._expert_offload_enabled = True
     with pytest.raises(ValueError, match="quantized"):
         layer._get_quant_method("experts", None, object())
@@ -473,6 +499,20 @@ def test_routed_hook_passes_consistent_view_and_restores_comm(offload, fail):
         return SimpleNamespace(routed_out="output")
 
     layer.quant_method = SimpleNamespace(apply=apply)
+    if offload:
+
+        class Parent:
+            def apply(self, **kwargs):
+                return apply(**kwargs)
+
+        offload_cls = load_hook_class(
+            "vllm_ascend/expert_offload/method.py",
+            "ExpertOffloadMoEMethod",
+            {"apply"},
+            Parent,
+            {"_EXTRA_CTX": context},
+        )
+        layer.quant_method = offload_cls()
     if fail:
         with pytest.raises(RuntimeError, match="kernel failed"):
             layer.forward_impl(hidden_states=torch.ones(1, 4), router_logits=torch.ones(1, 6))
