@@ -1163,8 +1163,7 @@ Before starting vLLM, follow the
 to install `memfabric-hybrid` and `memcache-hybrid`, configure
 `mmc-meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`, and start the
 Memcache MetaService. The
-Prefill and Decode nodes must use the same MetaService endpoint. Keep the
-`/etc/hccn.conf` container mount from Section 4.1.
+Prefill and Decode nodes must use the same MetaService endpoint.
 
 This example uses separated Memcache deployment so that the pool reserves host
 memory before vLLM loads the model. Prepare one MetaService configuration and
@@ -1231,7 +1230,9 @@ allocations as well as the operating system and vLLM.
 
 `<DISK_PATH>` is the cache device path used in this example. Set `ubsio.disk.path` to
 the dedicated, unmounted cache device on each node. With
-`ubsio.standalone.force_new_disk = true`, UBS IO clears that device at startup.
+`ubsio.standalone.force_new_disk = true`, UBS IO rebuilds **its cache layout and
+metadata** on the specified block device at startup, invalidating the existing
+cache.
 The MetaService eviction watermarks are `70` (high) and `60` (low).
 
 Start MetaService with `mmc-meta.conf`:
@@ -1260,8 +1261,10 @@ while True:
     time.sleep(1)
 ```
 
-After MetaService is ready, start the standalone Memcache process on all
-Prefill and Decode nodes and wait for successful initialization:
+After MetaService logs `Meta Service launched successfully`, start the standalone
+Memcache process on all Prefill and Decode nodes. Wait until each process prints
+`Successfully initialized Memcache` to confirm successful standalone
+initialization:
 
 ```shell
 export MMC_LOCAL_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-local-standalone.conf"
@@ -1537,13 +1540,7 @@ Start the components in this order:
 2. Standalone Memcache processes on all four nodes. Wait for successful initialization.
 3. Decode engines. Wait until every engine reports `Application startup complete`.
 4. Both Prefill nodes. Wait until the Prefill service is ready.
-5. The PD proxy, using the Prefill and Decode endpoints from Section 5.2.1.
-
-Wait until all four standalone Memcache processes report successful initialization
-before starting the Decode engines. Then wait until every Decode engine reports
-`Application startup complete` before starting Prefill. After every Prefill
-engine is ready, start the proxy with the same endpoint mapping described in
-Section 5.2.1 (step 5).
+5. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs
 show Memcache lookup, get, put, and hit activity, and that Decode logs still
