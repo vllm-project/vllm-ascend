@@ -28,15 +28,15 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 ### 3.1 Model Weight
 
-| Weight Version | Hardware Requirements | KV Cache Selection | Download Links |
-|----------------|-----------------------|--------------------|----------------|
-| `Qwen3.5-397B-A17B` (BF16 version) | 2 950DT Products (96 GB x 8) nodes or 2 Atlas 800I A3 (64 GB x 16) nodes or 4 Atlas 800I A2 (64 GB x 8) nodes | `auto` for the baseline | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
-| `Qwen3.5-397B-A17B-w8a8` (quantized version) | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
-| `Qwen3.5-397B-A17B-w4a8` (quantized version) | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
-| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
-| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
+| Weight Version                                       | Hardware Requirements | KV Cache Selection | Download Links |
+|------------------------------------------------------|-----------------------|--------------------|----------------|
+| `Qwen3.5-397B-A17B` (BF16 version)                   | 2 950DT Products (96 GB x 8) nodes or 2 Atlas 800I A3 (64 GB x 16) nodes or 4 Atlas 800I A2 (64 GB x 8) nodes | `auto` for the baseline | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
+| `Qwen3.5-397B-A17B-w8a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
+| `Qwen3.5-397B-A17B-w4a8` (quantized version)         | 1 Atlas 800I A3 (64 GB x 16) node or 2 Atlas 800I A2 (64 GB x 8) nodes | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
+| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
+| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version)   | 1 950DT Products (96 GB x 8) node | Check KV metadata; the model name alone is insufficient | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 | `Qwen3.5-397B-A17B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96 GB x 8) node | `mxfp8` for the supported C8 recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8c8-mxfp8) |
-| `Qwen3.5-397B-A17B-w4a8-mxfp` (quantized version) | 1 950DT Products (96 GB x 8) node | Follow the checkpoint KV quantization recipe | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mxfp) |
+| `Qwen3.5-397B-A17B-w4a8c8-mxfp` (quantized version)  | 1 950DT Products (96 GB x 8) node | `mxfp8` for the C8 recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8c8-mxfp) |
 
 !!! note
 
@@ -696,7 +696,7 @@ Send client requests to `http://<LOCAL_SERVICE_IP>:8000`.
 
 ### 5.5 Prefill-Decode Disaggregation (950DT Products)
 
-This performance-oriented example deploys 1P1D on two 8-NPU 950DT hosts with a compatible Qwen3.5-397B W4A8C8 checkpoint:
+This performance-oriented example deploys 1P1D on two 8-NPU 950DT hosts with the [Qwen3.5-397B-A17B-w4a8c8-mxfp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8c8-mxfp) checkpoint. Set `MODEL_PATH` on both nodes to the local directory containing this checkpoint:
 
 | Node role | NPUs | TP | DP | EP world size |
 |-----------|------|----|----|---------------|
