@@ -164,7 +164,7 @@
     <tr>
       <td>returnSoftmaxLse</td>
       <td>可选属性</td>
-      <td>用于表示是否返回softmax_max和softmax_sum。True表示返回，False表示不返回，默认值为False。该参数仅在训练且layout_kv不为PA_BSND场景支持。</td>
+      <td>用于表示是否返回softmax_max和softmax_sum。True表示返回，False表示不返回，默认值为False。支持推理的PA_BSND场景；DCP decode使用softmax_max + log(softmax_sum)合并各rank的局部注意力结果。</td>
       <td>BOOL</td>
       <td>-</td>
     </tr>
@@ -198,9 +198,9 @@
 - 该接口支持图模式。
 - N1支持1/2/4/8/16/32/64/128。
 - block_size为一个block的token数，block_size取值为16的倍数，且最大支持1024。
-- 参数query中的D和key、value的D值相等为512，参数query_rope中的Dr和key_rope的Dr值相等为64。
+- 参数query中的D和key、value的D值相等为512。使用RoPE时，query_rope与key_rope的Dr相等且为64。
 - 参数query、key、value的数据类型必须保持一致。
-- 当前只支持query_rope和key_rope传入，不支持rope为空。
+- Atlas A2/A3支持NoPE：query_rope和key_rope同时省略，Dr为0。Ascend 950要求传入Dr为64的RoPE。
 - 支持sparse_block_size整除block_size。
     - <term>Ascend 950PR&950DT 系列产品</term>：
         - 只支持sparse_block_size为1。
