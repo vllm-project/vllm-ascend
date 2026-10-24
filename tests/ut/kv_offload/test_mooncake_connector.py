@@ -276,6 +276,9 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
         sock.close()
         context.term()
+        thread.stop()
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
 
     def test_reformat_kv_cache_hybrid_linear_uses_cache_block_size(self):
         block_size = 4
@@ -2571,6 +2574,36 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
 
+    def test_dsa_consumer_registers_only_indexer_destination(self):
+        self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._dsa_decode = True
+        worker._dsa_transformer_layers = {"model.layers.0.self_attn": 0}
+        layouts = ([MagicMock()], [MagicMock()])
+        with (
+            patch.object(worker, "_build_dsa_local_layouts", return_value=layouts) as build_layouts,
+            patch.object(
+                worker,
+                "_dsa_consumer_indexer_register_regions",
+                return_value=(MagicMock(ptrs=[123], lengths=[456]), ["*"]),
+            ) as collect_indexer,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.global_te.register_buffer"
+            ) as register_buffer,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.validate_register_region_count"
+            ) as validate_regions,
+        ):
+            worker.register_kv_caches(self.kv_caches)
+
+        build_layouts.assert_called_once_with(self.kv_caches)
+        collect_indexer.assert_called_once_with(self.kv_caches, layouts[0])
+        register_buffer.assert_called_once_with([123], [456], ["*"])
+        validate_regions.assert_called_once()
+        self.assertIsNotNone(worker.kv_recv_thread)
+        self.assertEqual(worker.kv_recv_thread._dsa_indexer_local_layout, layouts[0])
+        self.assertEqual(worker.kv_recv_thread._dsa_main_local_layout, layouts[1])
+
     def test_register_kv_caches_mla_case(self):
         self.vllm_config.model_config.is_deepseek_mla = True
         mla_caches = {"model.layers.0.self_attn": make_cpu_kv_cache(kv_heads=1)}
@@ -3197,6 +3230,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_multi_nodes_meta_mapping={},
                             )
 
+                            if case["prefill_pp_size"] > 1:
+                                # This synthetic PCP+PP case bypasses startup validation.
+                                # It must not pass merely because stage 0's block counts match.
+                                with self.assertRaisesRegex(AssertionError, "KV source coverage incomplete"):
+                                    worker._get_kv_split_metadata("req_pd", meta)
+                                continue
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
                             group_pulls = worker._get_group_pulls_metadata(
                                 "req_pd",
