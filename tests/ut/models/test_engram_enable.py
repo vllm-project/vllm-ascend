@@ -14,8 +14,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.engram_config import AscendEngramConfig
-
 ROOT = Path(__file__).resolve().parents[3]
 MODEL = "vllm_ascend/models/deepseek_v41/model.py"
 
@@ -44,11 +42,10 @@ def method(relative, cls, name, namespace):
     return namespace[name]
 
 
-@pytest.mark.parametrize("additional", [None, {}])
 @pytest.mark.parametrize(
-    "native",
-    [None, AscendEngramConfig(), AscendEngramConfig(backend="elastic", cpu_offload=False, dp_shared_memory=True)],
+    "additional", [None, {}, {"engram_config": {}}, {"engram_config": {"enabled": False, "backend": "elastic"}}]
 )
+@pytest.mark.parametrize("native", [None, SimpleNamespace(cpu_offload=True, dp_shared_memory=True)])
 def test_platform_disables_engram_before_auto_resolution_and_validation(additional, native):
     validate = production("vllm_ascend/platform.py", "_validate_engram_config", {})
     # No model/parallel attributes: none may be inspected when disabled.

@@ -11,7 +11,6 @@ from vllm.config import VllmConfig, replace
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import validate_additional_config_bool
-from vllm_ascend.engram_config import copy_engram_projection
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -135,7 +134,7 @@ def prepare_replicated_pcp_config(
             and target_parallel_config.data_parallel_size == 1
         ):
             # The PCP=1 draft has no Engram tables; sharing belongs to the target.
-            engram_config = copy_engram_projection(engram_config, dp_shared_memory=False)
+            engram_config = replace(engram_config, dp_shared_memory=False)
         enable_eplb = target_parallel_config.enable_eplb
         eplb_config = target_parallel_config.eplb_config
         if (
