@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
+from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
 from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
@@ -77,6 +78,8 @@ def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         return topk_ids
     self._validate_eplb_state()
     expert_replica_routing_table = eplb_state.expert_replica_routing_table
+    if use_allgather_eplb(True):
+        expert_replica_routing_table = eplb_state.allgather_expert_replica_routing_table
     if expert_replica_routing_table is None:
         raise RuntimeError("Ascend EPLB expert replica routing table is not initialized.")
     return torch.ops.vllm.ascend_eplb_map_to_physical(

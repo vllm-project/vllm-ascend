@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm_ascend.ops.fused_moe.eplb import record_expert_tokens
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult
 from vllm_ascend.ops.fused_moe.routed_experts import _record_v2_eplb_load
 
@@ -50,3 +51,15 @@ def test_record_v2_eplb_load_rejects_wrong_local_count():
     result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.zeros(3))
     with pytest.raises(RuntimeError, match="does not match local EPLB experts"):
         _record_v2_eplb_load(_router(), result)
+
+
+def test_allgather_records_masked_load_on_source_ineligible_owner(monkeypatch):
+    router = _router(record_enabled=False)
+    router.eplb_state.allgather_record_tensor = torch.tensor(1)
+    # Operator counts include communication/graph padding and ineligible sources.
+    result = FusedExpertsResult(routed_out=torch.empty(0), expert_tokens=torch.tensor([9, 8]))
+    monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
+    _record_v2_eplb_load(router, result, torch.tensor([2, 1]))
+    torch.testing.assert_close(
+        router.eplb_state.expert_load_view, torch.tensor([0, 0, 0, 0, 2, 1, 0, 0], dtype=torch.int32)
+    )

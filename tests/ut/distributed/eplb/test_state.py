@@ -10,6 +10,8 @@ import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 
 from vllm_ascend.ascend_config import StairConfig
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.distributed.eplb import eplb_state
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.eplb_state import (
@@ -168,6 +170,55 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     assert captured_routing_table is old_routing_table
     assert layer_state.expert_replica_routing_table is captured_routing_table
     torch.testing.assert_close(captured_routing_table, new_routing_table)
+
+
+def test_a5_common_table_refreshes_in_place_and_invalidates_only_changed_layout(monkeypatch):
+    monkeypatch.setattr(eplb_state, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5))
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=1, world_size=2))
+    layer_state = AscendEplbLayerState()
+    layer_state.set_layer_state(
+        0, torch.zeros((1, 4), dtype=torch.int32), torch.tensor([[[0, 2], [1, 3]]]), torch.tensor([[2, 2]])
+    )
+    common = layer_state.allgather_expert_replica_routing_table
+    ranked = layer_state.expert_replica_routing_table
+    assert common is not None and ranked is not None
+    assert common[0].tolist() == [0, 3] and ranked[0].tolist() == [2, 1]
+    physical = torch.tensor([[0, 1, 0, 1]])
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]),
+        physical_to_logical_map=physical,
+        _allgather_physical_map=physical.clone(),
+        expert_load_pass=torch.ones(1, 4),
+        expert_load_window=torch.ones(2, 1, 4),
+        _load_mapping_generation=0,
+    )
+    eplb_state.refresh_model_routing_tables(model_state)
+    assert model_state.expert_load_window.sum() == 8
+    physical.copy_(torch.tensor([[1, 0, 0, 1]]))
+    layer_state.logical_to_physical_map.copy_(torch.tensor([[1, 2], [0, 3]]))
+    eplb_state.refresh_model_routing_tables(model_state)
+    assert layer_state.allgather_expert_replica_routing_table is common
+    assert common[0].tolist() == [1, 3]
+    assert model_state.expert_load_pass.sum() == model_state.expert_load_window.sum() == 0
+    assert model_state._load_mapping_generation == 1
+
+
+@pytest.mark.parametrize("old_width,new_width", [(4, 6), (6, 4)])
+def test_allgather_history_snapshot_tracks_elastic_active_width(old_width, new_width):
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(moe_layers=[]),
+        physical_to_logical_map=torch.zeros(1, new_width, dtype=torch.long),
+        _allgather_physical_map=torch.zeros(1, old_width, dtype=torch.long),
+        expert_load_pass=torch.ones(1, new_width),
+        expert_load_window=torch.ones(2, 1, new_width),
+        _load_mapping_generation=0,
+    )
+    eplb_state.refresh_model_routing_tables(model_state)
+    torch.testing.assert_close(model_state._allgather_physical_map, model_state.physical_to_logical_map)
+    assert not model_state.expert_load_pass.any() and not model_state.expert_load_window.any()
+    assert model_state._load_mapping_generation == 1
+    eplb_state.refresh_model_routing_tables(model_state)
+    assert model_state._load_mapping_generation == 1
 
 
 def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
