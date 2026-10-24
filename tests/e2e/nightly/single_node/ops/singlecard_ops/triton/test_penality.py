@@ -1,9 +1,15 @@
 import gc
 
+import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.sample.penalties import apply_penalties
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.worker.v2.sample.penalties import (
+    VOCAB_BLOCK_SIZE,
+    _penalties_kernel,
+    apply_penalties,
+)
 
 NUM_TOKENS = [1, 4]
 VOCAB_SIZE = [1000]
@@ -15,6 +21,53 @@ DEVICES = [f"npu:{0}"]
 
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
+
+# More than one vocab block, with a partial tail block.
+MULTI_BLOCK_VOCAB = [12800, 151936]
+
+# No tail: the last block's `block < vocab_size` mask is all true.
+EXACT_BLOCK_VOCAB = [16384]
+
+# (repetition, frequency, presence). The kernel branches on each independently.
+PENALTY_CONFIGS = {
+    "none": (1.0, 0.0, 0.0),
+    "rep_only": (1.1, 0.0, 0.0),
+    "freq_only": (1.0, 0.1, 0.0),
+    "pres_only": (1.0, 0.0, 0.1),
+    "rep_pres": (1.1, 0.0, 0.1),
+    "all": (1.1, 0.1, 0.1),
+}
+
+# Label for the extra case that asks create_test_data for a batch with both
+# penalised and unpenalised requests, which no entry above produces.
+MIXED_PENALTY_CONFIG = "mixed"
+
+
+def pack_prompt_bin_mask(
+    prompt_token_ids: list[np.ndarray],
+    num_status: int,
+    vocab_size: int,
+    device: str,
+) -> torch.Tensor:
+    """
+    Bit-pack per-request prompt token sets into int32 words.
+    """
+    num_packed = (vocab_size + 31) // 32
+    dense = np.zeros((num_status, num_packed * 32), dtype=np.uint8)
+    for row, ids in enumerate(prompt_token_ids):
+        dense[row, ids] = 1
+    packed = np.packbits(dense, axis=-1, bitorder="little")
+    packed = np.ascontiguousarray(packed).view(np.int32)
+    return torch.from_numpy(np.ascontiguousarray(packed)).to(device)
+
+
+def unpack_prompt_bin_mask(prompt_bin_mask: torch.Tensor, vocab_size: int) -> torch.Tensor:
+    """Inverse of pack_prompt_bin_mask: [R, P] int32 -> [R, vocab_size] bool."""
+    arr = np.ascontiguousarray(prompt_bin_mask.detach().cpu().numpy())
+    rows = arr.shape[0]
+    bits = np.unpackbits(arr.view(np.uint8).reshape(rows, -1), axis=-1, bitorder="little")
+    bits = np.ascontiguousarray(bits[:, :vocab_size].astype(bool))
+    return torch.from_numpy(bits).to(prompt_bin_mask.device)
 
 
 def pytorch_apply_penalties(
@@ -37,22 +90,7 @@ def pytorch_apply_penalties(
 
     logits_float = logits.float()
 
-    num_status = prompt_bin_mask.shape[0]
-    num_packed = prompt_bin_mask.shape[1]
-
-    prompt_masks_unpacked = torch.zeros(num_status, vocab_size, dtype=torch.bool, device=device)
-
-    for state_idx in range(num_status):
-        for packed_idx in range(num_packed):
-            packed_val = prompt_bin_mask[state_idx, packed_idx].item()
-            if packed_val == 0:
-                continue
-            start_idx = packed_idx * 32
-            end_idx = min(start_idx + 32, vocab_size)
-
-            for bit_pos in range(end_idx - start_idx):
-                if (packed_val >> bit_pos) & 1:
-                    prompt_masks_unpacked[state_idx, start_idx + bit_pos] = True
+    prompt_masks_unpacked = unpack_prompt_bin_mask(prompt_bin_mask, vocab_size)
 
     start_idx_in_batch = torch.arange(num_tokens, device=device) - expanded_local_pos
 
@@ -114,57 +152,90 @@ def create_test_data(
     device: str = "npu",
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 42,
+    penalty_config: tuple[float, float, float] | None = None,
+    mixed_penalties: bool = False,
+    spec_decode_groups: bool = False,
 ):
-    """Create test data for penalties"""
+    """Create test data for penalties.
+
+    penalty_config: if given, every request gets exactly this
+        ``(repetition, frequency, presence)`` triple instead of random values.
+        The kernel branches on each penalty independently, so pinning them is
+        what makes per-branch coverage possible.
+    mixed_penalties: alternate requests between active and neutral, so a batch
+        has both. Takes precedence over penalty_config.
+    spec_decode_groups: if True, lay the rows out the way ``expand_idx_mapping``
+        actually does ``num_status`` runs of ``num_speculative_tokens + 1``
+        rows, with ``expanded_local_pos`` ramping 0..k and a constant
+        ``req_state_idx`` per run. The default (random per-token values) does
+        not correspond to any real batch, since ``start_idx = token_idx - pos``
+        then points at arbitrary rows.
+    """
     torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
 
     logits = torch.randn(num_tokens, vocab_size, device=device, dtype=dtype)
 
-    repetition_penalty = torch.ones(num_status, device=device, dtype=torch.float32)
-    for i in range(num_status):
-        if torch.rand(1) > 0.3:
-            repetition_penalty[i] = torch.rand(1, device=device).item() * 0.8 + 0.6
+    if mixed_penalties:
+        # A worker owning several rows must skip the neutral ones and process
+        # the rest; the random branch below hits that only ~7% of the time.
+        rep, freq, presence = PENALTY_CONFIGS["all"]
+        active = torch.arange(num_status, device=device) % 2 == 0
+        repetition_penalty = torch.where(
+            active, torch.full((num_status,), rep, device=device), torch.ones(num_status, device=device)
+        ).to(torch.float32)
+        frequency_penalty = (active * freq).to(torch.float32)
+        presence_penalty = (active * presence).to(torch.float32)
+    elif penalty_config is None:
+        repetition_penalty = torch.ones(num_status, device=device, dtype=torch.float32)
+        for i in range(num_status):
+            if torch.rand(1) > 0.3:
+                repetition_penalty[i] = torch.rand(1, device=device).item() * 0.8 + 0.6
 
-    frequency_penalty = torch.zeros(num_status, device=device, dtype=torch.float32)
-    for i in range(num_status):
-        if torch.rand(1) > 0.5:
-            frequency_penalty[i] = torch.rand(1, device=device).item() * 0.2
+        frequency_penalty = torch.zeros(num_status, device=device, dtype=torch.float32)
+        for i in range(num_status):
+            if torch.rand(1) > 0.5:
+                frequency_penalty[i] = torch.rand(1, device=device).item() * 0.2
 
-    presence_penalty = torch.zeros(num_status, device=device, dtype=torch.float32)
-    for i in range(num_status):
-        if torch.rand(1) > 0.5:
-            presence_penalty[i] = torch.rand(1, device=device).item() * 0.2
-
-    idx_mapping = torch.randint(0, num_status, (num_tokens,), device=device, dtype=torch.int32)
+        presence_penalty = torch.zeros(num_status, device=device, dtype=torch.float32)
+        for i in range(num_status):
+            if torch.rand(1) > 0.5:
+                presence_penalty[i] = torch.rand(1, device=device).item() * 0.2
+    else:
+        rep, freq, presence = penalty_config
+        repetition_penalty = torch.full((num_status,), rep, device=device, dtype=torch.float32)
+        frequency_penalty = torch.full((num_status,), freq, device=device, dtype=torch.float32)
+        presence_penalty = torch.full((num_status,), presence, device=device, dtype=torch.float32)
 
     # Create token_ids for speculative decoding
     token_ids = torch.randint(0, vocab_size, (num_tokens,), device=device, dtype=torch.int32)
 
-    # Create expanded_local_pos (position within speculative decoding window)
-    expanded_local_pos = torch.zeros(num_tokens, device=device, dtype=torch.int32)
-    for i in range(num_tokens):
-        expanded_local_pos[i] = torch.randint(0, num_speculative_tokens + 1, (1,)).item()
+    if spec_decode_groups:
+        rows_per_req = num_speculative_tokens + 1
+        flat_req = np.minimum(np.arange(num_tokens) // rows_per_req, num_status - 1)
+        flat_pos = np.arange(num_tokens) % rows_per_req
+        idx_mapping = torch.from_numpy(flat_req.astype(np.int32)).to(device)
+        expanded_local_pos = torch.from_numpy(flat_pos.astype(np.int32)).to(device)
+    else:
+        idx_mapping = torch.randint(0, num_status, (num_tokens,), device=device, dtype=torch.int32)
+        # Create expanded_local_pos (position within speculative decoding window)
+        expanded_local_pos = torch.zeros(num_tokens, device=device, dtype=torch.int32)
+        for i in range(num_tokens):
+            expanded_local_pos[i] = torch.randint(0, num_speculative_tokens + 1, (1,)).item()
 
-    num_packed = (vocab_size + 31) // 32
-    prompt_bin_mask = torch.zeros(num_status, num_packed, device=device, dtype=torch.int32)
-
-    for state_idx in range(num_status):
-        num_tokens_in_prompt = max(1, vocab_size // 20)
-        prompt_tokens = torch.randperm(vocab_size, device=device)[:num_tokens_in_prompt]
-
-        for token_id in prompt_tokens:
-            packed_idx = token_id // 32
-            bit_pos = token_id % 32
-            prompt_bin_mask[state_idx, packed_idx] |= 1 << bit_pos
+    num_in_prompt = max(1, vocab_size // 20)
+    prompt_token_ids = [
+        rng.choice(vocab_size, size=num_in_prompt, replace=False).astype(np.int64) for _ in range(num_status)
+    ]
+    prompt_bin_mask = pack_prompt_bin_mask(prompt_token_ids, num_status, vocab_size, device)
 
     output_bin_counts = torch.zeros(num_status, vocab_size, device=device, dtype=torch.int32)
-    for state_idx in range(num_status):
-        num_output_tokens = max(1, vocab_size // 20)
-        output_tokens = torch.randint(0, vocab_size, (num_output_tokens,), device=device)
-        counts = torch.randint(1, 10, (num_output_tokens,), device=device)
-
-        for token, count in zip(output_tokens, counts):
-            output_bin_counts[state_idx, token] = count
+    num_output_tokens = max(1, vocab_size // 20)
+    out_ids = torch.from_numpy(rng.integers(0, vocab_size, size=(num_status, num_output_tokens), dtype=np.int64)).to(
+        device
+    )
+    out_vals = torch.from_numpy(rng.integers(1, 10, size=(num_status, num_output_tokens), dtype=np.int32)).to(device)
+    output_bin_counts.scatter_(1, out_ids, out_vals)
 
     return (
         logits,
@@ -177,6 +248,63 @@ def create_test_data(
         prompt_bin_mask,
         output_bin_counts,
     )
+
+
+def launch_with_num_workers(data, num_workers: int, block_size: int = VOCAB_BLOCK_SIZE) -> None:
+    """Run _penalties_kernel with an explicit worker count, in place.
+
+    apply_penalties uses get_vectorcore_num(); this bypasses that so the
+    worker-invariance property can be pinned directly.
+    """
+    (
+        logits,
+        idx_mapping,
+        token_ids,
+        expanded_local_pos,
+        repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
+        prompt_bin_mask,
+        output_bin_counts,
+    ) = data
+    num_tokens, vocab_size = logits.shape
+    num_vocab_blocks = (vocab_size + block_size - 1) // block_size
+    total_tiles = num_tokens * num_vocab_blocks
+    tiles_per_worker = (total_tiles + num_workers - 1) // num_workers
+    _penalties_kernel[(num_workers,)](
+        logits,
+        logits.stride(0),
+        idx_mapping,
+        token_ids,
+        expanded_local_pos,
+        repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
+        prompt_bin_mask,
+        prompt_bin_mask.stride(0),
+        output_bin_counts,
+        output_bin_counts.stride(0),
+        vocab_size,
+        total_tiles,
+        tiles_per_worker,
+        NUM_VOCAB_BLOCKS=num_vocab_blocks,
+        BLOCK_SIZE=block_size,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _init_triton_device_properties():
+    """apply_penalties reads get_vectorcore_num(), which asserts unless device
+    properties were initialised. In production that happens once in
+    AscendWorker.init_device; tests do not go through the worker, so they
+    initialise it themselves, same as every other triton test here."""
+    init_device_properties_triton()
+
+
+def cleanup() -> None:
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 class TestApplyPenalties:
@@ -245,6 +373,123 @@ class TestApplyPenalties:
         gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
+
+    # The test above runs at vocab_size=1000, a single block, so it never
+    # exercises the per-block address arithmetic or the masked tail.
+    @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB + EXACT_BLOCK_VOCAB)
+    @pytest.mark.parametrize("num_tokens", [1, 64])
+    @pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("device", DEVICES)
+    @torch.inference_mode()
+    def test_apply_penalties_multi_vocab_block(self, vocab_size, num_tokens, num_speculative_tokens, dtype, device):
+        num_vocab_blocks = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
+        assert num_vocab_blocks > 1, "this test is meant to cover more than one vocab block"
+        assert (vocab_size % VOCAB_BLOCK_SIZE != 0) == (vocab_size in MULTI_BLOCK_VOCAB)
+        num_status = max(1, num_tokens // (num_speculative_tokens + 1))
+        data = create_test_data(
+            num_tokens=num_tokens,
+            vocab_size=vocab_size,
+            num_status=num_status,
+            num_speculative_tokens=num_speculative_tokens,
+            device=device,
+            dtype=dtype,
+            seed=SEEDS[0],
+            spec_decode_groups=True,
+        )
+        logits_triton = data[0]
+        logits_pytorch = logits_triton.clone()
+
+        apply_penalties(*data)
+        expected = pytorch_apply_penalties(logits_pytorch, *data[1:])
+
+        if dtype == torch.float32:
+            # fp32 end to end, so the comparison can be tight.
+            atol = rtol = 1e-5
+        else:
+            atol = rtol = 1e-2
+        torch.testing.assert_close(logits_triton, expected, atol=atol, rtol=rtol)
+        cleanup()
+
+    # Each tile is owned by exactly one worker, so the result must not depend
+    # on the count, which apply_penalties takes from get_vectorcore_num().
+    # One count per shape of the split: all on one worker, coprime with n so
+    # workers start mid-row, aligned to n, and more workers than tiles.
+    @pytest.mark.parametrize("vocab_size", [MULTI_BLOCK_VOCAB[-1]])
+    @pytest.mark.parametrize("num_tokens", [1, 5, 64])
+    @pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+    @pytest.mark.parametrize("device", DEVICES)
+    @torch.inference_mode()
+    def test_apply_penalties_worker_invariance(self, vocab_size, num_tokens, num_speculative_tokens, device):
+        n = (vocab_size + VOCAB_BLOCK_SIZE - 1) // VOCAB_BLOCK_SIZE
+        assert n > 1, "need more than one vocab block for this to mean anything"
+
+        candidates = sorted({1, 7, n, 100})
+        assert len(candidates) > 1, "need at least two worker counts to compare"
+
+        num_status = max(1, num_tokens // (num_speculative_tokens + 1))
+        data = create_test_data(
+            num_tokens=num_tokens,
+            vocab_size=vocab_size,
+            num_status=num_status,
+            num_speculative_tokens=num_speculative_tokens,
+            device=device,
+            dtype=torch.float32,
+            seed=SEEDS[0],
+            penalty_config=PENALTY_CONFIGS["all"],
+            spec_decode_groups=True,
+        )
+        logits = data[0]
+        pristine = logits.clone()
+
+        reference = None
+        for num_workers in candidates:
+            logits.copy_(pristine)
+            launch_with_num_workers(data, num_workers)
+            torch.npu.synchronize()
+            if reference is None:
+                reference = logits.clone()
+            else:
+                assert torch.equal(logits, reference), (
+                    f"num_workers={num_workers} differs from num_workers={candidates[0]} "
+                    f"(max abs diff {(logits - reference).abs().max().item():.3e})"
+                )
+        cleanup()
+
+    # Each penalty is a separate branch; "none" must leave logits untouched via
+    # the early return. Run every config at 4 blocks and again at 38 with spec
+    # decoding, so the per-row skip is also hit inside a multi-row worker.
+    @pytest.mark.parametrize("config_name", sorted(PENALTY_CONFIGS) + [MIXED_PENALTY_CONFIG])
+    @pytest.mark.parametrize(
+        "vocab_size,num_speculative_tokens",
+        [(MULTI_BLOCK_VOCAB[0], 0), (MULTI_BLOCK_VOCAB[-1], 3)],
+    )
+    @pytest.mark.parametrize("device", DEVICES)
+    @torch.inference_mode()
+    def test_apply_penalties_penalty_configs(self, config_name, vocab_size, num_speculative_tokens, device):
+        num_tokens = 32
+        data = create_test_data(
+            num_tokens=num_tokens,
+            vocab_size=vocab_size,
+            num_status=max(1, num_tokens // (num_speculative_tokens + 1)),
+            num_speculative_tokens=num_speculative_tokens,
+            device=device,
+            dtype=torch.float32,
+            seed=SEEDS[0],
+            penalty_config=PENALTY_CONFIGS.get(config_name),
+            mixed_penalties=config_name == MIXED_PENALTY_CONFIG,
+            spec_decode_groups=True,
+        )
+        logits_triton = data[0]
+        logits_pytorch = logits_triton.clone()
+
+        apply_penalties(*data)
+        expected = pytorch_apply_penalties(logits_pytorch, *data[1:])
+        torch.testing.assert_close(logits_triton, expected, atol=1e-5, rtol=1e-5)
+
+        if config_name == "none":
+            assert torch.equal(logits_triton, logits_pytorch), "no penalty active, logits must be untouched"
+        cleanup()
 
     # make sure the kernel can handle large shapes without crashing
     @pytest.mark.parametrize(
