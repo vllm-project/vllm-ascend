@@ -22,6 +22,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -117,6 +118,16 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
+    def __init__(self, config: Any, vllm_config: Any, device: torch.device, model: torch.nn.Module) -> None:
+        super().__init__(config, vllm_config, device, model)
+        # The base owns finish/shutdown cleanup; only the native rebuild differs.
+        self._packed_importer = NPUPackedBufferImporter()
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Bind the assigned NPU for inherited receive and final synchronization."""
+        with torch.npu.device(self.device):
+            super().update_weights(update_info)
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -154,6 +165,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and

@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from vllm.distributed.weight_transfer.packed_tensor import PackedBufferImporter
 from vllm.logger import logger
 
 # Default values for packed tensor configuration.
@@ -68,6 +69,13 @@ def packed_broadcast_producer(
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
+    Before calling, join any source writes from other streams onto the caller's
+    current NPU stream. Entry synchronization waits only for that stream's
+    already-submitted work; it cannot discover arbitrary producer streams.
+    Iterator materialization and post_iter_func run on each packing slot stream.
+    An iterator using additional streams must establish readiness on that active
+    slot before yielding each tensor.
+
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
         group: Process group (PyHcclCommunicator)
@@ -92,6 +100,8 @@ def packed_broadcast_producer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    # Source writes must finish before packing on independently rotating streams.
+    torch.npu.current_stream().synchronize()
     buffer_idx = 0
     previous_broadcast_stream = None
 
@@ -173,6 +183,11 @@ def packed_broadcast_consumer(
     buffer and loader copies. A HCCL chunk may exceed buffer_size_bytes; peak
     memory also depends on in-flight slots and tensors retained by the loader.
 
+    The caller must make prior model work ready on its current NPU stream before
+    entry. Callbacks may retain owning clones across chunks; per-chunk host
+    synchronization orders loading across slot streams. Other callback streams
+    require their own readiness dependencies and storage-lifetime protection.
+
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
         group: Process group (PyHcclCommunicator)
@@ -211,6 +226,8 @@ def packed_broadcast_consumer(
     target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    caller_stream = torch.npu.current_stream()
+    caller_stream.synchronize()
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
@@ -259,16 +276,24 @@ def packed_broadcast_consumer(
             # Unpack and load weights on the custom stream
             with torch.npu.stream(streams[buffer_idx]):
                 names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-                post_unpack_func(
-                    unpack_tensor(
-                        packed_tensors[buffer_idx],
-                        list(names),
-                        list(shapes),
-                        list(dtypes),
-                        list(tensor_sizes),
-                    )
+                weights = unpack_tensor(
+                    packed_tensors[buffer_idx],
+                    list(names),
+                    list(shapes),
+                    list(dtypes),
+                    list(tensor_sizes),
                 )
+                # Protect raw storage and owning clones on all supported streams,
+                # including callbacks deferred to the caller's stream.
+                for tensor in (packed_tensors[buffer_idx], *(tensor for _, tensor in weights)):
+                    for stream in (*streams, caller_stream):
+                        tensor.record_stream(stream)
+                post_unpack_func(weights)
 
+            # This host wait guarantees cross-chunk clone/load readiness.
+            # Removing it requires explicit cross-slot dependencies and separate
+            # model/graph and performance validation; see PR #19127.
+            streams[buffer_idx].synchronize()
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
@@ -369,6 +394,26 @@ def packed_npu_ipc_producer(
         }
 
 
+class NPUPackedBufferImporter(PackedBufferImporter):
+    """Reuse upstream's one-export/one-mapping lifecycle with NPU rebuilds.
+
+    Share one instance across chunks; inherited close releases the held mapping
+    at finish/shutdown. This cache is not a transfer synchronization mechanism.
+    """
+
+    _entry: tuple[tuple, torch.Tensor] | None
+
+    def rebuild(self, list_args: list) -> torch.Tensor:
+        from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
+        key = tuple(list_args)
+        if self._entry is not None and self._entry[0] == key:
+            return self._entry[1]
+        packed = rebuild_npu_tensor(*list_args)
+        self._entry = (key, packed)
+        return packed
+
+
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
     physical_npu_id: str,
@@ -377,6 +422,8 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
+    *,
+    importer: NPUPackedBufferImporter,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -397,11 +444,9 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
+        importer: Mapping cache shared across all chunks of one export.
+            Engines own and close this cache at finish/shutdown.
     """
-    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
-    # imported at module load time on non-NPU hosts.
-    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-
     if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
         raise ValueError(f"device_index must be a non-negative integer, got {device_index!r}")
     if physical_npu_id not in ipc_handle:
@@ -431,7 +476,7 @@ def packed_npu_ipc_consumer(
     if len(list_args) <= 6:
         raise ValueError(f"NPU IPC rebuild arguments do not contain a device index: got {len(list_args)} values")
     list_args[6] = device_index
-    packed = rebuild_npu_tensor(*list_args)
+    packed = importer.rebuild(list_args)
 
     content_size = sum(tensor_sizes)
     if content_size > packed.numel():

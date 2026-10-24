@@ -138,6 +138,11 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
 
         finalize_layerwise_reload(self.model, self.model_config)
 
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Bind the worker NPU for receive, callbacks and final synchronization."""
+        with torch.npu.device(self.device):
+            super().update_weights(update_info)
+
     def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
         """
         Initialize HCCL process group with the trainer.
@@ -159,13 +164,12 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
-        device = torch.accelerator.current_device_index()
         self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
             init_info.master_address,
             init_info.master_port,
             rank,
             init_info.world_size,
-            device=device,
+            device=self.device,
         )
 
     def receive_weights(
@@ -221,6 +225,10 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         trainer_args: dict[str, Any] | HCCLTrainerSendWeightsArgs,
     ) -> None:
         """Broadcast weights from trainer to vLLM workers.
+
+        Packed sources must be ready on the caller's current NPU stream before
+        entry. Join writes from other streams first; args.stream controls only
+        unpacked broadcasts and is not a packed source-readiness stream.
 
         Args:
             iterator: Iterator of model parameters. Returns (name, tensor) tuples

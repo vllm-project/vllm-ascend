@@ -101,6 +101,45 @@ def test_init_passes_model_to_super():
     assert captured["args"] == ("config", "vllm_config", device, "model")
 
 
+def test_worker_constructs_npu_importer_and_closes_it_on_shutdown():
+    from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedBufferImporter
+
+    with patch.object(WeightTransferEngine, "__init__", return_value=None):
+        engine = NPUIPCWeightTransferEngine(None, None, torch.device("cpu"), MagicMock())
+    assert isinstance(engine._packed_importer, NPUPackedBufferImporter)
+    with patch.object(engine._packed_importer, "close") as close:
+        engine.shutdown()
+    close.assert_called_once_with()
+
+
+def test_ipc_update_binds_worker_device_for_inherited_sync():
+    from contextlib import contextmanager
+
+    from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
+
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.device = torch.device("cpu")
+    events = []
+
+    @contextmanager
+    def device_context(device):
+        assert device == engine.device
+        events.append("bound")
+        yield
+        events.append("restored")
+
+    def update(payload):
+        assert events == ["bound"]
+        assert payload == {"payload": True}
+
+    with (
+        patch.object(torch, "npu", types.SimpleNamespace(device=device_context), create=True),
+        patch.object(IPCWeightTransferEngine, "update_weights", side_effect=update),
+    ):
+        engine.update_weights({"payload": True})
+    assert events == ["bound", "restored"]
+
+
 def test_unpacked_send_stores_reduce_tensor_args_only():
     """Bug 2 (producer): the handle stores only the ``reduce_tensor`` args.
 
@@ -218,6 +257,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -236,6 +276,7 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
 
