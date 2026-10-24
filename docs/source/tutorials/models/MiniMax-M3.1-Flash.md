@@ -123,53 +123,9 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment runs Prefill and Decode on the same host. The A3 example uses all 16 NPUs with W8A8 weights; the A5 example uses all eight NPUs with MXFP8 weights. Prepare the common environment for your platform before starting the service.
+Single-node deployment runs Prefill and Decode on the same host. Both examples use W8A8 weights and DSpark speculative decoding, with all 16 NPUs on A3 or all eight NPUs on A5.
 
 === "A3 series (W8A8)"
-
-    **Common Environment**
-
-    Save the following as `/workspace/env.sh` in the A3 container. Set `LOCAL_IP` and `NIC_NAME` to the current host's business IP address and network interface.
-
-    ```bash
-    #!/usr/bin/env bash
-    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
-    export NO_PROXY='*' no_proxy='*'
-
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    source /usr/local/Ascend/nnal/atb/set_env.sh
-
-    export LOCAL_IP="<CURRENT_NODE_IP>"
-    export NIC_NAME="<CURRENT_NODE_NIC>"
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    export VLLM_BATCH_INVARIANT=0
-    export OMP_NUM_THREADS=1
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ENGINE_READY_TIMEOUT_S=3600
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_CONNECT_TIMEOUT=600
-    export HCCL_EXEC_TIMEOUT=600
-    export HCCL_IF_IP="$LOCAL_IP"
-    export VLLM_HOST_IP="$LOCAL_IP"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_OP_EXPANSION_MODE=AIV
-    unset HCCL_INTRA_ROCE_ENABLE
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_CONNECT_TIMEOUT=30000
-    export ASCEND_TRANSFER_TIMEOUT=30000
-
-    export ASCEND_SOURCE=/opt/m31flash/code/vllm-ascend
-    export OP_VENDOR="$ASCEND_SOURCE/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"
-    export ASCEND_CUSTOM_OPP_PATH="$OP_VENDOR"
-    export LD_LIBRARY_PATH="$OP_VENDOR/op_api/lib:${LD_LIBRARY_PATH:-}"
-    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    export PYTHONPATH="$ASCEND_SOURCE:/opt/m31flash/code/vllm:${PYTHONPATH:-}"
-    ```
 
     **Start the Service**
 
@@ -223,82 +179,57 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
 === "950DT products"
 
-    **Common Environment**
-
-    A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/workspace/.venv`.
-
-    Save the following as `/workspace/runtime_env.sh` in the A5 container and set `NIC_NAME` to the current host's network interface. The launch commands set `LOCAL_IP` before sourcing this file.
-
-    ```bash
-    #!/usr/bin/env bash
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
-        source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
-    fi
-    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
-    fi
-    unset ftp_proxy https_proxy http_proxy all_proxy FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
-    export NIC_NAME="<CURRENT_NODE_NIC>"
-    export PATH=/workspace/.venv/bin:/workspace/bin:$PATH
-    export PYTHONPATH=/workspace/src/vllm:/workspace/src/vllm-ascend:${PYTHONPATH:-}
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export HCCL_IF_IP=$LOCAL_IP
-    export HCCL_OP_EXPANSION_MODE=AIV
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    ```
-
     **Start the Service**
 
-    Run the following inside the A5 container. It starts one API service with DP2 x TP4 / EP8 across all eight NPUs, using MXFP8 weights and FP8 KV cache.
+    Run the following inside the A5 container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8 weights, and DSpark speculative decoding with seven draft tokens. For this configuration, set `MODEL_DIR` to the W8A8 checkpoint and use `-v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro` as the model bind mount in the [A5 container command](#42-a5-docker-container).
 
     ```bash
-    export LOCAL_IP="<CURRENT_NODE_IP>"
-    source /workspace/runtime_env.sh
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export HCCL_BUFFSIZE=1024
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
 
-    /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
-        --host 0.0.0.0 \
-        --port 11223 \
-        --served-model-name minimax-m3 \
-        --trust-remote-code \
-        --dtype bfloat16 \
-        --tensor-parallel-size 4 \
-        --pipeline-parallel-size 1 \
-        --data-parallel-size 2 \
-        --data-parallel-size-local 2 \
-        --enable-expert-parallel \
-        --distributed-executor-backend mp \
-        --quantization mxfp8 \
-        --max-model-len 133000 \
-        --max-num-seqs 128 \
-        --max-num-batched-tokens 32768 \
-        --gpu-memory-utilization 0.92 \
-        --disable-hybrid-kv-cache-manager \
-        --kv-cache-dtype fp8 \
-        --enable-chunked-prefill \
-        --enable-prefix-caching \
-        --reasoning-parser minimax_m3 \
-        --enable-auto-tool-choice \
-        --tool-call-parser minimax_m3 \
-        --limit-mm-per-prompt '{"image":1,"video":1}' \
-        --safetensors-load-strategy prefetch \
-        --seed 1024 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve ${MODEL_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
+      --served-model-name minimax-m3.1-flash \
+      --trust-remote-code \
+      --max-model-len 133000 \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 2 \
+      --enable-expert-parallel \
+      --max-num-seqs 32 \
+      --disable-hybrid-kv-cache-manager \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --reasoning-parser minimax_m3 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{
+          "enable_cpu_binding": true,
+          "enable_flashcomm1": true,
+          "multistream_overlap_shared_expert": true,
+          "enable_shared_expert_dp":true
+      }' \
+      --speculative-config '{
+          "method":"dspark",
+          "num_speculative_tokens":7,
+          "enforce_eager":true,
+          "kv_cache_dtype":"bfloat16",
+          "draft_sample_method":"probabilistic"
+      }' \
+      --safetensors-load-strategy prefetch
     ```
 
-    Send requests directly to port `11223` with model name `minimax-m3`.
+    Send requests directly to port `11223` with model name `minimax-m3.1-flash`.
 
 ### 5.2 PD Disaggregation
 
-PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prepare the common environment from the matching platform tab in [Single-Node Deployment](#51-single-node-deployment), using each host's own IP address and network interface. Use `/workspace/env.sh` for A3 or `/workspace/runtime_env.sh` for A5, then follow the corresponding deployment below.
+PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prepare the common environment from the matching platform tab below, using each host's own IP address and network interface. Use `/workspace/env.sh` for A3 or `/workspace/runtime_env.sh` for A5, then start the corresponding Prefill and Decode services.
 
 === "A3"
 
@@ -318,6 +249,50 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     | max-num-seqs | 32 | 128 per replica |
     | KV cache dtype | BF16 | BF16 |
     | Execution mode | Eager | FULL_DECODE_ONLY |
+
+    **Common Environment**
+
+    Save the following as `/workspace/env.sh` in the A3 container. Set `LOCAL_IP` and `NIC_NAME` to the current host's business IP address and network interface.
+
+    ```bash
+    #!/usr/bin/env bash
+    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+    export NO_PROXY='*' no_proxy='*'
+
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+
+    export LOCAL_IP="<CURRENT_NODE_IP>"
+    export NIC_NAME="<CURRENT_NODE_NIC>"
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    export VLLM_BATCH_INVARIANT=0
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_CONNECT_TIMEOUT=600
+    export HCCL_EXEC_TIMEOUT=600
+    export HCCL_IF_IP="$LOCAL_IP"
+    export VLLM_HOST_IP="$LOCAL_IP"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_OP_EXPANSION_MODE=AIV
+    unset HCCL_INTRA_ROCE_ENABLE
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    export ASCEND_CONNECT_TIMEOUT=30000
+    export ASCEND_TRANSFER_TIMEOUT=30000
+
+    export ASCEND_SOURCE=/opt/m31flash/code/vllm-ascend
+    export OP_VENDOR="$ASCEND_SOURCE/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"
+    export ASCEND_CUSTOM_OPP_PATH="$OP_VENDOR"
+    export LD_LIBRARY_PATH="$OP_VENDOR/op_api/lib:${LD_LIBRARY_PATH:-}"
+    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    export PYTHONPATH="$ASCEND_SOURCE:/opt/m31flash/code/vllm:${PYTHONPATH:-}"
+    ```
 
     **Prefill Node**
 
@@ -520,6 +495,35 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     | fuse_norm_quant | true | false |
     | fuse_qknorm_rope | true | true |
     | Speculative decoding | Disabled | Disabled |
+
+    **Common Environment**
+
+    A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/workspace/.venv`.
+
+    Save the following as `/workspace/runtime_env.sh` in the A5 container and set `NIC_NAME` to the current host's network interface. The launch commands set `LOCAL_IP` before sourcing this file.
+
+    ```bash
+    #!/usr/bin/env bash
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
+        source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
+    fi
+    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
+    fi
+    unset ftp_proxy https_proxy http_proxy all_proxy FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
+    export NIC_NAME="<CURRENT_NODE_NIC>"
+    export PATH=/workspace/.venv/bin:/workspace/bin:$PATH
+    export PYTHONPATH=/workspace/src/vllm:/workspace/src/vllm-ascend:${PYTHONPATH:-}
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+    export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    ```
 
     **Prefill Node**
 
