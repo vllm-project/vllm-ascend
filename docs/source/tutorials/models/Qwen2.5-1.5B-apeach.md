@@ -21,11 +21,13 @@ classification model there is no sampling path: greedy/non-greedy criteria
 do not apply, and inference is near-deterministic. Measured noise on this
 model (33-sample Korean corpus): repeated runs are bit-identical for 32/33
 samples (~1e-3 otherwise), single-vs-batch differs by ~2e-3, and the
-end-to-end bf16-vs-fp32 probability difference is <= 4e-3 for
-high-confidence samples and up to ~2e-2 for soft ones (p ~ 0.7, where the
-small logit error is amplified ~4.7x). The tests therefore compare
-probabilities with atol=1e-2 on the high-confidence subset and atol=2.5e-2
-on the full corpus, and require exact argmax agreement everywhere.
+end-to-end bf16-vs-fp32 probability difference is below 9e-3 for
+high-confidence samples and up to 1.98e-2 (custom op) / 2.74e-2
+(`VLLM_BATCH_INVARIANT=1` fallback) for one soft sample (p ~ 0.69, where
+the small logit difference is amplified by 1/(1-p)). The tests therefore
+compare probabilities with atol=1e-2 for confident samples (runtime HF
+confidence >= 0.9) and atol=3.5e-2 for soft ones, and require exact argmax
+agreement everywhere.
 
 ## 3 Prerequisites
 
@@ -122,8 +124,9 @@ Key parameter descriptions:
 
 - `--runner pooling`: required for embedding/pooling/classification models.
 - `--dtype bfloat16`: with bf16 the measured difference from the fp32
-  reference is <= 4e-3 for high-confidence samples and up to ~2e-2 for
-  soft ones on this corpus (the tests use atol=1e-2 / 2.5e-2 accordingly). Avoid fp16 on this model:
+  reference is below 9e-3 for high-confidence samples and up to 2.74e-2 for
+  one soft sample on this corpus (the tests use atol=1e-2 / 3.5e-2
+  accordingly). Avoid fp16 on this model:
   a same-lineage fp16 test was historically flaky and is on the CI skip
   list.
 - `--max-model-len 4096`: classification inputs are short (< 512 tokens),
@@ -189,12 +192,14 @@ for out in outputs:
   without crashing but are out of the model's domain.
 - Soft probabilities: for benign Korean inputs the model naturally emits
   probabilities around 0.5-0.9. In that regime |dp| ~ p(1-p)|dz| amplifies
-  the bf16 logit error ~4.7x, so measured end-to-end bf16-vs-fp32
-  differences reach ~2e-2 for one soft sample (0.0198: HF fp32 p=0.6907 vs
-  vLLM 0.7105; deterministic across runs and independent of batching),
-  against <= 4e-3 for high-confidence samples. Argmax labels remain stable
-  in both cases. Run-to-run differences are bit-exact for 32/33 samples
-  (~1e-3 otherwise) and single-vs-batch differences are ~2e-3.
+  the bf16 logit difference (~0.15 measured), so end-to-end bf16-vs-fp32
+  differences reach 0.0198 on the custom-op path and 0.0274 on the
+  `VLLM_BATCH_INVARIANT=1` fallback path for one soft sample (HF fp32
+  p=0.6907 vs vLLM 0.7105 / 0.7181; deterministic across runs and
+  independent of batching), against below 9e-3 for high-confidence
+  samples. Argmax labels remain stable in both cases. Run-to-run
+  differences are bit-exact for 32/33 samples (~1e-3 otherwise) and
+  single-vs-batch differences are ~2e-3.
 
 ## 9 FAQ
 
