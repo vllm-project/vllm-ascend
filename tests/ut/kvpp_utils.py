@@ -61,9 +61,7 @@ def make_kvpp_config(tp=3, pcp=1):
 def make_kvpp_specs():
     # PP-local targets have uneven sizes; MTP is larger than every target.
     specs = {
-        layer_name(index): AscendMLAAttentionSpec(
-            block_size=2, num_kv_heads=1, head_size=size // 2, dtype=torch.int8, cache_sparse_sfa_c8=True
-        )
+        layer_name(index): AscendMLAAttentionSpec(2, 1, size // 2, torch.int8, cache_sparse_sfa_c8=True)
         for index, size in zip(range(9, 18), (32, 48, 64, 32, 48, 64, 32, 48, 96))
     }
     specs[indexer_name(11)] = AscendSFAIndexerCacheSpec(
@@ -162,10 +160,10 @@ def make_attention_cache_case(packed):
     for index, dims, packed_dim in ((9, (8, 4), 16), (10, (4, 4), 24), (11, (8, 4), 16)):
         name = layer_name(index)
         specs[name] = AscendMLAAttentionSpec(
-            block_size=2,
-            num_kv_heads=1,
-            head_size=packed_dim if packed else sum(dims),
-            dtype=torch.int8 if packed else torch.bfloat16,
+            2,
+            1,
+            packed_dim if packed else sum(dims),
+            torch.int8 if packed else torch.bfloat16,
             cache_sparse_sfa_c8=packed,
         )
         layer = MLAAttention.__new__(MLAAttention)
