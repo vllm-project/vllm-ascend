@@ -1976,7 +1976,7 @@ Compared with normal PD in [Section 5.2.4](#524-950dt-series-pd-separation-deplo
     ock.mmc.local_service.world_size = 256
     ock.mmc.local_service.protocol = device_urma
     ock.mmc.local_service.dram.size = 40GB
-    ock.mmc.local_service.max.dram.size = 2049GB
+    ock.mmc.local_service.max.dram.size = 2048GB
     ```
 
     Use `device_urma` for 950DT products Device UB. For UBOE, replace it with `device_uboe`. Both roles must connect to the same MetaService and ConfigStore. `world_size` is the maximum number of LocalServices supported by the pool; it is not the number of NPUs used by this example.
