@@ -229,6 +229,54 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     torch.testing.assert_close(updates, values.squeeze(1))
 
 
+def test_v41_draft_context_rope_is_looked_up_once_and_reused(monkeypatch):
+    names = [f"mtp.{idx}.self_attn.attn" for idx in range(3)]
+    layers = {
+        name: SimpleNamespace(
+            self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=name)),
+        )
+        for name in names
+    }
+    context_states = torch.zeros(2, 4)
+    context_positions = torch.tensor([1, 3])
+    slot_mappings = [torch.tensor([idx, idx + 1]) for idx in range(3)]
+    rope = (object(), object())
+    lookup = MagicMock(return_value=rope)
+    project = MagicMock(side_effect=lambda *_args, **_kwargs: context_states)
+    store = MagicMock()
+    model = SimpleNamespace(
+        layers=layers,
+        _project_shared_kv=project,
+        _store_standard_swa_kv=store,
+    )
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lookup)
+
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(
+        model,
+        context_states,
+        context_positions,
+        slot_mappings,
+    )
+
+    lookup.assert_called_once_with(context_positions, layer_names=names)
+    assert project.call_count == len(layers)
+    assert store.call_count == len(layers)
+    for project_call, store_call, slot_mapping, layer in zip(
+        project.call_args_list,
+        store.call_args_list,
+        slot_mappings,
+        layers.values(),
+        strict=True,
+    ):
+        assert project_call.args[0] is context_states
+        assert project_call.args[1] is context_positions
+        assert project_call.args[2] is layer.self_attn
+        assert project_call.kwargs == {"rope": rope}
+        assert store_call.args[0] is context_states
+        assert store_call.args[1] is slot_mapping
+        assert store_call.args[2] is layer.self_attn
+
+
 @pytest.mark.parametrize("draft_vocab_size", [None, 16])
 def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab_size):
     config = SimpleNamespace(
