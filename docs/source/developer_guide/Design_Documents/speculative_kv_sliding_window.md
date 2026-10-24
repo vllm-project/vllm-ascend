@@ -418,3 +418,23 @@ a small-result cancellation failure even with exact native lengths; the
 FP32 path preserves the independent same-window numerical contract without
 relaxing its tolerance. This adds intermediate storage and compute that must
 be included in actual correctness, lifetime and performance measurements.
+
+## Isolated prompt-only terminal-row producer experiment
+
+The `experiment/mrv2-eagle-prompt-exact-20261024` branch extends only ordinary
+GQA Eagle legacy metadata whose entire batch is still prefilling, contains no
+Draft placeholders, and has actual CPU query widths equal to scheduled prompt
+counts. Scheduling must not cross the prompt end, and terminal rows must have
+one target logit. Replicated PCP and non-advancing positions remain excluded.
+
+For that certified producer, current prompt progress and scheduled counts give
+the exact native extent; zero rejection makes it the live first-pass anchor
+as well. The current device native/live pair and frozen starts are retained
+for later dense AR consumers. Continuing rows retain Full reads, terminal rows
+use their original frozen window after step0, and reader selection is unchanged.
+CPU snapshots are scoped to the proposal and retained through its original
+completion token. Ambiguous producers retain the existing exact fallback.
+
+This isolated experiment has Host evidence only until model and trace validation.
+It does not establish native-copy elimination, complete A01 resolution or main
+PR support, and it does not change the certified Full-only C23 fast path.

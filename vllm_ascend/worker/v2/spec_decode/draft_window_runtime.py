@@ -95,6 +95,7 @@ class DraftWindowRuntime:
         self._eagle_frozen_starts = None
         self._eagle_first_pass_pair = None
         self._eagle_full_prefill_base = None
+        self._eagle_prompt_exact_base = None
         self._next_step = 0
         self._proposal_mapping = None
 
@@ -191,6 +192,7 @@ class DraftWindowRuntime:
             self._eagle_frozen_starts = None
             self._eagle_first_pass_pair = None
             self._eagle_full_prefill_base = None
+            self._eagle_prompt_exact_base = None
             self._next_step = 0
             self._proposal_mapping = None
             try:
@@ -209,6 +211,7 @@ class DraftWindowRuntime:
                 self._eagle_frozen_starts = None
                 self._eagle_first_pass_pair = None
                 self._eagle_full_prefill_base = None
+                self._eagle_prompt_exact_base = None
                 self._proposal_mapping = None
 
     def metadata_callback(
@@ -465,6 +468,63 @@ class DraftWindowRuntime:
             raise ValueError("Eagle3 prepared live queries disagree with the current native padding extent")
         return extent_cpu, live_cpu
 
+    def _prompt_only_exact_lengths(self, step: int, num_reqs: int):
+        """Experimental producer reuse for prompt-only, non-PCP Eagle rows.
+
+        This certifies current prompt progress and actual scheduled prompt
+        widths, not the optimistic seq_lens mirror. Terminal rows have one
+        target logit and no speculative candidates, so rejection is zero;
+        continuing rows have rejected=0 in the existing sampler contract.
+        Reader selection and per-row Full/window rules remain unchanged.
+        """
+        batch = self._input_batch
+        if not self._dense_device_reads or not getattr(self.speculator, "advance_draft_positions", False):
+            return None
+        if getattr(self.speculator, "replicated_pcp", False):
+            return None
+        if not batch.is_prefilling_np[:num_reqs].all():
+            return None
+        drafts = batch.num_draft_tokens_per_req
+        if drafts is not None and drafts[:num_reqs].any():
+            return None
+        boundaries = getattr(batch, "query_start_loc_np", None)
+        logits = getattr(batch, "cu_num_logits_np", None)
+        if boundaries is None or logits is None:
+            return None
+        progress = batch.num_computed_prefill_tokens_np[:num_reqs]
+        scheduled = batch.num_scheduled_tokens[:num_reqs]
+        prompt = batch.prefill_len_np[:num_reqs]
+        ends = progress + scheduled
+        if (
+            len(boundaries) < num_reqs + 1
+            or len(logits) < num_reqs + 1
+            or not np.array_equal(np.diff(boundaries[: num_reqs + 1]), scheduled)
+            or np.any(progress < 0)
+            or np.any(scheduled <= 0)
+            or np.any(ends > prompt)
+            or np.any(ends > self.speculator.max_model_len)
+            or np.any(np.diff(logits[: num_reqs + 1])[ends == prompt] != 1)
+        ):
+            return None
+        identity = (
+            tuple(batch.req_ids),
+            tuple(batch.idx_mapping_np[:num_reqs]),
+            tuple(progress),
+            tuple(scheduled),
+            tuple(prompt),
+        )
+        if self._eagle_prompt_exact_base is None:
+            if step != 0:
+                return None
+            base = torch.tensor(ends, dtype=torch.int32, device="cpu")
+            self._eagle_prompt_exact_base = identity, base
+            self.pool.retain(self._owner, base)
+        if self._eagle_prompt_exact_base[0] != identity:
+            raise RuntimeError("Prompt-only exact preparation changed within a proposal")
+        exact = torch.clamp(self._eagle_prompt_exact_base[1] + step, max=self.speculator.max_model_len)
+        self.pool.retain(self._owner, exact)
+        return exact
+
     def _host_metadata_callback(
         self,
         step: int,
@@ -537,8 +597,20 @@ class DraftWindowRuntime:
                 rows = batch.idx_mapping_np[:num_reqs].copy()
                 full_exact_input = common_metadata.seq_lens
                 mapping = (request_ids, tuple(int(row) for row in rows))
-                if self.method == "eagle3" and step == 0:
+                prompt_exact = (
+                    self._prompt_only_exact_lengths(step, num_reqs)
+                    if self.method == "eagle3" and prepared_exact_cpu is None
+                    else None
+                )
+                if self.method == "eagle3" and step == 0 and prompt_exact is not None:
+                    # Retain the real device native/live pair and frozen starts
+                    # for a subsequent dense AR reader, without copying it.
+                    self._eagle_first_pass_device_lengths(full_exact_input, num_reqs)
+                    exact = proposal_exact = prompt_exact
+                elif self.method == "eagle3" and step == 0:
                     exact, proposal_exact = self._eagle_first_pass_lengths(full_exact_input, num_reqs)
+                elif prompt_exact is not None:
+                    exact = prompt_exact
                 elif prepared_exact_cpu is not None:
                     if mapping != prepared_mapping:
                         raise RuntimeError("Prepared exact lengths belong to another request mapping")

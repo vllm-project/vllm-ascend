@@ -883,3 +883,103 @@ def test_dense_device_callback_or_exact_fallback_keeps_the_same_window(setup, up
     assert len(completions) == 1
     with pytest.raises(RuntimeError, match="stale"):
         callback(0, common())
+
+
+@pytest.mark.parametrize("drafts", [None, (0, 0)])
+@pytest.mark.parametrize("all_terminal", [False, True])
+@pytest.mark.parametrize("max_len", [4096, 2178])
+def test_eagle_prompt_only_terminal_rows_reuse_exact_without_d2h(setup, monkeypatch, drafts, all_terminal, max_len):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    runtime.window_size, runtime.anchor_block_span = 1035, 128
+    spec.max_model_len, spec.advance_draft_positions = max_len, True
+    table = torch.arange(6 * 32, dtype=torch.int32).reshape(6, 32)
+    spec.block_tables.block_tables = [SimpleNamespace(gpu=table)]
+    spec.block_tables.kernel_block_sizes = [128]
+    spec.block_tables.num_blocks.np = np.full((1, 6), 32, dtype=np.int32)
+    state = batch(
+        computed=(1792, 1920), prompt=(2047, 2177 if all_terminal else 2303), scheduled=(255, 257), drafts=drafts
+    )
+    state.idx_mapping = torch.tensor(state.idx_mapping_np, dtype=torch.int64)
+    state.query_start_loc_np = np.array([0, 255, 512])
+    state.cu_num_logits_np = np.array([0, 1, 2 if all_terminal else 1])
+    spec.input_buffers.positions = torch.cat((torch.arange(1792, 2047), torch.arange(1920, 2177)))
+    spec.last_token_indices = torch.tensor([254, 511])
+    original_to = torch.Tensor.to
+
+    def no_exact_cpu_copy(tensor, *args, **kwargs):
+        if kwargs.get("device") == "cpu" and kwargs.get("copy") is True:
+            pytest.fail("Known prompt producer still copied current device exact lengths")
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", no_exact_cpu_copy)
+    before = table.clone()
+    with runtime.proposal_context(spec, state):
+        for step in range(3):
+            ends = (min(2047 + step, max_len), min(2177 + step, max_len))
+            metadata = common(exact=ends, upper=(2050 + step, 2180 + step))
+            metadata.query_start_loc_cpu = torch.tensor([0, 255, 512, 512] if step == 0 else [0, 1, 2, 2])
+            metadata.causal = True
+            slots, positions = metadata.slot_mapping, metadata.positions
+            apply = runtime.metadata_callback(step, 2)
+            apply(0, metadata)
+            expected_starts = [0, 0] if step == 0 else [896, 1024 if all_terminal else 0]
+            if all_terminal and step > 0:
+                assert metadata._draft_window_device_read.starts.tolist() == expected_starts
+            else:
+                assert metadata._draft_window_read.starts_cpu.tolist() == expected_starts
+            assert metadata.seq_lens[:2].tolist() == [
+                ends[0] - expected_starts[0],
+                ends[1] - expected_starts[1],
+            ]
+            assert metadata.slot_mapping is slots and metadata.positions is positions
+            assert torch.equal(table, before)
+    assert runtime._eagle_prompt_exact_base is None
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["placeholder", "query_width", "terminal_logits", "past_prompt", "decode_row", "past_limit", "replicated_pcp"],
+)
+def test_eagle_prompt_only_ambiguous_producer_keeps_exact_fallback(setup, invalid):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    spec.max_model_len, spec.advance_draft_positions = 100, True
+    state = batch(computed=(8, 24), prompt=(12, 100), scheduled=(4, 3), drafts=None)
+    state.query_start_loc_np = np.array([0, 4, 7])
+    state.cu_num_logits_np = np.array([0, 1, 1])
+    if invalid == "placeholder":
+        state.num_draft_tokens_per_req = np.array([1, 0])
+    elif invalid == "query_width":
+        state.query_start_loc_np[1] = 3
+    elif invalid == "terminal_logits":
+        state.cu_num_logits_np[1:] = 2
+    elif invalid == "past_prompt":
+        state.prefill_len_np[0] = 11
+    elif invalid == "decode_row":
+        state.is_prefilling_np[0] = False
+    elif invalid == "past_limit":
+        spec.max_model_len = 11
+    else:
+        spec.replicated_pcp = True
+    with pytest.raises(RuntimeError, match="did not consume a read projection"), runtime.proposal_context(spec, state):
+        assert runtime._prompt_only_exact_lengths(0, 2) is None
+        assert runtime._eagle_prompt_exact_base is None
+    assert runtime.pool.poisoned
+
+
+def test_eagle_prompt_only_snapshot_cpu_and_generation_scope(setup):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    spec.max_model_len, spec.advance_draft_positions = 100, True
+    state = batch(computed=(8, 24), prompt=(12, 100), scheduled=(4, 3), drafts=None)
+    state.query_start_loc_np = np.array([0, 4, 7])
+    state.cu_num_logits_np = np.array([0, 1, 1])
+    with pytest.raises(RuntimeError, match="preparation changed"), runtime.proposal_context(spec, state):
+        with torch.device("meta"):
+            snapshot = runtime._prompt_only_exact_lengths(0, 2)
+        assert snapshot.device.type == "cpu" and snapshot.tolist() == [12, 27]
+        state.num_scheduled_tokens[1] += 1
+        state.query_start_loc_np[-1] += 1
+        runtime._prompt_only_exact_lengths(1, 2)
+    assert runtime.pool.poisoned and runtime._eagle_prompt_exact_base is None
