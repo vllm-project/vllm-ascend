@@ -416,6 +416,7 @@ Key Parameter Descriptions:
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
+Use the API port configured for the selected deployment. For the 950DT example, use port `8000`.
 
 ```shell
 curl http://<node0_ip>:8000/v1/chat/completions \
