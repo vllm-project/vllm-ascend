@@ -983,3 +983,43 @@ def test_eagle_prompt_only_snapshot_cpu_and_generation_scope(setup):
         state.query_start_loc_np[-1] += 1
         runtime._prompt_only_exact_lengths(1, 2)
     assert runtime.pool.poisoned and runtime._eagle_prompt_exact_base is None
+
+
+def test_eagle_mixed_decode_prompt_without_exact_copy(setup, monkeypatch):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    runtime.window_size, runtime.anchor_block_span = 1035, 128
+    spec.max_model_len, spec.advance_draft_positions = 4096, True
+    table = torch.arange(6 * 32, dtype=torch.int32).reshape(6, 32)
+    spec.block_tables.block_tables = [SimpleNamespace(gpu=table)]
+    spec.block_tables.kernel_block_sizes = [128]
+    spec.block_tables.num_blocks.np = np.full((1, 6), 32, dtype=np.int32)
+    state = batch(computed=(1792, 1920), prompt=(1, 2303), scheduled=(4, 257), drafts=(3, 0))
+    state.idx_mapping = torch.tensor(state.idx_mapping_np, dtype=torch.int64)
+    spec.input_buffers.positions = torch.cat((torch.arange(1792, 1796), torch.arange(1920, 2177)))
+    spec.last_token_indices = torch.tensor([2, 260])  # One rejected decoder query.
+    original_to = torch.Tensor.to
+
+    def no_exact_cpu_copy(tensor, *args, **kwargs):
+        if kwargs.get("device") == "cpu" and kwargs.get("copy") is True:
+            pytest.fail("Mixed decode/prompt metadata copied current device exact")
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", no_exact_cpu_copy)
+    before = table.clone()
+    with runtime.proposal_context(spec, state):
+        for step, ends in enumerate(((1796, 2177), (1796, 2178), (1797, 2179))):
+            metadata = common(exact=ends, upper=(1800, 2180))
+            boundaries = [0, 4, 261, 261] if step == 0 else [0, 1, 2, 2]
+            metadata.query_start_loc_cpu = torch.tensor(boundaries, dtype=torch.int32)
+            metadata.query_start_loc = metadata.query_start_loc_cpu.clone()
+            metadata.causal = True
+            slots, positions = metadata.slot_mapping, metadata.positions
+            runtime.metadata_callback(step, 2)(0, metadata)
+            read = metadata._draft_window_device_read
+            assert read.starts.tolist() == [640, 0]
+            assert read.seq_lens.tolist() == [1155 if step == 0 else ends[0] - 640, ends[1]]
+            assert read.num_query_tokens == (261 if step == 0 else 2)
+            assert read.capacity == 2208
+            assert metadata.slot_mapping is slots and metadata.positions is positions
+            assert torch.equal(table, before)

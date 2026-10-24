@@ -1326,7 +1326,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     self.value_cache,
                     self.scale,
                 )
-                real_tokens = device_read.num_reqs * device_read.query_width
+                real_tokens = device_read.num_query_tokens
                 output[:real_tokens] = result.reshape(real_tokens, *output.shape[1:])
                 output[real_tokens:] = 0
                 return output

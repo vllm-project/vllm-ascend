@@ -35,6 +35,94 @@ class NativeCompletion:
         self.event.synchronize()
 
 
+@pytest.mark.parametrize("operation", ["plan", "gather", "pack"])
+def test_private_kernel_outputs_survive_exception_after_real_enqueue(monkeypatch, operation):
+    from vllm_ascend.ops.triton.v2.spec_decode import draft_window
+
+    pool = DraftWindowOwnerPool(1)
+    stream = torch.npu.Stream()
+    held_outputs = []
+    diagnostic_events = []
+    kernel_name = {
+        "plan": "_plan_draft_window",
+        "gather": "_gather_draft_kv_fp32",
+        "pack": "_pack_draft_query_indices",
+    }[operation]
+    original = getattr(draft_window, kernel_name)
+
+    class RaiseAfterEnqueue:
+        def __getitem__(self, grid):
+            launcher = original[grid]
+
+            def launch(*args):
+                outputs = args[7:11] if operation == "plan" else args[3:5] if operation == "gather" else args[1:3]
+                assert all(any(value is output for value in owner.retained) for output in outputs)
+                held_outputs.extend(outputs)
+                launcher(*args)
+                # This real event is a diagnostic cleanup token only. The
+                # production operation deliberately fails without receiving
+                # a token, so its owner must remain quarantined.
+                event = torch.npu.Event()
+                event.record(stream)
+                diagnostic_events.append(event)
+                raise RuntimeError("injected host exception after real kernel enqueue")
+
+            return launch
+
+    monkeypatch.setattr(draft_window, kernel_name, RaiseAfterEnqueue())
+    with (
+        pytest.raises(RuntimeError, match="after real kernel enqueue"),
+        torch.npu.stream(stream),
+        pool.operation(lambda: NativeCompletion(stream)) as owner,
+    ):
+        pool.begin_native(owner)
+        retain = lambda *objects: pool.retain(owner, *objects)
+        if operation == "plan":
+            draft_window.plan_draft_window(
+                torch.arange(8, dtype=torch.int32, device="npu").reshape(1, 8),
+                torch.tensor([0], dtype=torch.int64, device="npu"),
+                torch.tensor([17], dtype=torch.int32, device="npu"),
+                None,
+                block_span=4,
+                anchor_span=4,
+                window=8,
+                capacity=12,
+                query_width=3,
+                causal=True,
+                retain=retain,
+            )
+        elif operation == "gather":
+            draft_window.gather_draft_kv_fp32(
+                torch.tensor([[1, 2, 3]], dtype=torch.int64, device="npu"),
+                torch.arange(64, dtype=torch.bfloat16, device="npu").reshape(2, 4, 1, 8),
+                torch.ones((2, 4, 1, 8), dtype=torch.bfloat16, device="npu"),
+                retain=retain,
+            )
+        else:
+            draft_window.pack_draft_query_indices(
+                torch.tensor([0, 2, 5], dtype=torch.int32, device="npu"), 5, 3, retain=retain
+            )
+    assert diagnostic_events and held_outputs
+    assert owner.state is DraftWindowOwnerState.QUARANTINED
+    assert all(any(value is output for value in owner.retained) for output in held_outputs)
+    with pytest.raises(RuntimeError, match="quarantined"):
+        pool.acquire()
+    diagnostic_events[0].synchronize()
+    if operation == "plan":
+        assert held_outputs[1].cpu().tolist() == [8]
+        assert held_outputs[2].cpu().tolist() == [9]
+    elif operation == "gather":
+        torch.testing.assert_close(held_outputs[0].cpu().flatten(), torch.arange(8, 32, dtype=torch.float32))
+        assert held_outputs[1].eq(1).all()
+    else:
+        assert held_outputs[0].cpu().tolist() == [[0, 0, 1], [2, 3, 4]]
+        assert held_outputs[1].cpu().tolist() == [1, 2, 3, 4, 5]
+    # Even an external diagnostic wait does not make production's unknown
+    # completion contract safe to reuse.
+    with pytest.raises(RuntimeError, match="quarantined"):
+        pool.acquire()
+
+
 @pytest.mark.parametrize("failure", ["host_after_enqueue", "event_create", "event_record", "submit_result"])
 def test_native_enqueue_failure_quarantines_backing(failure):
     pool = DraftWindowOwnerPool(1)

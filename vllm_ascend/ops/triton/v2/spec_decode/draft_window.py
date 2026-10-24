@@ -2,11 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Plan private eager Draft reads from current device lengths."""
 
+from collections.abc import Callable
+
 import torch
 from vllm.triton_utils import tl, triton
 
 PLAN_BLOCK_SIZE = 256
 GATHER_TOKEN_BLOCK_SIZE = 8
+
+
+@triton.jit
+def _pack_draft_query_indices(offsets, packed, restored, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    local = tl.arange(0, BLOCK)
+    begin = tl.load(offsets + row).to(tl.int64)
+    end = tl.load(offsets + row + 1).to(tl.int64)
+    width = end - begin
+    padding = WIDTH - width
+    tl.store(packed + row * WIDTH + local, begin + tl.maximum(local - padding, 0), mask=local < WIDTH)
+    tl.store(restored + begin + local, row * WIDTH + padding + local, mask=local < width)
+
+
+def pack_draft_query_indices(
+    offsets: torch.Tensor, total: int, query_width: int, *, retain: Callable[..., None] | None = None
+):
+    """Right-align current queries without reading device boundaries on Host."""
+    n = offsets.numel() - 1
+    packed = torch.empty((n, query_width), dtype=torch.int64, device=offsets.device)
+    restored = torch.empty(total, dtype=torch.int64, device=offsets.device)
+    if retain is not None:
+        retain(offsets, packed, restored)
+    _pack_draft_query_indices[(n,)](offsets, packed, restored, query_width, triton.next_power_of_2(query_width))
+    return packed, restored
 
 
 @triton.jit
@@ -41,7 +68,7 @@ def _gather_draft_kv_fp32(
 
 
 def gather_draft_kv_fp32(
-    slots: torch.Tensor, keys: torch.Tensor, values: torch.Tensor
+    slots: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, *, retain: Callable[..., None] | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather validated ND token rows directly into private native FP32 operands.
 
@@ -54,6 +81,8 @@ def gather_draft_kv_fp32(
     shape = (*slots.shape, *keys.shape[2:])
     gathered_keys = torch.empty(shape, dtype=torch.float32, device=keys.device)
     gathered_values = torch.empty_like(gathered_keys)
+    if retain is not None:
+        retain(slots, keys, values, gathered_keys, gathered_values)
     token_size = keys.shape[2] * keys.shape[3]
     _gather_draft_kv_fp32[(triton.cdiv(slots.numel(), GATHER_TOKEN_BLOCK_SIZE),)](
         slots,
@@ -79,6 +108,8 @@ def _plan_draft_window(
     exact,
     query_ends,
     frozen,
+    full_rows,
+    query_offsets,
     slots,
     starts,
     visible,
@@ -97,6 +128,8 @@ def _plan_draft_window(
     CAUSAL: tl.constexpr,
     HAS_FROZEN: tl.constexpr,
     HAS_QUERY_ENDS: tl.constexpr,
+    HAS_FULL_ROWS: tl.constexpr,
+    HAS_QUERY_OFFSETS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     req = tl.program_id(0)
@@ -109,6 +142,8 @@ def _plan_draft_window(
         start = tl.load(frozen + req * FROZEN_STRIDE).to(tl.int64)
     else:
         start = tl.maximum(end - WINDOW, 0) // ANCHOR_SPAN * ANCHOR_SPAN
+    if HAS_FULL_ROWS:
+        start = tl.where(tl.load(full_rows + req), 0, start)
     length = end - start
     if tl.program_id(1) == 0:
         tl.store(starts + req, start)
@@ -127,6 +162,9 @@ def _plan_draft_window(
     if CAUSAL:
         query_end = tl.load(query_ends + req * QUERY_END_STRIDE).to(tl.int64) if HAS_QUERY_ENDS else end
         excluded = excluded | (column > query_end - start - QUERY_WIDTH + query)
+    if HAS_QUERY_OFFSETS:
+        query_length = tl.load(query_offsets + req + 1) - tl.load(query_offsets + req)
+        excluded = excluded | (query < QUERY_WIDTH - query_length)
     tl.store(mask + req * QUERY_WIDTH * CAPACITY + index, excluded, mask=valid)
 
 
@@ -143,18 +181,28 @@ def plan_draft_window(
     query_width: int,
     causal: bool,
     query_ends: torch.Tensor | None = None,
+    full_rows: torch.Tensor | None = None,
+    query_offsets: torch.Tensor | None = None,
+    retain: Callable[..., None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return owned slots/S/V/mask; Host values are allocation geometry only."""
     n = exact.numel()
     slots = torch.empty((n, capacity), dtype=torch.int64, device=exact.device)
     starts, visible = torch.empty_like(exact), torch.empty_like(exact)
     mask = torch.empty((n, 1, query_width, capacity), dtype=torch.bool, device=exact.device)
+    if retain is not None:
+        # A launcher can raise after submitting device work. The proposal
+        # must already own every private output when that happens, including
+        # when recording the exception-path completion subsequently fails.
+        retain(table, rows, exact, frozen, query_ends, full_rows, query_offsets, slots, starts, visible, mask)
     _plan_draft_window[(n, triton.cdiv(query_width * capacity, PLAN_BLOCK_SIZE))](
         table,
         rows,
         exact,
         exact if query_ends is None else query_ends,
         exact if frozen is None else frozen,
+        exact if full_rows is None else full_rows,
+        exact if query_offsets is None else query_offsets,
         slots,
         starts,
         visible,
@@ -173,6 +221,8 @@ def plan_draft_window(
         causal,
         frozen is not None,
         query_ends is not None and query_ends is not exact,
+        full_rows is not None,
+        query_offsets is not None,
         PLAN_BLOCK_SIZE,
     )
     return slots, starts, visible, mask

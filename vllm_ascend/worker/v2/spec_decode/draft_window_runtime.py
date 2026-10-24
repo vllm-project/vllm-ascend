@@ -247,22 +247,22 @@ class DraftWindowRuntime:
                 # no rejection uncertainty. Use that current prompt producer,
                 # never the optimistic CPU seq_lens mirror, for native lengths.
                 return self._full_prefill_metadata_callback(step, num_reqs)
-            # An unfinished prompt retains Full reads at every AR step.
-            # A window-sized device read cannot represent S=0 when E>W.
-            if (
-                legacy is not None
-                and self._dense_device_reads
-                and not continuing_prefill_rows(self._input_batch, num_reqs).any()
+            # Mixed terminal/continuing prompt-only rows retain their
+            # existing certified producer and native Full/window handling.
+            # Mixed decode/prompt rows require the device-exact Full-capacity
+            # path because rejection can make a CPU mirror optimistic.
+            if continuing_prefill_rows(self._input_batch, num_reqs).any() and (
+                self._input_batch.is_prefilling_np[:num_reqs].all()
+                or not getattr(self.speculator, "advance_draft_positions", False)
+                or getattr(self.speculator, "replicated_pcp", False)
             ):
+                return legacy
+            if legacy is not None and self._dense_device_reads:
                 if step > 0 and self._eagle_frozen_starts is None:
                     raise RuntimeError("Eagle3 AR read has no current proposal anchor")
                 return self._dense_metadata_callback(num_reqs, legacy, eagle_step=step)
             return legacy
-        if (
-            legacy is not None
-            and getattr(self, "_dense_device_reads", False)
-            and not continuing_prefill_rows(self._input_batch, num_reqs).any()
-        ):
+        if legacy is not None and getattr(self, "_dense_device_reads", False):
             return self._dense_metadata_callback(num_reqs, legacy)
         return legacy
 
@@ -334,10 +334,13 @@ class DraftWindowRuntime:
         full_exact = None
         use_device = None
         sources = None
+        full_rows_cpu = None
+        packed_query_cpu = packed_query_device = None
         query_width = 1 if eagle_step is not None else self.speculator.num_query_per_req
 
         def apply(gid: int, common: Any) -> None:
             nonlocal mapping, full_exact, use_device, sources, query_width
+            nonlocal full_rows_cpu, packed_query_cpu, packed_query_device
             if gid not in self.gids:
                 return
             if self._owner is not owner or gid in seen:
@@ -357,27 +360,47 @@ class DraftWindowRuntime:
                 upper = common.seq_lens_cpu_upper_bound[:num_reqs]
                 widths = common.query_start_loc_cpu[: num_reqs + 1].diff()
                 if eagle_step == 0:
-                    # Decode keeps rejected query rows in its native layout.
-                    # A uniform K+1 layout can use the same device mask as AR;
-                    # prefill and ragged queries retain their Full/legacy path.
-                    query_width = int(widths[0])
+                    query_width = int(widths.max())
+                continuing = continuing_prefill_rows(batch, num_reqs)
+                full_rows = continuing | (batch.is_prefilling_np[:num_reqs] if eagle_step == 0 else False)
+                full_rows_cpu = torch.tensor(full_rows, dtype=torch.bool, device="cpu")
                 # Keep the existing exact path when scheduling bounds do not
-                # prove allocated address capacity, or query widths are ragged.
-                use_device = bool((widths == query_width).all()) and all(
-                    all(
-                        0 < int(bound) <= count * source.block_span for bound, count in zip(upper, source.valid_columns)
+                # prove allocated address capacity. Parallel methods preserve
+                # their fixed native query width; Eagle may right-align its
+                # current ragged queries in private attention scratch.
+                use_device = (
+                    bool((widths > 0).all())
+                    and (eagle_step == 0 or bool((widths == query_width).all()))
+                    and all(
+                        all(
+                            0 < int(bound) <= count * source.block_span
+                            for bound, count in zip(upper, source.valid_columns)
+                        )
+                        for source in sources.values()
                     )
-                    for source in sources.values()
                 )
                 if eagle_step == 0:
                     assert self.static_k is not None
-                    use_device = (
-                        use_device
-                        and 0 < query_width <= self.static_k + 1
-                        and not batch.is_prefilling_np[:num_reqs].any()
-                    )
+                    prefilling = batch.is_prefilling_np[:num_reqs]
+                    if prefilling.any():
+                        # Entire prompt-only batches already have the cheaper
+                        # certified CPU producer. Only mixed decode/prompt
+                        # batches need a Full-capacity device read here.
+                        use_device = (
+                            use_device
+                            and not prefilling.all()
+                            and bool(
+                                getattr(self.speculator, "advance_draft_positions", False)
+                                and not getattr(self.speculator, "replicated_pcp", False)
+                            )
+                        )
+                    else:
+                        use_device = use_device and query_width <= self.static_k + 1
                     if use_device:
                         self._eagle_first_pass_device_lengths(common.seq_lens, num_reqs)
+                if use_device and not bool((widths == query_width).all()):
+                    packed_query_cpu = common.query_start_loc_cpu[: num_reqs + 1].clone()
+                    packed_query_device = common.query_start_loc[: num_reqs + 1]
             if not use_device:
                 legacy(gid, common)
                 return
@@ -385,6 +408,11 @@ class DraftWindowRuntime:
                 raise RuntimeError("Dense Draft request mapping changed within a proposal")
             if common.seq_lens.data_ptr() != full_exact.data_ptr():
                 raise ValueError("Dense Draft groups must share current preparation lengths")
+            if packed_query_cpu is not None and (
+                not torch.equal(common.query_start_loc_cpu[: num_reqs + 1], packed_query_cpu)
+                or common.query_start_loc.data_ptr() != packed_query_device.data_ptr()
+            ):
+                raise ValueError("Dense Draft groups must share current packed query boundaries")
             self._proposal_mapping = mapping
             retain = lambda *objects: self.pool.retain(owner, *objects)
             first_pass = self._eagle_first_pass_pair if eagle_step == 0 else None
@@ -400,6 +428,9 @@ class DraftWindowRuntime:
                 retain=retain,
                 frozen_starts=self._eagle_frozen_starts if eagle_step is not None else None,
                 query_ends=None if first_pass is None else first_pass[0],
+                full_rows_cpu=full_rows_cpu,
+                query_start_loc_cpu=packed_query_cpu,
+                query_start_loc_device=packed_query_device,
             )
             retain(common)
             read.apply(common)

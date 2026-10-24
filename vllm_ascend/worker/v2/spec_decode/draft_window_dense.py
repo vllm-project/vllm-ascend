@@ -26,6 +26,12 @@ class DenseDraftRead:
     query_width: int
     retain: Callable[..., None]
     may_have_empty_rows: bool = False
+    query_indices: torch.Tensor | None = None
+    output_indices: torch.Tensor | None = None
+
+    @property
+    def num_query_tokens(self) -> int:
+        return self.output_indices.numel() if self.output_indices is not None else self.num_reqs * self.query_width
 
     @property
     def num_reqs(self) -> int:
@@ -62,6 +68,9 @@ def prepare_dense_draft_read(
     retain: Callable[..., None],
     frozen_starts: torch.Tensor | None = None,
     query_ends: torch.Tensor | None = None,
+    full_rows_cpu: torch.Tensor | None = None,
+    query_start_loc_cpu: torch.Tensor | None = None,
+    query_start_loc_device: torch.Tensor | None = None,
 ) -> DenseDraftRead:
     """Snapshot current device E and canonical addresses without Host exact.
 
@@ -115,9 +124,55 @@ def prepare_dense_draft_read(
         or frozen_starts.dtype not in (torch.int32, torch.int64)
     ):
         raise ValueError("Frozen Draft anchors must match current request rows and device")
+    full_rows = None
+    if full_rows_cpu is not None:
+        if full_rows_cpu.device.type != "cpu" or full_rows_cpu.dtype != torch.bool or full_rows_cpu.shape != (n,):
+            raise ValueError("Full-read phase rows require one current CPU boolean per request")
+        if full_rows_cpu.any():
+            # This copies phase facts, never device exact lengths. Retain an
+            # independent Host snapshot until the asynchronous H2D completes.
+            phase_snapshot = full_rows_cpu.clone()
+            full_rows = phase_snapshot.to(exact.device, non_blocking=True)
+            retain(phase_snapshot, full_rows)
+    query_offsets = query_indices = output_indices = None
+    if (query_start_loc_cpu is None) != (query_start_loc_device is None):
+        raise ValueError("Packed queries require current CPU and device boundaries")
+    if query_start_loc_cpu is not None:
+        if (
+            query_start_loc_cpu.device.type != "cpu"
+            or query_start_loc_cpu.dtype not in (torch.int32, torch.int64)
+            or query_start_loc_cpu.shape != (n + 1,)
+            or query_start_loc_device.shape != (n + 1,)
+            or query_start_loc_device.device != exact.device
+            or query_start_loc_device.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError("Packed query boundaries must match the active preparation")
+        widths = query_start_loc_cpu.diff()
+        if int(query_start_loc_cpu[0]) != 0 or bool(((widths <= 0) | (widths > query_width)).any()):
+            raise ValueError("Packed query widths exceed their current allocation bound")
+        if not bool((widths == query_width).all()):
+            query_offsets = query_start_loc_device.clone()
+            total = int(query_start_loc_cpu[-1])
+            if exact.device.type == "npu":
+                from vllm_ascend.ops.triton.v2.spec_decode.draft_window import pack_draft_query_indices
+
+                query_indices, output_indices = pack_draft_query_indices(
+                    query_offsets, total, query_width, retain=retain
+                )
+            else:
+                local = torch.arange(query_width, device=exact.device)[None, :]
+                row_widths = query_offsets.diff()
+                padding = query_width - row_widths
+                query_indices = query_offsets[:-1, None] + (local - padding[:, None]).clamp(min=0)
+                output_indices = torch.cat(
+                    [row * query_width + padding[row] + torch.arange(int(width)) for row, width in enumerate(widths)]
+                )
+            retain(query_offsets, query_indices, output_indices)
     # Both are allocation bounds: V <= E <= U and V <= W+B-1. Avoid
     # window-sized padding on short contexts without using U to choose S/V.
     capacity_bound = min(window_size + anchor_span - 1, int(upper_cpu.max()))
+    if full_rows is not None:
+        capacity_bound = max(capacity_bound, int(upper_cpu[full_rows_cpu].max()))
     capacity = (capacity_bound + 31) // 32 * 32
     if exact.device.type == "npu":
         from vllm_ascend.ops.triton.v2.spec_decode.draft_window import plan_draft_window
@@ -134,6 +189,9 @@ def prepare_dense_draft_read(
             query_width=query_width,
             causal=causal,
             query_ends=query_ends,
+            full_rows=full_rows,
+            query_offsets=query_offsets,
+            retain=retain,
         )
     else:
         # Keep a CPU execution path for geometry/ownership contract tests.
@@ -143,6 +201,9 @@ def prepare_dense_draft_read(
             else frozen_starts.clone()
         )
         visible = exact - starts
+        if full_rows is not None:
+            starts = torch.where(full_rows, 0, starts)
+            visible = exact - starts
         columns = torch.arange(capacity, device=exact.device, dtype=torch.int64)
         absolute = starts[:, None] + torch.minimum(columns[None, :], visible[:, None] - 1)
         block_columns = torch.div(absolute, source.block_span, rounding_mode="floor")
@@ -158,6 +219,9 @@ def prepare_dense_draft_read(
                 + torch.arange(query_width, device=exact.device)[None, :]
             )
             mask = mask | (columns[None, None, :] > queries[:, :, None])
+        if query_offsets is not None:
+            padding = query_width - query_offsets.diff()
+            mask = mask | (torch.arange(query_width)[None, :, None] < padding[:, None, None])
         mask = mask[:, None].contiguous()
     read = DenseDraftRead(
         slots,
@@ -168,6 +232,8 @@ def prepare_dense_draft_read(
         query_width,
         retain,
         causal and window_size < query_width,
+        query_indices,
+        output_indices,
     )
     retain(read, exact)
     if query_ends is not exact:
@@ -213,7 +279,7 @@ def gather_dense_draft_kv(
         # Raw Triton addresses require an ND physical layout. Other formats
         # retain the existing format-aware PyTorch gather/conversion path.
         if all(torch_npu.get_npu_format(cache) in (0, 2) for cache in (key_cache, value_cache)):
-            keys, values = gather_draft_kv_fp32(read.slots, key_cache, value_cache)
+            keys, values = gather_draft_kv_fp32(read.slots, key_cache, value_cache, retain=read.retain)
             read.retain(keys, values)
             return keys, values
     slots = read.slots.reshape(-1)
@@ -252,7 +318,11 @@ def dense_draft_attention(
     import torch_npu
 
     keys_fp32, values_fp32 = gather_dense_draft_kv(read, key_cache, value_cache, output_dtype=torch.float32)
-    query = query[: read.num_reqs * read.query_width].reshape(read.num_reqs, read.query_width, *query.shape[-2:])
+    query = query[: read.num_query_tokens]
+    if read.query_indices is not None:
+        query = query.index_select(0, read.query_indices.flatten())
+        read.retain(query)
+    query = query.reshape(read.num_reqs, read.query_width, *query.shape[-2:])
     queries_fp32 = query.float().contiguous()
     read.retain(queries_fp32, keys_fp32, values_fp32)
     outputs = torch_npu.npu_fusion_attention(
@@ -274,5 +344,7 @@ def dense_draft_attention(
         read.retain(empty_rows)
         result.masked_fill_(empty_rows, 0)
     output = result.to(query.dtype).flatten(0, 1)
+    if read.output_indices is not None:
+        output = output.index_select(0, read.output_indices)
     read.retain(output)
     return output
