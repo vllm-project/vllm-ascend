@@ -386,6 +386,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=None,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -441,6 +442,7 @@ def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata
         vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
         num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
         max_model_len=1024,
+        recoverssm=None,
     )
     input_batch = SimpleNamespace(
         num_reqs=3,

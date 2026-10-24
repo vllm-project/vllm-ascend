@@ -896,7 +896,7 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_start_block_idx = num_computed_tokens // kernel_block_size
             remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
         elif isinstance(spec, MambaSpec):
-            local_kernel_block_ids = [local_group_block_ids[-self.num_speculative_tokens - 1]]
+            local_kernel_block_ids = [local_group_block_ids[-spec.num_speculative_blocks - 1]]
             remote_kernel_block_ids = [remote_group_block_ids[-1]]
         else:
             raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")

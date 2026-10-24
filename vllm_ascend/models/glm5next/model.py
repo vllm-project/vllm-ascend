@@ -94,6 +94,32 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
+from .recoverssm_config import use_glm_recoverssm
+
+
+def _get_glm5next_text_config(model_config):
+    config = model_config.hf_text_config
+    # Preserve the aliases/defaults supplied by vLLM's legacy GLM config.
+    # Transformers exposes the checkpoint names without these serving aliases.
+    layer_types = getattr(config, "layer_types", None) or []
+    defaults = {
+        "num_experts_per_token": getattr(config, "num_experts_per_tok", 7),
+        "moe_renormalize": getattr(config, "norm_topk_prob", True),
+        "mhc_num_residual_streams": getattr(config, "hc_mult", 4),
+        "mhc_sinkhorn_iterations": getattr(config, "hc_sinkhorn_iters", 20),
+        "mhc_tau": 0.05,
+        "mhc_post_mult_value": 2.0,
+        "mla_nope": getattr(config, "mla_use_nope", True),
+        "logit_scale": 1.0,
+        "rope_parameters": None,
+        "is_moe": getattr(config, "n_routed_experts", None) is not None,
+        "is_linear_attn": "linear_attention" in layer_types,
+        "layers_block_type": ["linear_attention" if t == "linear_attention" else "attention" for t in layer_types],
+    }
+    for name, value in defaults.items():
+        if not hasattr(config, name):
+            setattr(config, name, value)
+    return config
 
 
 class Glm5NextMLP(nn.Module):
@@ -298,10 +324,15 @@ class Glm5NextDecoderLayer(nn.Module):
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
-        self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
+        is_kda_layer = (
+            config.layer_types is not None
+            and layer_idx < len(config.layer_types)
+            and config.layer_types[layer_idx] == "linear_attention"
+        )
+        self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        if config.is_kda_layer(layer_idx):
+        if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
                 config=config,
                 vllm_config=vllm_config,
@@ -561,7 +592,7 @@ class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = _get_glm5next_text_config(vllm_config.model_config)
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -850,7 +881,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         super().__init__()
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
-        self.config = self.model_config.hf_config
+        self.config = _get_glm5next_text_config(self.model_config)
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
         self.model = Glm5NextModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
@@ -885,25 +916,33 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
+        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
+        hf_config = _get_glm5next_text_config(vllm_config.model_config)
         tp_size = parallel_config.tensor_parallel_size
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
+        if use_glm_recoverssm(vllm_config):
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(

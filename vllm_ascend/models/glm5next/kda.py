@@ -30,7 +30,9 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
@@ -122,7 +124,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        if self.use_recoverssm:
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, self.model_config.dtype)
+        return dtypes
 
     def get_state_shape(
         self,
@@ -131,13 +136,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # (AscendC causal-conv with num_accepted_tokens) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
-        return MambaStateShapeCalculator.kda_state_shape(
+        shapes = MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
+        if self.use_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                shapes, self.num_heads, self.head_dim, self.tp_size, self.num_spec + 1
+            )
+        return shapes
 
     def __init__(
         self,
@@ -146,6 +156,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
+        self.use_recoverssm = use_glm_recoverssm(vllm_config)
         saved_quant_config = vllm_config.quant_config
         try:
             vllm_config.quant_config = None
@@ -260,7 +271,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             projection_size,
             self.hidden_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=saved_quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -280,6 +291,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
         self.kda_lower_bound = config.linear_lower_bound
+        self.gate_lower_bound = self.kda_lower_bound
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
@@ -362,14 +374,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         non_spec_state_indices_tensor = attn_metadata_narrowed.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
         # Spec-decode metadata (all None when speculative decoding is disabled).
-        spec_sequence_masks = attn_metadata_narrowed.spec_sequence_masks
         spec_query_start_loc = attn_metadata_narrowed.spec_query_start_loc
         spec_state_indices_tensor = attn_metadata_narrowed.spec_state_indices_tensor
         spec_token_indx = attn_metadata_narrowed.spec_token_indx
         non_spec_token_indx = attn_metadata_narrowed.non_spec_token_indx
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
-        use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
@@ -378,7 +389,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        (conv_state, recurrent_state) = constant_caches
+        conv_state, recurrent_state, *records = constant_caches
         # AscendC consumes [cache, state_len, dim]. Preserve the original storage.
         # Layout is process-global and resolved once at init (see __init__).
         if self._conv_state_dim_first:
@@ -493,21 +504,45 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Prefill copies its output and speculative dispatch scatters both token
         # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
-            spec_output = recurrent_kda(
-                rearrange(q_spec),
-                rearrange(k_spec),
-                rearrange(v_spec),
-                g1_spec,
-                beta_spec,
-                recurrent_state,
-                spec_query_start_loc[: num_spec_decodes + 1],
-                spec_state_indices_tensor,
-                self.A_log,
-                self.dt_bias,
-                lower_bound,
-                num_accepted_tokens,
-            )
-            core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
+            if self.use_recoverssm:
+                correction_cache, kg_cache = records
+                # One paged checkpoint per request; verification only records
+                # compact updates. MRV2 commits after rejection sampling.
+                spec_output = kda_recoverssm_verify(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    self.A_log.reshape(-1),
+                    self.dt_bias,
+                    lower_bound,
+                    recurrent_state,
+                    correction_cache,
+                    kg_cache,
+                    spec_query_start_loc,
+                    spec_state_indices_tensor[:, 0],
+                    self.num_spec + 1,
+                )
+            else:
+                spec_output = recurrent_kda(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    recurrent_state,
+                    spec_query_start_loc[: num_spec_decodes + 1],
+                    spec_state_indices_tensor,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                    num_accepted_tokens,
+                )
+            if spec_token_indx is None:
+                core_attn_out[:, : spec_output.shape[1]].copy_(spec_output)
+            else:
+                core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
             maybe_save_kv_layer_to_connector("", [])
