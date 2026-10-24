@@ -16,18 +16,21 @@ at 32k, up to +381% end-to-end throughput in the original evaluation).
 
 ## Configuration
 
-The window is enabled through `additional_config` and is available for the
-EAGLE3 / DFlash / DSpark draft paths on the default (MRV1) model runner:
+The window is enabled through `additional_config` for supported
+EAGLE3 / DFlash / DSpark draft consumers. MRV2 requires an explicitly eager
+Draft model; Target Graph selection remains independent. See the MRV2
+consumer and validation limits below before choosing a configuration.
 
 ```json
 {"draft_window_size": 2048}
 ```
 
-It is disabled by default (key absent). MTP force-disables it (MTP reuses the
-target's own layers, so windowing the draft would window the target); for a
-DSpark draft that was natively trained together with a DeepSeek-V4 target, a
-warning is logged because the draft is already long-context stable and
-windowing degrades acceptance.
+It is disabled by default (key absent). On MRV2, MTP and the config-identified
+built-in co-trained DeepSeek-V4 DSpark category ignore the window with a
+warning while retaining their original speculative method. Eagle3 follows
+the switch, including co-trained Eagle3 models. Checkpoint path names do not
+identify the V4 exception. The existing MRV1 adapter and its policy remain
+separate from the MRV2 implementation described below.
 
 ## Window math
 
@@ -128,9 +131,11 @@ Eagle3's first pass preserves rejected query padding in the native layout.
 Its logical proposal end is the current last valid query position plus one;
 the padded native extent must not choose the frozen anchor. For example,
 live E=1159, native extent=1160, K=3, W=1035 and B=128 require S=0, whereas
-using the native extent would incorrectly choose S=128. The runtime snapshots
-both current device values in one combined Host copy, shared across groups.
-This corrects the anchor; it does not remove Eagle3's remaining synchronization.
+using the native extent would incorrectly choose S=128. For an eligible
+uniform decode layout, the runtime keeps both values on device and freezes
+the anchor there. Legacy first-pass consumers take one combined current Host
+snapshot, shared across groups. Prefill, ragged layouts and other legacy
+consumers retain their exact synchronization.
 
 Native first-pass lengths retain the original padded query alignment. With R
 rejected query slots, native extent=E+R and padded query count=Q+R, so their
@@ -156,11 +161,15 @@ retain their original query/write coordinates. DSA-CP needs a distinct
 provider for its local query ranges and global KV read coordinates.
 
 Providers distinguish direct GQA, ordinary MLA, standard SFA with its indexer,
-and uncompressed DSA. Legacy DSA-CP is rejected by the fixed MRV2 startup
-contract before a Window provider can run. PCP is a separate mechanism and
-does not satisfy this missing capability. The inventory also rejects the
-legacy builder if reached directly; its ordinary metadata construction keeps
-the baseline behavior. MLA and SFA preserve full absolute rotary inputs
+and uncompressed DSA. MRV2 Target DSA-CP is admitted for the uncompressed SFA
+MLA route with sequence-parallel MoE, PP=1 and DCP=1. Its existing builder
+receives padded model-input counts for TP token projection, while actual
+query/write coordinates remain separate. The Draft provider is still chosen
+from its own actual consumer; a Target CP flag does not turn a dense Draft
+into a sharded reader. Compressed DSA and other PP/DCP compositions retain
+their startup guard. A sharded Draft consumer without a corresponding
+provider is rejected. PCP is separate and does not satisfy an unimplemented
+DSA-CP route. MLA and SFA preserve full absolute rotary inputs
 while taking ownership of scratch that would otherwise be overwritten.
 DSA native-window reads must remain a subset of the baseline native read set;
 the provider does not infer residency from stale prefix table entries.
@@ -187,12 +196,23 @@ mechanism unless the executor separately establishes device completion. The
 final event must cover all readers, including any secondary communication
 stream; retaining a Python reference alone does not establish that boundary.
 
-### Unresolved async-first architecture constraint
+### Device exact consumers and remaining async-first constraint
 
-The current implementation generally obtains an exact CPU length snapshot
-once per metadata build and shares it across groups: one added copy per
-normal parallel proposal and K copies per K-step Eagle3 proposal. DSpark
-with ordinary MLA and no DCP is an explicit exception: its existing preparation
+Eligible ordinary ND GQA DSpark/DFlash proposals use current device exact
+lengths to plan starts, valid KV addresses and attention masks in one Triton
+kernel. Only initialized readable KV rows enter private scratch; capacity
+padding repeats the last valid row and remains masked. FP32 native attention
+consumes the mask without extracting exact device lengths on Host. Its
+workspace and conversion costs remain part of the performance evaluation.
+
+Eagle3 uses this consumer for eligible uniform non-prefill first passes and
+later one-token AR steps, retaining the proposal's frozen start. Continuing
+prefill remains on the exact Full-read path at every step, including mixed
+batches. First prefill and ragged layouts also retain their legacy path.
+
+Legacy consumers obtain one current exact CPU snapshot per metadata build,
+shared across groups. DSpark with ordinary MLA and no DCP is an explicit
+exception: its existing preparation
 already completes a fresh CPU copy of the current Draft lengths. The caller
 binds that snapshot to the current device prefix and request mapping; the
 proposal owner retains it, avoiding a second Window copy. This does not reuse
@@ -218,8 +238,8 @@ Generic parallel GQA drafting already selects device lengths and calls
 projection now certifies its owned CPU/device exact pair to this selector,
 so parallel GQA does not repeat that transfer. Replacing any certified read
 operand invalidates the pair. OFF leaves no certificate on common metadata
-and keeps the baseline selection. The initial Window exact D2H remains;
-this reuse does not resolve the async-first architecture constraint.
+and keeps the baseline selection. The initial legacy Window exact D2H remains;
+this reuse does not resolve the whole async-first architecture constraint.
 Default CPU-to-device
 copies for projection indices also require an asynchronous staging contract.
 SFA also has existing device-length consumers that can be reused; this does
@@ -289,8 +309,10 @@ avoids multiplying unused buffers across proposal lanes and AR steps.
 Device-metadata setup allocates before deferred work/capture. This changes the
 shared OFF/MRV1 allocation time and requires eager reuse, warmup, profiling,
 and existing capture/replay regressions. It is not a measured optimization.
-The unrelated legacy DSA-CP ordinary-build extension is excluded; the baseline
-CP drafting implementation and MRV2 startup guard remain intact.
+The SFA Target DSA-CP input-count adaptation is separate from these Draft
+capacity changes. It preserves the existing distributed projection and
+collectives and requires its own all-rank correctness and Graph regression.
+Compressed DSA and unsupported PP/DCP startup guards remain intact.
 
 ### Validation boundaries
 

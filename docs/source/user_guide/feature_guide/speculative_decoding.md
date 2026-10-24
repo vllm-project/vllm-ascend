@@ -533,8 +533,9 @@ options.
 - MRV2 supports static Eagle3, DFlash, and eligible DSpark methods. Plain
   Eagle, dynamic speculative length, and DFlash2 window providers are not
   implemented. Continuing prefill chunks retain full reads. Eagle3 also keeps
-  full reads for its first prefill pass before applying its frozen window to
-  subsequent autoregressive steps.
+  full reads for its first prefill pass. An unfinished prompt keeps full reads
+  at every autoregressive step; after prompt completion, eligible steps use
+  the frozen proposal window.
 
 See the [MRV2 design](../../developer_guide/Design_Documents/speculative_kv_sliding_window.md#mrv2-implementation)
 for read ownership, backend boundaries, and current synchronization costs.
