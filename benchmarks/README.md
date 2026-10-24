@@ -1,5 +1,46 @@
 # vLLM Ascend Benchmarks
 
+## Fused HcPre operator
+
+`hc_pre.py` measures the complete fused operator used by GLM and DeepSeek mHC
+layers. It includes projection, gates, finite-iteration Sinkhorn normalization,
+and stream contraction. NPU events and synchronized host wall times are retained
+for every warmup and measured invocation. These are operator measurements;
+they do not establish model throughput or token latency improvements.
+
+Run each installed revision in a fresh process on the same idle device:
+
+```shell
+python benchmarks/hc_pre.py --label baseline-a --output results/baseline-a
+python benchmarks/hc_pre.py --label candidate-a --output results/candidate-a \
+    --reference results/baseline-a
+python benchmarks/hc_pre.py --label candidate-b --output results/candidate-b \
+    --reference results/baseline-a
+python benchmarks/hc_pre.py --label baseline-b --output results/baseline-b \
+    --reference results/baseline-a
+```
+
+Switch the installed revision between baseline and candidate invocations, keeping
+the toolkit, dependencies, device, flags and inputs unchanged. The default matrix
+has 28 cases: seven token counts, two hidden sizes, and positive or signed inputs.
+Reference comparisons check all four outputs byte for byte; inputs are checked
+for mutation. Signed benchmark weights have a larger scale than the numerical
+nightly fixtures, so baseline parity alone does not validate their CPU accuracy.
+
+Each output directory must be new. `results.json` retains all three rounds of
+70 samples per case, with the first 20 marked by the `warmup` field. Compare both
+complete repetitions, report every case and any slowdown, and retain variation
+between rounds. Do not select only the fastest round. Use `--tokens`, `--hidden`,
+`--iterations`, `--rounds`, `--warmup`, and `--samples` to reproduce another matrix.
+
+For device-focused comparisons, add `--timing graph` to every command. A captured
+graph contains 20 HcPre calls by default (`--replays` changes this); event and
+wall samples are divided by that count. Capture and initial setup are excluded,
+and the final graph outputs receive the same byte-for-byte reference check.
+This amortizes host launch overhead; the resulting wall times are graph replay
+costs per operator, not eager invocation latency. Retain eager results separately,
+especially when background host work contributes noise.
+
 ## Introduction
 
 This document outlines the benchmarking methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. The primary goal is to help developers assess whether their pull requests improve or degrade vllm-ascend's performance.
