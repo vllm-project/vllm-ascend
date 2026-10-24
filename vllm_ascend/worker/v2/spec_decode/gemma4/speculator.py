@@ -44,6 +44,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         num_tokens_across_dp=None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs=None,
+        skip_sample: bool = False,
     ):
         if attn_metadata and any(
             metadata is not None and metadata.attn_state == AscendAttentionState.PrefillNoCache
@@ -63,6 +64,7 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
             mm_inputs,
+            skip_sample,
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
