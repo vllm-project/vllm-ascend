@@ -173,53 +173,51 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     **Start the Service**
 
-    Run the following inside the A3 container. It starts one API service with DP4 x TP4 / EP16 across all 16 NPUs, using W8A8 weights and BF16 KV cache.
+    Run the following inside the A3 container. It starts one API service with DP4 x TP4 / EP16 across all 16 NPUs, using W8A8 weights and DSpark speculative decoding with seven draft tokens.
 
     ```bash
-    source /workspace/env.sh
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-    export HCCL_BUFFSIZE=1024
-    unset VLLM_PP_LAYER_PARTITION
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
 
-    vllm serve "$MODEL_PATH" \
-        --host 0.0.0.0 \
-        --port 11223 \
-        --served-model-name minimax-m31-flash \
-        --trust-remote-code \
-        --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
-        --language-model-only \
-        --quantization ascend \
-        --dtype bfloat16 \
-        --tensor-parallel-size 4 \
-        --pipeline-parallel-size 1 \
-        --data-parallel-size 4 \
-        --data-parallel-size-local 4 \
-        --api-server-count 1 \
-        --enable-expert-parallel \
-        --distributed-executor-backend mp \
-        --seed 1024 \
-        --max-model-len 263000 \
-        --max-num-seqs 32 \
-        --max-num-batched-tokens 32768 \
-        --gpu-memory-utilization 0.92 \
-        --block-size 128 \
-        --kv-cache-dtype bfloat16 \
-        --enable-chunked-prefill \
-        --enable-prefix-caching \
-        --long-prefill-token-threshold 2048 \
-        --reasoning-parser minimax_m3 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{
-            "enable_cpu_binding":true,
-            "multistream_overlap_shared_expert":true,
-            "enable_shared_expert_dp":true,
-            "enable_flashcomm1":true,
-            "weight_nz_mode":2,
-            "ascend_compilation_config":{"fuse_norm_quant":false,"enable_static_kernel":false}
-        }'
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve ${MODEL_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
+      --served-model-name minimax-m3.1-flash \
+      --trust-remote-code \
+      --max-model-len 133000 \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 4 \
+      --enable-expert-parallel \
+      --max-num-seqs 32 \
+      --disable-hybrid-kv-cache-manager \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --reasoning-parser minimax_m3 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{
+          "enable_cpu_binding": true,
+          "enable_flashcomm1": true,
+          "multistream_overlap_shared_expert": true,
+          "enable_shared_expert_dp":true,
+          "weight_nz_mode": 2
+      }' \
+      --speculative-config '{
+          "method":"dspark",
+          "num_speculative_tokens":7,
+          "enforce_eager":true,
+          "draft_sample_method":"probabilistic"
+      }' \
+      --safetensors-load-strategy prefetch
     ```
 
-    Send requests directly to port `11223` with model name `minimax-m31-flash`.
+    Send requests directly to port `11223` with model name `minimax-m3.1-flash`.
 
 === "950DT products"
 
