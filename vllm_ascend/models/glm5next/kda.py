@@ -21,6 +21,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -269,6 +270,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+        # Piecewise capture has no attention metadata. Execute the stateful
+        # KDA custom op eagerly between captured tensor-compute segments.
+        if compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
+            splitting_op = "vllm::glm5next_kda_forward"
+            splitting_ops = compilation_config.splitting_ops
+            if splitting_ops is not None and splitting_op not in splitting_ops:
+                splitting_ops.append(splitting_op)
+
         # Checkpoints store A_log as 1-D; the model parameter is 4-D.
         def _a_log_weight_loader(param, loaded_weight):
             if loaded_weight.dim() == 1:
@@ -323,14 +332,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        # Keep the layer's dispatch outside piecewise graph compilation.
-        self._forward(
+        # Metadata and recurrent cache updates must execute on every invocation,
+        # including when Dynamo traces a profiling run without metadata.
+        torch.ops.vllm.glm5next_kda_forward(
             qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
+            g2=g2,
             core_attn_out=core_attn_out,
+            layer_name=self.prefix,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
@@ -556,3 +567,40 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+def glm5next_kda_forward(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    g2: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward(qkv_proj_states, g1, beta, core_attn_out)
+    # Triton kernel_side_table indices belong to this process. Keep the gated
+    # norm inside the custom op so serialized FX/AOT graphs do not retain them.
+    # Piecewise replay retains the address of this caller-owned buffer. A
+    # newly allocated norm result would leave the next captured segment
+    # reading the profile run's output instead of this invocation's values.
+    layer.o_norm.forward_oot(core_attn_out, g2, out=core_attn_out)
+
+
+def glm5next_kda_forward_fake(
+    qkv_proj_states: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    g2: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward",
+    op_func=glm5next_kda_forward,
+    mutates_args=["core_attn_out"],
+    fake_impl=glm5next_kda_forward_fake,
+)

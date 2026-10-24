@@ -1,0 +1,4 @@
+pr: 19076
+entries:
+  - category: feature
+    text: Added torch.compile support for the GLM-5.3-Flash text backbone and MTP draft model on Ascend.
