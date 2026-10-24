@@ -1215,6 +1215,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            # Offload keeps Native fallback for prefill/mixed batches and
+            # token buckets outside the Direct operator's contract.
+            and not get_ascend_config().sparse_kv_offload_config.enabled
         ):
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
@@ -1942,8 +1945,21 @@ class AscendSFAImpl(MLAAttentionImpl):
         fused_type: PreprocessType = self.preprocess_type
         # PROLOG_V3 serves every attention state (decode, spec decoding and
         # prefill); only MLAPO carries a per-call token-count limit.
-        if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
-            fused_type = PreprocessType.NATIVE
+        if self.preprocess_type == PreprocessType.MLAPO:
+            if num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
+                fused_type = PreprocessType.NATIVE
+            elif get_ascend_config().sparse_kv_offload_config.enabled:
+                # V2 labels pure MTP verification ChunkedPrefill; its explicit
+                # decode/prefill counts distinguish it from a mixed batch.
+                if hasattr(attn_metadata, "num_prefills") and hasattr(attn_metadata, "num_decodes"):
+                    decode_only = attn_metadata.num_prefills == 0 and attn_metadata.num_decodes > 0
+                else:
+                    decode_only = attn_metadata.attn_state in (
+                        AscendAttentionState.DecodeOnly,
+                        AscendAttentionState.SpecDecoding,
+                    ) and not int(getattr(attn_metadata, "num_prefills", 0) or 0)
+                if not decode_only:
+                    fused_type = PreprocessType.NATIVE
 
         # IMPORTANT!
         # NOTE: With PIECEWISE ACL graphs, this method is executed in

@@ -162,6 +162,37 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Direct MLAPO with fused-overlap offload
+
+For BF16 activations and W8A8 QKV/Q projections, Direct MLAPO can produce
+the current KV directly for the fused-overlap path. Add `"enable_mlapo": true`
+and set `"use_fused_overlap": true` inside `sparse_kv_offload_config` in the
+existing `--additional-config`. Keep `keep_device_kv_cache` disabled.
+
+The supported model dimensions are hidden size 6144, Q LoRA rank 2048,
+KV LoRA rank 512, Q non-RoPE head dimension 192, RoPE head dimension 64,
+and one KV head. Local query heads are derived from the projection weights.
+Unsupported configurations, Prefill/mixed steps, and token counts above
+1024 retain Native preprocessing. The default Copy-SFA path remains Native.
+
+Set `VLLM_ASCEND_MLAPO_FUSED_CPU_WRITEBACK=1` before starting Decode to also
+write the mapped BF16 CPU KV pools inside the Direct kernel on TP0. The
+default (`0`) retains external CPU writeback. Both paths keep the completion
+dependencies before FSA reads the CPU pool and before output buffers are reused.
+Set `VLLM_PATCH_TRACE=1` for one-time INFO messages identifying the selected
+path and fallback reasons; all other values disable these diagnostic messages.
+
+Direct preserves the original MLAPO Q/KV RMSNorm epsilon of `1e-6`; it does
+not substitute the model's Native RMSNorm epsilon or promise bitwise equality
+with Native. Numerical validation compares Direct against the original MLAPO
+under identical inputs and weights. Main uses ACLNN tiling; the older custom
+stream-local tiling cache and its graph warmup hook are not used here.
+
+Rebuild and install the custom ACLNN operator package and the PyTorch
+extension together after applying this change. Mixing old generated ACLNN
+headers/libraries with the new extension is not supported. Hardware validation
+of Direct, graph replay and multi-TP CPU writeback is required before deployment.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are

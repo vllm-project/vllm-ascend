@@ -36,6 +36,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -50,6 +51,7 @@ from vllm_ascend.attention.sfa_v1 import (
     PreprocessType,
 )
 from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
     split_decodes_and_prefills,
 )
@@ -58,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     get_sparse_kv_offload_manager,
 )
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import enable_dsa_cp
 
 # LIM bounds mirror both BF16 and quantized kernel constants headers;
@@ -597,11 +600,230 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.fused_overlap_last_req_ids: torch.Tensor | None = None
         self._fused_overlap_selection_capacity: tuple[int, int, int, int] | None = None
 
+    def _refresh_mlapo_quant_scales(self) -> None:
+        # Keep the scalar views and 32-byte backing fixed across post-load
+        # refreshes; startup already orders consumers after these copies.
+        scales = (self.quant_scale0, self.quant_scale1)
+        for scale in scales:
+            if (
+                scale.dtype != torch.bfloat16
+                or scale.device != self.gamma2.device
+                or scale.numel() != 1
+                or not scale.is_contiguous()
+            ):
+                raise ValueError("MLAPO direct requires original scalar BF16 scales on the model device")
+        for index, scale in enumerate(scales):
+            storage_name = f"_mlapo_quant_scale_storage{index}"
+            storage = getattr(self, storage_name, None)
+            if storage is None:
+                # Keep the 32-byte backing address stable for captured graphs.
+                storage = torch.empty(16, dtype=torch.bfloat16, device=scale.device)
+                setattr(self, storage_name, storage)
+                setattr(self, f"_mlapo_quant_scale{index}", storage[:1])
+            storage.copy_(scale.reshape(1).expand(16))
+
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
-        logger.warning_once(
-            "Sparse KV offload requires the native SFA preprocessing path; sfa_prolog_v3/mlapo is disabled."
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        self._quant_type = type(quant_method) if quant_method is not None else None
+        reasons = []
+        if not self.use_fused_overlap:
+            reasons.append("use_fused_overlap=False")
+        if get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache:
+            reasons.append("keep_device_kv_cache=True")
+        if not self.enable_mlapo:
+            reasons.append("enable_mlapo=False")
+        if act_dtype != torch.bfloat16:
+            reasons.append(f"activation_dtype={act_dtype}")
+        if self._quant_type is not AscendW8A8LinearMethod:
+            reasons.append(f"fused_qkv_a_proj_quant={self._quant_type}")
+        q_quant_type = type(self._get_layer_quant_method(self.q_proj))
+        if q_quant_type is not AscendW8A8LinearMethod:
+            reasons.append(f"q_proj_quant={q_quant_type}")
+        if self.num_kv_heads != 1:
+            reasons.append(f"num_kv_heads={self.num_kv_heads}")
+        if self.kv_lora_rank != 512:
+            reasons.append(f"kv_lora_rank={self.kv_lora_rank}")
+        if self.qk_rope_head_dim != 64:
+            reasons.append(f"qk_rope_head_dim={self.qk_rope_head_dim}")
+        if self.q_lora_rank != 2048:
+            reasons.append(f"q_lora_rank={self.q_lora_rank}")
+        if self.qk_nope_head_dim != 192:
+            reasons.append(f"qk_nope_head_dim={self.qk_nope_head_dim}")
+        if not reasons:
+            assert self.fused_qkv_a_proj is not None
+            if tuple(self.fused_qkv_a_proj.weight.shape) != (
+                6144,
+                self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+            ):
+                reasons.append(f"fused_qkv_a_proj_weight_shape={tuple(self.fused_qkv_a_proj.weight.shape)}")
+        if not reasons and (
+            self.num_heads <= 0
+            or tuple(self.q_proj.weight.shape)
+            != (self.q_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+            or tuple(self.W_UK_T.shape) != (self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
+        ):
+            reasons.append("query projection/absorbed KV dimensions do not match the local head count")
+        if not reasons and not self._try_enable_type(PreprocessType.MLAPO, act_dtype):
+            reasons.extend(self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO))
+            if not reasons:
+                reasons.append("fused MLAPO unsupported")
+        if reasons:
+            if envs_ascend.VLLM_PATCH_TRACE:
+                logger.info_once(
+                    "Sparse KV offload decode preprocessing selected: "
+                    "path=Native heads=%d activation_dtype=%s reasons=%s",
+                    self.num_heads,
+                    str(act_dtype),
+                    ", ".join(reasons),
+                )
+            return PreprocessType.NATIVE
+
+        self._refresh_mlapo_quant_scales()
+        if not hasattr(self, "_mlapo_current_k"):
+            # Per-layer output storage is shared by graph buckets and MTP steps.
+            # Attention joins writeback before this layer can reuse the buffers.
+            self._mlapo_current_k, self._mlapo_current_rope = (
+                torch.empty(
+                    (MLAPO_MAX_SUPPORTED_TOKENS, head_dim),
+                    dtype=act_dtype,
+                    device=self.gamma2.device,
+                )
+                for head_dim in (self.kv_lora_rank, self.qk_rope_head_dim)
+            )
+        if envs_ascend.VLLM_PATCH_TRACE:
+            logger.info_once(
+                "Sparse KV offload decode preprocessing selected: path=Direct heads=%d activation_dtype=%s",
+                self.num_heads,
+                str(act_dtype),
+            )
+        return PreprocessType.MLAPO
+
+    def _sfa_preprocess_mlapo(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: AscendSFAMetadata | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        if (
+            not 0 < num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            or hidden_states.shape[0] != num_input_tokens
+            or slot_mapping.numel() != num_input_tokens
+        ):
+            raise ValueError("Sparse KV offload MLAPO requires matching input, output and slot counts in [1, 1024]")
+
+        manager = get_sparse_kv_offload_manager()
+        capturing = self._in_graph_runtime()
+        current_k = self._mlapo_current_k[:num_input_tokens]
+        current_rope = self._mlapo_current_rope[:num_input_tokens]
+        ql_nope = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], self.kv_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
-        return PreprocessType.NATIVE
+        q_pe = torch.empty(
+            (num_input_tokens, self.W_UK_T.shape[0], self.qk_rope_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        q_c = torch.empty(
+            (num_input_tokens, self.q_lora_rank),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        layer_name = self._offload_layer_name()
+        k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
+        fused_writeback = envs_ascend.VLLM_ASCEND_MLAPO_FUSED_CPU_WRITEBACK
+        writeback_args = {}
+        if fused_writeback and manager.tp_rank == 0:
+            if (
+                not manager.use_fused_overlap
+                or k_cache_cpu is None
+                or v_cache_cpu is None
+                or k_cache_cpu.device.type != "cpu"
+                or v_cache_cpu.device.type != "cpu"
+                or k_cache_cpu.dtype != torch.bfloat16
+                or v_cache_cpu.dtype != torch.bfloat16
+                or not k_cache_cpu.is_contiguous()
+                or not v_cache_cpu.is_contiguous()
+                or k_cache_cpu.numel() % self.kv_lora_rank
+                or v_cache_cpu.numel() % self.qk_rope_head_dim
+            ):
+                raise ValueError("MLAPO fused writeback requires the manager's mapped BF16 CPU KV pools")
+            capacity = k_cache_cpu.numel() // self.kv_lora_rank
+            if capacity <= 0 or capacity != v_cache_cpu.numel() // self.qk_rope_head_dim:
+                raise ValueError("MLAPO fused writeback CPU KV capacities differ")
+            writeback_args = {
+                "writeback_slots": slot_mapping,
+                "writeback_k_base": k_cache_cpu.data_ptr(),
+                "writeback_rope_base": v_cache_cpu.data_ptr(),
+                "writeback_capacity": capacity,
+            }
+        torch.ops._C_ascend.mla_preprocess_without_kv_cache_write(
+            hidden_states,
+            self.wd_qkv,
+            self.deq_scale_qkv,
+            self.gamma1,
+            self.beta1,
+            self.wu_q,
+            self.qb_deq_scl,
+            self.gamma2,
+            cos.view(num_input_tokens, self.qk_rope_head_dim),
+            sin.view(num_input_tokens, self.qk_rope_head_dim),
+            self.W_UK_T,
+            quant_scale0=self._mlapo_quant_scale0,
+            quant_offset0=self.quant_offset0,
+            bias0=self.quant_bias_qkv,
+            quant_scale1=self._mlapo_quant_scale1,
+            quant_offset1=self.quant_offset1,
+            bias1=self.qb_qt_bias,
+            ctkv_scale=self.ctkv_scale,
+            q_nope_scale=self.q_nope_scale,
+            quant_mode="per_tensor_quant_asymm",
+            q_out0=ql_nope,
+            q_out1=q_pe,
+            inner_out=q_c,
+            current_k=current_k,
+            current_rope=current_rope,
+            **writeback_args,
+        )
+        if envs_ascend.VLLM_PATCH_TRACE and not getattr(self, "_patch_mlapo_traced", False):
+            logger.info(
+                "MLAPO without KV cache write submitted: layer=%s tp_rank=%d tokens=%d fused_cpu_writeback=%s",
+                self.layer_name or self._current_layer_name,
+                manager.tp_rank,
+                num_input_tokens,
+                fused_writeback,
+            )
+            self._patch_mlapo_traced = True
+        manager.offload_new_kv(
+            layer_name=layer_name,
+            slot_mapping=slot_mapping,
+            k_cache_cpu=k_cache_cpu,
+            v_cache_cpu=v_cache_cpu,
+            k_cache_npu=None,
+            v_cache_npu=None,
+            k=current_k.view(num_input_tokens, 1, 1, self.kv_lora_rank),
+            v=current_rope.view(num_input_tokens, 1, 1, self.qk_rope_head_dim),
+            has_prefill=False,
+            capturing=capturing,
+            writeback_in_producer=fused_writeback,
+            direct_kv_output=True,
+        )
+        # Captured attention joins the writeback stream downstream. A FULL
+        # runtime Python call outside capture needs its own join after record.
+        if capturing and not _EXTRA_CTX.capturing:
+            manager.wait_for_current_kv_writeback(capturing)
+        return hidden_states, ql_nope, q_pe, q_c
 
     @staticmethod
     def _cpu_cache_pair(manager, layer_name: str):
