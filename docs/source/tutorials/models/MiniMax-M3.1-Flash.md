@@ -197,6 +197,8 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
       --gpu-memory-utilization 0.92 \
       --quantization ascend \
       --reasoning-parser minimax_m3 \
+      --enable-auto-tool-choice \
+      --tool-call-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
@@ -361,6 +363,8 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
         --data-parallel-size "$DP_SIZE" \
         --enforce-eager \
         --long-prefill-token-threshold 2048 \
@@ -439,6 +443,8 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
         --data-parallel-size "$DP_SIZE" \
         --data-parallel-size-local 1 \
         --data-parallel-rank "$DP_RANK" \
