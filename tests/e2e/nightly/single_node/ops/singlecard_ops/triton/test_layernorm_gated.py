@@ -2,8 +2,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm_ascend.ops.triton.layernorm_gated as layernorm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 DEVICE = "npu"
 TOLERANCES = {
@@ -135,6 +136,133 @@ def test_layer_norm_fwd_npu_correctness(
     else:
         assert actual_mean is not None
         assert expected_mean is not None
+        torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
+
+
+class _KernelLaunchRecorder:
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.grids = []
+        self.launch_kwargs = []
+
+    def __getitem__(self, grid):
+        self.grids.append(grid)
+        launch = self.kernel[grid]
+
+        def record_launch(*args, **kwargs):
+            self.launch_kwargs.append(kwargs)
+            return launch(*args, **kwargs)
+
+        return record_launch
+
+
+@pytest.mark.parametrize(
+    ("rows_kind", "kernel_name", "dtype", "is_rms_norm", "has_bias", "has_gate", "norm_before_gate"),
+    [
+        pytest.param(
+            "before",
+            "_layer_norm_fwd_1pass_kernel_npu",
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
+            id="before-quarter-wave-rmsnorm-post-gate",
+        ),
+        pytest.param(
+            "at",
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            torch.float16,
+            False,
+            True,
+            True,
+            False,
+            id="quarter-wave-boundary-layernorm-pre-gate-fp16",
+        ),
+        pytest.param(
+            "above",
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
+            id="above-quarter-wave-rmsnorm-post-gate",
+        ),
+        pytest.param(
+            "large",
+            "_layer_norm_fwd_persistent_hoist_kernel_npu",
+            torch.bfloat16,
+            True,
+            False,
+            True,
+            True,
+            id="hoist-rmsnorm-post-gate-large-m",
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_layer_norm_fwd_npu_hoist_routes(
+    rows_kind,
+    kernel_name,
+    dtype,
+    is_rms_norm,
+    has_bias,
+    has_gate,
+    norm_before_gate,
+    monkeypatch,
+):
+    vector_cores = get_vectorcore_num()
+    threshold = (vector_cores + 3) // 4 * 32 - 31
+    rows = {
+        "before": max(1, threshold - 1),
+        "at": threshold,
+        "above": threshold + 1,
+        "large": 65536,
+    }[rows_kind]
+    shape = (rows, 128)
+
+    original_kernel = getattr(layernorm_gated, kernel_name)
+    recorder = _KernelLaunchRecorder(original_kernel)
+    monkeypatch.setattr(layernorm_gated, kernel_name, recorder)
+
+    generator = torch.Generator(device="cpu").manual_seed(0x1F3A5C8)
+    x = torch.randn(shape, generator=generator, dtype=dtype).to(DEVICE)
+    weight = torch.randn((128,), generator=generator, dtype=dtype).to(DEVICE)
+    bias = torch.randn((128,), generator=generator, dtype=dtype).to(DEVICE) if has_bias else None
+    z = torch.randn(shape, generator=generator, dtype=dtype).to(DEVICE) if has_gate else None
+    eps = 1e-6
+
+    actual, actual_mean, actual_rstd = layer_norm_fwd_npu(
+        x,
+        weight,
+        bias,
+        eps,
+        z=z,
+        group_size=128,
+        norm_before_gate=norm_before_gate,
+        is_rms_norm=is_rms_norm,
+    )
+    expected, expected_mean, expected_rstd = layer_norm_gated_ref(
+        x, weight, bias, eps, z, 128, norm_before_gate, is_rms_norm
+    )
+
+    uses_hoist = 4 * ((rows + 31) // 32) >= vector_cores
+    if not uses_hoist:
+        assert recorder.grids == [((rows + 15) // 16, 1)]
+        assert recorder.launch_kwargs[-1]["BLOCK_M"] == 16
+        assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128
+    else:
+        assert recorder.grids == [(min(vector_cores, (rows + 31) // 32),)]
+        assert recorder.launch_kwargs[-1]["BLOCK_M"] == 32
+        assert recorder.launch_kwargs[-1]["BLOCK_N"] == 128
+    rtol, atol = TOLERANCES[dtype]
+    torch.testing.assert_close(actual.float().cpu(), expected.float(), rtol=rtol, atol=atol)
+    torch.testing.assert_close(actual_rstd.cpu(), expected_rstd, rtol=rtol, atol=atol)
+    if is_rms_norm:
+        assert actual_mean is None
+        assert expected_mean is None
+    else:
         torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
 
 
