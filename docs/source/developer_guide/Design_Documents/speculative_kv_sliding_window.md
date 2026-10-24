@@ -134,8 +134,21 @@ live E=1159, native extent=1160, K=3, W=1035 and B=128 require S=0, whereas
 using the native extent would incorrectly choose S=128. For an eligible
 uniform decode layout, the runtime keeps both values on device and freezes
 the anchor there. Legacy first-pass consumers take one combined current Host
-snapshot, shared across groups. Prefill, ragged layouts and other legacy
-consumers retain their exact synchronization.
+snapshot, shared across groups. Ragged decode, mixed phases, terminal prefill
+and other legacy consumers retain their exact synchronization.
+
+An all-continuing ordinary GQA Eagle3 batch without draft placeholders has a
+narrower exact producer: current computed prompt progress plus this batch's
+scheduled prompt tokens. Before prompt completion the rejection sampler sets
+rejected tokens to zero. The runtime retains this proposal's prompt-exact CPU
+base and supplies a fresh, clamped `base + AR step` to the native builder. It
+does not read the optimistic CPU sequence-length mirror. Full device lengths,
+tables, positions, query padding and write slots remain unchanged; only the
+fresh common metadata's CPU exact fields change. Their storage is retained
+through the existing proposal completion event. Request mapping or prompt
+preparation changes invalidate this base. Placeholder and replicated-PCP
+batches continue through their existing exact path. This preserves the
+required Full read rather than turning Window off for short contexts.
 
 Native first-pass lengths retain the original padded query alignment. With R
 rejected query slots, native extent=E+R and padded query count=Q+R, so their

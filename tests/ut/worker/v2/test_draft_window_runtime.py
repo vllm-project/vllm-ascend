@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-
 from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerState
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
 from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime, continuing_prefill_rows
@@ -445,6 +444,123 @@ def test_eagle_continuing_prefill_later_ar_preserves_full_read(setup, all_contin
             expected = [ends[0], ends[1] if all_continuing else ends[1] - 20]
             assert metadata.seq_lens[:2].tolist() == expected
             assert not hasattr(metadata, "_draft_window_device_read")
+
+
+@pytest.mark.parametrize("groups", [(0,), (0, 1), (1, 0)])
+@pytest.mark.parametrize("drafts", [None, (0, 0)])
+def test_eagle_full_continuing_keeps_full_addressing_without_window_snapshot(setup, monkeypatch, groups, drafts):
+    runtime, spec, canonical, completions = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    runtime.gids = groups
+    state = batch(computed=(8, 24), prompt=(100, 100), scheduled=(4, 3), drafts=drafts)
+    spec.max_model_len, spec.advance_draft_positions = 4096, True
+    spec.block_tables.block_tables.append(SimpleNamespace(gpu=canonical.clone()))
+    spec.block_tables.num_blocks.np = np.full((2, 6), 8, dtype=np.int32)
+    spec.block_tables.kernel_block_sizes = [4, 4]
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Full continuing prefill requested a Window exact snapshot or read projection")
+
+    monkeypatch.setattr(runtime, "_eagle_first_pass_lengths", unexpected)
+    monkeypatch.setattr(runtime_module, "materialize_direct_prefix", unexpected)
+    retained_common = []
+    with runtime.proposal_context(spec, state):
+        owner = runtime._owner
+        for step in range(3):
+            callback = runtime.metadata_callback(step, 2)
+            exact = torch.tensor([12 + step, 27 + step, 0], dtype=torch.int32)
+            for gid in groups:
+                metadata = common()
+                metadata.seq_lens = exact
+                metadata.seq_lens_cpu = metadata._seq_lens_cpu = torch.tensor([14, 30, 0], dtype=torch.int32)
+                before = dict(vars(metadata))
+                callback(gid, metadata)
+                assert vars(metadata).keys() == before.keys()
+                assert all(
+                    getattr(metadata, key) is value
+                    for key, value in before.items()
+                    if key not in ("seq_lens_cpu", "_seq_lens_cpu")
+                )
+                assert metadata.seq_lens_cpu.tolist() == [12 + step, 27 + step, 0]
+                assert metadata._seq_lens_cpu is metadata.seq_lens_cpu
+                retained_common.append((step, metadata))
+        assert runtime._next_step == 3 and runtime._build_count == 3
+        assert runtime._eagle_plans is None and runtime._eagle_first_pass_pair is None
+        for step, metadata in retained_common:
+            assert any(item is metadata for item in owner.retained)
+            assert metadata.seq_lens_cpu.tolist() == [12 + step, 27 + step, 0]
+    assert len(completions) == 1
+    assert runtime.pool.reclaim_completed() == 0
+    completions[0].complete = True
+    assert runtime.pool.reclaim_completed() == 1
+
+
+@pytest.mark.parametrize("changed", ["duplicate", "mapping", "lengths", "projected", "extent"])
+def test_eagle_full_continuing_rejects_changed_preparation(setup, changed):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    runtime.gids = (0, 1)
+    state = batch(computed=(8, 24), prompt=(100, 100), scheduled=(4, 3), drafts=None)
+    spec.max_model_len, spec.advance_draft_positions = 4096, True
+    with pytest.raises((RuntimeError, ValueError), match="Full prefill"), runtime.proposal_context(spec, state):
+        callback = runtime.metadata_callback(0, 2)
+        first, second = common(), common()
+        second.seq_lens = first.seq_lens
+        callback(0, first)
+        if changed == "mapping":
+            state.req_ids.reverse()
+        elif changed == "lengths":
+            second.seq_lens = second.seq_lens.clone()
+        elif changed == "projected":
+            second._draft_window_read = object()
+        elif changed == "extent":
+            second.num_reqs = 1
+        callback(0 if changed == "duplicate" else 1, second)
+    assert runtime.pool.poisoned
+
+
+def test_eagle_full_continuing_with_placeholders_keeps_exact_fallback(setup, monkeypatch):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    spec.max_model_len, spec.advance_draft_positions = 4096, True
+    state = batch(computed=(8, 24), prompt=(100, 100))
+    monkeypatch.setattr(
+        runtime,
+        "_full_prefill_metadata_callback",
+        lambda *args: pytest.fail("placeholder prompt took exact Host shortcut"),
+    )
+    with runtime.proposal_context(spec, state):
+        for step in range(3):
+            metadata = common(exact=(12 + step, 27 + step))
+            runtime.metadata_callback(step, 2)(0, metadata)
+            assert metadata.seq_lens[:2].tolist() == [12 + step, 27 + step]
+            assert hasattr(metadata, "_draft_window_read")
+
+
+def test_eagle_full_continuing_prompt_snapshot_clamps_at_model_limit(setup):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    spec.max_model_len, spec.advance_draft_positions = 32, True
+    state = batch(computed=(8, 24), prompt=(32, 32), scheduled=(4, 7), drafts=None)
+    with runtime.proposal_context(spec, state):
+        for step in range(3):
+            expected = (12 + step, min(31 + step, 32))
+            metadata = common(exact=expected, upper=(16, 32))
+            runtime.metadata_callback(step, 2)(0, metadata)
+            assert metadata.seq_lens_cpu.tolist() == [*expected, 0]
+
+
+def test_eagle_full_continuing_rejects_prompt_progress_change_between_ar_steps(setup):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime._dense_device_reads = "eagle3", 3, True
+    spec.max_model_len, spec.advance_draft_positions = 4096, True
+    state = batch(computed=(8, 24), prompt=(100, 100), scheduled=(4, 3), drafts=None)
+    with pytest.raises(RuntimeError, match="prompt preparation changed"), runtime.proposal_context(spec, state):
+        runtime.metadata_callback(0, 2)(0, common())
+        state.num_computed_prefill_tokens_np[0] += 1
+        runtime.metadata_callback(1, 2)
+    assert runtime._eagle_full_prefill_base is None
+    assert runtime.pool.poisoned
 
 
 def test_multiple_groups_project_same_logical_start_with_independent_backing(setup, monkeypatch):

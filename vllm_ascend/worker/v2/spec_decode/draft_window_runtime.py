@@ -94,6 +94,7 @@ class DraftWindowRuntime:
         self._eagle_plans = None
         self._eagle_frozen_starts = None
         self._eagle_first_pass_pair = None
+        self._eagle_full_prefill_base = None
         self._next_step = 0
         self._proposal_mapping = None
 
@@ -189,6 +190,7 @@ class DraftWindowRuntime:
             self._eagle_plans = None
             self._eagle_frozen_starts = None
             self._eagle_first_pass_pair = None
+            self._eagle_full_prefill_base = None
             self._next_step = 0
             self._proposal_mapping = None
             try:
@@ -206,6 +208,7 @@ class DraftWindowRuntime:
                 self._eagle_plans = None
                 self._eagle_frozen_starts = None
                 self._eagle_first_pass_pair = None
+                self._eagle_full_prefill_base = None
                 self._proposal_mapping = None
 
     def metadata_callback(
@@ -223,6 +226,24 @@ class DraftWindowRuntime:
             prepared_exact_device=prepared_exact_device,
         )
         if self.method == "eagle3":
+            if (
+                legacy is not None
+                and self._dense_device_reads
+                and continuing_prefill_rows(self._input_batch, num_reqs).all()
+                and (
+                    self._input_batch.num_draft_tokens_per_req is None
+                    or not self._input_batch.num_draft_tokens_per_req[:num_reqs].any()
+                )
+                and getattr(self.speculator, "advance_draft_positions", False)
+                and not getattr(self.speculator, "replicated_pcp", False)
+            ):
+                # Every unfinished prompt already requires the original Full
+                # read at every AR step. Re-projecting S=0 adds an exact D2H
+                # snapshot and private table without changing that read set.
+                # With no draft placeholders, scheduled prompt tokens have
+                # no rejection uncertainty. Use that current prompt producer,
+                # never the optimistic CPU seq_lens mirror, for native lengths.
+                return self._full_prefill_metadata_callback(step, num_reqs)
             # An unfinished prompt retains Full reads at every AR step.
             # A window-sized device read cannot represent S=0 when E>W.
             if (
@@ -241,6 +262,65 @@ class DraftWindowRuntime:
         ):
             return self._dense_metadata_callback(num_reqs, legacy)
         return legacy
+
+    def _full_prefill_metadata_callback(self, step: int, num_reqs: int):
+        """Retain Full addressing and current prompt-exact native lengths.
+
+        Request-state prompt progress and this batch's scheduled prompt count
+        are exact while all prompts continue without speculative placeholders.
+        The rejection sampler sets rejected=0 before prompt completion. Decode,
+        mixed, terminal, placeholder and replicated-PCP batches keep their
+        existing device-exact planning. Later AR steps use this proposal's
+        retained base, advancing and clamping exactly as prepare_decode_inputs.
+        """
+        owner, batch = self._owner, self._input_batch
+        mapping = (tuple(batch.req_ids), tuple(int(row) for row in batch.idx_mapping_np[:num_reqs]))
+        progress = tuple(int(value) for value in batch.num_computed_prefill_tokens_np[:num_reqs])
+        scheduled = tuple(int(value) for value in batch.num_scheduled_tokens[:num_reqs])
+        if any(computed < 0 or count <= 0 for computed, count in zip(progress, scheduled)):
+            raise ValueError("Full prefill requires valid current scheduled prompt progress")
+        phase_identity = (mapping, progress, scheduled)
+        if step == 0:
+            base = torch.tensor([computed + count for computed, count in zip(progress, scheduled)], dtype=torch.int32)
+            self._eagle_full_prefill_base = phase_identity, base
+            self.pool.retain(owner, base)
+        if self._eagle_full_prefill_base is None or self._eagle_full_prefill_base[0] != phase_identity:
+            raise RuntimeError("Full prefill prompt preparation changed within a proposal")
+        base = self._eagle_full_prefill_base[1]
+        seen = set()
+        full_exact = None
+
+        def apply(gid: int, common: Any) -> None:
+            nonlocal full_exact
+            if gid not in self.gids:
+                return
+            if self._owner is not owner or gid in seen:
+                raise RuntimeError("Full prefill callback is stale or its group was already prepared")
+            current = (tuple(batch.req_ids), tuple(int(row) for row in batch.idx_mapping_np[:num_reqs]))
+            if batch.num_reqs != num_reqs or len(current[0]) != num_reqs or current != mapping:
+                raise RuntimeError("Full prefill request mapping changed during metadata preparation")
+            if common.num_reqs < num_reqs or common.seq_lens.ndim != 1 or common.seq_lens.numel() < num_reqs:
+                raise ValueError("Full prefill metadata does not cover the active requests")
+            if self._proposal_mapping is not None and self._proposal_mapping != mapping:
+                raise RuntimeError("Full prefill request mapping changed within a proposal")
+            if full_exact is None:
+                full_exact = common.seq_lens
+            if common.seq_lens.data_ptr() != full_exact.data_ptr():
+                raise ValueError("Full prefill groups must share current preparation lengths")
+            if hasattr(common, "_draft_window_read") or hasattr(common, "_draft_window_device_read"):
+                raise ValueError("Full prefill requires fresh, unprojected common metadata")
+            exact_cpu = torch.zeros(common.num_reqs, dtype=torch.int32)
+            exact_cpu[:num_reqs] = torch.clamp(base + step, max=self.speculator.max_model_len)
+            common.seq_lens_cpu = exact_cpu
+            common._seq_lens_cpu = exact_cpu
+            self._proposal_mapping = mapping
+            self.pool.retain(owner, common, exact_cpu, common.seq_lens, common.block_table_tensor)
+            seen.add(gid)
+            if len(seen) == len(self.gids):
+                self._build_count += 1
+                self._next_step += 1
+
+        return apply
 
     def _dense_metadata_callback(self, num_reqs: int, legacy, *, eagle_step: int | None = None):
         from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
