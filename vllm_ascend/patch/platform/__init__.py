@@ -21,6 +21,7 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
+import vllm_ascend.patch.platform.patch_mm_encoder_budget  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
@@ -130,3 +131,31 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+#
+# ** File: platform/patch_mm_encoder_budget.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.multimodal.encoder_budget.MultiModalBudget.__init__`
+#    Why:
+#       Upstream floors the encoder cache capacity at the largest single
+#       multimodal item. A request whose items' embeddings sum beyond that
+#       floor (e.g. two large images with limit-mm-per-prompt image=2) can
+#       never hold all items' embeddings simultaneously; combined with the
+#       lookahead shift in Scheduler._try_schedule_encoder_inputs (the
+#       can_allocate failure branch schedules only up to
+#       start_pos - num_prefill_lookahead), the request deadlocks in permanent
+#       empty steps until the client times out.
+#    How:
+#       After the budget computation, raise encoder_cache_size to the
+#       worst-case single-request residency (sum over modalities of
+#       max_tokens_per_item * mm_limit). The per-step compute budget is
+#       untouched. Single-item-per-request models keep
+#       total_per_request == max_tokens_per_item (zero behavior change), and
+#       modalities with an unlimited (None) mm_limit keep the legacy
+#       single-item sizing.
+#    Related PR (if no, explain why):
+#       No upstream PR currently covers this Ascend-specific behavior.
+#       Observed on Kimi-K3: two 2560x2644 images expand to ~8740 embeddings
+#       per item (17480 total) while the cache is floored at 16817.
+#    Future Plan:
+#       Remove this patch when upstream sizes the encoder cache by the
+#       worst-case per-request residency.
