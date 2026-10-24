@@ -10,6 +10,7 @@ import torch
 torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.worker.v2.spec_decode.draft_window_dense import (  # noqa: E402
+    DenseDraftReadBatch,
     dense_draft_attention,
     prepare_dense_draft_read,
 )
@@ -21,16 +22,21 @@ TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("dim,kv_heads", [(192, 4), (128, 1)])
-@pytest.mark.parametrize("eagle", [False, True])
-def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, eagle):
+@pytest.mark.parametrize("case", ["parallel", "eagle", "interleaved_eagle"])
+def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, case):
+    eagle = case != "parallel"
     block, window, heads = 128, 1035 if eagle else 1024, 4
     ends = (1795, 2177) if eagle else (1151, 1408)
     widths = (4, 257) if eagle else (3, 5)
     starts = (640, 0) if eagle else (0, 0)
+    frozen = (640, 1024) if eagle else None
     native_ends = (1796, ends[1]) if eagle else ends
+    if case == "interleaved_eagle":
+        ends, widths, starts = (1151, 2177, 1795, 1535), (4, 33, 4, 33), (0, 0, 640, 0)
+        native_ends, frozen = (1152, 2177, 1796, 1535), (0, 1024, 640, 512)
     generator = torch.Generator().manual_seed(4337 + dim)
     canonical = (torch.randperm(128, generator=generator) + 1).reshape(4, 32).to(torch.int32)
-    rows = (3, 1)
+    rows = (3, 1, 0, 2)[: len(ends)]
     keys_cpu = (torch.randn(129, block, kv_heads, dim, generator=generator) * 0.2).to(dtype)
     values_cpu = (torch.randn(129, block, kv_heads, dim, generator=generator) * 0.2).to(dtype)
     for row, end in zip(rows, ends):
@@ -48,8 +54,8 @@ def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, e
     table = table_backing[:, ::2]
     table.copy_(canonical)
     table_before = table_backing.clone()
-    source = DirectPrefixSource(table, rows, (32, 32), block)
-    offsets = torch.tensor([0, widths[0], sum(widths)], dtype=torch.int32)
+    source = DirectPrefixSource(table, rows, (32,) * len(rows), block)
+    offsets = torch.tensor([0, *torch.tensor(widths).cumsum(0).tolist()], dtype=torch.int32)
     retained = []
     read = prepare_dense_draft_read(
         source,
@@ -61,8 +67,8 @@ def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, e
         anchor_span=block,
         query_width=max(widths),
         causal=eagle,
-        frozen_starts=torch.tensor([640, 1024], dtype=torch.int32, device="npu") if eagle else None,
-        full_rows_cpu=torch.tensor([False, True]),
+        frozen_starts=torch.tensor(frozen, dtype=torch.int32, device="npu") if eagle else None,
+        full_rows_cpu=torch.tensor([False, True] * (len(rows) // 2)),
         query_start_loc_cpu=offsets,
         query_start_loc_device=offsets.npu(),
         retain=lambda *objects: retained.extend(objects),
@@ -74,9 +80,15 @@ def test_native_ragged_exact_read_with_full_continuation(dtype, dim, kv_heads, e
     references, query_offset = [], 0
     for index, (row, start, end, width) in enumerate(zip(rows, starts, ends, widths)):
         expected_slots = [int(canonical[row, p // block]) * block + p % block for p in range(start, end)]
-        actual_slots = read.slots[index].cpu().tolist()
+        assert isinstance(read, DenseDraftReadBatch)
+        part = next(part for part in read.parts if index in part.request_indices)
+        local_row = part.request_indices.index(index)
+        private = part.read
+        local_queries = part.query_indices.reshape(len(part.request_indices), width)[local_row].cpu().tolist()
+        assert local_queries == list(range(query_offset, query_offset + width))
+        actual_slots = private.slots[local_row].cpu().tolist()
         assert actual_slots[: end - start] == expected_slots
-        assert actual_slots[end - start :] == [expected_slots[-1]] * (read.capacity - end + start)
+        assert actual_slots[end - start :] == [expected_slots[-1]] * (private.capacity - end + start)
         for local in range(width):
             visible_end = min(end, native_ends[index] - width + local + 1) if eagle else end
             # Independent absolute-coordinate reference: no tested mask or

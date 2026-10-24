@@ -349,9 +349,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # TODO: This will be moved to propose and deleted after fia ops fixed.
         device_read = getattr(common_attn_metadata, "_draft_window_device_read", None)
         if device_read is not None:
-            from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead
+            from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead, DenseDraftReadBatch
 
-            if not isinstance(device_read, DenseDraftRead):
+            if not isinstance(device_read, (DenseDraftRead, DenseDraftReadBatch)):
                 device_read = None
         seq_lens = (
             device_read.capacity_cpu(common_attn_metadata)
@@ -1310,9 +1310,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             device_read = getattr(attn_metadata, "_draft_window_device_read", None)
             if device_read is not None:
-                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead
+                from vllm_ascend.worker.v2.spec_decode.draft_window_dense import DenseDraftRead, DenseDraftReadBatch
 
-                if not isinstance(device_read, DenseDraftRead):
+                if not isinstance(device_read, (DenseDraftRead, DenseDraftReadBatch)):
                     device_read = None
             if device_read is not None:
                 from vllm_ascend.worker.v2.spec_decode.draft_window_dense import dense_draft_attention

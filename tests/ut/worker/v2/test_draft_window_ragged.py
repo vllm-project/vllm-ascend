@@ -4,7 +4,10 @@
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.spec_decode.draft_window_dense import prepare_dense_draft_read
+from vllm_ascend.worker.v2.spec_decode.draft_window_dense import (
+    DenseDraftReadBatch,
+    prepare_dense_draft_read,
+)
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource
 
 
@@ -34,23 +37,23 @@ def test_ragged_queries_keep_full_row_and_use_device_exact_at_boundary(causal):
     assert read.seq_lens.tolist() == [1151, 1408]
     assert read.capacity == 1440  # Full-row U controls allocation only.
     assert read.num_query_tokens == 8
-    assert read.query_indices.tolist() == [[0, 0, 0, 1, 2], [3, 4, 5, 6, 7]]
-    assert read.output_indices.tolist() == [2, 3, 4, 5, 6, 7, 8, 9]
-    assert read.mask[0, 0, :2].all()
+    assert isinstance(read, DenseDraftReadBatch)
+    assert [part.query_indices.tolist() for part in read.parts] == [[0, 1, 2], [3, 4, 5, 6, 7]]
+    assert [part.read.capacity for part in read.parts] == [1152, 1440]
     for row, (state_row, end, width) in enumerate(((1, 1151, 3), (0, 1408, 5))):
         expected = [int(before[state_row, pos // 128]) * 128 + pos % 128 for pos in range(end)]
-        assert read.slots[row, :end].tolist() == expected
-        assert read.slots[row, end:].tolist() == [expected[-1]] * (read.capacity - end)
+        private = read.parts[row].read
+        assert private.slots[0, :end].tolist() == expected
+        assert private.slots[0, end:].tolist() == [expected[-1]] * (private.capacity - end)
         for local in range(width):
-            packed_query = 5 - width + local
             length = end - width + local + 1 if causal else end
-            assert not read.mask[row, 0, packed_query, :length].any()
-            assert read.mask[row, 0, packed_query, length:].all()
+            assert not private.mask[0, 0, local, :length].any()
+            assert private.mask[0, 0, local, length:].all()
     assert torch.equal(table, before)
     offsets.zero_()
     exact.fill_(1)
     assert read.seq_lens.tolist() == [1151, 1408]
-    assert read.output_indices.tolist() == [2, 3, 4, 5, 6, 7, 8, 9]
+    assert read.parts[1].query_indices.tolist() == [3, 4, 5, 6, 7]
     assert any(item is read for item in held)
 
 
@@ -77,10 +80,11 @@ def test_ragged_eagle_native_padding_preserves_frozen_anchor_and_full_continuati
     assert read.starts.tolist() == [640, 0]
     assert read.seq_lens.tolist() == [1155, 2177]
     assert read.num_query_tokens == 261
-    assert read.mask[0, 0, :253].all()
-    assert (~read.mask[0, 0, 253:]).sum(-1).tolist() == [1153, 1154, 1155, 1155]
-    assert read.output_indices[:4].tolist() == [253, 254, 255, 256]
-    assert read.output_indices[4:].tolist() == list(range(257, 514))
+    assert isinstance(read, DenseDraftReadBatch)
+    assert (~read.parts[0].read.mask[0, 0]).sum(-1).tolist() == [1153, 1154, 1155, 1155]
+    assert read.parts[0].query_indices.tolist() == [0, 1, 2, 3]
+    assert read.parts[1].query_indices.tolist() == list(range(4, 261))
+    assert [part.read.capacity for part in read.parts] == [1152 + 32, 2208]
 
 
 def test_uniform_full_read_rows_keep_original_query_layout():
@@ -100,4 +104,6 @@ def test_uniform_full_read_rows_keep_original_query_layout():
     assert read.starts.tolist() == [0, 0]
     assert read.capacity == 1312
     assert read.num_query_tokens == 16
-    assert read.query_indices is None and read.output_indices is None
+    assert isinstance(read, DenseDraftReadBatch)
+    assert [part.query_indices.tolist() for part in read.parts] == [list(range(8)), list(range(8, 16))]
+    assert all(part.read.query_indices is None and part.read.output_indices is None for part in read.parts)

@@ -143,7 +143,7 @@ def _plan_draft_window(
     else:
         start = tl.maximum(end - WINDOW, 0) // ANCHOR_SPAN * ANCHOR_SPAN
     if HAS_FULL_ROWS:
-        start = tl.where(tl.load(full_rows + req), 0, start)
+        start = tl.where(tl.load(full_rows + req) != 0, 0, start)
     length = end - start
     if tl.program_id(1) == 0:
         tl.store(starts + req, start)

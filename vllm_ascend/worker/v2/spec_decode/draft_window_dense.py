@@ -38,21 +38,129 @@ class DenseDraftRead:
         return self.slots.shape[0]
 
     def apply(self, common: Any) -> None:
-        n = common.num_reqs
-        lengths = self.seq_lens.new_zeros(n)
-        lengths[: self.num_reqs] = self.seq_lens
-        common.seq_lens = lengths
-        # These are explicitly capacity/workspace bounds, never CPU exact.
-        common.seq_lens_cpu_upper_bound = torch.full((n,), self.capacity, dtype=torch.int32, device="cpu")
-        common.seq_lens_cpu = None
-        common._seq_lens_cpu = None
-        common.max_seq_len = self.capacity
-        common._draft_window_device_read = self
+        _apply_read_metadata(self, common)
 
     def capacity_cpu(self, common: Any) -> torch.Tensor:
         if getattr(common, "_draft_window_device_read", None) is not self:
             raise ValueError("Dense Draft read belongs to another common metadata object")
         return torch.full((common.num_reqs,), self.capacity, dtype=torch.int32, device="cpu")
+
+
+@dataclass(frozen=True)
+class DenseDraftReadPart:
+    request_indices: tuple[int, ...]
+    query_indices: torch.Tensor
+    read: DenseDraftRead
+
+
+@dataclass(frozen=True)
+class DenseDraftReadBatch:
+    """Private reads partitioned by known phase and query allocation geometry.
+
+    An unfinished prompt can need Full KV while concurrent decodes need W.
+    Separate native operands avoid padding every decode to that Full capacity
+    or every decode query to the prompt's query width. This never partitions
+    by device E, S, rejection, or any other value requiring a Host read.
+    """
+
+    parts: tuple[DenseDraftReadPart, ...]
+    seq_lens: torch.Tensor
+    starts: torch.Tensor
+    capacity: int
+    num_query_tokens: int
+    retain: Callable[..., None]
+
+    @property
+    def num_reqs(self) -> int:
+        return self.seq_lens.numel()
+
+    def apply(self, common: Any) -> None:
+        _apply_read_metadata(self, common)
+
+    def capacity_cpu(self, common: Any) -> torch.Tensor:
+        if getattr(common, "_draft_window_device_read", None) is not self:
+            raise ValueError("Dense Draft read belongs to another common metadata object")
+        return torch.full((common.num_reqs,), self.capacity, dtype=torch.int32, device="cpu")
+
+
+def _apply_read_metadata(read: DenseDraftRead | DenseDraftReadBatch, common: Any) -> None:
+    n = common.num_reqs
+    lengths = read.seq_lens.new_zeros(n)
+    lengths[: read.num_reqs] = read.seq_lens
+    common.seq_lens = lengths
+    # These are explicitly capacity/workspace bounds, never CPU exact.
+    common.seq_lens_cpu_upper_bound = torch.full((n,), read.capacity, dtype=torch.int32, device="cpu")
+    common.seq_lens_cpu = None
+    common._seq_lens_cpu = None
+    common.max_seq_len = read.capacity
+    common._draft_window_device_read = read
+
+
+def _prepare_partitioned_reads(
+    source: DirectPrefixSource,
+    *,
+    groups: dict[tuple[bool, int], list[int]],
+    exact_device: torch.Tensor,
+    row_indices: torch.Tensor,
+    upper_cpu: torch.Tensor,
+    window_size: int,
+    anchor_span: int,
+    query_width: int,
+    causal: bool,
+    retain: Callable[..., None],
+    frozen_starts: torch.Tensor | None,
+    query_ends: torch.Tensor | None,
+    query_start_loc_device: torch.Tensor | None,
+) -> DenseDraftReadBatch:
+    parts = []
+    visible = torch.empty_like(exact_device[: len(source.request_rows)])
+    starts = torch.empty_like(visible)
+    retain(visible, starts)
+    for (full, width), rows in groups.items():
+        host_rows = torch.tensor(rows, dtype=torch.int64, device="cpu")
+        selected = host_rows.to(exact_device.device, non_blocking=True)
+        retain(host_rows, selected)
+        bounds = (
+            selected * query_width
+            if query_start_loc_device is None
+            else query_start_loc_device.index_select(0, selected)
+        )
+        queries = (bounds[:, None] + torch.arange(width, device=selected.device)[None, :]).flatten()
+        retain(bounds, queries)
+        subset = DirectPrefixSource(
+            source.table,
+            tuple(source.request_rows[row] for row in rows),
+            tuple(source.valid_columns[row] for row in rows),
+            source.block_span,
+        )
+        read = prepare_dense_draft_read(
+            subset,
+            exact_device=exact_device.index_select(0, selected),
+            row_indices=row_indices.index_select(0, selected),
+            upper_cpu=upper_cpu.index_select(0, host_rows),
+            window_size=window_size,
+            anchor_span=anchor_span,
+            query_width=width,
+            causal=causal,
+            retain=retain,
+            frozen_starts=None if frozen_starts is None else frozen_starts.index_select(0, selected),
+            query_ends=None if query_ends is None else query_ends.index_select(0, selected),
+            full_rows_cpu=torch.full((len(rows),), full, dtype=torch.bool, device="cpu"),
+        )
+        assert isinstance(read, DenseDraftRead)
+        visible.index_copy_(0, selected, read.seq_lens)
+        starts.index_copy_(0, selected, read.starts)
+        parts.append(DenseDraftReadPart(tuple(rows), queries, read))
+    result = DenseDraftReadBatch(
+        tuple(parts),
+        visible,
+        starts,
+        max(part.read.capacity for part in parts),
+        sum(part.query_indices.numel() for part in parts),
+        retain,
+    )
+    retain(result)
+    return result
 
 
 def prepare_dense_draft_read(
@@ -71,7 +179,7 @@ def prepare_dense_draft_read(
     full_rows_cpu: torch.Tensor | None = None,
     query_start_loc_cpu: torch.Tensor | None = None,
     query_start_loc_device: torch.Tensor | None = None,
-) -> DenseDraftRead:
+) -> DenseDraftRead | DenseDraftReadBatch:
     """Snapshot current device E and canonical addresses without Host exact.
 
     Caller supplies current preparation's 0<E<=U and matching device request
@@ -137,6 +245,7 @@ def prepare_dense_draft_read(
     query_offsets = query_indices = output_indices = None
     if (query_start_loc_cpu is None) != (query_start_loc_device is None):
         raise ValueError("Packed queries require current CPU and device boundaries")
+    widths = None
     if query_start_loc_cpu is not None:
         if (
             query_start_loc_cpu.device.type != "cpu"
@@ -150,6 +259,28 @@ def prepare_dense_draft_read(
         widths = query_start_loc_cpu.diff()
         if int(query_start_loc_cpu[0]) != 0 or bool(((widths <= 0) | (widths > query_width)).any()):
             raise ValueError("Packed query widths exceed their current allocation bound")
+    if full_rows_cpu is not None and full_rows_cpu.any():
+        groups = {}
+        for row in range(n):
+            key = (bool(full_rows_cpu[row]), query_width if widths is None else int(widths[row]))
+            groups.setdefault(key, []).append(row)
+        if len(groups) > 1:
+            return _prepare_partitioned_reads(
+                source,
+                groups=groups,
+                exact_device=exact,
+                row_indices=row_indices,
+                upper_cpu=upper_cpu,
+                window_size=window_size,
+                anchor_span=anchor_span,
+                query_width=query_width,
+                causal=causal,
+                retain=retain,
+                frozen_starts=frozen_starts,
+                query_ends=query_ends,
+                query_start_loc_device=query_start_loc_device,
+            )
+    if widths is not None:
         if not bool((widths == query_width).all()):
             query_offsets = query_start_loc_device.clone()
             total = int(query_start_loc_cpu[-1])
@@ -304,7 +435,11 @@ def gather_dense_draft_kv(
 
 
 def dense_draft_attention(
-    read: DenseDraftRead, query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor, scale: float
+    read: DenseDraftRead | DenseDraftReadBatch,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    scale: float,
 ) -> torch.Tensor:
     """Consume the device exact mask without a Host exact-length consumer.
 
@@ -317,6 +452,15 @@ def dense_draft_attention(
     # Lazy import keeps leaf planning/ownership usable in CPU-only tests.
     import torch_npu
 
+    if isinstance(read, DenseDraftReadBatch):
+        output = query.new_empty((read.num_query_tokens, *query.shape[-2:]))
+        read.retain(output)
+        for part in read.parts:
+            queries = query.index_select(0, part.query_indices)
+            read.retain(queries)
+            value = dense_draft_attention(part.read, queries, key_cache, value_cache, scale)
+            output.index_copy_(0, part.query_indices, value)
+        return output
     keys_fp32, values_fp32 = gather_dense_draft_kv(read, key_cache, value_cache, output_dtype=torch.float32)
     query = query[: read.num_query_tokens]
     if read.query_indices is not None:
