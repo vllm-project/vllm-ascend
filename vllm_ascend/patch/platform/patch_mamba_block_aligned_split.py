@@ -113,7 +113,11 @@ def _mamba_block_aligned_split(
     # one-block backoff (see the docstring). The sparse index-kpool
     # early-return path below must observe it too (it previously ran under
     # a temporary bit clear from the outer producer wrapper).
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
+    # Fine-grained caching needs the upstream hash-aligned tail checkpoint.
+    # The legacy sparse path below materializes only full-page boundaries.
+    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None and not getattr(
+        self, "mamba_partial_cache_hit", False
+    ):
         num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
             request.num_prompt_tokens,

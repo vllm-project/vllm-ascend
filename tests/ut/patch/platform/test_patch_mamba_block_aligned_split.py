@@ -298,3 +298,31 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens, computed_tokens",
+    [(2175, 0), (4095, 2176), (9215, 8704)],
+)
+@pytest.mark.parametrize("fine_grained", [False, True])
+@pytest.mark.parametrize("hash_block_size", [32, 64, 128])
+def test_sparse_prefill_materializes_configured_checkpoint(
+    prompt_tokens, computed_tokens, fine_grained, hash_block_size
+):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.block_size = scheduler.cache_config.block_size = 2176
+    scheduler.hash_block_size = hash_block_size
+    checkpoint = prompt_tokens // hash_block_size * hash_block_size
+    scheduler.mamba_partial_cache_hit = fine_grained
+    request = _request(
+        num_computed_tokens=computed_tokens,
+        num_prompt_tokens=prompt_tokens,
+        num_tokens=prompt_tokens,
+    )
+
+    scheduled = _mamba_block_aligned_split(scheduler, request, prompt_tokens - computed_tokens)
+
+    expected_end = checkpoint if fine_grained else prompt_tokens
+    assert computed_tokens + scheduled == expected_end
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True

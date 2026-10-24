@@ -613,6 +613,16 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
+        if self.use_hybrid:
+            # A state checkpoint at a longer prefix does not prove that a
+            # shorter checkpoint exists. Apply the replay limit before lookup
+            # so the coordinator verifies the boundary we will actually load.
+            replay_limit = request.num_tokens - 1
+            if self.use_eagle:
+                replay_limit = replay_limit // self.lcm_block_size * self.lcm_block_size
+            if len(self.cacheable_group_ids) != len(self.original_block_size):
+                replay_limit = self._floor_to_cache_transfer_granularity(replay_limit)
+            prompt_token_len = min(prompt_token_len, replay_limit)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:
@@ -650,7 +660,7 @@ class KVPoolScheduler:
             return 0, False
 
         store_skip_tokens = num_external_hit_tokens
-        if self.use_eagle:
+        if self.use_eagle and not self.use_hybrid:
             # Keep the draft model's recomputation zone intact: the
             # generation-point hidden states must be freshly computed, and the
             # local prefix-cache path already drops its trailing block

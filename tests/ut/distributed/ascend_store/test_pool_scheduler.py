@@ -1681,5 +1681,50 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         self.assertEqual(hit, 16)
 
 
+@pytest.mark.parametrize("transport", ["rpc", "gva", "block_key"])
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("available_states,expected", [({128}, 0), ({64, 128}, 64), ({112, 128}, 112)])
+def test_hybrid_lookup_verifies_the_replay_checkpoint(transport, use_eagle, available_states, expected):
+    """A longer checkpoint cannot be truncated into a missing earlier state.
+
+    Attention covers all 128 tokens. Only the listed recurrent checkpoints
+    exist in the pool; the lookup models the intersection of those groups.
+    """
+    scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+    scheduler.kv_role = "kv_producer"
+    scheduler.use_hybrid = True
+    scheduler.use_eagle = use_eagle
+    scheduler.lcm_block_size = scheduler.cache_transfer_granularity = 16
+    scheduler.cacheable_group_ids = scheduler.kv_cache_group_ids = [0, 1]
+    scheduler.original_block_size = [16, 16]
+    scheduler.use_layerwise = transport != "rpc"
+    scheduler.use_block_key_layerwise = transport == "block_key"
+    scheduler.use_layerwise_transfer = transport == "gva"
+    scheduler._discard_partial_chunks = True
+    scheduler.load_async = False
+    scheduler.load_specs = {}
+    request = SimpleNamespace(
+        request_id="replay", prompt_token_ids=list(range(128)), num_tokens=128, block_hashes=list(range(8))
+    )
+
+    def lookup(token_len, *_args, **_kwargs):
+        return max((state for state in available_states if state <= token_len), default=0)
+
+    rpc_lookup = MagicMock(side_effect=lookup)
+    direct_lookup = MagicMock(side_effect=lambda _request, token_len, _computed: lookup(token_len))
+    scheduler.client = SimpleNamespace(closed=False, lookup=rpc_lookup)
+    scheduler._get_layerwise_hit_tokens = direct_lookup
+    scheduler._get_block_key_layerwise_hit_tokens = direct_lookup
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
+    if expected:
+        spec = scheduler.load_specs[request.request_id]
+        assert spec.kvpool_cached_tokens in available_states
+        assert spec.kvpool_cached_tokens == spec.kvpool_store_skip_tokens == expected
+    else:
+        assert request.request_id not in scheduler.load_specs
+    assert rpc_lookup.call_count + direct_lookup.call_count == 1
+
+
 if __name__ == "__main__":
     unittest.main()
