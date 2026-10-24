@@ -31,6 +31,7 @@ def _expand_quant_pool_indices(
     LAST: tl.constexpr,
     SELECTED: tl.constexpr,
     POOL: tl.constexpr,
+    POOL_SHIFT: tl.constexpr,
     OUT_WIDTH: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -43,10 +44,12 @@ def _expand_quant_pool_indices(
         live = token < tl.load(ends + LAST)
         poolcols = part * (BLOCK // POOL) + tl.arange(0, BLOCK // POOL)
         unique_ids = tl.load(ids + token * SELECTED + poolcols, poolcols < SELECTED, other=-1)
-        poolids = tl.gather(unique_ids.to(tl.float32, bitcast=True), tl.arange(0, BLOCK) // POOL, axis=0).to(
+        # Pool sizes are powers of two and column indices are nonnegative.
+        # Explicit bit operations avoid expensive vector division on Ascend.
+        poolids = tl.gather(unique_ids.to(tl.float32, bitcast=True), tl.arange(0, BLOCK) >> POOL_SHIFT, axis=0).to(
             tl.int32, bitcast=True
         )
-        value = tl.where((poolids >= 0) & (cols < SELECTED * POOL), poolids * POOL + cols % POOL, -1)
+        value = tl.where((poolids >= 0) & (cols < SELECTED * POOL), poolids * POOL + (cols & (POOL - 1)), -1)
         tail_start = (position + 1) // POOL * POOL
         tail_col = tl.minimum(tail_start, SELECTED * POOL).to(tl.int32)
         off = cols - tail_col
@@ -173,7 +176,7 @@ def glm5_next_c8_quant_indexer(
     if output is None:
         output = torch.empty((q.shape[0], width), dtype=torch.int32, device=q.device)
     result = output[: q.shape[0]]
-    block = 4096 if q.shape[0] >= 512 else 256
+    block = 4096
     _expand_quant_pool_indices[(min(q.shape[0] * triton.cdiv(result.shape[1], block), 256),)](
         ids,
         query_meta.positions,
@@ -183,6 +186,7 @@ def glm5_next_c8_quant_indexer(
         lengths.numel() - 1,
         topk_tokens // pool_size,
         pool_size,
+        pool_size.bit_length() - 1,
         result.shape[1],
         result.stride(0),
         block,

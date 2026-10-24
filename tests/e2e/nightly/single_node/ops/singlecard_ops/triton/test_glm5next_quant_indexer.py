@@ -107,7 +107,7 @@ def test_integer_kpool_operator_limits(pool_size, topk):
         glm5_next_c8_quant_indexer(query, query, query, unused, unused, topk, pool_size, None)
 
 
-@pytest.mark.parametrize("tokens", [1, 6, 16])
+@pytest.mark.parametrize("tokens", [1, 6, 16, 30, 48])
 def test_integer_kpool_graph_replay_updates_lengths_and_pages(tokens):
     torch.manual_seed(18535)
     cache = torch.zeros(32, 32, 1, 132, device="npu", dtype=torch.int8)
