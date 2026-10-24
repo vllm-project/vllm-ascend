@@ -23,6 +23,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
+# isort: off
+import tests.ut.distributed.ascend_store._mock_deps as _mock_deps  # noqa: E402
+# isort: on
+
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -35,7 +40,6 @@ from vllm.v1.outputs import KVConnectorOutput
 from zmq.constants import RCVTIMEO
 from zmq.error import ZMQError
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -156,6 +160,7 @@ def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
 
 
 @pytest.mark.parametrize("draft_first", [False, True])
+@pytest.mark.skipif(_mock_deps._MOCK_VLLM_DEPS, reason="requires the real vLLM package")
 def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp_layer_names(draft_first):
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 

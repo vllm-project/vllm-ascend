@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import tests.ut.distributed.ascend_store._mock_deps as _mock_deps  # noqa: E402
 
 # isort: split
 import torch
@@ -416,6 +416,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
 
 
 class TestKVPPPoolWorker(unittest.TestCase):
+    @unittest.skipIf(_mock_deps._MOCK_VLLM_DEPS, "requires the real vLLM package")
     def test_pcp_registers_persistent_owner_layers_and_mtp(self):
         import torch
 
@@ -501,6 +502,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
                     self.assertIs(recv_thread.call_args.args[1], worker.token_database)
                     self.doCleanups()
 
+    @unittest.skipIf(_mock_deps._MOCK_VLLM_DEPS, "requires the real vLLM package")
     def test_registers_persistent_layers_and_mtp(self):
         import torch
 

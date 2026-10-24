@@ -162,6 +162,18 @@ class _MockKVConnectorStats:
     data: dict = field(default_factory=dict)
 
 
+@dataclass
+class _MockKVConnectorOutput:
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+    kv_connector_stats: Any = None
+    kv_connector_worker_meta: Any = None
+
+
+_outputs_mod: Any = sys.modules["vllm.v1.outputs"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_outputs_mod.KVConnectorOutput = _MockKVConnectorOutput
+
+
 class _MockKVConnectorPromMetrics:
     def __init__(
         self,
