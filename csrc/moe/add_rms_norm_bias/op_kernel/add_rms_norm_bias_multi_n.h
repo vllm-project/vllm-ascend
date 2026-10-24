@@ -188,12 +188,27 @@ private:
         Mul(sqx, x_fp32, x_fp32, calc_row_num * numColAlign);
         PipeBarrier<PIPE_V>();
 
-        Muls(sqx, sqx, avgFactor, calc_row_num * numColAlign);
-        PipeBarrier<PIPE_V>();
-
-        for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
-            ReduceSumCustom(rstdLocal[i_i * NUM_PER_BLK_FP32], sqx[i_i * numColAlign], reduce_buf_local, numCol);
+        if constexpr (is_same<T, half>::value) {
+            // fp16 keeps the post-reduce scaling: max(x)^2 ~ 4.3e9 and
+            // numCol <= 12288 keep the raw sum of squares below 5.3e13, far
+            // from the fp32 overflow domain.
+            for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+                ReduceSumCustom(rstdLocal[i_i * NUM_PER_BLK_FP32], sqx[i_i * numColAlign], reduce_buf_local, numCol);
+            }
+            // Scale the per-row sums (8 lanes each) instead of the whole batch of
+            // squares before the reduction: mean = rawsum * (1/N).
+            Muls(rstdLocal, rstdLocal, avgFactor, calc_row_num * NUM_PER_BLK_FP32);
+        } else {
+            // bf16/fp32 domain: scale per element BEFORE the reduction like
+            // the reference - the raw sum of squares can overflow fp32 for
+            // large-magnitude inputs where the scaled sum stays finite.
+            Muls(sqx, sqx, avgFactor, calc_row_num * numColAlign);
+            PipeBarrier<PIPE_V>();
+            for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+                ReduceSumCustom(rstdLocal[i_i * NUM_PER_BLK_FP32], sqx[i_i * numColAlign], reduce_buf_local, numCol);
+            }
         }
+        PipeBarrier<PIPE_V>();
         Adds(rstdLocal, rstdLocal, epsilon, calc_row_num * NUM_PER_BLK_FP32);
         PipeBarrier<PIPE_V>();
 
