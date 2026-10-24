@@ -34,7 +34,11 @@ _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
 _PROBE_INTERVAL = 32
-_ACCEPTED_TAIL_THRESHOLD = 0.25
+# The worker's full-step score is authoritative unless measured acceptance
+# gives strong evidence that the discarded tail is almost never useful. A
+# short low-acceptance spell in a greedy rollout should not override K=5.
+_ACCEPTED_TAIL_THRESHOLD = 0.125
+_ECONOMIC_MIN_OBSERVATIONS = 32
 
 
 def _trace_physical_k(message: str, *args: Any) -> None:
@@ -179,7 +183,7 @@ class AdaptiveDraftKController:
             desired = state.profile_k
             if (
                 state.economic_k is not None
-                and state.observations >= 6
+                and state.observations >= _ECONOMIC_MIN_OBSERVATIONS
                 and all(state.survival_seen[state.economic_k :])
                 and sum(state.survival[state.economic_k :]) <= _ACCEPTED_TAIL_THRESHOLD
             ):

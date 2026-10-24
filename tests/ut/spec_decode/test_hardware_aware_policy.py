@@ -88,10 +88,21 @@ def test_profiled_auto_tune_observation_skips_sampled_token_iteration():
 def test_cost_saving_profile_uses_actual_low_tail_acceptance():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     controller.recommend(4, 5, cost_saving_k=3)
+    for _ in range(34):
+        controller.observe([5] * 4, [[0]] * 4)
+    assert controller._state(4).observations == 34
+    assert controller.cap(5, 4) == 3
+
+
+def test_cost_saving_profile_ignores_short_low_acceptance_spell():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    controller.recommend(4, 5, cost_saving_k=3)
     for _ in range(8):
         controller.observe([5] * 4, [[0]] * 4)
-    assert controller._state(4).observations == 8
-    assert controller.cap(5, 4) == 3
+    assert controller.cap(5, 4) == 5
+    for _ in range(24):
+        controller.observe([5] * 4, [[0] * 6] * 4)
+    assert controller.cap(5, 4) == 5
 
 
 def test_cost_saving_profile_keeps_full_width_for_high_tail_acceptance():
