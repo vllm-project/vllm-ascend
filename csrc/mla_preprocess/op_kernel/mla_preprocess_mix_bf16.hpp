@@ -636,7 +636,7 @@ public:
 
         num_col_ = num_col;
         avg_factor_ = avg_factor;
-        epsilon_ = 1e-6;
+        epsilon_ = mlaParams_.qEpsilon;
         quantMin_ = -128;
         this->num_row_ = mlaParams_.n;
         this->row_work = row_work;
@@ -2466,7 +2466,7 @@ public:
         this->num_col_1 = mlaParams_.rmsNumCol1;
         this->num_col_2 = mlaParams_.rmsNumCol2;
         this->num_row = mlaParams_.n;
-        this->epsilon_ = 1e-6;
+        this->epsilon_ = mlaParams_.kvEpsilon;
         this->mlaParams = mlaParams_;
         this->hiddenStateDim = mlaParams_.hiddenStateDim;
         this->mm1OutSize_ = mlaParams_.mm1OutSize;

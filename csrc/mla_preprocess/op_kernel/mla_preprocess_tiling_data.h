@@ -114,6 +114,8 @@ struct MlaTilingData {
     uint64_t kvCacheBlockSize{128};
     uint64_t kvCacheStride0{0};
     uint64_t kvCacheRopeStride0{0};
+    float qEpsilon{1e-6f};
+    float kvEpsilon{1e-6f};
 };
 
 #endif  // MLA_PREPROCESS_TILING_DATA_H
