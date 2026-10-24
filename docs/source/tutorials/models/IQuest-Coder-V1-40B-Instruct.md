@@ -160,7 +160,7 @@ TP2 memory account (paper):
 - Weights: ~40GB bf16 per card.
 - Runtime reserve (eager mode + activations): ~3GB + ~2.6GB.
 - KV cache budget: ~12GB per card at `gpu_memory_utilization=0.85` → **160KB/token/card** (80 layers x 8 KV heads x 128 head_dim x 2 (K+V) x 2 bytes = 160KB per token per card).
-  - 4096 tokens → ~0.62GB; 8192 tokens → ~1.25GB.
+    - 4096 tokens → ~0.62GB; 8192 tokens → ~1.25GB.
 - Concurrency safety line: 4–6 concurrent sequences (logits peaks ~2.3GB/request).
 
 Runtime HBM sampling recipe (run while an eval/serving round is in flight):
