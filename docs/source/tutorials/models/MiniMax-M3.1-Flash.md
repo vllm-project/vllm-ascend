@@ -117,6 +117,10 @@ Use the container and model weights for your hardware from [Installation](#4-ins
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
+**Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+
+For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
+
 ### 5.1 Single-Node Deployment
 
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses all 16 NPUs with W8A8 weights; the A5 example uses all eight NPUs with MXFP8 weights. Prepare the common environment for your platform before starting the service.
@@ -291,10 +295,6 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
     ```
 
     Send requests directly to port `11223` with model name `minimax-m3`.
-
-**Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
-
-For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.2 PD Disaggregation
 
