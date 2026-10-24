@@ -53,6 +53,45 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
+=== "950DT products"
+
+    Start a Docker container on each node.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-a5
+    docker run --runtime=runc \
+        --name vllm-ascend \
+        --shm-size=500g \
+        --net=host \
+        --privileged=true \
+        --pid=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/hisi_hdc \
+        --device /dev/ummu \
+        --device /dev/uburma \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+        -v /etc/hixlep:/etc/hixlep \
+        -v /var/log/npu/:/usr/slog \
+        -v /root/host:/root/host \
+        -v /mnt:/mnt \
+        -v /data:/data \
+        -v /home/:/home/ \
+        -it $IMAGE bash
+    ```
+
 === "A3 series"
 
     Start the docker image on each node.
@@ -141,7 +180,7 @@ To use the tool_calls feature, please ensure that your transformers version is 4
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on one A5 server.
 
 While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
 
