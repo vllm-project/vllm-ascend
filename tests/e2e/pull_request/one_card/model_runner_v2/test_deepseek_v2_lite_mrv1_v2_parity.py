@@ -13,6 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Compare DeepSeek V2 across Model Runner V1 and V2.
+
+Greedy tokens and logprobs are exactness/parity gates. Fixed-seed sampled-token
+agreement is recorded as diagnostic data, not asserted exactly: MRV1 samples
+with exponential-race RNG, while MRV2 uses hash-based Gumbel noise, so the two
+implementations do not share an RNG stream.
+"""
+
 import json
 import os
 import platform
@@ -31,6 +39,7 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory, wait_unt
 
 MODEL = os.environ.get("DEEPSEEK_V2_MODEL", "/workspace/DeepSeek-V2-Lite-W8A8")
 RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity.json"))
+TP2_RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_TP2_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity_tp2.json"))
 
 PROMPTS = [
     "The capital of France is",
@@ -81,15 +90,45 @@ def _json_default(value):
     return str(value)
 
 
-def _measure(model_runner: str):
+def _greedy_logprob_deltas(mrv1, mrv2):
+    deltas = []
+    for tokens1, tokens2, logprobs1, logprobs2 in zip(
+        mrv1["greedy_tokens"],
+        mrv2["greedy_tokens"],
+        mrv1["greedy_logprobs"],
+        mrv2["greedy_logprobs"],
+        strict=True,
+    ):
+        for token1, token2, position1, position2 in zip(tokens1, tokens2, logprobs1, logprobs2, strict=True):
+            if token1 != token2:
+                continue
+            entry1 = position1.get(token1, position1.get(str(token1)))
+            entry2 = position2.get(token2, position2.get(str(token2)))
+            value1 = entry1.logprob if hasattr(entry1, "logprob") else entry1["logprob"]
+            value2 = entry2.logprob if hasattr(entry2, "logprob") else entry2["logprob"]
+            deltas.append(abs(value1 - value2))
+    return max(deltas, default=0.0), sum(deltas) / len(deltas) if deltas else 0.0
+
+
+def _measure(
+    model_runner: str,
+    *,
+    prompts: list[str] = PROMPTS,
+    max_tokens: int = 32,
+    max_model_len: int = 4096,
+    max_num_batched_tokens: int = 4096,
+    tensor_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
+    gpu_memory_utilization: float = 0.75,
+):
     greedy = SamplingParams(
-        max_tokens=32,
+        max_tokens=max_tokens,
         temperature=0.0,
         logprobs=5,
         seed=1234,
     )
     sampled = SamplingParams(
-        max_tokens=32,
+        max_tokens=max_tokens,
         temperature=0.8,
         top_p=0.95,
         top_k=20,
@@ -97,19 +136,23 @@ def _measure(model_runner: str):
     )
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("VLLM_USE_V2_MODEL_RUNNER", model_runner)
+        mp.setenv("OMP_NUM_THREADS", "1")
+        mp.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         started = time.perf_counter()
         with (
             _NpuMemoryMonitor() as memory_monitor,
             VllmRunner(
                 MODEL,
-                max_model_len=4096,
-                max_num_batched_tokens=4096,
+                max_model_len=max_model_len,
+                max_num_batched_tokens=max_num_batched_tokens,
                 enforce_eager=True,
-                gpu_memory_utilization=0.75,
+                tensor_parallel_size=tensor_parallel_size,
+                enable_expert_parallel=enable_expert_parallel,
+                gpu_memory_utilization=gpu_memory_utilization,
             ) as runner,
         ):
-            greedy_outputs = runner.generate_w_logprobs(PROMPTS, greedy)
-            sampled_outputs = runner.generate(PROMPTS, sampled)
+            greedy_outputs = runner.generate_w_logprobs(prompts, greedy)
+            sampled_outputs = runner.generate(prompts, sampled)
             elapsed = time.perf_counter() - started
 
     cleanup_dist_env_and_memory()
@@ -126,6 +169,9 @@ def _measure(model_runner: str):
         "output_tokens": sum(len(item[0]) for item in greedy_outputs)
         + sum(len(item[0][0]) for item in sampled_outputs),
         "hbm_peak_mb": memory_monitor.peak_hbm_mb,
+        "tensor_parallel_size": tensor_parallel_size,
+        "expert_parallel": enable_expert_parallel,
+        "gpu_memory_utilization": gpu_memory_utilization,
     }
 
 
@@ -141,6 +187,7 @@ def test_deepseek_v2_lite_mrv1_mrv2_parity_and_performance():
         for left, right in zip(left_tokens, right_tokens, strict=True)
     )
     sampled_match_ratio = sampled_matches / sampled_total
+    greedy_logprob_max_delta, greedy_logprob_mean_delta = _greedy_logprob_deltas(mrv1, mrv2)
 
     mrv1_rates = mrv1["output_tokens"] / mrv1["elapsed_s"]
     mrv2_rates = mrv2["output_tokens"] / mrv2["elapsed_s"]
@@ -168,6 +215,8 @@ def test_deepseek_v2_lite_mrv1_mrv2_parity_and_performance():
         "mrv1_tokens_per_s": mrv1_rates,
         "mrv2_tokens_per_s": mrv2_rates,
         "sampled_token_match_ratio": sampled_match_ratio,
+        "greedy_logprob_max_abs_delta": greedy_logprob_max_delta,
+        "greedy_logprob_mean_abs_delta": greedy_logprob_mean_delta,
     }
     RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESULT_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
@@ -177,6 +226,71 @@ def test_deepseek_v2_lite_mrv1_mrv2_parity_and_performance():
     assert all(mrv1["sampled_texts"])
     assert all(mrv2["sampled_texts"])
     assert mrv1["greedy_tokens"] == mrv2["greedy_tokens"], "MRV1/MRV2 greedy token outputs diverged"
+    assert greedy_logprob_max_delta <= 1e-4, "MRV1/MRV2 greedy logprobs diverged"
     assert sampled_total > 0
     assert mrv2["elapsed_s"] <= mrv1["elapsed_s"] * 1.10, "MRV2 regressed by more than 10%"
     assert mrv2_rates >= mrv1_rates * 0.90, "MRV2 throughput regressed by more than 10%"
+
+
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_deepseek_v2_lite_mrv1_mrv2_tp2_ep_parity_and_performance():
+    prompts = PROMPTS[:3]
+    mrv1 = _measure(
+        "0",
+        prompts=prompts,
+        max_tokens=16,
+        max_model_len=1024,
+        max_num_batched_tokens=256,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        gpu_memory_utilization=0.45,
+    )
+    mrv2 = _measure(
+        "1",
+        prompts=prompts,
+        max_tokens=16,
+        max_model_len=1024,
+        max_num_batched_tokens=256,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        gpu_memory_utilization=0.45,
+    )
+
+    sampled_total = sum(len(tokens) for tokens in mrv1["sampled_tokens"])
+    sampled_matches = sum(
+        left == right
+        for left_tokens, right_tokens in zip(mrv1["sampled_tokens"], mrv2["sampled_tokens"], strict=True)
+        for left, right in zip(left_tokens, right_tokens, strict=True)
+    )
+    sampled_match_ratio = sampled_matches / sampled_total
+    greedy_logprob_max_delta, greedy_logprob_mean_delta = _greedy_logprob_deltas(mrv1, mrv2)
+    mrv1_rates = mrv1["output_tokens"] / mrv1["elapsed_s"]
+    mrv2_rates = mrv2["output_tokens"] / mrv2["elapsed_s"]
+
+    result = {
+        "model": MODEL,
+        "runtime": {
+            "model_runner_v1": "VLLM_USE_V2_MODEL_RUNNER=0",
+            "model_runner_v2": "VLLM_USE_V2_MODEL_RUNNER=1",
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 1,
+            "expert_parallel": True,
+            "enforce_eager": True,
+        },
+        "prompts": prompts,
+        "mrv1": mrv1,
+        "mrv2": mrv2,
+        "mrv1_tokens_per_s": mrv1_rates,
+        "mrv2_tokens_per_s": mrv2_rates,
+        "sampled_token_match_ratio": sampled_match_ratio,
+        "greedy_logprob_max_abs_delta": greedy_logprob_max_delta,
+        "greedy_logprob_mean_abs_delta": greedy_logprob_mean_delta,
+    }
+    TP2_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TP2_RESULT_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+
+    assert mrv1["greedy_tokens"] == mrv2["greedy_tokens"], "MRV1/MRV2 TP2 greedy token outputs diverged"
+    assert greedy_logprob_max_delta <= 1e-4, "MRV1/MRV2 TP2 greedy logprobs diverged"
+    assert sampled_total > 0
+    assert mrv2["elapsed_s"] <= mrv1["elapsed_s"] * 1.10, "MRV2 TP2 regressed by more than 10%"
+    assert mrv2_rates >= mrv1_rates * 0.90, "MRV2 TP2 throughput regressed by more than 10%"
