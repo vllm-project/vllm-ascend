@@ -297,6 +297,9 @@ class AscendPCPManager(PCPManager):
             padded_num_reqs=padded_num_reqs if self.is_decode_sharded else None,
         )
         assert isinstance(local_batch, AscendInputBatch)
+        # Global request caps do not describe PCP-local segment rows. PP
+        # participation uses the retained global batch, as in vLLM #58542.
+        local_batch.max_seq_len_np = None
         local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
         local_batch.is_cpp_profile = getattr(global_batch, "is_cpp_profile", False)
         self._pad_hidden_restore_idx(global_batch)
