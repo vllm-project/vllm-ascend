@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, fields
+from typing import Any
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -736,6 +737,14 @@ class RecomputeScheduler(Scheduler):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                allocate_kwargs: dict[str, Any] = {}
+                if not vllm_version_is("0.31.0"):
+                    allocate_kwargs["skip_zeroing_group_ids"] = (
+                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        if load_kv_async and self.connector is not None
+                        else ()
+                    )
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -748,6 +757,7 @@ class RecomputeScheduler(Scheduler):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    **allocate_kwargs,
                 )
 
                 if new_blocks is None:
@@ -799,9 +809,7 @@ class RecomputeScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
+                    if vllm_version_is("0.31.0") and self.needs_kv_cache_zeroing:
                         self._skip_zero_block_ids.update(
                             self.kv_cache_manager.get_zeroing_block_ids_in_range(
                                 request.request_id,

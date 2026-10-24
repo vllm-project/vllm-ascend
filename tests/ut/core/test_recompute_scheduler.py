@@ -5,10 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.request import RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
@@ -21,6 +24,7 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
     RecomputeSchedulerConfig,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -377,3 +381,96 @@ def test_first_request_preserves_ascend_speculative_padding_without_cached_token
 
     assert output.num_scheduled_tokens[request.request_id] == 3
     assert output.scheduled_spec_decode_tokens[request.request_id] == [-1, -1]
+
+
+@pytest.mark.parametrize("scheduler_cls", [RecomputeScheduler, AsyncRecomputeScheduler])
+@pytest.mark.parametrize("async_load", [False, True])
+def test_remote_load_excludes_only_async_blocks_from_zeroing(scheduler_cls, async_load):
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
+    scheduler.needs_kv_cache_zeroing = True
+    # Enable the attention-block zeroing used by hybrid models.
+    for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        manager._record_new_block_ids = True
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (8, async_load)
+    connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector = connector
+    request = create_request(request_id=1, num_tokens=10)
+    scheduler.add_request(request)
+
+    with (
+        patch.object(
+            scheduler.kv_cache_manager, "allocate_slots", wraps=scheduler.kv_cache_manager.allocate_slots
+        ) as allocate,
+        patch.object(
+            scheduler.kv_cache_manager,
+            "get_zeroing_block_ids_in_range",
+            wraps=getattr(scheduler.kv_cache_manager, "get_zeroing_block_ids_in_range", None),
+            create=True,
+        ) as loaded_blocks,
+    ):
+        output = scheduler.schedule()
+
+    assert allocate.call_args is not None
+    kwargs = allocate.call_args.kwargs
+    if vllm_version_is("0.31.0"):
+        assert "skip_zeroing_group_ids" not in kwargs
+        if async_load:
+            loaded_blocks.assert_called_once_with(request.request_id, 0, 8)
+        else:
+            loaded_blocks.assert_not_called()
+    else:
+        assert kwargs["skip_zeroing_group_ids"] == ((0,) if async_load else ())
+
+    blocks = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    assert blocks
+    if async_load:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert output.new_block_ids_to_zero is None
+    else:
+        assert set(output.new_block_ids_to_zero) == set(blocks)
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="Group exclusion is specific to the main allocation API")
+def test_async_load_preserves_zeroing_for_unloaded_group():
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.num_gpu_blocks = 100
+    kv_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"layer{group}"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16)
+            )
+            for group in range(2)
+        ],
+    )
+    scheduler = AsyncRecomputeScheduler(
+        vllm_config=config,
+        kv_cache_config=kv_config,
+        log_stats=True,
+        block_size=16,
+        structured_output_manager=StructuredOutputManager(config),
+    )
+    scheduler.use_v2_model_runner = False
+    scheduler.needs_kv_cache_zeroing = True
+    for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        manager._record_new_block_ids = True
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = (8, True)
+    connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector = connector
+    request = create_request(request_id=1, num_tokens=10)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    loaded, fresh = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert loaded and fresh
+    zeroed = set(output.new_block_ids_to_zero or [])
+    assert zeroed.isdisjoint(loaded)
+    assert set(fresh) <= zeroed
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
