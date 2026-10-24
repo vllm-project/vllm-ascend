@@ -1,0 +1,7 @@
+pr: 19401
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the npu_hc_pre_v3/v2 Sinkhorn column epsilon application so identical inputs
+      produce identical comb regardless of token position, resolving the accuracy drift
+      in DeepSeek-V4.1 hyper-connections.
