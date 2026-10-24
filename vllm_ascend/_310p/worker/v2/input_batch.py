@@ -16,3 +16,6 @@ class Ascend310PInputBatch(AscendInputBatch):
     block_tables_np: tuple[np.ndarray, ...] | None = None
     input_ids_cpu: torch.Tensor | None = None
     logits_indices_np: np.ndarray | None = None
+    # CPU mirrors of expanded mapping / local pos (avoid NPU→CPU sync in sampler).
+    expanded_idx_mapping_np: np.ndarray | None = None
+    expanded_local_pos_np: np.ndarray | None = None

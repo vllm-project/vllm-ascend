@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
+from vllm_ascend._310p.worker.v2.sample.logprob import gather_logprobs
 from vllm_ascend._310p.worker.v2.spec_utils import (
     get_num_sampled_and_rejected_cpu,
     probabilistic_rejection_sample_cpu,
@@ -63,6 +64,37 @@ class RejectionSampler310V2(RejectionSampler):
         self._copy_event = torch.npu.Event()
         self._copy_pending = False
 
+    def _build_logprobs_tensors(
+        self,
+        *,
+        logits: torch.Tensor,
+        sampled: torch.Tensor,
+        num_sampled: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ):
+        """Raw logprobs for emitted tokens (aligned with ``cu_num_logits`` rows).
+
+        Triton-free stand-in for upstream ``RejectionSampler._get_logprobs_tensors``.
+        Emitted token ``j`` of request ``r`` uses logits row ``cu[r] + j``.
+        Built on device to avoid NPU→CPU sync (#16489); uses raw logits.
+        """
+        max_num_logprobs = self.sampler._batch_max_num_logprobs(idx_mapping_np)
+        if max_num_logprobs is None:
+            return None
+        num_reqs = int(num_sampled.shape[0])
+        max_steps = int(sampled.shape[1])
+        pos = torch.arange(max_steps, device=sampled.device, dtype=torch.int64).unsqueeze(0)
+        pos = pos.expand(num_reqs, -1)
+        valid = (pos < num_sampled.to(torch.int64).unsqueeze(1)) & (sampled != PLACEHOLDER_TOKEN_ID)
+        starts = cu_num_logits[:num_reqs].to(torch.int64).unsqueeze(1)
+        rows = (starts + pos)[valid]
+        tokens = sampled[valid]
+        if tokens.numel() == 0:
+            return None
+        raw = torch.log_softmax(logits.index_select(0, rows), dim=-1, dtype=torch.float32)
+        return gather_logprobs(raw, max_num_logprobs, tokens)
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -73,10 +105,15 @@ class RejectionSampler310V2(RejectionSampler):
         num_reqs = input_batch.num_reqs
         idx_mapping_np = input_batch.idx_mapping_np
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        # Post-process for verify; keep raw ``logits`` for logprobs. Prefer CPU
+        # mirrors from InputBatch to avoid NPU→CPU sync (#16489).
         processed = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
+            input_ids_cpu=getattr(input_batch, "input_ids_cpu", None),
+            expanded_idx_mapping_np=getattr(input_batch, "expanded_idx_mapping_np", None),
+            expanded_local_pos_np=getattr(input_batch, "expanded_local_pos_np", None),
         )
 
         temperature_np = getattr(self.sampler, "_temperature_np", None)
@@ -114,9 +151,16 @@ class RejectionSampler310V2(RejectionSampler):
             self.num_sampled_cpu[:num_reqs].copy_(num_sampled_cpu)
             self.num_rejected_cpu[:num_reqs].copy_(num_rejected_cpu)
             self._copy_pending = False
+            logprobs_tensors = self._build_logprobs_tensors(
+                logits=logits,
+                sampled=sampled,
+                num_sampled=num_sampled,
+                cu_num_logits=input_batch.cu_num_logits[: num_reqs + 1],
+                idx_mapping_np=idx_mapping_np,
+            )
             return SamplerOutput(
                 sampled_token_ids=sampled,
-                logprobs_tensors=None,
+                logprobs_tensors=logprobs_tensors,
                 num_nans=None,
                 num_sampled=num_sampled,
                 num_rejected=num_rejected,
@@ -140,8 +184,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
-        target_logits = logits.index_select(0, target_rows)
-        bonus_token_ids = logits.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
+        # Verify / bonus against post-processed logits (allowed / penalties / …).
+        target_logits = processed.index_select(0, target_rows)
+        bonus_token_ids = processed.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
 
         target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
         sampled = torch.full(
@@ -180,6 +225,7 @@ class RejectionSampler310V2(RejectionSampler):
             num_logits.to(torch.int32) - num_sampled,
         )
 
+        # Kick async H2D first (#16489), then gather logprobs on the main stream.
         main_stream = torch.npu.current_stream()
         with torch.npu.stream(self._copy_stream):
             self._copy_stream.wait_stream(main_stream)
@@ -188,9 +234,17 @@ class RejectionSampler310V2(RejectionSampler):
             self.num_rejected_cpu[:num_reqs].copy_(num_rejected, non_blocking=True)
             self._copy_event.record()
             self._copy_pending = True
+
+        logprobs_tensors = self._build_logprobs_tensors(
+            logits=logits,
+            sampled=sampled,
+            num_sampled=num_sampled,
+            cu_num_logits=cu_num_logits,
+            idx_mapping_np=idx_mapping_np,
+        )
         return SamplerOutput(
             sampled_token_ids=sampled,
-            logprobs_tensors=None,
+            logprobs_tensors=logprobs_tensors,
             num_nans=None,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
