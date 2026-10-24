@@ -20,6 +20,12 @@ fi
 log "Starting batch_invariant installation..."
 log "SOC_ARG=${SOC_ARG}"
 
+# Track failures of the download/install steps below so that the script exits
+# non-zero at the end. Every failing command is wrapped in an if/|| context, so
+# `set -e` never triggers on its own and the build would otherwise be reported
+# as successful even when the ops were not installed.
+FAILED=0
+
 # determine device type from SOC_ARG
 case "${SOC_ARG}" in
     ascend910b)
@@ -65,9 +71,11 @@ if curl --max-time 120 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_
         log "batch_invariant run package installed successfully"
     else
         log "Failed to install batch_invariant run package"
+        FAILED=1
     fi
 else
     log "Failed to download batch_invariant run package: ${BATCH_INVARIANT_RUN_URL}"
+    FAILED=1
 fi
 # clean up downloaded run file (always clean, regardless of success/failure)
 rm -f "${BATCH_INVARIANT_RUN_FILE}"
@@ -86,18 +94,27 @@ if curl --max-time 5 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [
                 log "batch_invariant whl package installed successfully"
             else
                 log "Failed to build and install batch_invariant whl package"
+                FAILED=1
             fi
             cd -
         else
             log "batch_invariant_ops directory not found in zip"
+            FAILED=1
         fi
     else
         log "Failed to unzip batch_invariant whl package"
+        FAILED=1
     fi
 else
     log "Failed to download batch_invariant whl package: ${BATCH_INVARIANT_WHL_URL}"
+    FAILED=1
 fi
 # clean up downloaded files (always clean, regardless of success/failure)
 rm -rf "${BATCH_INVARIANT_WHL_FILE}" torch_ops_extension
 
-log "batch_invariant_ops build completed"
+if [[ "${FAILED}" -eq 0 ]]; then
+    log "batch_invariant_ops build completed successfully"
+else
+    log "ERROR: batch_invariant_ops build failed"
+fi
+exit "${FAILED}"
