@@ -40,6 +40,9 @@ def bind_layerwise_keys(
     validate_pp_groups(kv_cache_config, parallel)
     namespace = layerwise_topology_namespace(vllm_config, kv_cache_config)
     pp_size = parallel.pipeline_parallel_size
+    pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+    if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
+        raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
     if pp_size > 1:
         logger.info(
             "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
@@ -66,12 +69,12 @@ def bind_layerwise_keys(
                 pp_rank=stage if pp_size > 1 else None,
             )
 
-        return LayerwiseKeyBuilder(make_key, pp_size)
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size)
 
     def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
         return make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-    return LayerwiseKeyBuilder(make_single_group_key, pp_size)
+    return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -181,14 +184,11 @@ def validate_topology(parallel_config: Any) -> None:
         value = getattr(parallel_config, name, 1)
         return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
-    dimensions = (
-        ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
-        ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
-    )
+    dimensions = (("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),)
     unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
     if unsupported:
         raise ValueError(
-            "Mooncake block-key layerwise supports TP/PP, but not context parallelism; unsupported "
+            "Mooncake block-key layerwise supports TP/PP/PCP, but not decode context parallelism; unsupported "
             + ", ".join(unsupported)
         )
 

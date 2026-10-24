@@ -148,8 +148,9 @@ Hybrid attention and topology-matched PP are covered by the
 [hybrid guide](mooncake_hybrid_attention.md).
 The implementation still explicitly rejects:
 
-- Prefill or decode context parallel size greater than 1.
-- Recurrent Mamba state in hybrid layerwise mode, and PP stages with empty projected cache groups.
+- Decode context parallel size greater than 1. PCP is supported with topology-matched peers;
+  see the [PCP guide](mooncake_hybrid_attention.md#prefill-context-parallelism-pcp).
+- PP stages with empty projected cache groups.
 - TP mismatch with layerwise transfer.
 
 ### 4.5 Exceptions and Fallbacks
@@ -268,8 +269,7 @@ Keep the default value of `false` during normal operation to avoid per-layer log
 
 1. Support hybrid and multi-group layouts by recording the group layout in the key and object header, with an
    independent completeness bitmap for each group.
-2. Support PP/PCP/DCP by encoding parallel coordinates in the key and having the scheduler validate the participating
-   rank set.
+2. Extend the existing PP/PCP key coordinates and all-rank readability checks to DCP layouts.
 3. Support a per-layer readiness bitmap so consumers can read completed early layers before the entire object becomes
    `COMPLETE`. This requires visibility and consistency support from Mooncake and introduces substantial complexity.
 4. Record a schema, version, and checksum in the object header and perform an inexpensive compatibility check before
