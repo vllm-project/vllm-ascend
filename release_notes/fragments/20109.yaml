@@ -1,0 +1,10 @@
+pr: 20109
+entries:
+  - category: bugfix
+    text: >-
+      `selected_token_ranks` now counts the vocabulary entries whose logit is
+      greater than or equal to the sampled token's, matching vLLM. The previous
+      strict comparison under-reported the rank by the multiplicity of the
+      sampled logit (0 instead of 1 for a unique argmax, 0 instead of 2 for a
+      two-way top tie), and padding lanes could be counted when the sampled logit
+      was -inf.
