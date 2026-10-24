@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -148,14 +149,27 @@ def test_o_projection_keeps_weight_lifetime_in_caller(monkeypatch, fail_at):
             if fail_at == "copy":
                 raise RuntimeError("copy failed")
 
-    impl = SimpleNamespace(
+    @contextmanager
+    def full_weight_context():
+        events.append("full")
+        try:
+            yield
+        finally:
+            events.append("local")
+
+    impl: Any = SimpleNamespace(
         tp_size=2,
         enable_dsa_cp_full_o_proj=True,
         _get_layer_metadata=lambda *args: SimpleNamespace(compressor_cache=metadata),
         _forward=lambda *args: tensor,
         _restore_tp_head_layout=lambda *args, **kwargs: tensor,
-        _switch_o_proj_to_full_weight=lambda: events.append("full"),
-        _switch_o_proj_to_local_weight=lambda: events.append("local"),
+        _parallel_o_proj=SimpleNamespace(
+            forward_context=lambda: nullcontext(),
+            set_mode=lambda **kwargs: None,
+            uses_full_weight=True,
+            use_full_weights=full_weight_context,
+        ),
+        _forward_impl=lambda *args: AscendDSACPImpl._forward_impl(impl, *args),
         _forward_o_proj=project,
     )
     monkeypatch.setattr(dsa_cp, "wait_for_kv_layer_from_connector", lambda *args: None)

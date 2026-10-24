@@ -492,7 +492,6 @@ class SFAForwardContext:
     actual_seq_lengths_key: torch.Tensor
     kv_slot_mapping: torch.Tensor
     topk_num_tokens: int
-    gather_full_o_proj: bool = False
 
 
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
@@ -1711,7 +1710,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
-        full_gather_o_proj_enabled: bool,
     ) -> tuple[
         torch.Tensor | None,
         list[torch.distributed.Work],
@@ -1729,7 +1727,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv_cache: tuple[torch.Tensor, ...] | None,
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
-        full_gather_o_proj_enabled: bool,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1784,7 +1781,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         attn_output: torch.Tensor,
         output: torch.Tensor,
-        gather_full_o_proj: bool,
     ) -> torch.Tensor:
         output[...] = self.o_proj(attn_output)[0]
         return output
@@ -1897,7 +1893,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def forward(
         self,
         layer_name,
-        hidden_states: torch.Tensor,  # query in unified attn
+        hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
@@ -1914,7 +1910,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
-                num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
+                if self.vllm_config.parallel_config.prefill_context_parallel_size > 1 and needs_pcp_kv_gather(
+                    attn_metadata, self.is_pcp_decode_sharded
+                ):
+                    # Empty and uneven PCP ranks must keep the same padded
+                    # rows for KV gathers and O-projection collectives.
+                    num_tokens = min(num_tokens, attn_metadata.num_input_tokens)
+                else:
+                    num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
                 return output.zero_()
             hidden_states = hidden_states[:num_tokens]
@@ -2034,7 +2037,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_pe,
                 k_nope,
                 knope_scale,
-                parallel_context.gather_full_o_proj,
             )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
@@ -2058,7 +2060,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 kv_cache,
                 self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
-                parallel_context.gather_full_o_proj,
             )
 
         # A sharded-decode PCP rank can own no request but must still write
@@ -2126,7 +2127,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._finalize_o_proj(
             attn_output,
             output[:num_input_tokens],
-            parallel_context.gather_full_o_proj,
         )
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

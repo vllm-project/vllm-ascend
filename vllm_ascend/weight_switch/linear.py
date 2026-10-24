@@ -190,6 +190,10 @@ class WeightSwitchMixin:
         """Apply the concrete linear method."""
         raise NotImplementedError(f"{type(self).__name__} must implement apply().")
 
+    def apply_weight_shard(self, layer: torch.nn.Module, x: torch.Tensor, *, bias_rank: int) -> torch.Tensor:
+        """Compute one weight-shard contribution without ordinary bias or reduction."""
+        return self.apply(layer, x, bias=None)
+
     def _get_weight_switch_specs(
         self,
         layer: torch.nn.Module,

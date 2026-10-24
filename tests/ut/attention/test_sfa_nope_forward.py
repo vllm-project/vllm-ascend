@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +10,8 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl, AscendSFAPCPDCPImpl, AscendSFAPCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
 
 
@@ -82,6 +84,7 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
 
 def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl._parallel_o_proj = SimpleNamespace(uses_full_weight=False, forward_context=nullcontext)
     impl.qk_rope_head_dim = 0
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     impl.kv_lora_rank = 8
@@ -99,9 +102,9 @@ def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
             "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async", return_value=(gathered, None)
         ) as gather,
     ):
-        full_kv, handles = impl._prepare_kv_for_parallel(k_pe, k_nope, scale, False)
+        full_kv, handles = impl._prepare_kv_for_parallel(k_pe, k_nope, scale)
     torch.testing.assert_close(gather.call_args.args[0], inputs * 2)
-    impl._store_parallel_kv(k_pe, k_nope, scale, full_kv, handles, (cache,), slots, metadata, False)
+    impl._store_parallel_kv(k_pe, k_nope, scale, full_kv, handles, (cache,), slots, metadata)
     torch.testing.assert_close(cache.view(4, 8)[:3], gathered[:3])
     assert cache.view(4, 8)[3].count_nonzero() == 0
 
@@ -109,7 +112,9 @@ def test_dsacp_nope_kv_gathers_before_writing_replicated_cache():
 @pytest.mark.parametrize("rank", [0, 1])
 def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl._parallel_o_proj = SimpleNamespace(uses_full_weight=False, forward_context=nullcontext)
     impl.qk_rope_head_dim = 0
+    impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     impl.q_lora_rank = impl.kv_lora_rank = 2
     impl.preprocess_type = PreprocessType.NATIVE
@@ -137,7 +142,6 @@ def test_dsacp_nope_forward_keeps_local_padding_rows(rank):
             actual_seq_lengths_query=torch.tensor([1 if rank == 0 else 0]),
             actual_seq_lengths_key=torch.tensor([1 if rank == 0 else 0]),
             kv_slot_mapping=metadata.slot_mapping[:8],
-            gather_full_o_proj=False,
             topk_num_tokens=8,
         )
     )
@@ -522,3 +526,83 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     assert latent_dim != value_dim
     assert expected_values.shape[-1] == num_heads * value_dim
     assert metadata.smla_metadata is None
+
+
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("actual_tokens", [0, 1, 3])
+@pytest.mark.parametrize(
+    "impl_cls,sharded_decode,global_prefill",
+    [(AscendSFAPCPImpl, False, True), (AscendSFAPCPImpl, True, False), (AscendSFAPCPDCPImpl, False, True)],
+)
+def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
+    impl_cls, sharded_decode, global_prefill, actual_tokens, graph_mode
+):
+    """Run the real forward entry; PCP peers need the same padded row count."""
+    impl = impl_cls.__new__(impl_cls)
+    impl._parallel_o_proj = SimpleNamespace(batch=lambda **kwargs: nullcontext(), uses_full_weight=False)
+    impl.qk_rope_head_dim = 0
+    impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=2))
+    impl.is_pcp_decode_sharded = sharded_decode
+    impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
+    impl.q_lora_rank = impl.kv_lora_rank = impl.v_head_dim = 2
+    impl.local_num_heads = 1
+    impl.preprocess_type = PreprocessType.NATIVE
+    impl.g_proj = impl.layerwise_kv_cache_hook = None
+    impl.has_indexer = True
+    impl.skip_topk = impl.use_index_cache = False
+    impl.layer_name = "layer"
+    impl._is_mtp_layer = False
+    hidden = torch.ones(4, 2)
+    metadata = SimpleNamespace(
+        cos=None,
+        sin=None,
+        num_actual_tokens=actual_tokens,
+        num_input_tokens=4,
+        slot_mapping=torch.tensor([0, 1, 2, -1]),
+        pcp_has_global_prefill=global_prefill,
+        attn_state=AscendAttentionState.ChunkedPrefill if global_prefill else AscendAttentionState.DecodeOnly,
+        num_prefills=int(global_prefill and actual_tokens > 0),
+    )
+    impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
+    impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
+    impl._get_indexer_attn_metadata = MagicMock(return_value=object())
+    impl._get_parallel_forward_context = MagicMock(
+        return_value=SimpleNamespace(
+            actual_seq_lengths_query=torch.tensor([actual_tokens]),
+            actual_seq_lengths_key=torch.tensor([actual_tokens]),
+            kv_slot_mapping=metadata.slot_mapping,
+            topk_num_tokens=4,
+        )
+    )
+    impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
+    impl.q_a_layernorm = lambda value: value
+    impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
+    impl._prepare_kv_for_parallel = MagicMock(return_value=(None, []))
+    impl._store_parallel_kv = MagicMock(return_value=(None, None))
+    impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
+    impl._record_query_gather_context = MagicMock()
+    impl._prepare_indexer_metadata = MagicMock()
+    impl.indexer = MagicMock(return_value=torch.zeros(4, 1, 1, dtype=torch.int32))
+    impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(4, 2))
+    impl._v_up_proj = lambda value: value
+    impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
+    with (
+        patch.object(
+            sparse_mla, "get_forward_context", return_value=SimpleNamespace(cudagraph_runtime_mode=graph_mode)
+        ),
+        patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
+        patch.object(sparse_mla, "notify_kv_cache_written"),
+        patch.object(sparse_mla, "attention_transfer_window"),
+        patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
+    ):
+        output = torch.empty_like(hidden)
+        assert impl.forward("layer", hidden, (), metadata, output) is output
+    impl._get_parallel_forward_context.assert_called_once()
+    assert impl._get_parallel_forward_context.call_args.args[1] == 4
+    assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
+    impl._store_parallel_kv.assert_called_once()
+    impl._finalize_o_proj.assert_called_once()
+    assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
+    assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
+    assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
+    torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

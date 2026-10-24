@@ -14,6 +14,7 @@ if "torch_npu._inductor" not in sys.modules:
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.weight_switch import (
+    ParallelOProjection,
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
     WeightSwitchMixin,
@@ -47,14 +48,21 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
         impl = AscendDSACPImpl.__new__(AscendDSACPImpl)
         impl.tp_size = 2
         impl.tp_group = object()
-        impl.o_proj_weight_switch_config = WeightSwitchConfig(
-            group=impl.tp_group,
-            world_size=impl.tp_size,
-            rank=0,
-        )
         impl.wo_a = self._OProj()
         impl.wo_b = self._OProj()
-        impl._o_proj_weight_switch_enabled = False
+        impl._parallel_o_proj = ParallelOProjection(
+            4,
+            impl.wo_b,
+            config=WeightSwitchConfig(group=impl.tp_group, world_size=impl.tp_size, rank=0),
+            tp_group=impl.tp_group,
+            pool=impl.o_proj_full_pools,
+            pool_key=impl.o_proj_weight_switch_pool_key,
+            project_full=MagicMock(),
+            decode_sharded=False,
+            input_layer=impl.wo_a,
+            clone_local_tensors=True,
+        )
+        impl._parallel_o_proj.enabled = True
         return impl
 
     def test_enablement_is_limited_to_a5(self):
@@ -126,78 +134,78 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
             self.assertIs(impl.cv_wq_b.linear, layer)
         self.assertEqual(profile.supports.call_args_list, [unittest.mock.call(HardwareCapability.FP8_ATTENTION)] * 2)
 
-    def test_get_weight_switch_method_unwraps_adapter_and_rejects_unsupported(self):
+    def test_resolve_o_proj_weight_switch_method_unwraps_adapter_and_rejects_unsupported(self):
         layer = self._OProj()
 
-        method = AscendDSACPImpl._get_weight_switch_method(layer)
+        method = ParallelOProjection._resolve_o_proj_weight_switch_method(layer)
 
         self.assertIs(method, layer.quant_method.quant_method)
         layer.quant_method = object()
         with self.assertRaisesRegex(RuntimeError, "weight-switch capable"):
-            AscendDSACPImpl._get_weight_switch_method(layer)
+            ParallelOProjection._resolve_o_proj_weight_switch_method(layer)
 
     def test_enable_o_proj_switch_initializes_both_layers_once_with_cloned_local_storage(self):
         impl = self._make_impl()
         original_ptrs = (impl.wo_a.weight.data_ptr(), impl.wo_b.weight.data_ptr())
 
-        impl._enable_o_proj_full_weight_switch()
+        impl._parallel_o_proj.enable()
 
-        self.assertTrue(impl._o_proj_weight_switch_enabled)
+        self.assertTrue(impl._parallel_o_proj._weight_switch_enabled)
         self.assertNotEqual(impl.wo_a.weight.data_ptr(), original_ptrs[0])
         self.assertNotEqual(impl.wo_b.weight.data_ptr(), original_ptrs[1])
         self.assertEqual(
             impl.wo_a.weight.data_ptr(),
-            impl.wo_a_weight_state.gather_parts["weight"].local_tensor.data_ptr(),
+            impl._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].local_tensor.data_ptr(),
         )
         self.assertEqual(
             impl.wo_b.weight.data_ptr(),
-            impl.wo_b_weight_state.gather_parts["weight"].local_tensor.data_ptr(),
+            impl._parallel_o_proj._weight_switch_states[1][2].gather_parts["weight"].local_tensor.data_ptr(),
         )
         self.assertEqual(len(AscendDSACPImpl.o_proj_full_pools), 4)
 
-        wo_a_state = impl.wo_a_weight_state
-        wo_b_state = impl.wo_b_weight_state
-        impl._enable_o_proj_full_weight_switch()
-        self.assertIs(impl.wo_a_weight_state, wo_a_state)
-        self.assertIs(impl.wo_b_weight_state, wo_b_state)
+        wo_a_state = impl._parallel_o_proj._weight_switch_states[0][2]
+        wo_b_state = impl._parallel_o_proj._weight_switch_states[1][2]
+        impl._parallel_o_proj.enable()
+        self.assertIs(impl._parallel_o_proj._weight_switch_states[0][2], wo_a_state)
+        self.assertIs(impl._parallel_o_proj._weight_switch_states[1][2], wo_b_state)
 
-    def test_maybe_all_gather_honors_enable_flag_for_both_layers(self):
+    def test_explicit_full_mode_gather_honors_enable_flag_for_both_layers(self):
         impl = self._make_impl()
-        impl._enable_o_proj_full_weight_switch()
-        impl.wo_a_weight_method.all_gather_weight = MagicMock()
-        impl.wo_b_weight_method.all_gather_weight = MagicMock()
+        impl._parallel_o_proj.enable()
+        impl._parallel_o_proj._weight_switch_states[0][1].all_gather_weight = MagicMock()
+        impl._parallel_o_proj._weight_switch_states[1][1].all_gather_weight = MagicMock()
 
-        impl._maybe_all_gather_o_proj_full_weight(False)
+        impl._parallel_o_proj.set_mode(use_full_weight=False, exchange_tokens=False)
+        impl._parallel_o_proj.all_gather_weights()
 
-        impl.wo_a_weight_method.all_gather_weight.assert_not_called()
-        impl.wo_b_weight_method.all_gather_weight.assert_not_called()
+        impl._parallel_o_proj._weight_switch_states[0][1].all_gather_weight.assert_not_called()
+        impl._parallel_o_proj._weight_switch_states[1][1].all_gather_weight.assert_not_called()
 
-        impl._maybe_all_gather_o_proj_full_weight(True)
+        impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
+        impl._parallel_o_proj.all_gather_weights()
 
-        impl.wo_a_weight_method.all_gather_weight.assert_called_once_with(
-            impl.wo_a_weight_state,
-            impl.o_proj_weight_switch_config,
+        config = impl._parallel_o_proj.config
+        impl._parallel_o_proj._weight_switch_states[0][1].all_gather_weight.assert_called_once_with(
+            impl._parallel_o_proj._weight_switch_states[0][2],
+            config,
         )
-        impl.wo_b_weight_method.all_gather_weight.assert_called_once_with(
-            impl.wo_b_weight_state,
-            impl.o_proj_weight_switch_config,
+        impl._parallel_o_proj._weight_switch_states[1][1].all_gather_weight.assert_called_once_with(
+            impl._parallel_o_proj._weight_switch_states[1][2],
+            config,
         )
 
     def test_switch_o_proj_between_full_and_local_storage(self):
         impl = self._make_impl()
-        impl._enable_o_proj_full_weight_switch()
+        impl._parallel_o_proj.enable()
         local_ptrs = (impl.wo_a.weight.data_ptr(), impl.wo_b.weight.data_ptr())
         full_ptrs = (
-            impl.wo_a_weight_state.gather_parts["weight"].full_tensor.data_ptr(),
-            impl.wo_b_weight_state.gather_parts["weight"].full_tensor.data_ptr(),
+            impl._parallel_o_proj._weight_switch_states[0][2].gather_parts["weight"].full_tensor.data_ptr(),
+            impl._parallel_o_proj._weight_switch_states[1][2].gather_parts["weight"].full_tensor.data_ptr(),
         )
 
-        impl._switch_o_proj_to_full_weight()
-
-        self.assertEqual(impl.wo_a.weight.data_ptr(), full_ptrs[0])
-        self.assertEqual(impl.wo_b.weight.data_ptr(), full_ptrs[1])
-
-        impl._switch_o_proj_to_local_weight()
+        with impl._parallel_o_proj.use_full_weights():
+            self.assertEqual(impl.wo_a.weight.data_ptr(), full_ptrs[0])
+            self.assertEqual(impl.wo_b.weight.data_ptr(), full_ptrs[1])
 
         self.assertEqual(impl.wo_a.weight.data_ptr(), local_ptrs[0])
         self.assertEqual(impl.wo_b.weight.data_ptr(), local_ptrs[1])
