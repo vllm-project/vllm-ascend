@@ -1,0 +1,108 @@
+# GLM-5.3-Flash single-node MRV2 accuracy and performance coverage.
+# CI provides the CANN/custom-op environment, shared checkpoint and dynamic service port.
+# Host IP/NIC and the served model name follow the existing CI harness.
+# Profiler output is container-local; traces require an explicit profiling request.
+# GSM8K-lite baseline 90 / threshold 10 is an initial gate, pending MRV2 calibration.
+test_cases:
+- name: GLM-5.3-Flash-W8A8-A5-MRV2
+  model: /root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+    PHYSICAL_DEVICES: 0,1,2,3,4,5,6,7
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_BUFFSIZE: '1024'
+    HCCL_EXEC_TIMEOUT: '3600'
+    HCCL_CONNECT_TIMEOUT: '3600'
+    ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+    SERVER_PORT: DEFAULT_PORT
+  server_cmd:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --max-model-len
+  - '1048576'
+  - --data-parallel-size
+  - '1'
+  - --tensor-parallel-size
+  - '8'
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --quantization
+  - ascend
+  - --reasoning-parser
+  - glm47
+  - --safetensors-load-strategy
+  - prefetch
+  - --max-num-seqs
+  - '8'
+  - --max-num-batched-tokens
+  - '16384'
+  - --trust-remote-code
+  - --gpu-memory-utilization
+  - '0.94'
+  - --limit-mm-per-prompt
+  - '{"image": 1, "video": 0}'
+  - --kv-cache-dtype
+  - auto
+  - --attention-config
+  - '{"indexer_kv_dtype": "bf16"}'
+  - --enable-prefix-caching
+  - --compilation-config
+  - '{"cudagraph_mode": "PIECEWISE"}'
+  # PIECEWISE disables npugraph_ex/static/super kernels in the platform config.
+  - --additional-config
+  - '{"enable_cpu_binding": true, "enable_flashcomm1": true, "enable_dsa_cp": false, "enable_fused_mc2": 0,
+    "multistream_overlap_shared_expert": false, "enable_shared_expert_dp": true,
+    "ascend_compilation_config": {"enable_static_kernel": false, "enable_super_kernel": false}}'
+  - --profiler-config
+  - '{"profiler": "torch", "torch_profiler_dir": "/tmp/glm53-flash-a5-mrv2-profiles",
+    "torch_profiler_with_stack": false, "torch_profiler_record_shapes": true}'
+  prompts:
+  - Reply with one short sentence confirming the service is healthy.
+  test_content:
+  - chat_completion
+  api_keyword_args:
+    max_tokens: 16
+    temperature: 0.0
+  benchmarks:
+    # Use the shared-prefix dataset exercised by the A3 MRV2 performance run.
+    # Token lengths depend on the GLM tokenizer; no prefix-hit ratio is asserted.
+    perf_warmup:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 8
+      max_out_len: 1024
+      batch_size: 1
+      request_rate: 0
+      baseline: 0
+      threshold: 0.97
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      dataset_path_local: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 128
+      max_out_len: 1024
+      batch_size: 8
+      request_rate: 0
+      # TODO: Replace 0 with the measured A5 single-node MRV2 throughput baseline.
+      # Until calibrated, this records throughput without a regression floor.
+      baseline: 0
+      threshold: 0.97
+    accuracy_placeholder_gsm8k:
+      case_type: accuracy
+      dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gsm8k-lite
+      request_conf: vllm_api_general_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+      max_out_len: 4096
+      batch_size: 4
+      temperature: 0
+      baseline: 90
+      threshold: 10
