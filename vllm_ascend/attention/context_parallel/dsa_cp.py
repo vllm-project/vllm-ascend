@@ -2228,6 +2228,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
 
     # DualChunkSwap expands each prefill into at most two local rows.
     _request_capacity_factor: ClassVar[int] = 2
+    _local_metadata_builder_cls = dsa_v1.AscendDSAMetadataBuilder
 
     def __init__(
         self,
@@ -2242,7 +2243,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             vllm_config,
             device,
         )
-        self._global_metadata_builder = dsa_v1.AscendDSAMetadataBuilder(
+        self._global_metadata_builder = self._local_metadata_builder_cls(
             kv_cache_spec,
             layer_names,
             vllm_config,
@@ -2438,6 +2439,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
         full_graph_mode: bool = False,
+        update_cache: bool = True,
     ) -> dsa_v1.AscendDSAMetadata:
         # A captured graph still runs its padded queries, so their metadata
         # must be refreshed even when this rank owns no tokens.
@@ -2449,6 +2451,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 num_actual_reqs=num_actual_reqs,
                 common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 full_graph_mode=full_graph_mode,
+                update_cache=update_cache,
             )
 
         # Empty ranks still participate in the global cache update collectives.
@@ -2484,19 +2487,40 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         # Replicated decode stays on the local metadata path. Sharded decode
         # owns different requests per rank, so it still needs global metadata.
         needs_global_metadata = has_prefill or self._is_decode_sharded
+        specialized = self._use_specialized_metadata()
+        # The standard caller creates a fresh cache for each build invocation.
+        # Global and rank-local layouts must never share metadata entries.
+        shared = common_ratio_to_sas_metadata if specialized else {}
+        # Reuse the base DSA computation cache even on the full-builder path.
+        # Only graph-stable PCP preparation is restricted to specialized builds.
+        global_shared = common_ratio_to_sas_metadata.setdefault("pcp_global", {})
+        local_shared = common_ratio_to_sas_metadata.setdefault("pcp_local", {})
         if needs_global_metadata:
-            pcp_context = self._prepare_graph_pcp_context(
-                pcp_context,
-                full_graph_mode=full_graph_mode,
-            )
-            global_common_attn_metadata = self._build_global_common_attn_metadata(
-                pcp_context,
-                pcp_cache_group_idx,
-                common_attn_metadata,
-            )
-            global_common_attn_metadata = self._build_graph_common_attn_metadata(
-                global_common_attn_metadata,
-                pcp_context.global_batch.num_reqs,
+            prepared = shared.get("pcp_context")
+            if prepared is None:
+                prepared = self._prepare_graph_pcp_context(
+                    pcp_context,
+                    full_graph_mode=full_graph_mode,
+                )
+                shared["pcp_context"] = prepared
+            pcp_context = prepared
+            global_common_attn_metadata = shared.get("pcp_global_common")
+            if global_common_attn_metadata is None:
+                global_common_attn_metadata = self._build_global_common_attn_metadata(
+                    pcp_context,
+                    pcp_cache_group_idx,
+                    common_attn_metadata,
+                )
+                global_common_attn_metadata = self._build_graph_common_attn_metadata(
+                    global_common_attn_metadata,
+                    pcp_context.global_batch.num_reqs,
+                )
+                shared["pcp_global_common"] = global_common_attn_metadata
+            # Physical cache addresses and causality remain group-specific.
+            global_common_attn_metadata = global_common_attn_metadata.replace(
+                block_table_tensor=pcp_context.global_block_tables[pcp_cache_group_idx],
+                slot_mapping=pcp_context.global_slot_mappings[pcp_cache_group_idx],
+                causal=common_attn_metadata.causal,
             )
             # num_prefills can miss short prefills; prevent local PCP RoPE
             # from overwriting the global RoPE buffer. Sharded decode also
@@ -2506,7 +2530,8 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 global_common_attn_metadata,
                 fast_build,
                 num_actual_reqs=pcp_context.global_batch.num_reqs,
-                common_ratio_to_sas_metadata={},
+                common_ratio_to_sas_metadata=global_shared,
+                build_query=not specialized,
                 can_use_rope_cache=False,
                 full_graph_mode=full_graph_mode,
             )
@@ -2518,9 +2543,15 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 # Keep the global RoPE at graph-stable addresses of its own.
                 req_metadata = global_dsa_metadata.req_metadata
                 assert req_metadata is not None
-                req_metadata.cos, req_metadata.sin = req_metadata.cos.copy_to_buffers(
-                    self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
-                )
+                if req_metadata.cos is not None:
+                    rope = global_shared.get("staged_rope") if specialized else None
+                    if rope is None:
+                        rope = req_metadata.cos.copy_to_buffers(
+                            self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
+                        )
+                        if specialized:
+                            global_shared["staged_rope"] = rope
+                    req_metadata.cos, req_metadata.sin = rope
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
@@ -2530,18 +2561,33 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         if local_common_attn_metadata.num_actual_tokens == 0:
             # The placeholder request of an empty rank is graph padding too.
             num_actual_reqs = 0
-        local_common_attn_metadata = self._build_graph_common_attn_metadata(
-            local_common_attn_metadata,
-            num_actual_reqs,
-        )
+        padded_local = shared.get("pcp_local_offsets")
+        if padded_local is None:
+            local_common_attn_metadata = self._build_graph_common_attn_metadata(
+                local_common_attn_metadata,
+                num_actual_reqs,
+            )
+            shared["pcp_local_offsets"] = (
+                local_common_attn_metadata.query_start_loc,
+                local_common_attn_metadata.query_start_loc_cpu,
+            )
+        else:
+            local_common_attn_metadata = local_common_attn_metadata.replace(
+                query_start_loc=padded_local[0],
+                query_start_loc_cpu=padded_local[1],
+            )
         local_dsa_metadata = self._build_local_dsa_metadata(
             common_prefix_len,
             local_common_attn_metadata,
             fast_build,
             num_actual_reqs=num_actual_reqs,
-            common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+            common_ratio_to_sas_metadata=local_shared,
             full_graph_mode=full_graph_mode,
+            update_cache=not specialized or not needs_global_metadata,
         )
+        # Base build stores the local namespace on self; expose both layouts
+        # to the runner for the next cache group, including empty local ranks.
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         # Replicated decode tokens stay in scheduler order on every PCP rank.
         # The local metadata therefore describes the canonical cache update
         # directly and can use the ordinary non-PCP DSA execution path.
@@ -2566,6 +2612,30 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             tuple(task for task in global_tasks if task.stage == DeviceMetadataStage.COMPRESSOR)
             + super().take_device_metadata_tasks()
         )
+
+
+class AscendDSAPCPStateMetadataBuilder(AscendDSAPCPMetadataBuilder, dsa_v1.AscendDSAStateMetadataBuilder):
+    """PCP layout handling with the state backend's metadata requirements."""
+
+    _local_metadata_builder_cls = dsa_v1.AscendDSAStateMetadataBuilder
+
+
+class AscendDSAPCPSWAMetadataBuilder(AscendDSAPCPMetadataBuilder, dsa_v1.AscendDSASWAMetadataBuilder):
+    """PCP layout handling with the swa backend's metadata requirements."""
+
+    _local_metadata_builder_cls = dsa_v1.AscendDSASWAMetadataBuilder
+
+
+class AscendDSAPCPAttentionMetadataBuilder(AscendDSAPCPMetadataBuilder, dsa_v1.AscendDSAAttentionMetadataBuilder):
+    """PCP layout handling with the attention backend's metadata requirements."""
+
+    _local_metadata_builder_cls = dsa_v1.AscendDSAAttentionMetadataBuilder
+
+
+class AscendDSAPCPIndexerMetadataBuilder(AscendDSAPCPMetadataBuilder, dsa_v1.AscendDSAIndexerMetadataBuilder):
+    """PCP layout handling with the indexer backend's metadata requirements."""
+
+    _local_metadata_builder_cls = dsa_v1.AscendDSAIndexerMetadataBuilder
 
 
 class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
