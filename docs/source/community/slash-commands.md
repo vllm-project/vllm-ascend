@@ -101,6 +101,13 @@ Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missi
 paths are reported in the workflow log. System and credential directories
 cannot be selected.
 
+Nightly jobs can also upload paths without `--log-path`. Set a JSON array of
+files or directories in `.github/workflows/configs/log_download_defaults.json`,
+for example `["outputs/default/", "/tmp/test-logs"]`. Every node checks the
+same paths and archives the ones that exist locally. Missing configured paths
+are skipped on that node. A `--log-path` request adds paths for that run and
+continues to use the requested node mapping.
+
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
 **Common test case names (A2):**
