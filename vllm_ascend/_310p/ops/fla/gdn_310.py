@@ -118,7 +118,13 @@ def npu_recurrent_gated_delta_rule_310(
         k = l2norm_310p(k)
 
     total_tokens = v.shape[1]
-    flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
+    # Preserve previous speculative states even when current queries are shorter.
+    # The kernel independently indexes each row for state reads and writeback.
+    if ssm_state_indices.ndim == 2:
+        num_seqs = cu_seqlens.shape[0] - 1
+        flat_state_indices = ssm_state_indices[:num_seqs].to(torch.int32).contiguous()
+    else:
+        flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
     # Do not clamp PAD_SLOT_ID (-1) to 0 — that would write mamba block 0.
     # Callers must slice away padded requests before invoking this helper.
