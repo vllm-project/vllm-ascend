@@ -1476,7 +1476,7 @@ Before you start, please:
 
 4. Deploy the P-D disaggregation proxy.
 
-    Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md#example-proxy-for-deployment) for proxy setup. For this single-node example, use the non-layerwise proxy with listen port `1999`, one Prefill backend at `<node_ip>:7100`, and four Decode backends at `<node_ip>:7200`, `<node_ip>:7201`, `<node_ip>:7202`, and `<node_ip>:7203`. Repeat the same node IP four times in `--decoder-hosts` and set `--decoder-ports 7200 7201 7202 7203`.
+    Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 ### 5.3 A3 1P1D Deployment with Memcache KV Cache Pool
 
