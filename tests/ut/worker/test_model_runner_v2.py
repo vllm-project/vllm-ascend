@@ -31,6 +31,68 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
+def test_batch_metadata_waits_for_h2d_before_reusing_host_buffer(monkeypatch):
+    capacity = 3
+    host = torch.zeros(24, dtype=torch.int32)
+    device = torch.zeros_like(host)
+    pending: list[torch.Tensor] = []
+    completed: list[torch.Tensor] = []
+    stream = object()
+
+    class DeferredCopy:
+        def copy_(self, source, non_blocking):
+            assert source is host
+            assert non_blocking
+            assert not pending
+            pending.append(source.clone())
+
+    class CompletionEvent:
+        def record(self, actual_stream):
+            assert actual_stream is stream
+            assert len(pending) == 1
+
+        def synchronize(self):
+            expected = pending.pop()
+            # A host overwrite before this wait would corrupt the pending DMA.
+            torch.testing.assert_close(host, expected)
+            device.copy_(host)
+            completed.append(device.clone())
+
+    event_factory = Mock(side_effect=CompletionEvent)
+    monkeypatch.setattr(torch.npu, "Event", event_factory)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    buffers = SimpleNamespace(
+        batch_metadata=DeferredCopy(),
+        batch_metadata_cpu=host,
+        batch_metadata_cpu_np=host.numpy(),
+        batch_metadata_copy_done=None,
+        query_start_loc_slice=slice(0, 5),
+        idx_mapping_slice=slice(8, 11),
+        cu_num_logits_slice=slice(16, 20),
+        query_start_loc=device[:5],
+        idx_mapping_buffer=device[8:11],
+        cu_num_logits_buffer=device[16:20],
+    )
+    runner = SimpleNamespace(max_num_reqs=capacity, input_buffers=buffers)
+    for count in (3, 1):
+        idx = np.arange(count, dtype=np.int32) + 7
+        cu = np.arange(count + 1, dtype=np.int32) * 2
+        query = np.arange(capacity + 2, dtype=np.int32) + count
+        result = NPUModelRunner._upload_batch_metadata(runner, idx, cu, query)
+        assert len(pending) == 1
+        np.testing.assert_array_equal(buffers.batch_metadata_cpu_np[8 : 8 + count], idx)
+        np.testing.assert_array_equal(buffers.batch_metadata_cpu_np[16 : 17 + count], cu)
+        assert np.all(buffers.batch_metadata_cpu_np[8 + count : 11] == 0)
+        assert np.all(buffers.batch_metadata_cpu_np[17 + count : 20] == 0)
+
+    assert len(completed) == 1
+    buffers.batch_metadata_copy_done.synchronize()
+    assert len(completed) == 2
+    event_factory.assert_called_once()
+    for actual, expected in zip(result, (idx, cu, query)):
+        torch.testing.assert_close(actual, torch.from_numpy(expected))
+
+
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
