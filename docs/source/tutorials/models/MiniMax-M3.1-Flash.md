@@ -16,7 +16,7 @@ This document covers supported features, environment and model preparation, sing
 
     **Current status and constraints**
 
-    - `MiniMax-M3.1-Flash` is provided **out-of-the-box** through the Docker images described in [Installation](#4-installation). The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - `MiniMax-M3.1-Flash` is provided **out-of-the-box** through the Docker image described in [Installation](#4-installation). The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `MiniMax-M3.1-Flash`. This is an early-access version; performance optimization and reliability validation are still in progress.
 
 ## 2 Supported Features
@@ -36,34 +36,10 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 Download the weight variant used by the serving commands to the same model directory on both nodes. It is recommended to place the model weight in a shared cache directory.
 
-### 3.2 Hardware and Software Preparation
-
-| Platform | Prefill | Decode | Software |
-| --- | --- | --- | --- |
-| Atlas 800I A3 | 1 node, 16 NPU ranks | 1 node, 16 NPU ranks | CANN 9.2.0, torch 2.10.0, torch_npu 2.10.0.post7, Mooncake 0.3.13 |
-| Ascend 950DT products | 1 node, DP2 × TP4 / EP8 | 1 node, DP2 × TP4 / EP8 | CANN 9.2, torch 2.10.0, Triton/Triton-Ascend 3.6.0 |
-
-Use a platform-specific integration image with the matching model source and
-compiled operators. Set `IMAGE` to that image in the container examples below.
-The source snapshots used to prepare these commands are:
-
-| Component | A3 | A5 |
-| --- | --- | --- |
-| vLLM Ascend | `40ebe9f672babc7b367df1310132ef41489a8784` | `8627ba9526aa8b125a86bbb864fb0fc71af70fd2` |
-| vLLM | `ced6857afa0ea7b2e3f0846a62e1394e90f15607` | `ced6857afa0ea7b2e3f0846a62e1394e90f15607` |
-| Decode QK-Norm/RoPE fusion fix | — | `03114943f` |
-
-The A3 image provides the model source and compiled operators under
-`/opt/m31flash/code`. The prepared A5 deployment directory provides the Python
-environment at `.venv` and the matching frameworks under `src/vllm` and
-`src/vllm-ascend`.
-
-### 3.3 Verify Multi-node Communication
+### 3.2 Verify Multi-node Communication
 
 Prepare the business network and the NPU interconnect by following
 [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
-The A3 example uses HCCS for Ascend Direct KV transfer. The 950DT deployment uses
-Device UB, with each node's fabric configuration mounted into its container.
 
 ## 4 Installation
 
@@ -73,7 +49,7 @@ Run the following on each A3 host. Set the model path to the W8A8 checkpoint and
 use `ycl-m31flash-p` and `ycl-m31flash-d` as the two container names.
 
 ```bash
-export IMAGE="<MINIMAX_M31_FLASH_A3_IMAGE>"
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a3-openeuler"
 export CONTAINER_NAME=ycl-m31flash-p
 export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
@@ -106,12 +82,12 @@ docker run -it --name "$CONTAINER_NAME" \
 
 ### 4.2 A5 Docker Container
 
-Use the matching A5 image and mount the prepared deployment directory at `/work`. It contains `.venv`, `src/vllm`, and `src/vllm-ascend`, including the compiled A5 operators.
+Use the Docker image below and mount the prepared deployment directory at `/work`. It contains `.venv`, `src/vllm`, and `src/vllm-ascend`, including the compiled A5 operators.
 
 Run the following on each host, using `ycl-m31flash-a5-p` and `ycl-m31flash-a5-d` as the container names. Mount each node's own `/etc/hixlep` and `/etc/hccl_rootinfo.json`.
 
 ```bash
-export IMAGE="<MINIMAX_M31_FLASH_A5_IMAGE>"
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a3-openeuler"
 export CONTAINER_NAME=ycl-m31flash-a5-p
 export MODEL_DIR="<MINIMAX_M31_FLASH_A5_WEIGHT_PATH>"
 export WORK_DIR="<PREPARED_A5_DEPLOYMENT_DIRECTORY>"
@@ -408,8 +384,6 @@ Use one Prefill node and one Decode node, each with all eight NPUs and DP2 × TP
 #### 5.2.1 Common Environment
 
 A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/work/.venv`.
-
-Use the A5 source snapshot and Decode QK-Norm/RoPE fusion fix listed in Section 3.2 for `fuse_qknorm_rope=true`.
 
 Save the following as `/work/runtime_env.sh` in both containers and set each node's `NIC_NAME`.
 
