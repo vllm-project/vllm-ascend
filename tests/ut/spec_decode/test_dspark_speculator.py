@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the MRV2 GQA DSpark target/draft contract."""
+"""Unit tests for the MRV2 DSpark target/draft contract."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -293,3 +296,119 @@ def test_dspark_sampling_uses_replicated_backbone_output(monkeypatch, replicated
 
     assert spec._run_model(3, None, None, None) is replicated
     broadcast.assert_called_once_with(local, local, 3, replicated_pcp=replicated_pcp)
+
+
+def _metadata_speculator(monkeypatch, architecture, use_dcp):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.attn_architecture, spec.use_dcp = architecture, use_dcp
+    spec.num_query_per_req = 3
+    spec.max_model_len = 1000
+    spec.vllm_config = SimpleNamespace(parallel_config=object())
+    spec.input_buffers = SimpleNamespace(positions=torch.arange(12))
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
+    return spec
+
+
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize(
+    "prepared,target,expected",
+    [
+        ([767, 914], [767, 914], [767, 914, 0, 0]),
+        ([767, 914], [771, 916], [767, 914, 0, 0]),
+        ([998, 1005], [998, 1005], [998, 1000, 0, 0]),
+    ],
+    ids=["query-already-included", "rejected-target-tail", "max-model-length"],
+)
+def test_mla_dcp_metadata_uses_prepared_kv_lengths(monkeypatch, mode, prepared, target, expected):
+    spec = _metadata_speculator(monkeypatch, "MLA", True)
+    # The prepared lengths include the current query block. Stale padded rows
+    # must not be copied even when their device-buffer values are nonzero.
+    spec.input_buffers.seq_lens = torch.tensor([*prepared, 111, 222], dtype=torch.int32)
+    spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([*target, 333, 444], dtype=torch.int32))
+    prepare = MagicMock()
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
+    captured: dict[str, Any] = {}
+
+    @contextmanager
+    def factory(positions, num_tokens, **kwargs):
+        captured.update(num_tokens=num_tokens, **kwargs)
+        yield
+
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", factory)
+    metadata = {"draft": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[]))}
+    parent = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
+    batch_desc = SimpleNamespace(cg_mode=mode, num_tokens=12, num_reqs=4)
+    query_start = np.array([0, 3, 6], dtype=np.int32)
+    upper_bound = spec.target_input_buffers.seq_lens_cpu
+
+    assert spec._build_attn_metadata(2, batch_desc, query_start, upper_bound, 3, causal=False) is metadata
+
+    prepare.assert_not_called()
+    assert captured["seq_lens_cpu"].tolist() == expected
+    assert captured["seq_lens_cpu"].dtype == torch.int32
+    assert captured["is_prefilling"].tolist() == [False] * 4
+    assert captured["is_prefilling"].dtype == torch.bool
+    assert captured["num_tokens"] == (12 if mode == CUDAGraphMode.FULL else 6)
+    assert captured["parallel_config"] is spec.vllm_config.parallel_config
+    assert parent.call_args.kwargs["causal"] is False
+    assert metadata["draft"].decode.actual_seq_lengths_q == ([3, 6, 9, 12] if mode == CUDAGraphMode.FULL else [])
+    assert spec.input_buffers.seq_lens.tolist() == [*prepared, 111, 222]
+    assert upper_bound.tolist() == [*target, 333, 444]
+
+
+@pytest.mark.parametrize("architecture,use_dcp", [("GQA", False), ("GQA", True), ("MLA", False)])
+def test_other_dense_draft_metadata_keeps_length_preparation(monkeypatch, architecture, use_dcp):
+    spec = _metadata_speculator(monkeypatch, architecture, use_dcp)
+    lengths = torch.tensor([12, 24, 0, 0], dtype=torch.int32)
+    flags = torch.zeros(4, dtype=torch.bool)
+    prepare = MagicMock(return_value=(lengths, flags))
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
+    captured: dict[str, Any] = {}
+
+    @contextmanager
+    def factory(positions, num_tokens, **kwargs):
+        captured.update(kwargs)
+        yield
+
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", factory)
+    parent = MagicMock(return_value=None)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
+    batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.NONE, num_tokens=12, num_reqs=4)
+    query_start = np.array([0, 3, 6], dtype=np.int32)
+
+    assert spec._build_attn_metadata(2, batch_desc, query_start, lengths, 3) is None
+
+    prepare.assert_called_once_with(2, 4, 3)
+    assert captured["seq_lens_cpu"] is lengths
+    assert captured["is_prefilling"] is flags
+    parent.assert_called_once()
+
+
+@pytest.mark.parametrize("architecture", [None, "SFA"])
+def test_other_draft_architectures_delegate_without_cpu_lengths(monkeypatch, architecture):
+    spec = _metadata_speculator(monkeypatch, architecture, True)
+    prepare, factory = MagicMock(), MagicMock()
+    monkeypatch.setattr(spec, "_prepare_draft_dcp_metadata_inputs", prepare)
+    monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", factory)
+    parent = MagicMock(return_value=None)
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)
+    batch_desc = SimpleNamespace(cg_mode=CUDAGraphMode.FULL, num_tokens=12, num_reqs=4)
+    query_start = np.array([0, 3, 6], dtype=np.int32)
+    lengths = torch.tensor([12, 24], dtype=torch.int32)
+    local_lengths = torch.tensor([3, 6], dtype=torch.int32)
+
+    assert spec._build_attn_metadata(2, batch_desc, query_start, lengths, 3, False, local_lengths) is None
+
+    prepare.assert_not_called()
+    factory.assert_not_called()
+    parent.assert_called_once_with(
+        num_reqs=2,
+        batch_desc=batch_desc,
+        query_start_loc_np=query_start,
+        seq_lens_cpu_upper_bound=lengths,
+        step=3,
+        causal=False,
+        dcp_local_seq_lens=local_lengths,
+    )
