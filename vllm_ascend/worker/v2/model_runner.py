@@ -105,8 +105,10 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
+    requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
@@ -397,7 +399,10 @@ class NPUModelRunner(GPUModelRunner):
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
+        state = self.execute_model_state
+        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
+        self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
@@ -663,9 +668,13 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        dp_coordination_context = (
-            skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
+        # Reduced LMHead padding needs synchronized token buckets for V2,
+        # DCP=1. Share the MC2 dispatcher's policy so active masks agree;
+        # DCP>1 retains full capacity and the original coordination policy.
+        skip_dp_metadata_sync = should_skip_allreduce_across_dp_group(self.vllm_config) and not requires_lmhead_dp_sync(
+            self.vllm_config
         )
+        dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
@@ -689,14 +698,13 @@ class NPUModelRunner(GPUModelRunner):
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
-            # lmhead TP: idle ranks never call sample(); join the target head
-            # here at capacity, before _dummy_run replays the dummy propose.
+            # Idle ranks join the same LMHead collective size as active ranks.
             if self.execute_model_state is None:
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
             dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
+                self._get_lmhead_pad_size(self.execute_model_state),
                 dtype=torch.int64,
                 device=self.device,
             )
@@ -1100,6 +1108,15 @@ class NPUModelRunner(GPUModelRunner):
         ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
+    def _get_lmhead_pad_size(self, execute_model_state) -> int:
+        pad_size = self._lmhead_tp_max_num_logits()
+        if self.dcp_size == 1 and execute_model_state is not None:
+            # vLLM #60754 renamed the stored DP-sync state on main.
+            dp_sync = execute_model_state.dp_sync if vllm_version_is("0.31.0") else execute_model_state.dp_sync_state
+            if dp_sync is not None:
+                pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
+        return pad_size
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
@@ -1108,7 +1125,7 @@ class NPUModelRunner(GPUModelRunner):
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_max_num_logits()
+        capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
         # V1-style index pad: pad a private copy of the indices (input_batch keeps
         # the real ones; the V2 sampler gathers penalties by them) so one gather
         # feeds compute_logits the capacity rows; zero entries gather row 0.

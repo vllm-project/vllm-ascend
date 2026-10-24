@@ -986,3 +986,15 @@ def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert utils.oproj_tp_enable() is enabled
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("lmhead", [False, True])
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+    config = SimpleNamespace(
+        use_v2_model_runner=v2,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+    )
+    monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
+    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)

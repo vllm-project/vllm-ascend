@@ -923,6 +923,7 @@ def test_capture_preserves_prepared_prefill_inputs(replicated: bool, num_steps: 
 )
 def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, replicated_pcp, batch_kind) -> None:
     speculator = object.__new__(speculator_cls)
+    speculator.dp_size = 2
     speculator.replicated_pcp = replicated_pcp
     speculator.input_batch = None
     speculator.pcp_manager = MagicMock(is_decode_sharded=False)
@@ -992,6 +993,7 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
 
 def test_propose_preserves_dp_sync_state() -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.dp_size = 2
     speculator.replicated_pcp = False
     input_batch = object()
     dp_sync = object()

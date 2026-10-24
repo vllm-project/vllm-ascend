@@ -38,13 +38,14 @@ def _make_runner(need_timing: bool = True):
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=None, use_v2_model_runner=False)
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="other_model"))
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False, finish_execution=Mock())
     runner.prompt_logprobs_worker = None
     runner.execute_model_state = None
+    runner.dcp_size = 1
     runner.use_pp = False
     runner.is_last_pp_rank = False
     runner.is_pooling_model = False
@@ -81,8 +82,14 @@ def _make_runner(need_timing: bool = True):
         (False, True, True),
     ],
 )
-def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, profile, fail):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("base_can_skip", [False, True])
+def test_metadata_and_dp_skip_scopes_coexist_and_retire(
+    monkeypatch, dummy, profile, fail, lmhead_tp, dcp_size, base_can_skip
+):
     runner = _make_runner(need_timing=False)
+    runner.dcp_size = dcp_size
     scheduler_output = SimpleNamespace(total_num_scheduled_tokens=0, num_scheduled_tokens={})
     active = set()
     events: list[str | tuple[str, bool]] = []
@@ -97,7 +104,9 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
 
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "has_kv_transfer_group", lambda: False)
-    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: True)
+    monkeypatch.setattr(module + "should_skip_allreduce_across_dp_group", lambda _config: base_can_skip)
+    monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module + "requires_lmhead_dp_sync", lambda _config: lmhead_tp and dcp_size == 1)
     monkeypatch.setattr(module + "skip_dp_coordination", lambda: scope("dp_skip"))
     runner.model_state.finish_execution.side_effect = lambda *, failed: events.append(("finish", failed))
 
@@ -109,7 +118,8 @@ def test_metadata_and_dp_skip_scopes_coexist_and_retire(monkeypatch, dummy, prof
     monkeypatch.setattr(runner, "_maybe_send_draft_kv", draft_sender)
 
     def forward(_self, _output, **kwargs):
-        assert active == {"dp_skip"}
+        expected_skip = base_can_skip and (not lmhead_tp or dcp_size > 1)
+        assert active == ({"dp_skip"} if expected_skip else set())
         assert kwargs["dummy_run"] is dummy
         assert kwargs["is_profile"] is profile
         events.append("forward")
@@ -2085,3 +2095,60 @@ def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(re
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize("release_lane", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("tokens,expected", [(None, 16), ([4, 8], 8), ([32, 64], 16)])
+def test_lmhead_padding_reads_versioned_dp_sync_state(release_lane, dcp_size, tokens, expected):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.max_num_reqs = 16
+    runner.decode_query_len = 1
+    runner.dcp_size = dcp_size
+    dp_sync = None if tokens is None else SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens))
+    field = "dp_sync" if release_lane else "dp_sync_state"
+    state = SimpleNamespace(**{field: dp_sync})
+    with patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=release_lane):
+        assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
+        assert runner._get_lmhead_pad_size(None) == 16
+
+
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+@pytest.mark.parametrize("first_call_fails", [False, True])
+def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp, first_call_fails):
+    runner = _make_runner(need_timing=False)
+    runner.pcp_manager = None
+    runner.max_num_reqs = 16
+    runner.decode_query_len = 1
+    runner.dcp_size = 1
+    runner._lmhead_pad_size = 123  # Must never leak into this step's sampling.
+    observed = []
+
+    def parent_sample_tokens(self, grammar_output):
+        # Upstream consumes the state before invoking sample(). The cached
+        # padding must survive that consumption and refresh on the next step.
+        self.execute_model_state = None
+        observed.append(self._lmhead_pad_size)
+        if first_call_fails and len(observed) == 1:
+            raise RuntimeError("sampling failed")
+        return "sampled"
+
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module + "vllm_version_is", lambda _version: True)
+    monkeypatch.setattr(GPUModelRunner, "sample_tokens", parent_sample_tokens)
+
+    for step, tokens in enumerate(([2, 4], [8, 6], None)):
+        runner.execute_model_state = (
+            SimpleNamespace(dp_sync=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
+            if tokens is not None
+            else None
+        )
+        if first_call_fails and step == 0:
+            with pytest.raises(RuntimeError, match="sampling failed"):
+                runner.sample_tokens(None)
+        else:
+            assert runner.sample_tokens(None) == "sampled"
+            assert runner._lmhead_pad_size is None
+
+    assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
