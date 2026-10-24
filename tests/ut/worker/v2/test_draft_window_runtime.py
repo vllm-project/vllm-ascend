@@ -149,6 +149,60 @@ def test_exact_after_rejection_controls_start_not_cpu_upper(setup):
     assert metadata.block_table_tensor[1, :3].tolist() == canonical[3, 1:4].tolist()
 
 
+def test_eagle_uniform_first_pass_reads_current_device_end_without_host_snapshot(setup, monkeypatch):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime.window_size = "eagle3", 3, 1035
+    runtime.anchor_block_span = 128
+    runtime._dense_device_reads = True
+    spec.block_tables.kernel_block_sizes = [128]
+    spec.block_tables.block_tables[0].gpu = torch.arange(120, dtype=torch.int32).reshape(6, 20)
+    spec.block_tables.num_blocks.np[:] = 20
+    spec.input_buffers.positions = torch.tensor([1155, 1156, 1157, 1158, 1156, 1157, 1158, 1159])
+    spec.last_token_indices = torch.tensor([3, 6])
+    state = batch(computed=(1150, 1150), prompt=(1, 1))
+    state.idx_mapping = torch.tensor(state.idx_mapping_np, dtype=torch.int64)
+    monkeypatch.setattr(
+        runtime, "_eagle_first_pass_lengths", lambda *args: pytest.fail("uniform decode copied Host exact")
+    )
+    with runtime.proposal_context(spec, state):
+        for step, ends, width in [(0, (1159, 1160), 4), (1, (1160, 1160), 1), (2, (1161, 1161), 1)]:
+            metadata = common(exact=ends, upper=(1162, 1163))
+            metadata.causal = True
+            metadata.query_start_loc_cpu = torch.tensor([0, width, 2 * width, 2 * width])
+            runtime.metadata_callback(step, 2)(0, metadata)
+            read = metadata._draft_window_device_read
+            # Rejected native padding must not move H: live E1159+K3 gives
+            # H1162, S0 at W1035/B128, although native extent1160 would give S128.
+            assert read.starts.tolist() == [0, 0]
+            assert read.seq_lens.tolist() == ([1159, 1159] if step == 0 else list(ends))
+            assert read.query_width == width
+
+
+def test_eagle_host_fallback_reuses_the_same_device_first_pass_anchor(setup):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime.static_k, runtime.window_size = "eagle3", 3, 1035
+    runtime.anchor_block_span = 128
+    runtime._dense_device_reads = True
+    spec.block_tables.kernel_block_sizes = [128]
+    spec.block_tables.block_tables[0].gpu = torch.arange(120, dtype=torch.int32).reshape(6, 20)
+    spec.block_tables.num_blocks.np[:] = 20
+    spec.input_buffers.positions = torch.tensor([1155, 1156, 1157, 1158, 1156, 1157, 1158, 1159])
+    spec.last_token_indices = torch.tensor([3, 6])
+    state = batch(computed=(1150, 1150), prompt=(1, 1))
+    state.idx_mapping = torch.tensor(state.idx_mapping_np, dtype=torch.int64)
+    with runtime.proposal_context(spec, state):
+        for step, ends, width in [(0, (1159, 1160), 4), (1, (1160, 1160), 1), (2, (1161, 1161), 1)]:
+            # A later loose workspace bound exceeds initialized columns. The
+            # legacy fallback must use retained current first-pass E, not E-W.
+            upper = (1162, 1163) if step == 0 else (3000, 3000)
+            metadata = common(exact=ends, upper=upper)
+            metadata.causal = True
+            metadata.query_start_loc_cpu = torch.tensor([0, width, 2 * width, 2 * width])
+            runtime.metadata_callback(step, 2)(0, metadata)
+            assert metadata.seq_lens[:2].tolist() == ([1159, 1159] if step == 0 else list(ends))
+        assert runtime._eagle_plans is not None
+
+
 def test_reorder_row_replacement_and_in_place_mapping_refresh_each_proposal(setup):
     runtime, spec, canonical, completions = setup
     state = batch()

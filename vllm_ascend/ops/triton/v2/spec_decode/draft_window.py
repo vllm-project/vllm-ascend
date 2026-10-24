@@ -13,6 +13,7 @@ def _plan_draft_window(
     table,
     rows,
     exact,
+    query_ends,
     frozen,
     slots,
     starts,
@@ -22,6 +23,7 @@ def _plan_draft_window(
     TABLE_COLUMN_STRIDE: tl.constexpr,
     ROW_STRIDE: tl.constexpr,
     EXACT_STRIDE: tl.constexpr,
+    QUERY_END_STRIDE: tl.constexpr,
     FROZEN_STRIDE: tl.constexpr,
     BLOCK_SPAN: tl.constexpr,
     ANCHOR_SPAN: tl.constexpr,
@@ -30,6 +32,7 @@ def _plan_draft_window(
     QUERY_WIDTH: tl.constexpr,
     CAUSAL: tl.constexpr,
     HAS_FROZEN: tl.constexpr,
+    HAS_QUERY_ENDS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     req = tl.program_id(0)
@@ -58,7 +61,8 @@ def _plan_draft_window(
     tl.store(slots + req * CAPACITY + column, physical * BLOCK_SPAN + absolute % BLOCK_SPAN, mask=first)
     excluded = column >= length
     if CAUSAL:
-        excluded = excluded | (column > length - QUERY_WIDTH + query)
+        query_end = tl.load(query_ends + req * QUERY_END_STRIDE).to(tl.int64) if HAS_QUERY_ENDS else end
+        excluded = excluded | (column > query_end - start - QUERY_WIDTH + query)
     tl.store(mask + req * QUERY_WIDTH * CAPACITY + index, excluded, mask=valid)
 
 
@@ -74,6 +78,7 @@ def plan_draft_window(
     capacity: int,
     query_width: int,
     causal: bool,
+    query_ends: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return owned slots/S/V/mask; Host values are allocation geometry only."""
     n = exact.numel()
@@ -84,6 +89,7 @@ def plan_draft_window(
         table,
         rows,
         exact,
+        exact if query_ends is None else query_ends,
         exact if frozen is None else frozen,
         slots,
         starts,
@@ -93,6 +99,7 @@ def plan_draft_window(
         table.stride(1),
         rows.stride(0),
         exact.stride(0),
+        0 if query_ends is None else query_ends.stride(0),
         0 if frozen is None else frozen.stride(0),
         block_span,
         anchor_span,
@@ -101,6 +108,7 @@ def plan_draft_window(
         query_width,
         causal,
         frozen is not None,
+        query_ends is not None and query_ends is not exact,
         PLAN_BLOCK_SIZE,
     )
     return slots, starts, visible, mask

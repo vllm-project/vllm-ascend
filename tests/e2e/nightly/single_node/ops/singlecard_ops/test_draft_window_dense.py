@@ -21,9 +21,50 @@ TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_rejected_first_pass_preserves_query_alignment_without_gathering_native_padding(dtype):
+    end, native_end, block, dim = 1159, 1160, 128, 192
+    generator = torch.Generator().manual_seed(1823)
+    keys_cpu = (torch.randn(12, block, 2, dim, generator=generator) * 0.2).to(dtype)
+    values_cpu = (torch.randn(12, block, 2, dim, generator=generator) * 0.2).to(dtype)
+    keys_cpu.view(-1, 2, dim)[end:] = torch.nan
+    values_cpu.view(-1, 2, dim)[end:] = torch.nan
+    query_cpu = (torch.randn(4, 4, dim, generator=generator) * 0.2).to(dtype)
+    keys, values, query = keys_cpu.npu(), values_cpu.npu(), query_cpu.npu()
+    source = DirectPrefixSource(torch.arange(12, dtype=torch.int32, device="npu").reshape(1, 12), (0,), (12,), block)
+    held = []
+    read = prepare_dense_draft_read(
+        source,
+        exact_device=torch.tensor([end], dtype=torch.int32, device="npu"),
+        query_ends=torch.tensor([native_end], dtype=torch.int32, device="npu"),
+        row_indices=torch.tensor([0], device="npu"),
+        upper_cpu=torch.tensor([native_end + 1]),
+        window_size=1035,
+        anchor_span=block,
+        query_width=4,
+        causal=True,
+        frozen_starts=torch.tensor([0], dtype=torch.int32, device="npu"),
+        retain=lambda *items: held.extend(items),
+    )
+    references = []
+    for index in range(4):
+        valid_end = min(end, native_end - 4 + index + 1)
+        key = keys_cpu.view(-1, 2, dim)[:valid_end].float().repeat_interleave(2, dim=1)
+        value = values_cpu.view(-1, 2, dim)[:valid_end].float().repeat_interleave(2, dim=1)
+        scores = torch.einsum("hd,khd->hk", query_cpu[index].float(), key) / math.sqrt(dim)
+        references.append(torch.einsum("hk,khd->hd", scores.softmax(-1), value))
+    output = dense_draft_attention(read, query, keys, values, 1 / math.sqrt(dim))
+    torch.testing.assert_close(
+        output.cpu().float(), torch.stack(references), atol=TOLERANCES[dtype][0], rtol=TOLERANCES[dtype][1]
+    )
+    assert (~read.mask[0, 0]).sum(-1).cpu().tolist() == [1157, 1158, 1159, 1159]
+    assert read.slots[0, :end].cpu().tolist() == list(range(end))
+    assert read.slots[0, end:].cpu().tolist() == [end - 1] * (read.capacity - end)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("geometry", [(192, 4, 4), (128, 32, 8)])
-@pytest.mark.parametrize(("query_width", "future"), [(1, 0), (1, 2), (8, 0), (9, 0)])
+@pytest.mark.parametrize(("query_width", "future"), [(1, 0), (1, 2), (4, 2), (8, 0), (9, 0)])
 @pytest.mark.parametrize("causal", [False, True])
 def test_dense_device_exact_reader(geometry, query_width, future, causal, page_layers, dtype):
     D, NQ, NK = geometry

@@ -61,6 +61,7 @@ def prepare_dense_draft_read(
     causal: bool,
     retain: Callable[..., None],
     frozen_starts: torch.Tensor | None = None,
+    query_ends: torch.Tensor | None = None,
 ) -> DenseDraftRead:
     """Snapshot current device E and canonical addresses without Host exact.
 
@@ -70,6 +71,8 @@ def prepare_dense_draft_read(
     in that preparation contract; it never chooses S or readable token count.
     An Eagle AR caller may supply the current proposal's validated frozen
     anchor. Its producer guarantees S<=E<=H; it must not follow later E-W.
+    A first-pass Eagle caller may preserve its padded native query end while
+    E remains the last valid KV end. Padding never authorizes a KV read.
     No device assertion is used: this torch_npu version implements even
     _assert_async through a synchronizing scalar copy.
     """
@@ -99,6 +102,13 @@ def prepare_dense_draft_read(
     if exact_device.device != source.table.device or row_indices.device != source.table.device:
         raise ValueError("Dense read operands must share their source device")
     exact = exact_device[:n].clone()
+    if query_ends is not None and (
+        query_ends.shape != (n,)
+        or query_ends.device != exact.device
+        or query_ends.dtype not in (torch.int32, torch.int64)
+    ):
+        raise ValueError("Native query ends must match current request rows and device")
+    query_ends = exact if query_ends is None else query_ends.clone()
     if frozen_starts is not None and (
         frozen_starts.shape != (n,)
         or frozen_starts.device != exact.device
@@ -123,6 +133,7 @@ def prepare_dense_draft_read(
             capacity=capacity,
             query_width=query_width,
             causal=causal,
+            query_ends=query_ends,
         )
     else:
         # Keep a CPU execution path for geometry/ownership contract tests.
@@ -140,7 +151,12 @@ def prepare_dense_draft_read(
         slots = blocks.to(torch.int64) * source.block_span + absolute % source.block_span
         mask = (columns[None, None, :] >= visible[:, None, None]).expand(n, query_width, capacity)
         if causal:
-            queries = visible[:, None] - query_width + torch.arange(query_width, device=exact.device)[None, :]
+            queries = (
+                query_ends[:, None]
+                - starts[:, None]
+                - query_width
+                + torch.arange(query_width, device=exact.device)[None, :]
+            )
             mask = mask | (columns[None, None, :] > queries[:, :, None])
         mask = mask[:, None].contiguous()
     read = DenseDraftRead(
@@ -154,6 +170,8 @@ def prepare_dense_draft_read(
         causal and window_size < query_width,
     )
     retain(read, exact)
+    if query_ends is not exact:
+        retain(query_ends)
     return read
 
 

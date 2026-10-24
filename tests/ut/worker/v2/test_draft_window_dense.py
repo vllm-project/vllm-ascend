@@ -33,6 +33,33 @@ def test_frozen_eagle_anchor_does_not_follow_later_exact_lengths():
         assert not read.mask[0, 0, 0, : end - 4].any()
 
 
+def test_rejected_first_pass_keeps_native_query_alignment_and_excludes_unwritten_tail():
+    end, native_end, block = 1159, 1160, 128
+    source = DirectPrefixSource(torch.arange(12, dtype=torch.int32).reshape(1, 12), (0,), (12,), block)
+    held = []
+    read = prepare_dense_draft_read(
+        source,
+        exact_device=torch.tensor([end], dtype=torch.int32),
+        query_ends=torch.tensor([native_end], dtype=torch.int32),
+        row_indices=torch.tensor([0]),
+        upper_cpu=torch.tensor([native_end + 1]),
+        window_size=1035,
+        anchor_span=block,
+        query_width=4,
+        causal=True,
+        frozen_starts=torch.tensor([0], dtype=torch.int32),
+        retain=lambda *items: held.extend(items),
+    )
+    assert read.seq_lens.tolist() == [end]
+    assert read.slots[0, :end].tolist() == list(range(end))
+    assert read.slots[0, end:].tolist() == [end - 1] * (read.capacity - end)
+    assert (~read.mask[0, 0]).sum(-1).tolist() == [1157, 1158, 1159, 1159]
+    cache = torch.full((12, block, 1, 16), torch.nan, dtype=torch.bfloat16)
+    cache.view(-1, 1, 16)[:end] = 1
+    keys, values = gather_dense_draft_kv(read, cache, cache)
+    assert torch.isfinite(keys).all() and torch.isfinite(values).all()
+
+
 @pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("query_width", [8, 9])

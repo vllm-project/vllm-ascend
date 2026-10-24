@@ -93,6 +93,7 @@ class DraftWindowRuntime:
         self._build_count = 0
         self._eagle_plans = None
         self._eagle_frozen_starts = None
+        self._eagle_first_pass_pair = None
         self._next_step = 0
         self._proposal_mapping = None
 
@@ -187,6 +188,7 @@ class DraftWindowRuntime:
             self._build_count = 0
             self._eagle_plans = None
             self._eagle_frozen_starts = None
+            self._eagle_first_pass_pair = None
             self._next_step = 0
             self._proposal_mapping = None
             try:
@@ -203,6 +205,7 @@ class DraftWindowRuntime:
                 self._input_batch = None
                 self._eagle_plans = None
                 self._eagle_frozen_starts = None
+                self._eagle_first_pass_pair = None
                 self._proposal_mapping = None
 
     def metadata_callback(
@@ -220,12 +223,10 @@ class DraftWindowRuntime:
             prepared_exact_device=prepared_exact_device,
         )
         if self.method == "eagle3":
-            if legacy is not None and step > 0 and self._dense_device_reads:
-                if self._eagle_frozen_starts is None:
+            if legacy is not None and self._dense_device_reads:
+                if step > 0 and self._eagle_frozen_starts is None:
                     raise RuntimeError("Eagle3 AR read has no current proposal anchor")
                 return self._dense_metadata_callback(num_reqs, legacy, eagle_step=step)
-            # Initial queries can be ragged or carry rejection padding. They
-            # retain the certified first-pass path and freeze the live anchor.
             return legacy
         if (
             legacy is not None
@@ -247,7 +248,7 @@ class DraftWindowRuntime:
         query_width = 1 if eagle_step is not None else self.speculator.num_query_per_req
 
         def apply(gid: int, common: Any) -> None:
-            nonlocal mapping, full_exact, use_device, sources
+            nonlocal mapping, full_exact, use_device, sources, query_width
             if gid not in self.gids:
                 return
             if self._owner is not owner or gid in seen:
@@ -266,6 +267,11 @@ class DraftWindowRuntime:
                 }
                 upper = common.seq_lens_cpu_upper_bound[:num_reqs]
                 widths = common.query_start_loc_cpu[: num_reqs + 1].diff()
+                if eagle_step == 0:
+                    # Decode keeps rejected query rows in its native layout.
+                    # A uniform K+1 layout can use the same device mask as AR;
+                    # prefill and ragged queries retain their Full/legacy path.
+                    query_width = int(widths[0])
                 # Keep the existing exact path when scheduling bounds do not
                 # prove allocated address capacity, or query widths are ragged.
                 use_device = bool((widths == query_width).all()) and all(
@@ -274,6 +280,15 @@ class DraftWindowRuntime:
                     )
                     for source in sources.values()
                 )
+                if eagle_step == 0:
+                    assert self.static_k is not None
+                    use_device = (
+                        use_device
+                        and 0 < query_width <= self.static_k + 1
+                        and not batch.is_prefilling_np[:num_reqs].any()
+                    )
+                    if use_device:
+                        self._eagle_first_pass_device_lengths(common.seq_lens, num_reqs)
             if not use_device:
                 legacy(gid, common)
                 return
@@ -283,9 +298,10 @@ class DraftWindowRuntime:
                 raise ValueError("Dense Draft groups must share current preparation lengths")
             self._proposal_mapping = mapping
             retain = lambda *objects: self.pool.retain(owner, *objects)
+            first_pass = self._eagle_first_pass_pair if eagle_step == 0 else None
             read = prepare_dense_draft_read(
                 sources[gid],
-                exact_device=common.seq_lens,
+                exact_device=common.seq_lens if first_pass is None else first_pass[1],
                 row_indices=batch.idx_mapping[:num_reqs],
                 upper_cpu=common.seq_lens_cpu_upper_bound[:num_reqs],
                 window_size=self.window_size,
@@ -294,6 +310,7 @@ class DraftWindowRuntime:
                 causal=common.causal,
                 retain=retain,
                 frozen_starts=self._eagle_frozen_starts if eagle_step is not None else None,
+                query_ends=None if first_pass is None else first_pass[0],
             )
             retain(common)
             read.apply(common)
@@ -305,8 +322,8 @@ class DraftWindowRuntime:
 
         return apply
 
-    def _eagle_first_pass_lengths(self, native_extent: torch.Tensor, num_reqs: int):
-        """Snapshot live anchor and padded native extent in one current copy.
+    def _eagle_first_pass_device_lengths(self, native_extent: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        """Freeze current live/native lengths without a Host exact consumer.
 
         MRV2 keeps rejected query padding in the first-pass native layout.
         Its last valid query index, rather than that padded extent, identifies
@@ -333,8 +350,8 @@ class DraftWindowRuntime:
         self.pool.retain(owner, live_end)
         live_end.add_(1)
         if self._dense_device_reads:
-            # Freeze from this preparation's last valid query, before the CPU
-            # validation below. Later AR inputs advance within this horizon;
+            # Freeze from this preparation's last valid query. Later AR
+            # inputs advance within this horizon;
             # their device exact lengths must not move this proposal anchor.
             self._eagle_frozen_starts = (
                 torch.div(
@@ -347,8 +364,16 @@ class DraftWindowRuntime:
             self.pool.retain(owner, self._eagle_frozen_starts)
         pair = torch.stack((native_extent[:num_reqs], live_end))
         self.pool.retain(owner, pair)
+        self._eagle_first_pass_pair = pair
+        return pair
+
+    def _eagle_first_pass_lengths(self, native_extent: torch.Tensor, num_reqs: int):
+        """Certify first-pass lengths for a legacy consumer or later fallback."""
+        pair = self._eagle_first_pass_pair
+        if pair is None:
+            pair = self._eagle_first_pass_device_lengths(native_extent, num_reqs)
         snapshot = pair.to(device="cpu", dtype=torch.int32, copy=True)
-        self.pool.retain(owner, snapshot)
+        self.pool.retain(self._owner, snapshot)
         extent_cpu, live_cpu = snapshot[0], snapshot[1]
         if bool(((live_cpu <= 0) | (live_cpu > extent_cpu) | (extent_cpu - live_cpu > self.static_k)).any()):
             raise ValueError("Eagle3 prepared live queries disagree with the current native padding extent")
@@ -451,7 +476,14 @@ class DraftWindowRuntime:
                     raise RuntimeError("Draft Window request mapping changed within a proposal")
                 self._proposal_mapping = mapping
                 if self.method == "eagle3":
-                    if step == 0:
+                    if self._eagle_plans is None:
+                        if step > 0:
+                            if self._eagle_first_pass_pair is None:
+                                raise RuntimeError("Eagle3 fallback has no current first-pass snapshot")
+                            # A device first pass retained this generation's
+                            # native/live pair. A later legacy consumer may
+                            # copy that pair, never infer the anchor from E-W.
+                            _, proposal_exact = self._eagle_first_pass_lengths(self._eagle_first_pass_pair[0], num_reqs)
                         self._eagle_plans = tuple(
                             freeze_eagle_window_plan(
                                 proposal_exact_end=int(end),
