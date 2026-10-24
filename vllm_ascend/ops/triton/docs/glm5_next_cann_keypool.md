@@ -2,12 +2,13 @@
 
 ## Description
 
-- **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
+- **Function**: Triton kernels adapt GLM-5.3-Flash metadata, tail reads, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
 - **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
 - **Algorithm flow**:
     1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. DSA-CP also builds rank-local cumulative query ends, visible pool counts and tail lengths in the same launch. Completed pools retain their compact output row even when their cache slot is evicted.
-    2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 or INT8 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
-    3. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
+    2. For padded tail pages, `gather_keypool_state` copies retained FP32 rows into CANN state in one launch, using physical page strides. This avoids separate division, remainder, advanced indexing and copy operations before `KeyPool`.
+    3. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed BF16 or INT8 pools in one launch. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
+    4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
 
 ## Parameters
@@ -89,7 +90,7 @@
 ## Origin and Differences
 
 - **Origin**: Developed for the CANN GLM-5.3-Flash pooled-indexer integration, with the same logical slot and tail contract as the existing GLM KPool path.
-- **Differences**: Replaces separate boundary conversions, compact-slot construction, tail/cache scatter and output padding operations with three kernel types. The metadata kernel runs in two modes per metadata build; this is not a claim of only three launches per model step. Key pooling and TopK scoring remain CANN operations. The FP32 tail is preserved; completed keys use BF16 or per-row INT8 quantization.
+- **Differences**: Fuses boundary conversions, compact-slot construction, padded tail gathering, tail/cache scatter and output padding. The metadata kernel runs in two modes per metadata build, and cache/index kernels run across layers. Key pooling and TopK scoring remain CANN operations. The FP32 tail is preserved; completed keys use BF16 or per-row INT8 quantization.
 
 ## Example
 

@@ -37,6 +37,21 @@ raise an error rather than silently switching to floating QK. Query metadata
 is shared only within a forward; capture records its device-side updates so
 sequence lengths and page-table contents can change on replay.
 
+For MTP, size FULL decode graphs for verification tokens:
+`concurrency * (num_speculative_tokens + 1)`. With TP16, eight requests,
+MTP5 and DSA-CP disabled, the largest verification batch is 48 tokens.
+The following capture sizes cover the tested five- and eight-request cases:
+
+```bash
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,30,48]}'
+```
+
+Capture sizes count tokens. A maximum of 8 leaves the 30/48-token
+verification batches in eager execution. The current Ascend runner also
+uses the capture limit when sizing MC2 capacity, so this setting can affect
+MoE communication. Compare C8 and BF16 with identical capture settings;
+measure normal-sampling decode throughput separately from prefill throughput.
+
 The parameters and constraints below describe the legacy BF16 helper only.
 
 ## Parameters
