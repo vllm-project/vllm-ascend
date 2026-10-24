@@ -71,6 +71,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         precompute_context_kv: Callable[[int], None] | None = None,
         prepare_forward: Callable[[int, dict[str, Any] | None], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        prepare_forward: Callable[[int, dict[str, Any] | None], None] | None = None,
     ) -> None:
         """Capture ACL graphs for DFlash.
 
@@ -84,6 +85,21 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             else {"prepare_forward": prepare_forward}
         )
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
+            if not vllm_version_is("0.31.0"):
+                if prepare_forward is None:
+                    raise ValueError("DFlash graph capture on vLLM main requires prepare_forward.")
+                super().capture(
+                    forward_fn,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    max_model_len,
+                    causal=causal,
+                    prepare_forward=prepare_forward,
+                    progress_bar_desc=progress_bar_desc,
+                )
+                return
             super().capture(
                 forward_fn,
                 input_buffers,

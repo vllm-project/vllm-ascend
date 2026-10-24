@@ -21,6 +21,7 @@ The following speculative decoding methods are supported:
 | `mtp` | Multi-Token Prediction with shared embedding head |
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
+| `mamba_attn_hybrid` | H-Spec latent-seeded hybrid drafter with a sequential Markov head (Model Runner V2, matching vLLM H-Spec branch required) |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
@@ -383,6 +384,23 @@ A few important things to consider when using DFlash2 draft models:
 
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
+
+## Speculating using H-Spec
+
+H-Spec requires a vLLM build containing [PR #62780](https://github.com/vllm-project/vllm/pull/62780). It combines target auxiliary hidden states into a latent seed, runs a block-local Mamba/attention backbone, and applies DSpark's sequential Markov sampling. The Mamba state is initialized from the latent seed for each block; it is not a persistent Mamba KV cache.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{"model":"weifanjiang/qwen3-8b.speculators.hspec","method":"mamba_attn_hybrid","num_speculative_tokens":7}'
+```
+
+The Ascend integration currently supports the standard GQA attention backend with PP, PCP and DCP all set to 1. Draft TP must match target TP because the drafter aliases the target's KV shards. The target and draft must have compatible KV dimensions and dtypes, and equal hidden sizes. MLA, specialized quantized KV backends, and 310P are not enabled by this implementation. Use the checkpoint's trained draft width and auxiliary layer IDs.
+
+The attention layer reads the target's accepted history and writes candidate K/V only into lookahead slots after that history. H-Spec uses the `1+K` query layout; ordinary DFlash initialization would omit its latent seed and sequential Markov head. Target rejection sampling remains unchanged.
+
+Both eager execution and the existing DFlash ACL graph path are integrated. Non-causal FIA needs exact host KV lengths after rejection. The implementation makes one batched device-to-host length transfer per proposal and reuses it for metadata construction and graph updates. The recurrent state retains upstream FP32 arithmetic. NPU end-to-end accuracy, graph capture/replay, throughput, latency and graph memory must be validated on the deployment hardware; CPU unit checks do not establish those results.
+
+The shared Ascend DFlash input-preparation kernel also refreshes vLLM main's `is_padding` buffer and clears padded query IDs/positions. These stores run in the existing preparation kernel, avoiding extra launches after graph capture or a change in batch size. The vLLM release lane without `is_padding` keeps its previous preparation behavior.
 
 ## Speculating using DSpark
 
