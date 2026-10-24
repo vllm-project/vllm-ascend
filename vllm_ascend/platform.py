@@ -313,6 +313,28 @@ class NPUPlatform(Platform):
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        # Upstream platform hook (called from init_worker before any Triton
+        # kernel launch). Installs the NPU kernel overrides through the
+        # official dispatcher, replacing the retired
+        # patch/worker/patch_v2/patch_triton.py monkey patch, and performs
+        # the one device-function swap the dispatcher cannot express. The
+        # HAS_TRITON guard mirrors the old import guard in
+        # patch/worker/__init__.py.
+        from vllm.triton_utils import HAS_TRITON
+
+        if not HAS_TRITON:
+            return
+
+        from vllm_ascend.triton_kernel_overrides import (
+            register_triton_kernels,
+            swap_device_functions,
+        )
+
+        register_triton_kernels()
+        swap_device_functions()
+
+    @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch

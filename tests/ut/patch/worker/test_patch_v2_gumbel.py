@@ -1,40 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""DSpark sampling dispatch through the NPU gumbel_sample binding.
 
-import importlib
+The gumbel_sample fan-out used to be installed (and unit-tested) by the
+retired patch_v2/patch_triton.py; it is now registered through the
+official kernel dispatcher, whose table is covered by
+tests/ut/test_triton_kernel_overrides.py.
+"""
+
 from unittest.mock import MagicMock, create_autospec
 
 import pytest
 import torch
-from vllm.v1.worker.gpu.sample import gumbel, sampler
-from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
-from vllm_ascend.patch.worker.patch_v2 import patch_triton
-
-
-@pytest.mark.parametrize(
-    "consumer",
-    [
-        gumbel,
-        sampler,
-        base_speculator,
-        dspark_speculator,
-        eagle_speculator,
-    ],
-)
-def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
-    # Simulate a consumer retaining its original `from ... import` binding.
-    stale_gumbel = MagicMock()
-    monkeypatch.setattr(consumer, "gumbel_sample", stale_gumbel)
-
-    importlib.reload(patch_triton)
-
-    # vLLM-Ascend replaces gumbel_sample with categorical_sample for NPU.
-    assert consumer.gumbel_sample is categorical_sample
-    stale_gumbel.assert_not_called()
 
 
 @pytest.mark.parametrize("probabilistic", [False, True])

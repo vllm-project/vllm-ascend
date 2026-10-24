@@ -52,3 +52,40 @@ def _fill_logprob_token_ids_kernel(
 
     tl.store(tid_base + col, tokens, mask=valid)
     tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
+
+
+def fill_logprob_token_ids_npu(
+    out_token_ids_ptr,
+    out_token_ids_stride,
+    out_valid_mask_ptr,
+    out_valid_mask_stride,
+    sampled_token_ids_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    expanded_idx_mapping_ptr,
+    num_per_req_token_ids_ptr,
+    per_req_token_ids_ptr,
+    per_req_token_ids_stride,
+    NUM_TOPK,
+    PADDED_COLS,
+):
+    """Plain-callable launch adapter for the kernel dispatcher.
+
+    Upstream launches with grid = (batch_size,); batch_size is the leading
+    dimension of every per-row argument, so derive it from the first one.
+    """
+    return _fill_logprob_token_ids_kernel[(out_token_ids_ptr.shape[0],)](
+        out_token_ids_ptr,
+        out_token_ids_stride,
+        out_valid_mask_ptr,
+        out_valid_mask_stride,
+        sampled_token_ids_ptr,
+        topk_indices_ptr,
+        topk_indices_stride,
+        expanded_idx_mapping_ptr,
+        num_per_req_token_ids_ptr,
+        per_req_token_ids_ptr,
+        per_req_token_ids_stride,
+        NUM_TOPK=NUM_TOPK,
+        PADDED_COLS=PADDED_COLS,
+    )

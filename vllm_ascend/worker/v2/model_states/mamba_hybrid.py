@@ -180,8 +180,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         # axis is the state index and the kernel fast-exits per request when
         # src_col < 0 or src_col == dst_col (no copy for that request).
         # Resolved through the mamba_utils module attribute so the NPU-safe
-        # kernel installed by patch_mamba_utils is used (upstream's uint64
-        # vectorized temporal copy faults the Ascend vector core).
+        # kernel installed by the NPU platform's triton-kernel override
+        # registration is used (upstream's uint64 vectorized temporal copy
+        #  faults the Ascend vector core).
         mamba_utils.precopy_mamba_align_fused_kernel[(pending.num_reqs, end - start)](
             self._mamba_state_idx_gpu,
             self._mamba_src_col_gpu,

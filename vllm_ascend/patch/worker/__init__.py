@@ -22,8 +22,6 @@ from vllm_ascend.utils import vllm_version_is
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
-    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
-
 
 # Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
 # that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
