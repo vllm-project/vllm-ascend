@@ -8,9 +8,7 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately
-428B total parameters and 23B activated parameters per token. It uses sparse
-attention throughout the model.
+MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 428B total parameters and 23B activated parameters per token. It uses sparse attention throughout the model.
 
 This document covers supported features, environment and model preparation, single-node deployment, PD separation, and accuracy evaluation.
 
@@ -23,10 +21,7 @@ This document covers supported features, environment and model preparation, sing
 
 ## 2 Supported Features
 
-Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
-page for the support matrix and the
-[Feature Guide](../../user_guide/feature_guide/index.md)
-for feature configuration.
+Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) page for the support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
 ## 3 Prerequisites
 
