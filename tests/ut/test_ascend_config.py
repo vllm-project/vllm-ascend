@@ -233,6 +233,17 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
 
+    def test_eplb_intervals_must_be_positive(self):
+        for key in ("expert_heat_collection_interval", "algorithm_execution_interval"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, f"{key} must greater than 0"):
+                    EplbConfig(**{key: 0})
+                self.assertEqual(getattr(EplbConfig(**{key: 1}), key), 1)
+        # Zero redundant experts is the default and must stay valid.
+        self.assertEqual(EplbConfig(num_redundant_experts=0).num_redundant_experts, 0)
+        with self.assertRaisesRegex(ValueError, "num_redundant_experts must greater than 0"):
+            EplbConfig(num_redundant_experts=-1)
+
     def test_stair_config_defaults_and_overrides(self):
         defaults = EplbConfig().stair_config
         config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})
