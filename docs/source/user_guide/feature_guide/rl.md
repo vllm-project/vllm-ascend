@@ -181,7 +181,7 @@ vllm serve /path/to/checkpoint \
     --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
-Use the [HCCL example](https://github.com/vllm-project/vllm-ascend/blob/0ec6cf2e5ea5c7f750eabe9c8bdf37090aba113c/examples/rl/rlhf_sparse_hccl.py)
+Use the [HCCL example](../../../../examples/rl/rlhf_sparse_hccl.py)
 for trainer initialization and TP2 launch commands. The example explicitly
 enables expert parallelism. Reserve a separate NPU for the trainer; the transfer
 group size is `1 + TP * DP`, with no additional EP factor. Pipeline parallelism
