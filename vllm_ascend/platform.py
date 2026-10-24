@@ -414,14 +414,43 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        # DeepSeek V4 keys its page-padding tables on the physical block size.
+        # check_and_update_config has already settled that value; the call below
+        # derives one from get_supported_kernel_block_sizes(), which the compressed
+        # cache backends answer in logical units -- AscendDSAC128Backend reports
+        # 4096 for the same physical page -- so a derived value cannot stand in for
+        # the physical one.
+        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+        from vllm_ascend.utils import is_c8_mxfp_kv_quant
+
+        settled_block_size = cache_config.block_size
+        # Same predicate refresh_block_size uses to settle that value, minus the C8
+        # MXFP path, which keys its cache layout on its own kernel block size and
+        # so never consults the DeepSeek V4 table.
+        uses_dsv4_pages = getattr(
+            vllm_config.model_config.hf_config, "model_type", None
+        ) == "deepseek_v4" and not is_c8_mxfp_kv_quant(vllm_config)
+        if uses_dsv4_pages and settled_block_size not in DSV4_BLOCK_SIZES:
+            choices = _dsv4_block_size_choices()
+            raise ValueError(
+                f"DeepSeek V4 stores its KV cache pages with a block size of {choices}, "
+                f"but this launch resolved to {settled_block_size}. "
+                f"Pass --block-size one of: {choices}."
+            )
+
         super().update_block_size_for_backend(vllm_config)
+
+        if uses_dsv4_pages:
+            # The derived value is the same page expressed in raw scheduler
+            # tokens, so keep the physical size the cache is actually built with.
+            cache_config.block_size = settled_block_size
 
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
-        cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         if (
             not cache_config.enable_prefix_caching
@@ -1900,6 +1929,13 @@ def _validate_aux_output_config(vllm_config: VllmConfig) -> None:
             "supported by Model Runner V2 on Ascend. Set "
             "VLLM_USE_V2_MODEL_RUNNER=1."
         )
+
+
+def _dsv4_block_size_choices() -> str:
+    """The block sizes DeepSeek V4 has page-padding entries for."""
+    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
+    return ", ".join(str(size) for size in sorted(DSV4_BLOCK_SIZES))
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
