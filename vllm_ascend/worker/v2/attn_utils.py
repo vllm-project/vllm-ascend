@@ -94,6 +94,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.kv_offload.dsa_pd_mooncake import (
+    empty_mooncake_cpu_kv_memory,
+    register_dsa_pd_mooncake_offloaded_kv_tensor,
+    reset_dsa_pd_mooncake_kv_registries,
+    should_use_dsa_pd_mooncake_cpu_kv,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
@@ -865,6 +871,83 @@ def _align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     return tensor[int(offset) :]
 
 
+# DSA PD Mooncake offloaded-KV allocation state (V2 function-style port of the
+# V1 runner methods). _dsa_pd_mooncake_pending_offloaded_ranges collects the
+# (ptr, numel) of every swapped-memory allocation made during
+# _allocate_kv_cache; _register_dsa_pd_mooncake_final_kv_views then binds each
+# range to the final runtime tensor views so the connector registry can serve
+# the true device-visible tensors.
+_dsa_pd_mooncake_pending_offloaded_ranges: list[tuple[int, int]] = []
+
+
+def _use_dsa_pd_mooncake_cpu_kv(vllm_config, *, is_sparse_kv_cache: bool) -> bool:
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    dsa_sparse_attention_config = getattr(get_ascend_config(), "dsa_sparse_attention_config", None)
+    enable_cpu_kv_store = bool(getattr(dsa_sparse_attention_config, "enable_cpu_kv_store", False))
+    dsa_sparse_attention_mode = getattr(dsa_sparse_attention_config, "mode", None)
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    is_kv_consumer = bool(getattr(kv_transfer_config, "is_kv_consumer", False))
+    return should_use_dsa_pd_mooncake_cpu_kv(
+        vllm_config,
+        use_sparse=is_sparse_kv_cache,
+        is_kv_consumer=is_kv_consumer,
+        enable_cpu_kv_store=enable_cpu_kv_store,
+        dsa_sparse_attention_mode=dsa_sparse_attention_mode,
+    )
+
+
+def _allocate_dsa_pd_mooncake_kv_tensor(tensor_size: int, alignment: int) -> torch.Tensor:
+    tensor = empty_mooncake_cpu_kv_memory(
+        (tensor_size + alignment,),
+        dtype=torch.int8,
+    )
+    tensor = _align_memory(tensor, alignment)[:tensor_size]
+    if tensor.data_ptr() % alignment != 0:
+        raise RuntimeError(
+            "DSA PD Mooncake offloaded KV tensor is not 2MB aligned, "
+            "which is required by fixed-size NPU staging copy."
+        )
+    _dsa_pd_mooncake_pending_offloaded_ranges.append((int(tensor.data_ptr()), int(tensor.numel())))
+    return tensor
+
+
+def _register_dsa_pd_mooncake_final_kv_views(final_tensors) -> None:
+    pending_ranges = _dsa_pd_mooncake_pending_offloaded_ranges
+    if not pending_ranges:
+        return
+
+    matched_ranges: set[int] = set()
+
+    def register_tensor(tensor: torch.Tensor) -> None:
+        ptr = int(tensor.data_ptr())
+        size = int(tensor.numel() * tensor.element_size())
+        end = ptr + size
+        for range_idx, (start, length) in enumerate(pending_ranges):
+            if ptr >= start and end <= start + length:
+                register_dsa_pd_mooncake_offloaded_kv_tensor(tensor)
+                matched_ranges.add(range_idx)
+                return
+
+    def walk(value) -> None:
+        if isinstance(value, torch.Tensor):
+            register_tensor(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    walk(final_tensors)
+
+    if len(matched_ranges) != len(pending_ranges):
+        raise RuntimeError(
+            "Failed to bind all DSA PD Mooncake offloaded KV allocations "
+            "to final runtime tensor views."
+        )
+
+
 def _align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
 
@@ -1448,8 +1531,16 @@ def _allocate_kv_cache(
                     k_factor, v_factor = calc_split_factor([k_dim, v_dim])
                 k_size = int(layer_size // k_factor)
                 v_size = int(layer_size // v_factor)
-                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                use_dsa_pd_mooncake_cpu_kv = _use_dsa_pd_mooncake_cpu_kv(
+                    vllm_config,
+                    is_sparse_kv_cache=True,
+                )
+                if use_dsa_pd_mooncake_cpu_kv:
+                    k_tensor = _allocate_dsa_pd_mooncake_kv_tensor(k_size, alignment)
+                    v_tensor = _allocate_dsa_pd_mooncake_kv_tensor(v_size, alignment)
+                else:
+                    k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                    v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
@@ -1498,6 +1589,13 @@ def allocate_kv_cache_main(
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
 
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    dsa_sparse_config = getattr(get_ascend_config(), "dsa_sparse_attention_config", None)
+    if getattr(dsa_sparse_config, "mode", None) == "fused_overlap":
+        reset_dsa_pd_mooncake_kv_registries()
+    _dsa_pd_mooncake_pending_offloaded_ranges.clear()
+
     raw_tensors = _allocate_kv_cache(
         kv_cache_config,
         shared_layers=shared_layers,
@@ -1529,7 +1627,7 @@ def allocate_kv_cache_main(
                 group_map[key].layer_names.append(layer_name)
         attn_groups.extend(group_map[key] for key in group_order)
 
-    return _reshape_kv_cache_v2(
+    kv_caches = _reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw_tensors,
         cache_dtype=vllm_config.cache_config.cache_dtype,
@@ -1537,6 +1635,9 @@ def allocate_kv_cache_main(
         shared_kv_cache_layers=shared_layers,
         kv_cache_config=kv_cache_config,
     )
+    _register_dsa_pd_mooncake_final_kv_views(kv_caches)
+    _dsa_pd_mooncake_pending_offloaded_ranges.clear()
+    return kv_caches
 
 
 def _reshape_mamba_kv_cache(

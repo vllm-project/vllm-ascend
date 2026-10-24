@@ -28,6 +28,13 @@ from typing import Any
 # begin-env-vars-definition
 
 
+def _strict_binary_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
+    return value == "1"
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -72,6 +79,47 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Number of reusable 2 MiB-aligned NPU staging chunks used when Mooncake
+    # transfers into DSA PD CPU-offloaded KV buffers. Default: 16; valid: >= 1.
+    # This setting is not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW", "16"))
+    ),
+    # Pipelining of DSA PD Mooncake staged reads. 1 = the staging window
+    # (VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW, unchanged total capacity)
+    # is split into BANKS banks that network reads round-robin between, and
+    # each bank lands on its own dedicated NPU stream so banks' copies can
+    # execute in parallel. A bank is only reclaimed, via its per-slot Events,
+    # when the pipeline wraps back to it BANKS reads later, plus a final
+    # drain before the receive completes. The network batch shrinks to
+    # window/BANKS chunks and the staging footprint is identical with the
+    # pipeline on or off. BANKS=1 degenerates to per-window landing waits.
+    # 0 keeps the legacy synchronous landing path (kill switch). Valid
+    # values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE": lambda: _strict_binary_env(
+        "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE"
+    ),
+    # Number of staging banks (and landing streams) used by the pipeline mode
+    # above. The window is split into this many banks that consecutive reads
+    # round-robin between; each bank's copies land on its own stream. Default
+    # 4 comes from the 101<->103 K-scan (2026-10-19): under bandwidth
+    # contention K2 leaves a ~1.4s exposed-landing tail, K4 cuts it ~11x and
+    # saturates the request-latency win, and K8 (~200x) only pays off for
+    # tail-intolerant SLOs at the cost of smaller network batches (window/K
+    # chunks per engine call). Any value >= 1 works; banks larger than the
+    # window are clamped. This setting is not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "4"))
+    ),
+    # Opt-in probe for the staged-read timing blind spot: after each engine
+    # batch read returns, a device-wide torch.npu.synchronize() reveals how
+    # much later the network data actually becomes visible on the device
+    # (read_settle_s in the receive timing line). 0 = off. Measurement runs
+    # only - the device-wide sync defeats the pipelining. Valid values: 0 or
+    # 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE": lambda: _strict_binary_env(
+        "VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE"
+    ),
 }
 
 # end-env-vars-definition
