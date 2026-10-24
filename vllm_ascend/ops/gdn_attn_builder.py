@@ -820,8 +820,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
-            non_spec_conv1d_cache_indices = block_table_tensor
+            non_spec_state_indices_tensor = block_table_tensor[: query_start_loc_cpu.shape[0] - 1, 0]
+            non_spec_conv1d_cache_indices = block_table_tensor[: query_start_loc_cpu.shape[0] - 1]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
