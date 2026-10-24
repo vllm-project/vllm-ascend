@@ -56,9 +56,20 @@ def _use_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
 
 
 def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    if not use_pp or _is_pd_prefill_node(vllm_config):
+    if not use_pp or getattr(vllm_config, "use_v2_model_runner", False):
         return False
-    return not getattr(vllm_config, "use_v2_model_runner", False)
+    if _is_pd_prefill_node(vllm_config):
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        # P also runs its local MTP drafter. In PP2TP16, fence the final
+        # prefill chunk until sampled tokens are committed before publishing
+        # its drafts; otherwise the next batch may contain only a draft token
+        # without the target token required by rejection sampling.
+        return (
+            getattr(parallel_config, "pipeline_parallel_size", 1) == 2
+            and getattr(parallel_config, "tensor_parallel_size", 1) == 16
+            and getattr(vllm_config, "speculative_config", None) is not None
+        )
+    return True
 
 
 def _patch_model_runner_output() -> None:
