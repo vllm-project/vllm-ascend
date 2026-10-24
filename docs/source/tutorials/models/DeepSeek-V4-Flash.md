@@ -52,14 +52,12 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-**Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
-
 === "950DT products"
 
     Start the Docker container on each server.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
     export NAME=vllm-ascend
     docker run --rm \
         --name $NAME \
@@ -189,87 +187,48 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V4-Flash-w8a8-mtp` can be deployed on 1 Atlas 800I A3 (128GB × 8) or 1 Atlas 800I A2 (64GB × 8).
 
-=== "A2 series"
+=== "950DT products with DSpark"
 
-    Run the following script to execute online inference.
+    Run the following script to execute PD-colocated online inference.
 
     ```shell
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_BUFFSIZE=1024
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
-        --max-model-len 133120 \
-        --max-num-batched-tokens 8192 \
-        --served-model-name dsv4 \
-        --gpu-memory-utilization 0.9 \
-        --max-num-seqs 32 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 1 \
-        --prefill-context-parallel-size 8 \
-        --enable-expert-parallel \
-        --tokenizer-mode deepseek_v4 \
-        --tool-call-parser deepseek_v4 \
-        --enable-auto-tool-choice \
-        --reasoning-parser deepseek_v4 \
-        --no-enable-prefix-caching \
-        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-        --quantization ascend \
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export HCCL_BUFFSIZE=1024
+    export ASCEND_PROCESS_LOG_PATH="${RUNTIME_DIR}/logs"
+
+    vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
         --port 8000 \
-        --block-size 128 \
-        --attention_config.indexer_kv_dtype int8 \
-        --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '
-        {"ascend_compilation_config":{
-            "enable_npugraph_ex":true,
-            "enable_static_kernel":false
-            },
-        "enable_cpu_binding": true,
-        "multistream_overlap_shared_expert": true}'
-    ```
-
-=== "A2 series with dspark"
-
-    Run the following script to execute online inference.
-
-    ```shell
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE=AIV
-    
-    # Ensure the model path matches the directory recorded during download
-    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
-        --max-model-len 800000 \
-        --max-num-batched-tokens 8192 \
         --served-model-name dsv4 \
-        --gpu-memory-utilization 0.9 \
-        --max-num-seqs 32 \
-        --data-parallel-size 1 \
-        --tensor-parallel-size 8 \
+        --data-parallel-size 8 \
+        --prefill-context-parallel-size 1 \
         --enable-expert-parallel \
+        --enable-chunked-prefill \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 16384 \
+        --max-num-seqs 32 \
+        --gpu-memory-utilization 0.9 \
+        --block-size 32 \
+        --safetensors-load-strategy prefetch \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --api-server-count 1 \
+        --kv-cache-dtype fp8 \
+        --attention_config.indexer_kv_dtype fp8 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --no-disable-hybrid-kv-cache-manager \
-        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-        --quantization ascend \
-        --port 8000 \
-        --block-size 128 \
-        --attention_config.indexer_kv_dtype int8 \
-        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
-        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
     ```
-    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
-=== "A3 series"
+    === "A3 series"
 
     Run the following script to execute online inference.
 
@@ -358,46 +317,85 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         }'
     ```
 
-=== "950DT products with DSpark"
+=== "A2 series"
 
-    Run the following script to execute PD-colocated online inference.
+    Run the following script to execute online inference.
 
     ```shell
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
     export HCCL_BUFFSIZE=1024
-    export ASCEND_PROCESS_LOG_PATH="${RUNTIME_DIR}/logs"
-
-    vllm serve /root/.cache/DeepSeek-V4-Flash-0731  \
-        --port 8000 \
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
         --served-model-name dsv4 \
-        --data-parallel-size 8 \
-        --prefill-context-parallel-size 1 \
-        --enable-expert-parallel \
-        --enable-chunked-prefill \
-        --max-model-len 1048576 \
-        --max-num-batched-tokens 16384 \
-        --max-num-seqs 32 \
         --gpu-memory-utilization 0.9 \
-        --block-size 32 \
-        --safetensors-load-strategy prefetch \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 1 \
+        --prefill-context-parallel-size 8 \
+        --enable-expert-parallel \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --api-server-count 1 \
-        --kv-cache-dtype fp8 \
-        --attention_config.indexer_kv_dtype fp8 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --no-disable-hybrid-kv-cache-manager \
-        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
-        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --no-enable-prefix-caching \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+        --quantization ascend \
+        --port 8000 \
+        --block-size 128 \
+        --attention_config.indexer_kv_dtype int8 \
+        --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '
+        {"ascend_compilation_config":{
+            "enable_npugraph_ex":true,
+            "enable_static_kernel":false
+            },
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert": true}'
     ```
+
+=== "A2 series with dspark"
+
+    Run the following script to execute online inference.
+
+    ```shell
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE=AIV
+    
+    # Ensure the model path matches the directory recorded during download
+    vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
+        --max-model-len 800000 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv4 \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs 32 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 8 \
+        --enable-expert-parallel \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+        --quantization ascend \
+        --port 8000 \
+        --block-size 128 \
+        --attention_config.indexer_kv_dtype int8 \
+        --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    ```
+    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
 
 Key Parameter Descriptions:
 
