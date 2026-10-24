@@ -496,3 +496,55 @@ def test_kimi_k3_zero_routed_rows_return_empty_outputs():
 
     assert tuple(actual_y.shape) == (0, K3_ROUTED_INPUT_WIDTH // 2)
     assert tuple(actual_scale.shape) == (0,)
+
+
+@pytest.mark.skipif(not torch.npu.is_available(), reason="requires an available NPU")
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="DequantSituQuant is configured for Ascend A2/A3",
+)
+@torch.inference_mode()
+def test_grouped_bf16_changing_counts_graph_preserves_row_coverage():
+    """Every active row is written once; inactive rows remain untouched."""
+    torch.npu.set_device(0)
+    rows, groups = 80, 14
+    x = _bf16_x(rows, 6144, seed=17)
+    reference_y, reference_scale = _run(x, None)
+    counts = torch.zeros(groups, dtype=torch.int64, device=x.device)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        y, scale = OP(
+            x=x,
+            weight_scale=None,
+            activation_scale=None,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=counts,
+            beta=1.0,
+            linear_beta=0.0,
+            activate_left=True,
+            quant_mode="dynamic",
+        )
+    fixtures = [
+        [0] * groups,
+        [1] * groups,
+        [1, 0] * 7,
+        [8, 0, 3, 0, 2, 1] + [0] * 8,
+        [4] * 7 + [3] * 7,
+        [-2, 1] * 7,
+        [rows + 7] + [0] * (groups - 1),
+        [3, rows + 5] + [0] * (groups - 2),
+        [0] * groups,
+    ]
+    for values in fixtures:
+        counts.copy_(torch.tensor(values, dtype=torch.int64))
+        y.fill_(-113)
+        scale.fill_(float("nan"))
+        graph.replay()
+        torch.npu.synchronize()
+        active = min(rows, sum(max(value, 0) for value in values))
+        assert torch.equal(y[:active], reference_y[:active])
+        assert torch.equal(scale[:active], reference_scale[:active])
+        assert torch.all(y[active:] == -113)
+        assert torch.isnan(scale[active:]).all()

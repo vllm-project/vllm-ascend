@@ -809,6 +809,23 @@ public:
 private:
     __aicore__ inline void ProcessGroup(int64_t expertIdx, int64_t groupRows, int64_t groupOffset)
     {
+        if constexpr (std::is_same_v<XType, bfloat16_t>) {
+            if (hasGroupIndex_) {
+                // Expert identity is irrelevant after dequantization. Assign
+                // rows by global offset so small groups do not all use core 0.
+                int64_t localRow = blockIdx_ - groupOffset % usedCoreNum_;
+                if (localRow < 0) {
+                    localRow += usedCoreNum_;
+                }
+                for (; localRow < groupRows; localRow += usedCoreNum_) {
+                    const int64_t rowIdx = groupOffset + localRow;
+                    CopyInRow(rowIdx);
+                    ComputeRow(rowIdx);
+                    CopyOutRow(rowIdx);
+                }
+                return;
+            }
+        }
         const int64_t rowsPerCore = (groupRows + usedCoreNum_ - 1) / usedCoreNum_;
         const int64_t localGroupOffset = blockIdx_ * rowsPerCore;
         if (localGroupOffset >= groupRows) {
