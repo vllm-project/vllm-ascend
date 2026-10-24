@@ -1,0 +1,253 @@
+test_name: "MiniMax-M3-w8a8-PP-prefix90-PD"
+model: "Eco-Tech/MiniMax-M3-w8a8-0626"
+num_nodes: 3
+npu_per_node: 16
+dp_load_balancing: external
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1, 2 ]
+
+config:
+  - node_index: 0
+    port_start: 31050
+    dp_rpc_port: 6884
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 4
+    pp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 31260
+    dp_rpc_port: 31422
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    pp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+  - node_index: 2
+    port_start: 31260
+    dp_rpc_port: 31422
+    dp_size: 8
+    dp_size_local: 4
+    dp_rank_start: 4
+    tp_size: 4
+    pp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  SERVER_PORT: "${PORT}"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  HCCL_BUFFSIZE: "1024"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_USE_MODELSCOPE: true
+  ASCEND_LAUNCH_BLOCKING: "1"
+env_prefill: &env_prefill
+  <<: *env_common
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_OP_EXPANSION_MODE: "AIV"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--pipeline-parallel-size"
+      - "${PP_SIZE}"
+      - "--enforce-eager"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--enable-chunked-prefill"
+      - "--enable-prefix-caching"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--limit-mm-per-prompt"
+      - '{"image":1,"video":0}'
+      - "--reasoning-parser"
+      - "minimax_m3"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+      - "--speculative-config"
+      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - "--kv-transfer-config"
+      - '{
+        "kv_connector":"MooncakeConnectorV1",
+        "kv_role":"kv_producer",
+        "kv_port":"36000",
+        "kv_connector_extra_config":{
+            "use_ascend_direct":true,
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--pipeline-parallel-size"
+      - "${PP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--enable-chunked-prefill"
+      - "--enable-prefix-caching"
+      - "--seed"
+      - "1024"
+      - "--reasoning-parser"
+      - "minimax_m3"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--max-num-seqs"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--limit-mm-per-prompt"
+      - '{"image":1,"video":0}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
+      - "--speculative-config"
+      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - "--kv-transfer-config"
+      - '{
+        "kv_connector":"MooncakeConnectorV1",
+        "kv_buffer_device":"npu",
+        "kv_role":"kv_consumer",
+        "kv_port":"36100",
+        "kv_connector_extra_config":{
+            "use_ascend_direct":true,
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+
+  - node_index: 2
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--pipeline-parallel-size"
+      - "${PP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--enable-chunked-prefill"
+      - "--enable-prefix-caching"
+      - "--seed"
+      - "1024"
+      - "--reasoning-parser"
+      - "minimax_m3"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--max-num-seqs"
+      - "128"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--limit-mm-per-prompt"
+      - '{"image":1,"video":0}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true}'
+      - "--speculative-config"
+      - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA", "method":"eagle3", "num_speculative_tokens":3}'
+      - "--kv-transfer-config"
+      - '{
+        "kv_connector":"MooncakeConnectorV1",
+        "kv_buffer_device":"npu",
+        "kv_role":"kv_consumer",
+        "kv_port":"36100",
+        "kv_connector_extra_config":{
+            "use_ascend_direct":true,
+            "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
+            "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
+
+benchmarks:
+  perf_prefix_90_warm_up:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf_prefix_90:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 68
+    max_out_len: 1024
+    batch_size: 17
+    request_rate: 0
+    baseline: 11
+    threshold: 0.97
