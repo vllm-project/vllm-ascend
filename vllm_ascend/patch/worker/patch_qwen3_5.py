@@ -252,7 +252,12 @@ def _set_qwen3_5_evs_attrs(self, vllm_config):
     mm_config = vllm_config.model_config.multimodal_config
     config = vllm_config.model_config.hf_config
     self.is_multimodal_pruning_enabled = mm_config.is_multimodal_pruning_enabled() if mm_config is not None else False
-    self.video_pruning_rate = mm_config.video_pruning_rate if mm_config is not None else 0.0
+    pruning_spec = mm_config.get_video_pruning_spec() if mm_config is not None else None
+    if pruning_spec is None:
+        self.video_pruning_method = None
+        self.video_pruning_rate = mm_config.video_pruning_rate if mm_config is not None else 0.0
+    else:
+        self.video_pruning_method, self.video_pruning_rate = pruning_spec
     self.model_config = vllm_config.model_config
     self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
     # Qwen3.5 ships an empty deepstack_visual_indexes; use bool(...) so the

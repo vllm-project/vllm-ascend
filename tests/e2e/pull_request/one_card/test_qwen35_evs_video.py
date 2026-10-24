@@ -20,10 +20,10 @@ import numpy as np
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 MODEL = os.environ.get("QWEN35_EVS_MODEL", "/workspace/shared_assets/models/Qwen/Qwen3.5-2B")
-PROMPT = "Describe what happens in this video in one sentence."
+PROMPT = "<|video_pad|>Describe what happens in this video in one sentence."
 
 
-def _synthetic_video() -> np.ndarray:
+def _synthetic_video() -> tuple[np.ndarray, dict[str, object]]:
     frames = []
     for index in range(8):
         frame = np.zeros((64, 64, 3), dtype=np.uint8)
@@ -31,33 +31,48 @@ def _synthetic_video() -> np.ndarray:
         frame[:, :, 1] = 255 - index * 24
         frame[index * 4 : index * 4 + 16, :, :] = 255
         frames.append(frame)
-    return np.stack(frames)
+    video = np.stack(frames)
+    metadata = {
+        "fps": 1.0,
+        "duration": 8.0,
+        "total_num_frames": len(video),
+        "frames_indices": list(range(len(video))),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return video, metadata
+
+
+COMMON = dict(
+    dtype="bfloat16",
+    max_model_len=4096,
+    max_num_batched_tokens=4096,
+    limit_mm_per_prompt={"video": 1},
+    mm_processor_kwargs={"fps": 1},
+    enforce_eager=True,
+    gpu_memory_utilization=0.75,
+)
 
 
 @wait_until_npu_memory_free()
-def test_qwen35_video_pruning_reduces_visual_tokens_and_stays_stable():
-    common = dict(
-        dtype="bfloat16",
-        max_model_len=4096,
-        max_num_batched_tokens=4096,
-        limit_mm_per_prompt={"video": 1},
-        mm_processor_kwargs={"fps": 1},
-        enforce_eager=True,
-    )
-    with VllmRunner(MODEL, video_pruning_rate=0.0, **common) as baseline:
+def test_qwen35_video_without_pruning_stays_stable():
+    with VllmRunner(MODEL, video_pruning_rate=0.0, **COMMON) as baseline:
         baseline_outputs = baseline.generate_greedy(
             prompts=[PROMPT],
             videos=[_synthetic_video()],
             max_tokens=32,
         )
 
-    with VllmRunner(MODEL, video_pruning_rate=0.75, **common) as pruned:
+    assert baseline_outputs and baseline_outputs[0][1]
+
+
+@wait_until_npu_memory_free()
+def test_qwen35_video_pruning_stays_stable():
+    with VllmRunner(MODEL, video_pruning_rate=0.75, **COMMON) as pruned:
         pruned_outputs = pruned.generate_greedy(
             prompts=[PROMPT],
             videos=[_synthetic_video()],
             max_tokens=32,
         )
 
-    assert baseline_outputs and pruned_outputs
-    assert baseline_outputs[0][1]
-    assert pruned_outputs[0][1]
+    assert pruned_outputs and pruned_outputs[0][1]
