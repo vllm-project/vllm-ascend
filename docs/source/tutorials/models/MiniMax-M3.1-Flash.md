@@ -235,7 +235,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
 ### 5.2 PD Disaggregation
 
-PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
+PD disaggregation runs Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
 === "A3 series (W8A8)"
 
@@ -308,6 +308,13 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --data-parallel-size 1 \
         --enforce-eager \
         --long-prefill-token-threshold 2048 \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -398,6 +405,13 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }' \
         --additional-config '{
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
@@ -446,7 +460,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
 === "950DT products"
 
-    Use one Prefill node and one Decode node, each with all eight NPUs. Prefill uses DP1 × TP4 × PP2, and Decode uses DP2 × TP4 × PP1. Each node starts one vLLM API service. Speculative decoding is disabled in this configuration.
+    Use one Prefill node and one Decode node, each with all eight NPUs. Prefill uses DP1 × TP4 × PP2, and Decode uses DP2 × TP4 × PP1. Each node starts one vLLM API service.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
@@ -515,6 +529,12 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }' \
         --additional-config '{
             "enable_cpu_binding": true,
             "multistream_overlap_shared_expert": true,
@@ -604,6 +624,12 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --safetensors-load-strategy prefetch \
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }' \
         --additional-config '{
             "enable_cpu_binding": true,
             "ascend_compilation_config": {
