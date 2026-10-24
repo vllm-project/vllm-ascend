@@ -28,6 +28,20 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# ** File: vllm_ascend/__init__.py (early Triton compatibility) **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `triton.compiler.compiler.triton_key`
+#    Why:
+#       torch_npu's Inductor cache imports the old path, removed in Triton 3.6.
+#    How:
+#       At package initialization, export runtime.cache.triton_key at the old
+#       path only if missing. This also covers direct compilation outside a
+#       vLLM worker and preserves the original compiler fingerprint function.
+#    Related PR (if no, explain why):
+#       No torch_npu PR yet; this bridges the pinned dependency versions.
+#    Future Plan:
+#       Remove when all supported torch_npu versions use runtime.cache.
+#
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
