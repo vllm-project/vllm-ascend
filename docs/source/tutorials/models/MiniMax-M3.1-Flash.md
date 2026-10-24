@@ -107,8 +107,8 @@ docker run -it --name "$CONTAINER_NAME" \
     -v /etc/hixlep:/etc/hixlep:ro \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
     -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
-    -v "$WORK_DIR":/work \
-    -w /work "$IMAGE" bash
+    -v "$WORK_DIR":/workspace \
+    -w /workspace "$IMAGE" bash
 ```
 
 ## 5 Online Service Deployment
@@ -221,9 +221,9 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     **Common Environment**
 
-    A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/work/.venv`.
+    A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/workspace/.venv`.
 
-    Save the following as `/work/runtime_env.sh` in the A5 container and set `NIC_NAME` to the current host's network interface. The launch commands set `LOCAL_IP` before sourcing this file.
+    Save the following as `/workspace/runtime_env.sh` in the A5 container and set `NIC_NAME` to the current host's network interface. The launch commands set `LOCAL_IP` before sourcing this file.
 
     ```bash
     #!/usr/bin/env bash
@@ -236,8 +236,8 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
     fi
     unset ftp_proxy https_proxy http_proxy all_proxy FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
     export NIC_NAME="<CURRENT_NODE_NIC>"
-    export PATH=/work/.venv/bin:/work/bin:$PATH
-    export PYTHONPATH=/work/src/vllm:/work/src/vllm-ascend:${PYTHONPATH:-}
+    export PATH=/workspace/.venv/bin:/workspace/bin:$PATH
+    export PYTHONPATH=/workspace/src/vllm:/workspace/src/vllm-ascend:${PYTHONPATH:-}
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
     export VLLM_USE_V2_MODEL_RUNNER=1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
@@ -254,12 +254,12 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     ```bash
     export LOCAL_IP="<CURRENT_NODE_IP>"
-    source /work/runtime_env.sh
+    source /workspace/runtime_env.sh
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_BUFFSIZE=1024
 
-    /work/.venv/bin/vllm serve "$MODEL_PATH" \
+    /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port 11223 \
         --served-model-name minimax-m3 \
@@ -298,7 +298,7 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.2 PD Disaggregation
 
-PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prepare the common environment from the matching platform tab in [Single-Node Deployment](#51-single-node-deployment), using each host's own IP address and network interface. Use `/workspace/env.sh` for A3 or `/work/runtime_env.sh` for A5, then follow the corresponding deployment below.
+PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prepare the common environment from the matching platform tab in [Single-Node Deployment](#51-single-node-deployment), using each host's own IP address and network interface. Use `/workspace/env.sh` for A3 or `/workspace/runtime_env.sh` for A5, then follow the corresponding deployment below.
 
 === "A3"
 
@@ -519,17 +519,17 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     **Prefill Node**
 
-    Save the following as `/work/prefill/run_dp_template.sh`.
+    Save the following as `/workspace/prefill/run_dp_template.sh`.
 
     ```bash
     #!/usr/bin/env bash
     set -e
-    source /work/runtime_env.sh
+    source /workspace/runtime_env.sh
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_BUFFSIZE=1024
     DP_RANK_ARGS=(--data-parallel-size-local "$DP_SIZE")
-    mkdir -p /work/logs
-    exec /work/.venv/bin/vllm serve "$MODEL_PATH" \
+    mkdir -p /workspace/logs
+    exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
@@ -559,26 +559,26 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":true,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /work/logs/prefill-rank${DP_RANK}.log 2>&1
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/prefill-rank${DP_RANK}.log 2>&1
     ```
 
-    Save the following as `/work/prefill/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
+    Save the following as `/workspace/prefill/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
 
     ```bash
     #!/usr/bin/env bash
     set -e
-    cd /work/prefill
+    cd /workspace/prefill
     export LOCAL_IP="<CURRENT_NODE_IP>"
     export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
     export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6884 SERVICE_PORT=31050
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
-    exec bash /work/prefill/run_dp_template.sh
+    exec bash /workspace/prefill/run_dp_template.sh
     ```
 
     Start it on the Prefill host:
 
     ```bash
-    docker exec -d minimax_m31_flash bash /work/prefill/start.sh
+    docker exec -d minimax_m31_flash bash /workspace/prefill/start.sh
     ```
 
     Check health after model loading completes:
@@ -589,17 +589,17 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     **Decode Node**
 
-    Save the following as `/work/decode/run_dp_template.sh`.
+    Save the following as `/workspace/decode/run_dp_template.sh`.
 
     ```bash
     #!/usr/bin/env bash
     set -e
-    source /work/runtime_env.sh
+    source /workspace/runtime_env.sh
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export HCCL_BUFFSIZE=2048
     DP_RANK_ARGS=(--data-parallel-size-local "$DP_SIZE")
-    mkdir -p /work/logs
-    exec /work/.venv/bin/vllm serve "$MODEL_PATH" \
+    mkdir -p /workspace/logs
+    exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size "$DP_SIZE" \
@@ -628,26 +628,26 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /work/logs/decode-rank${DP_RANK}.log 2>&1
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/decode-rank${DP_RANK}.log 2>&1
     ```
 
-    Save the following as `/work/decode/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
+    Save the following as `/workspace/decode/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
 
     ```bash
     #!/usr/bin/env bash
     set -e
-    cd /work/decode
+    cd /workspace/decode
     export LOCAL_IP="<CURRENT_NODE_IP>"
     export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
     export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6885 SERVICE_PORT=31060
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
-    exec bash /work/decode/run_dp_template.sh
+    exec bash /workspace/decode/run_dp_template.sh
     ```
 
     Start it on the Decode host:
 
     ```bash
-    docker exec -d minimax_m31_flash bash /work/decode/start.sh
+    docker exec -d minimax_m31_flash bash /workspace/decode/start.sh
     ```
 
     Check health after model loading completes:
@@ -658,7 +658,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     **Load-balance Proxy**
 
-    After both health checks return `200`, save the following as `/work/start_proxy.sh` in the Prefill container and set the two compute-network IPs. Configure one API endpoint per role.
+    After both health checks return `200`, save the following as `/workspace/start_proxy.sh` in the Prefill container and set the two compute-network IPs. Configure one API endpoint per role.
 
     ```bash
     #!/usr/bin/env bash
@@ -666,22 +666,22 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     export PREFILL_IP="<PREFILL_NODE_IP>"
     export DECODE_IP="<DECODE_NODE_IP>"
     export LOCAL_IP="$PREFILL_IP"
-    source /work/runtime_env.sh
-    mkdir -p /work/logs
-    exec /work/.venv/bin/python /work/src/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    source /workspace/runtime_env.sh
+    mkdir -p /workspace/logs
+    exec /workspace/.venv/bin/python /workspace/src/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8009 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
         --decoder-hosts "$DECODE_IP" --decoder-ports 31060 \
-        > /work/logs/proxy.log 2>&1
+        > /workspace/logs/proxy.log 2>&1
     ```
 
     Start the proxy on the Prefill host:
 
     ```bash
-    docker exec -d minimax_m31_flash bash /work/start_proxy.sh
+    docker exec -d minimax_m31_flash bash /workspace/start_proxy.sh
     ```
 
-    Service logs are `/work/logs/prefill-rank0.log`, `/work/logs/decode-rank0.log`, and `/work/logs/proxy.log`.
+    Service logs are `/workspace/logs/prefill-rank0.log`, `/workspace/logs/decode-rank0.log`, and `/workspace/logs/proxy.log`.
 
     **Send a Request**
 
