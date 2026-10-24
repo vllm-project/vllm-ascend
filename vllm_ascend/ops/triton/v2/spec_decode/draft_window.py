@@ -6,6 +6,63 @@ import torch
 from vllm.triton_utils import tl, triton
 
 PLAN_BLOCK_SIZE = 256
+GATHER_BLOCK_SIZE = 1024
+
+
+@triton.jit
+def _gather_draft_kv_fp32(
+    slots,
+    keys,
+    values,
+    out_keys,
+    out_values,
+    KEY_PAGE_STRIDE: tl.constexpr,
+    VALUE_PAGE_STRIDE: tl.constexpr,
+    BLOCK_SPAN: tl.constexpr,
+    TOKEN_SIZE: tl.constexpr,
+    TOTAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = index < TOTAL
+    slot = tl.load(slots + index // TOKEN_SIZE, mask=valid, other=0).to(tl.int64)
+    page, offset = slot // BLOCK_SPAN, slot % BLOCK_SPAN
+    token_offset = offset * TOKEN_SIZE + index % TOKEN_SIZE
+    key = tl.load(keys + page * KEY_PAGE_STRIDE + token_offset, mask=valid, other=0)
+    value = tl.load(values + page * VALUE_PAGE_STRIDE + token_offset, mask=valid, other=0)
+    tl.store(out_keys + index, key.to(tl.float32), mask=valid)
+    tl.store(out_values + index, value.to(tl.float32), mask=valid)
+
+
+def gather_draft_kv_fp32(
+    slots: torch.Tensor, keys: torch.Tensor, values: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather validated ND token rows directly into private native FP32 operands.
+
+    Tensor pointers preserve their own storage offsets; K/V page strides can
+    differ. The caller validates contiguous token rows and owns both outputs
+    until reader completion. Slots already exclude every uninitialized tail.
+    """
+    if not slots.is_contiguous():
+        raise ValueError("Fused Draft gather requires contiguous private slots")
+    shape = (*slots.shape, *keys.shape[2:])
+    gathered_keys = torch.empty(shape, dtype=torch.float32, device=keys.device)
+    gathered_values = torch.empty_like(gathered_keys)
+    total = gathered_keys.numel()
+    _gather_draft_kv_fp32[(triton.cdiv(total, GATHER_BLOCK_SIZE),)](
+        slots,
+        keys,
+        values,
+        gathered_keys,
+        gathered_values,
+        keys.stride(0),
+        values.stride(0),
+        keys.shape[1],
+        keys.shape[2] * keys.shape[3],
+        total,
+        GATHER_BLOCK_SIZE,
+    )
+    return gathered_keys, gathered_values
 
 
 @triton.jit

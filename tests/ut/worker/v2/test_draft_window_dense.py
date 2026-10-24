@@ -63,7 +63,8 @@ def test_rejected_first_pass_keeps_native_query_alignment_and_excludes_unwritten
 @pytest.mark.parametrize("page_layers", [0, 3])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("query_width", [8, 9])
-def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_width, page_layers):
+@pytest.mark.parametrize("output_dtype", [None, torch.float32])
+def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_width, page_layers, output_dtype):
     block = 128
     table = torch.tensor(
         [[3, 1, 8, 0, 11, 4, 2, 10, 9, 5, 6, 7], [16, 12, 20, 15, 13, 22, 14, 21, 23, 18, 17, 19]], dtype=torch.int32
@@ -106,10 +107,11 @@ def test_device_exact_read_set_reorder_rejection_and_nan_tail(causal, query_widt
         assert set(actual) == set(expected)
         reference.append(cache.flatten(0, 1)[expected].clone())
     backing_before = backing.clone() if backing is not None else None
-    keys, values = gather_dense_draft_kv(read, cache, cache)
+    keys, values = gather_dense_draft_kv(read, cache, cache, output_dtype=output_dtype)
+    assert keys.dtype == values.dtype == (output_dtype or cache.dtype)
     assert torch.isfinite(keys).all() and torch.isfinite(values).all()
     for row, expected in enumerate(reference):
-        torch.testing.assert_close(keys[row, : len(expected)], expected, rtol=0, atol=0)
+        torch.testing.assert_close(keys[row, : len(expected)], expected.to(keys.dtype), rtol=0, atol=0)
         visible = len(expected)
         for q in range(query_width):
             allowed = min(visible, visible - query_width + q + 1) if causal else visible

@@ -176,17 +176,23 @@ def prepare_dense_draft_read(
 
 
 def gather_dense_draft_kv(
-    read: DenseDraftRead, key_cache: torch.Tensor, value_cache: torch.Tensor
+    read: DenseDraftRead,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    *,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather ND token rows, including interleaved/padded physical KV pages."""
     if key_cache.ndim != 4 or key_cache.shape != value_cache.shape:
         raise ValueError("Dense Draft KV requires matching four-dimensional caches")
     if key_cache.dtype not in (torch.float16, torch.bfloat16) or value_cache.dtype != key_cache.dtype:
         raise ValueError("Dense Draft KV requires unquantized float16/bfloat16 storage")
+    if output_dtype not in (None, torch.float32):
+        raise ValueError("Dense Draft gather conversion supports only FP32 native operands")
+    if key_cache.device != value_cache.device or read.slots.device != key_cache.device:
+        raise ValueError("Dense Draft slots and KV caches must share their device")
     shape = (read.num_reqs, read.capacity, *key_cache.shape[2:])
-    slots = read.slots.reshape(-1)
-    indices_by_stride = {}
-    gathered = []
+    layouts = []
     for cache in (key_cache, value_cache):
         blocks, block_size, heads, dim = cache.shape
         token_size = heads * dim
@@ -198,6 +204,22 @@ def gather_dense_draft_kv(
         ):
             raise ValueError("Dense Draft KV requires contiguous ND token rows and aligned physical pages")
         stride_rows = page_stride // token_size
+        layouts.append((cache, blocks, block_size, heads, dim, token_size, stride_rows))
+    if output_dtype == torch.float32 and key_cache.device.type == "npu":
+        import torch_npu
+
+        from vllm_ascend.ops.triton.v2.spec_decode.draft_window import gather_draft_kv_fp32
+
+        # Raw Triton addresses require an ND physical layout. Other formats
+        # retain the existing format-aware PyTorch gather/conversion path.
+        if all(torch_npu.get_npu_format(cache) in (0, 2) for cache in (key_cache, value_cache)):
+            keys, values = gather_draft_kv_fp32(read.slots, key_cache, value_cache)
+            read.retain(keys, values)
+            return keys, values
+    slots = read.slots.reshape(-1)
+    indices_by_stride = {}
+    gathered = []
+    for cache, blocks, block_size, heads, dim, token_size, stride_rows in layouts:
         # Preserve the original storage offset, including the V offset in a
         # combined K/V page. This is a view, never a full-cache flatten/copy.
         rows = cache.as_strided(((blocks - 1) * stride_rows + block_size, heads, dim), (token_size, dim, 1))
@@ -207,7 +229,9 @@ def gather_dense_draft_kv(
                 if stride_rows == block_size
                 else slots + torch.div(slots, block_size, rounding_mode="floor") * (stride_rows - block_size)
             )
-        gathered.append(rows.index_select(0, indices_by_stride[stride_rows]).reshape(shape))
+        operand = rows.index_select(0, indices_by_stride[stride_rows]).reshape(shape)
+        read.retain(operand)
+        gathered.append(operand.to(output_dtype or cache.dtype))
     keys, values = gathered
     read.retain(keys, values)
     return keys, values
@@ -227,10 +251,9 @@ def dense_draft_attention(
     # Lazy import keeps leaf planning/ownership usable in CPU-only tests.
     import torch_npu
 
-    keys, values = gather_dense_draft_kv(read, key_cache, value_cache)
+    keys_fp32, values_fp32 = gather_dense_draft_kv(read, key_cache, value_cache, output_dtype=torch.float32)
     query = query[: read.num_reqs * read.query_width].reshape(read.num_reqs, read.query_width, *query.shape[-2:])
     queries_fp32 = query.float().contiguous()
-    keys_fp32, values_fp32 = keys.float().contiguous(), values.float().contiguous()
     read.retain(queries_fp32, keys_fp32, values_fp32)
     outputs = torch_npu.npu_fusion_attention(
         queries_fp32,

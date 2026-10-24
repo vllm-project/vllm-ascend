@@ -10,7 +10,9 @@ import torch
 torch_npu = pytest.importorskip("torch_npu")
 
 from vllm_ascend.worker.v2.spec_decode.draft_window_dense import (  # noqa: E402
+    DenseDraftRead,
     dense_draft_attention,
+    gather_dense_draft_kv,
     prepare_dense_draft_read,
 )
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource  # noqa: E402
@@ -18,6 +20,39 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSour
 pytestmark = pytest.mark.skipif(not torch.npu.is_available(), reason="requires an Ascend NPU")
 TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 # Prespecified dtype tolerances vs an independent FP32 oracle.
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("block", [64, 128])
+def test_fp32_gather_preserves_distinct_page_strides_and_storage_offsets(dtype, block):
+    generator = torch.Generator().manual_seed(2007)
+    keys_cpu = torch.randn(6, block, 2, 192, generator=generator).to(dtype)
+    values_cpu = torch.randn(6, block, 2, 192, generator=generator).to(dtype)
+    key_backing = torch.full((6, 3, 2, block, 2, 192), torch.nan, dtype=dtype, device="npu")
+    value_backing = torch.full((6, 7, 2, block, 2, 192), torch.nan, dtype=dtype, device="npu")
+    keys, values = key_backing[:, 1, 0], value_backing[:, 2, 1]
+    keys.copy_(keys_cpu.npu())
+    values.copy_(values_cpu.npu())
+    key_before, value_before = key_backing.cpu(), value_backing.cpu()
+    slots = torch.tensor([[3 * block + 1, block - 1, 2 * block + 3, 4, 4], [5 * block, 7, block + 2, 8, 8]])
+    retained = []
+    read = DenseDraftRead(
+        slots=slots.npu(),
+        seq_lens=torch.tensor([4, 4], dtype=torch.int32, device="npu"),
+        starts=torch.zeros(2, dtype=torch.int32, device="npu"),
+        mask=torch.zeros((2, 1, 1, 5), dtype=torch.bool, device="npu"),
+        capacity=5,
+        query_width=1,
+        retain=lambda *objects: retained.extend(objects),
+    )
+    gathered_keys, gathered_values = gather_dense_draft_kv(read, keys, values, output_dtype=torch.float32)
+    for actual, source in ((gathered_keys, keys_cpu), (gathered_values, values_cpu)):
+        expected = source[slots // block, slots % block].float()
+        assert actual.dtype == torch.float32 and actual.is_contiguous()
+        torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+        assert any(item is actual for item in retained)
+    torch.testing.assert_close(key_backing.cpu(), key_before, atol=0, rtol=0, equal_nan=True)
+    torch.testing.assert_close(value_backing.cpu(), value_before, atol=0, rtol=0, equal_nan=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
