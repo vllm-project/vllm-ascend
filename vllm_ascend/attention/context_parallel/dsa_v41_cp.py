@@ -4,7 +4,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import torch
 from vllm.distributed import get_pcp_group, get_tp_group
@@ -26,9 +26,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pc
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.utils import enable_dsa_cp
-
-if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def get_v41_cp_classes():
@@ -258,7 +255,6 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
 class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     """Build PCP-local queries and scheduler-global cache-write controls."""
 
-    consumes_pcp_context: ClassVar[bool] = True
     _request_capacity_factor: ClassVar[int] = 2
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
@@ -344,6 +340,10 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     def _build_empty_local_metadata(self, common: AscendCommonAttentionMetadata) -> AscendDSAV41Metadata:
         # Skip SMLA/QLI metadata ops on ranks with no queries.
         self._device_metadata_tasks = ()
+        self._smla_metadata.zero_()
+        self._qli_metadata.zero_()
+        if self._a5_smla_metadata is not None:
+            self._a5_smla_metadata.zero_()
         num_tokens, num_reqs = common.num_input_tokens, common.num_reqs
         is_state = self._cache_kind == "compressor_state"
         slots = self._slot_mapping if is_state else self._slot_mapping_2d
@@ -374,11 +374,11 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         common_prefix_len,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build=False,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
         num_actual_reqs: int | None = None,
         **kwargs: Any,
     ) -> AscendDSAV41Metadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
         assert pcp_cache_group_idx is not None
 
@@ -389,7 +389,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         self._global_builder.take_device_metadata_tasks()
 
         if needs_global_metadata:
-            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(self, pcp_context)
+            pcp_context = AscendDSAPCPMetadataBuilder._prepare_graph_pcp_context(
+                self, pcp_context, full_graph_mode=kwargs.get("full_graph_mode", False)
+            )
             global_common = AscendDSAPCPMetadataBuilder._build_global_common_attn_metadata(
                 pcp_context, pcp_cache_group_idx, common_attn_metadata
             )
@@ -447,22 +449,6 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     supports_pcp: ClassVar[bool] = True
 
-    @contextmanager
-    def _o_proj_batch(self, projector, *, needs_global_metadata: bool):
-        projector._pcp_o_proj_use_full_weight = projector.enable_pcp_o_proj_weight_sharding and needs_global_metadata
-        try:
-            # V4.1 bypasses DSA forward; prepare persistent aliases during warmup.
-            if projector.enable_pcp_o_proj_weight_sharding:
-                projector._get_pcp_o_proj_weight_switches()
-            yield
-        finally:
-            for layer, method, state in projector._pcp_o_proj_weight_switches or ():
-                if state.handles:
-                    method.wait_weight_all_gather(state)
-                if projector._pcp_o_proj_use_full_weight:
-                    method.switch_weight(layer, state, use_full_weight=False)
-            projector._pcp_o_proj_use_full_weight = False
-
     @staticmethod
     def _gather_and_restore_hidden_states(
         hidden_states: torch.Tensor,
@@ -483,8 +469,16 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
 
     def forward(self, attn, positions, hidden_states, output=None):
-        metadata = get_forward_context().attn_metadata
-        needs_global_metadata = metadata is not None and isinstance(metadata[self.swa_prefix], AscendDSAV41PCPMetadata)
+        # Every layer has SWA metadata carrying the batch's PCP and prefill state.
+        metadata = (
+            get_forward_context().attn_metadata[self.swa_prefix]
+            if get_forward_context().attn_metadata is not None
+            else None
+        )
+        needs_global_metadata = isinstance(metadata, AscendDSAV41PCPMetadata)
+        has_prefill = needs_global_metadata and metadata.global_metadata.num_prefills > 0
         projector = attn.dsa_attn.dsa_attn.impl
-        with self._o_proj_batch(projector, needs_global_metadata=needs_global_metadata):
+        # V4 owns the quantized O modules and their batch-scoped collective mode.
+        # V4.1 already projects padded output even on empty query ranks.
+        with projector._o_proj_batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(attn, positions, hidden_states, output)

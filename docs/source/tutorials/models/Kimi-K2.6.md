@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 Kimi K2.6 is an open-source, native multimodal agentic model built through continual pretraining on approximately 15 trillion mixed visual and text tokens atop Kimi-K2-Base. It seamlessly integrates vision and language understanding with advanced agentic capabilities, instant and thinking modes, as well as conversational and agentic paradigms.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
@@ -149,9 +155,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
@@ -313,9 +316,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -364,7 +364,6 @@ Parameter descriptions:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {
@@ -395,9 +394,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -446,7 +442,6 @@ Parameter descriptions:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30100",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
@@ -476,9 +471,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -527,7 +519,6 @@ Parameter descriptions:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,
@@ -557,9 +548,6 @@ Parameter descriptions:
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
 
-    # [Optional] jemalloc
-    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
@@ -608,7 +596,6 @@ Parameter descriptions:
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30300",
-        "engine_id": "3",
         "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 4,

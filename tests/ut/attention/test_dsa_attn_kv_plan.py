@@ -24,7 +24,6 @@ _DSA_C_ASCEND_OPS = (
     "npu_sparse_attn_sharedkv_metadata",
     "npu_kv_quant_sparse_attn_sharedkv",
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
-    "kv_compress_epilog",
     "npu_scatter_nd_update_sk",
 )
 
@@ -72,7 +71,7 @@ def test_a5_fp8_plan_uses_flat_shared_kv():
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert not plan.requires_block_offset_slots
-        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {}
 
 
 def test_a5_bf16_plan_uses_sparse_flash_mla():
@@ -118,7 +117,7 @@ def test_scatter_skips_none_updates():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         cache = torch.zeros(2, 1, 4)
-        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+        with mock.patch.object(torch.ops, "cann_ops_transformer.kv_compress_epilog") as epilog:
             plan.dsa_kv_compress_scatter(cache, None, torch.tensor([0], dtype=torch.int32))
             epilog.assert_not_called()
 

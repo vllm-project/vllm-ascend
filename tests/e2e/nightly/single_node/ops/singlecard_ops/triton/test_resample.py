@@ -455,6 +455,48 @@ def test_full_draft_residual_distribution_matches_positive_p_minus_q():
 
 
 @torch.inference_mode()
+def test_block_residual_scales_target_by_accepted_prefix():
+    """Both mass passes must use p_tau * p - q, including across vocab blocks."""
+    vocab_size = 1025
+    p = torch.zeros(vocab_size)
+    q = torch.zeros(vocab_size)
+    support = [0, 1024, 2, 3]
+    p[support] = torch.tensor([0.4, 0.3, 0.2, 0.1])
+    q[support] = torch.tensor([0.1, 0.1, 0.4, 0.4])
+    prefix_ratio = 0.5
+    residual = torch.clamp(prefix_ratio * p - q, min=0)
+    expected = residual / residual.sum()
+    lengths = [3] * STAT_TRIALS
+    total_logits = sum(lengths)
+    target_logits = _repeat_rows(p.log(), total_logits).to(DEVICE)
+    draft_logits = q.log().view(1, 1, -1).expand(STAT_TRIALS, 2, -1).contiguous().to(DEVICE)
+    sampled = torch.full((STAT_TRIALS, 3), -1, dtype=torch.int64, device=DEVICE)
+    # One accepted token, followed by the rejected token and a bonus row.
+    num_sampled = torch.ones(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, device=DEVICE)
+    cumulative_log_p = torch.full((total_logits,), prefix_ratio, device=DEVICE).log()
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        torch.ones(STAT_TRIALS, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE),
+        _position_tensor(total_logits),
+        cumulative_log_p=cumulative_log_p,
+        use_block_verification=True,
+    )
+    assert (num_sampled == 2).all()
+    assert (sampled[:, 0] == -1).all()
+    _assert_distribution(sampled[:, 1], expected)
+
+
+@torch.inference_mode()
 def test_one_hot_residual_distribution_excludes_rejected_token_and_renormalizes():
     probs = torch.tensor([0.10, 0.45, 0.20, 0.15, 0.10], dtype=torch.float32)
     rejected_token = 1
@@ -652,6 +694,52 @@ def test_same_seed_and_position_are_deterministic():
 # ---------------------------------------------------------------------------
 # End-to-end through the patched rejection_sample entry point
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("rejection_step", [0, 1])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+@torch.inference_mode()
+def test_rejection_sample_residual_is_independent_of_acceptance_draw(
+    has_draft_logits, rejection_step, use_block_verification
+):
+    """Reusing the acceptance draw would select only token 2 after rejection."""
+    num_spec_steps = rejection_step + 1
+    num_logits_per_req = num_spec_steps + 1
+    lengths = [num_logits_per_req] * STAT_TRIALS
+    target_probs = torch.tensor([0.5, 0.25, 0.25], dtype=torch.float32, device=DEVICE)
+    draft_probs = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
+    target_rows = draft_probs.log().repeat(num_logits_per_req, 1)
+    target_rows[rejection_step] = target_probs.log()
+    target_logits = target_rows.repeat(STAT_TRIALS, 1)
+    draft_logits = draft_probs.log().repeat(STAT_TRIALS, num_spec_steps, 1) if has_draft_logits else None
+    total_logits = sum(lengths)
+
+    sampled, num_sampled = rejection_sample(
+        target_logits,
+        draft_logits,
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        _cu_num_logits(lengths),
+        _position_tensor(total_logits),
+        torch.arange(STAT_TRIALS, dtype=torch.int32, device=DEVICE),
+        _expanded_mapping(lengths),
+        torch.arange(num_logits_per_req, dtype=torch.int32, device=DEVICE).repeat(STAT_TRIALS),
+        torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 4001,
+        num_spec_steps,
+        use_block_verification=use_block_verification,
+    )
+    torch.npu.synchronize()
+
+    rejected = num_sampled == rejection_step + 1
+    assert bool(((num_sampled == num_logits_per_req) | rejected).all())
+    torch.testing.assert_close(rejected.float().mean(), torch.tensor(0.5, device=DEVICE), rtol=0.0, atol=STAT_ATOL)
+    if rejection_step:
+        assert bool((sampled[:, :rejection_step] == 0).all())
+    _assert_distribution(sampled[:, rejection_step], target_probs.cpu())
+    # The recovered token has equal residual mass on tokens 1 and 2,
+    # even though rejection conditions the acceptance draw to be above 0.5.
+    _assert_distribution(sampled[rejected, rejection_step] - 1, torch.tensor([0.5, 0.5]))
 
 
 @torch.inference_mode()

@@ -315,7 +315,6 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
@@ -543,7 +542,12 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
         assert transfer["do_remote_prefill"]
         assert any(transfer["remote_block_ids"])
         decoded = _completion(decode_url, prompt, kv_transfer_params=transfer)
-        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+        # vLLM #54222: the D worker now reports the P worker's prefix-cache
+        # hits via kv_transfer_params instead of its own ~100% hit rate from
+        # the transferred KV. A fresh prompt has no P-side hit, so the value
+        # is 0; assert it is propagated rather than positive.
+        assert transfer.get("remote_prefill_cached_tokens") is not None
+        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] == transfer["remote_prefill_cached_tokens"]
         # A D worker can also receive a request without remote KV. Its MLA
         # prefill weights must remain usable (the previous P/D fallback bug).
         _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])

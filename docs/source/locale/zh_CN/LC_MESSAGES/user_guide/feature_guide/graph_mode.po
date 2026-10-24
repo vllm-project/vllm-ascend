@@ -594,7 +594,7 @@ msgstr "### Super Kernel 优化"
 
 msgid ""
 "[Super "
-"Kernel](https://www.hiascend.com/document/detail/zh/Pytorch/latest/devguide/TorchAir/docs/zh/npugraph_ex/advanced/superkernel.md)"
+"Kernel](https://www.hiascend.com/document/detail/en/Pytorch/latest/devguide/TorchAir/docs/en/npugraph_ex/advanced/superkernel.md)"
 " is an **optional** operator-binary fusion optimization. Unlike source-level"
 " fusion, it works on compiled kernel binaries: eligible subgraphs are "
 "identified, their child kernels are combined into a larger kernel, and "

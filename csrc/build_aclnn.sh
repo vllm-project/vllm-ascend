@@ -107,7 +107,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
-        "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
@@ -129,7 +128,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "kda_layout_swap12"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -160,7 +158,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
-        "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
@@ -174,7 +171,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"
         "dequant_situ_quant"
-        "gmm_dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
@@ -184,7 +180,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_layout_swap12"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -200,12 +195,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "sparse_flash_attention"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
-        "kv_compress_epilog"
         "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"
@@ -226,7 +221,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_layout_swap12"
         "k2q_csr"
         "sparse_attention_score"
-        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

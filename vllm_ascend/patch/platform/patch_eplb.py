@@ -36,6 +36,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.utils import vllm_version_is
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
@@ -573,17 +574,9 @@ def _wrap_async_worker(original_worker):
     transfer_signature = signature(_async_worker.transfer_layer)
     transfer_stream_parameter = "stream" if "stream" in transfer_signature.parameters else "cuda_stream"
 
-    @wraps(original_worker)
-    def _transfer_run_periodically(*args, **kwargs):
-        bound = worker_signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        state = bound.arguments["state"]
-        stream = bound.arguments[worker_stream_parameter]
-        is_profile = bound.arguments["is_profile"]
-        if not isinstance(state, AscendEplbState) or is_profile:
-            return original_worker(*bound.args, **bound.kwargs)
-        while True:
-            state.rearrange_event.wait(stream=stream)
+    def _run(state, stream, is_profile):
+        rank = _async_worker.get_eplb_group().device_group.rank()
+        while state.wait_for_rearrangement(stream):
             eplb_group = _async_worker.get_eplb_group().device_group
             eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
             for model_state in state.model_states.values():
@@ -651,6 +644,38 @@ def _wrap_async_worker(original_worker):
                     )
                     consumed_event.wait(stream=stream)
                     assert model_state.pending_result is None
+                    if not vllm_version_is("0.31.0") and index == len(changed_layers) - 1:
+                        # On main, the last workspace move may be performed by
+                        # upstream's own helper instead of the wrapped commit
+                        # path, so report completion from the worker there. The
+                        # v0.31.0 lane keeps logging it from that wrapper.
+                        if rank == 0:
+                            logger.info(
+                                "%s: model=%s",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                            )
+
+    @wraps(original_worker)
+    def _transfer_run_periodically(*args, **kwargs):
+        bound = worker_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        state = bound.arguments["state"]
+        stream = bound.arguments[worker_stream_parameter]
+        is_profile = bound.arguments["is_profile"]
+        if not isinstance(state, AscendEplbState) or is_profile:
+            return original_worker(*bound.args, **bound.kwargs)
+        try:
+            return _run(state, stream, is_profile)
+        except Exception as error:
+            if state._hixl_session is not None:
+                # Context restoration and the final stream synchronization also
+                # belong to the migration. Preserve ownership on any failure.
+                session = state._hixl_session
+                if session._error is None:
+                    session._error = error
+                session._usable = False
+            raise
 
     setattr(_transfer_run_periodically, _PATCH_MARKER, True)
     return _transfer_run_periodically
@@ -786,7 +811,7 @@ def _wrap_move_to_workspace(original_move):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
                 _clear_transfer_target(model_state.communicator)
-                if bound.arguments["ep_rank"] == 0:
+                if bound.arguments["ep_rank"] == 0 and vllm_version_is("0.31.0"):
                     if full_target is None:
                         logger.info(
                             "%s: model=%s",

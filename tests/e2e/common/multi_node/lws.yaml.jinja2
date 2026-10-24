@@ -29,6 +29,14 @@ spec:
                 value: "{{ config_base_path | default("") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -39,6 +47,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
@@ -107,8 +117,8 @@ spec:
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
-              - mountPath: /usr/local/Ascend/driver/tools
-                name: driver-tools
+              - mountPath: /usr/local/Ascend/driver
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -126,9 +136,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-tools
+        - name: ascend-driver
           hostPath:
-            path: /usr/local/Ascend/driver/tools
+            path: /usr/local/Ascend/driver
     workerTemplate:
       spec:
         tolerations:
@@ -149,6 +159,14 @@ spec:
                 value: "{{ test_frequency | default("nightly") }}"
               - name: LOG_PREFIX
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
+              - name: DOWNLOAD_SPEC
+                value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -159,6 +177,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
@@ -217,8 +237,8 @@ spec:
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
-              - mountPath: /usr/local/Ascend/driver/tools
-                name: driver-tools
+              - mountPath: /usr/local/Ascend/driver
+                name: ascend-driver
               - mountPath: /dev/shm
                 name: dshm
         volumes:
@@ -236,9 +256,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
 {% endif %}
-        - name: driver-tools
+        - name: ascend-driver
           hostPath:
-            path: /usr/local/Ascend/driver/tools
+            path: /usr/local/Ascend/driver
 ---
 apiVersion: v1
 kind: Service

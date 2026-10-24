@@ -40,7 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     register_ascend_kv_cache_specs,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 # The prefix-replay geometry upstream's own test uses: a 100-token prompt with a
 # 96-token hit and a 32-token window recomputes [64, 96).
