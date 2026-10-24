@@ -4,7 +4,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import torch
 from vllm.distributed import get_pcp_group, get_tp_group
@@ -26,9 +26,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pc
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.utils import enable_dsa_cp
-
-if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def get_v41_cp_classes():
@@ -258,7 +255,6 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
 class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     """Build PCP-local queries and scheduler-global cache-write controls."""
 
-    consumes_pcp_context: ClassVar[bool] = True
     _request_capacity_factor: ClassVar[int] = 2
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
@@ -344,6 +340,10 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
     def _build_empty_local_metadata(self, common: AscendCommonAttentionMetadata) -> AscendDSAV41Metadata:
         # Skip SMLA/QLI metadata ops on ranks with no queries.
         self._device_metadata_tasks = ()
+        self._smla_metadata.zero_()
+        self._qli_metadata.zero_()
+        if self._a5_smla_metadata is not None:
+            self._a5_smla_metadata.zero_()
         num_tokens, num_reqs = common.num_input_tokens, common.num_reqs
         is_state = self._cache_kind == "compressor_state"
         slots = self._slot_mapping if is_state else self._slot_mapping_2d
@@ -374,11 +374,11 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         common_prefix_len,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build=False,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
         num_actual_reqs: int | None = None,
         **kwargs: Any,
     ) -> AscendDSAV41Metadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         assert pcp_context is not None, "V4.1 PCP requires the MRV2 global batch context"
         assert pcp_cache_group_idx is not None
 

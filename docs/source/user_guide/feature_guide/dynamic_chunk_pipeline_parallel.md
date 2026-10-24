@@ -2,7 +2,7 @@
 
 !!! note
 
-    For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md). For deployment tutorial, see [Dynamic Chunked Pipeline Parallel Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md).
+    For design details and mathematical models, see [Design Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md).
 
 ## Overview
 
@@ -71,7 +71,6 @@ Note:
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "prefill": {
                     "pp_size": 2,
@@ -116,7 +115,6 @@ Note:
             "kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30000",
-            "engine_id": "0",
             "kv_connector_extra_config": {
                 "prefill": {
                     "pp_size": 2,

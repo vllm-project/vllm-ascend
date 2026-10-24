@@ -28,8 +28,8 @@ from vllm.v1.kv_cache_interface import (
 import vllm_ascend.compilation.acl_graph as acl_graph
 from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
@@ -495,7 +495,7 @@ def test_stateful_handoff_preserves_decode_graph(
         packed_tensor[0, 1:] = 32
         packed_tensor[1, 1:] = CUDAGraphMode.FULL.value
 
-    module = "vllm_ascend.worker.model_runner_v1"
+    module = "vllm_ascend.worker.v1.model_runner"
     monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
     # Keep the test focused on graph dispatch: MC2 requires uniform DP inputs
     # even when an incomplete handoff forces the batch back to eager mode.

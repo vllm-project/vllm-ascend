@@ -1281,6 +1281,29 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
     assert lengths == [128]
 
 
+@pytest.mark.parametrize("local_shape,remote_shape", [((9, 256), (2, 9, 128)), ((2, 9, 128), (9, 256))])
+def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remote_shape) -> None:
+    thread = make_thread(
+        kv_cache_specs=[make_kpool_tail_spec()],
+        kv_caches_base_addr=[[1000]],
+        block_shapes=[[local_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[remote_shape]],
+        block_strides=[[9216]],
+        block_lens=[[9216]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src, dst, lengths = list[int](), list[int](), list[int]()
+    with pytest.raises(ValueError, match="circular cache layout mismatch"):
+        thread._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 4, {(0, 0): [("request", [1], [3])]}, remote, src, dst, lengths
+        )
+    assert not src and not dst and not lengths
+
+
 def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     thread = make_thread(

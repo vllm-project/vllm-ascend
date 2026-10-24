@@ -84,7 +84,7 @@ class TestAscendEPLBController(unittest.TestCase):
                     model=nn.Linear(2, 2),
                     set_eplb_state=MagicMock(),
                 )
-                draft_config = SimpleNamespace()
+                draft_config = SimpleNamespace(model="draft")
                 with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
                     added = controller.maybe_register_speculator(
                         speculator, SimpleNamespace(draft_model_config=draft_config), False
@@ -92,7 +92,13 @@ class TestAscendEPLBController(unittest.TestCase):
                 self.assertEqual(added, enabled)
                 self.assertEqual(controller._has_registered_models, enabled)
                 if enabled:
-                    controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    if vllm_version_is("0.31.0"):
+                        controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    else:
+                        # vLLM main names the draft entry for the EPLB step log.
+                        controller.state.add_model.assert_called_once_with(
+                            speculator.model, draft_config, model_name="draft (draft)"
+                        )
                     speculator.set_eplb_state.assert_called_once_with(controller.state)
                 else:
                     controller.state.add_model.assert_not_called()

@@ -18,7 +18,7 @@
 #
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -58,6 +59,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
+from vllm_ascend.attention.attention_c8_mxfp import (
+    mxfp_cache_spec,
+    mxfp_cache_views_for_spec,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
@@ -65,12 +70,11 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
-    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
-    get_flashmla_ops,
     get_sfa_qsfa_packed_head_dim,
     get_tq_fused_slot_bytes,
     requires_contiguous_pa_kv_cache,
+    supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -91,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
+from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -99,8 +104,10 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -325,6 +332,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             )
             continue
 
+        if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+            spec = mxfp_cache_spec(spec)
+        # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
+        # the spec while specs are built. The v0.31.0 lane has no ``is_draft``
+        # field and annotates EAGLE groups through the packed hook, so only main
+        # propagates the flag here; without it no group is flagged as the draft
+        # model's and the coordinator fallback treats the target groups as
+        # EAGLE groups too.
+        if not vllm_version_is("0.31.0") and getattr(attn_module, "is_draft_layer", False):
+            spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
             attention_layer_names.append(layer_name)
@@ -399,6 +416,7 @@ def build_attn_metadata(
     copy_sfa_draft_index: int | None = None,
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
+    common_metadata_callback=None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
@@ -528,8 +546,12 @@ def build_attn_metadata(
             copy_sfa_restore_tails=copy_sfa_restore_tails,
             dcp_local_seq_lens=dcp_local_seq_lens,
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+            pcp_context=pcp_context,
+            pcp_cache_group_idx=i if pcp_context is not None else None,
             **common_attn_metadata_extra_kwargs,
         )
+        if common_metadata_callback is not None:
+            common_metadata_callback(i, common_attn_metadata)
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
@@ -547,7 +569,6 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -578,13 +599,6 @@ def build_attn_metadata(
                     # NONE and for_cudagraph_capture=True. Keep V4.1 indexer
                     # branches in the graph even for a short dummy sequence.
                     full_graph_mode=full_graph_mode or for_cudagraph_capture,
-                )
-            # Parallel attention and cache-only backends opt in to the PCP
-            # context needed to construct their own metadata.
-            if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
-                attn_metadata_extra_kwargs.update(
-                    pcp_context=pcp_context,
-                    pcp_cache_group_idx=i,
                 )
 
             for variant_names, variant_common in metadata_variants:
@@ -957,28 +971,96 @@ def _uses_single_raw_mla_cache(
         # PCP gathers and sharded-decode writes still use the legacy
         # preprocessing contract. Keep their allocation compatible with it.
         return False
-    if getattr(impl, "dcp_enabled", False):
-        buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
-        if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
-            return False
-        if not buffers_are_sufficient():
-            # DCP split attention needs stable private current-KV buffers for
-            # every admitted decode, prefill, and mixed graph.
-            return False
-    if getattr(impl, "fa_quant_layer", False):
+    if getattr(impl, "use_flashmla", False):
+        # The external reader retains its fused-cache contract, including
+        # DCP. Native FIA continues to follow the dependency's exclusions.
+        return True
+    return supports_strided_mla_cache(vllm_config, attn_module, kv_cache_spec)
+
+
+def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable[KVCacheSpec]) -> bool:
+    """Keep Gemma 4's budget and the V2 runner on the same dense layout.
+
+    Equal physical pages let full and sliding-window groups overlay the same
+    pool even when their head dimensions and tokens per block differ. Keep
+    specialized/quantized caches and distributed transfer on their existing
+    allocation paths. Limit this regression fix to Gemma 4 so other models
+    retain their existing allocation behavior.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) != "gemma4_text":
         return False
-    if getattr(impl, "enable_kv_nz", False):
-        # NZ decode reshapes each component with .view(). A5 token-fused
-        # NoPE/RoPE slices are separated by the other component's lanes, so
-        # keep the legacy component-dense allocation for this mode.
+    if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
         return False
-    supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
-    if supports_prolog_writer is None:
+    specs = tuple(specs)
+    if {type(spec) for spec in specs} != {FullAttentionSpec, SlidingWindowSpec}:
         return False
-    # The strided writer needs MLAPrologV3, RoPE MLA, and a supported
-    # projection/quantization contract. Keep incompatible layers on the
-    # legacy writer layout instead of allocating a cache they cannot use.
-    return supports_prolog_writer()
+    if vllm_config.kv_transfer_config is not None:
+        return False
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size != 1 or parallel_config.prefill_context_parallel_size != 1:
+        return False
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not (layout.is_layer_compact and layout.is_block_compact):
+        return False
+    return len({spec.page_size_bytes for spec in specs}) == 1 and all(
+        spec.dtype in (torch.float16, torch.bfloat16)
+        and spec.kv_quant_mode == KVQuantMode.NONE
+        and spec.head_size == spec.head_size_v
+        and spec.page_size_bytes == spec.real_page_size_bytes
+        and spec.tokens_per_state == 1
+        and spec.num_head_slots is None
+        and spec.state_content_bytes is None
+        for spec in specs
+    )
+
+
+def allocate_shared_attention_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    allocate: Callable[[int], torch.Tensor],
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Materialize overlay descriptors as contiguous K/V views of one pool.
+
+    Groups share block IDs from one scheduler pool, so the same ID cannot be
+    live in two groups at once. Split each layer slot into K and V halves;
+    equal, unpadded pages and equal K/V widths make this mapping identical
+    across groups while preserving the contiguous layout required by PA.
+    Upstream constructs the layer coverage, offsets and allocation bounds.
+    Check only the shared backing and contiguous strides required here:
+    upstream permits alignment padding that this K/V split cannot consume.
+    """
+    descriptors = kv_cache_config.kv_cache_tensors
+    specs = {
+        name: (
+            group.kv_cache_spec.kv_cache_specs[name]
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group.kv_cache_spec
+        )
+        for group in kv_cache_config.kv_cache_groups
+        for name in group.layer_names
+    }
+    sizes = {descriptor.size for descriptor in descriptors}
+    if len(sizes) != 1 or kv_cache_config.num_blocks <= 0:
+        raise ValueError("Shared attention KV cache requires one nonempty backing allocation.")
+    backing_size = sizes.pop()
+    regions: dict[str, tuple[int, int]] = {}
+    for descriptor in descriptors:
+        for index, name in enumerate(descriptor.layers):
+            spec = specs[name]
+            layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+            start = descriptor.offset + index * descriptor.layer_stride
+            if descriptor.layer_stride != layer_size or descriptor.block_stride != spec.page_size_bytes:
+                raise ValueError(f"Invalid shared attention KV cache descriptor for {name}.")
+            regions[name] = (start, layer_size)
+    backing = allocate(backing_size)
+    return {
+        name: (
+            backing[start : start + layer_size // 2],
+            backing[start + layer_size // 2 : start + layer_size],
+        )
+        for name, (start, layer_size) in regions.items()
+    }
 
 
 def _allocate_kv_cache(
@@ -1017,6 +1099,13 @@ def _allocate_kv_cache(
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     attn_layers: dict[str, AttentionLayerBase] | None = None
+    # Gemma 4 full/sliding groups share one pool while retaining contiguous
+    # K/V views. The worker keeps the full budget only for this V2 path.
+    if not enable_sfa(vllm_config) and can_share_full_and_sliding_kv_cache(vllm_config, layer_kv_cache_spec.values()):
+        return allocate_shared_attention_kv_cache(
+            kv_cache_config,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+        )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         for allocation in kv_cache_config.kv_cache_tensors:
             backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
@@ -1026,6 +1115,11 @@ def _allocate_kv_cache(
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
+    # Step-3.5/3.7 lay out their attention groups as views into one common
+    # backing allocation. The group count is derived from kv_cache_config
+    # below rather than being fixed here.
+    text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
+    is_step_model = getattr(text_config, "model_type", None) in ("step3p5", "step3p7")
     is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
@@ -1076,6 +1170,7 @@ def _allocate_kv_cache(
     # once here; allocating tensor.size for every descriptor duplicates the
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
+    step_backing: torch.Tensor | None = None
     if use_hybrid_layout and not is_dsv4_model and not is_glm5_next:
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
@@ -1170,6 +1265,32 @@ def _allocate_kv_cache(
                 if end > hybrid_backing.numel():
                     raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
                 kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+            continue
+
+        if is_step_model:
+            # Step-3.5/3.7 describe interleaved full/sliding groups with
+            # descriptors that all start at offset zero. They therefore need
+            # one backing allocation, with each layer receiving its own
+            # contiguous view inside it. Allocating per layer multiplies the
+            # budget by the group count and causes KV cache initialization OOM.
+            if step_backing is None:
+                tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
+                if len(tensor_sizes) != 1:
+                    raise ValueError("Step KV cache tensors must share one backing allocation.")
+                step_backing = _allocate_int8_cache_tensor(tensor_sizes.pop(), alignment, device)
+            for layer_idx, layer_name in enumerate(shared_names):
+                layer_spec = layer_kv_cache_spec[layer_name]
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                if (
+                    kv_cache_tensor.layer_stride != layer_size
+                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
+                ):
+                    raise ValueError(f"Step KV cache requires contiguous per-layer views for {layer_name}.")
+                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                end = start + layer_size
+                if end > step_backing.numel():
+                    raise ValueError(f"Step KV cache view for {layer_name} exceeds the backing allocation.")
+                kv_cache_raw_tensors[layer_name] = step_backing[start:end]
             continue
 
         if hybrid_backing is not None:
@@ -1295,6 +1416,10 @@ def _allocate_kv_cache(
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
                 if type(layer_spec) is not FullAttentionSpec:
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+                    continue
+                if is_c8_mxfp_kv_quant(vllm_config):
+                    # One packet-backed allocation holds K, V and both scales.
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
                 if attn_layers is None:
@@ -1490,6 +1615,13 @@ def _reshape_kv_cache_v2(
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
+            if type(kv_cache_spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
+                raw_cache = kv_cache_raw_tensors[layer_name]
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
+                kv_caches[layer_name] = mxfp_cache_views_for_spec(raw_cache, kv_cache_spec, kernel_block_size)
+                continue
+
             if layer_name in layer_tuple_strides:
                 # Same view construction as model_runner_v1
                 block_stride = layer_tuple_strides[layer_name]
@@ -1626,35 +1758,22 @@ def _reshape_kv_cache_v2(
                 continue
 
             if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
-                typed_slot = raw_cache.view(kv_cache_spec.dtype)
-                dtype_size = get_dtype_size(kv_cache_spec.dtype)
-                num_blocks = kv_cache_config.num_blocks
-                page_el = typed_slot.numel() // num_blocks if num_blocks else 0
-                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // dtype_size
-                if num_blocks and tail_block_el > page_el:
-                    raise ValueError(
-                        f"KPool tail cache for {layer_name} does not fit one small page: "
-                        f"tail={tail_block_el} elements, page={page_el} elements."
-                    )
-                kv_caches[layer_name] = [
-                    torch.as_strided(
-                        typed_slot,
-                        size=(
-                            num_blocks,
-                            2,
-                            kv_cache_spec.block_size,
-                            kv_cache_spec.head_size,
-                        ),
-                        stride=(
-                            page_el,
-                            kv_cache_spec.block_size * kv_cache_spec.head_size,
-                            kv_cache_spec.head_size,
-                            1,
-                        ),
-                    )
-                ]
+                kv_caches[layer_name] = view_kpool_tail_cache(
+                    layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks
+                )
+                continue
+            if (
+                isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+                and getattr(kv_cache_spec, "model_version", None) == "glm5_next"
+                and get_kv_cache_compression_ratio(kv_cache_spec) > 1
+            ):
+                kv_caches[layer_name] = view_compressed_indexer_cache(
+                    layer_name,
+                    kv_cache_spec,
+                    raw_cache,
+                    group.backend,
+                    kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
+                )
                 continue
             if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                 if not isinstance(raw_cache, torch.Tensor):
@@ -1701,15 +1820,9 @@ def _reshape_kv_cache_v2(
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
 
-                if (
-                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
-                    and kv_cache_spec.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
-                    and get_flashmla_ops() is not None
-                    # The outer eligibility check admits only supported PD,
-                    # which requires component-major pages at both endpoints.
-                    and vllm_config.kv_transfer_config is None
-                ):
-                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if attn_impl.use_flashmla:
+                    # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(
                         single_raw_mla_cache,
@@ -1720,7 +1833,7 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each component internally contiguous and puts
+                # FIA keeps each component internally contiguous and puts
                 # the hybrid-page padding only in the leading block stride.
                 kv_caches[layer_name] = _reshape_combined_mla_kv_cache(
                     single_raw_mla_cache,
@@ -1869,7 +1982,14 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_attn_metadata_factory(
-    positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None, offload_kwargs=None
+    positions,
+    pad,
+    is_prefilling,
+    seq_lens_cpu=None,
+    *,
+    attn_state=None,
+    parallel_config=None,
+    offload_kwargs=None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 

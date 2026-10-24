@@ -476,13 +476,13 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         self.dsa_cp_spec_actual_seq_lengths_key: list[torch.Tensor] | None = None
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
+            spec_rows = max([max_num_reqs * (spec_token_num + 1), *capture_sizes]) + 1
             self.dsa_cp_spec_actual_seq_lengths_query = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
             self.dsa_cp_spec_actual_seq_lengths_key = [
-                torch.zeros(max_num_reqs * (spec_token_num + 1) + 1, dtype=torch.int32, device=device)
-                for _ in range(spec_token_num)
+                torch.zeros(spec_rows, dtype=torch.int32, device=device) for _ in range(spec_token_num)
             ]
 
     def _prepare_parallel_metadata(
@@ -570,7 +570,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         context = metadata.dsa_cp_context
         assert context is not None
         assert metadata.positions is not None
-        positions = nn.functional.pad(metadata.positions, (0, context.num_tokens_pad - metadata.positions.shape[0]))
+        positions = metadata.positions
+        if context.num_tokens_pad != positions.shape[0]:
+            positions = nn.functional.pad(positions, (0, context.num_tokens_pad - positions.shape[0]))
         # Preserve the global metadata for KV writes and output restoration.
         # Only the NoPE operator consumes this token-local view.
         local_metadata = replace(
@@ -1273,10 +1275,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_context: Any | None = None,
-        pcp_cache_group_idx: int | None = None,
         **kwargs,
     ) -> AscendSFAMetadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if pcp_context is None:
             # Decode-only graph capture builds dummy metadata without running
             # PCP's prefill gather, so no PCP context is available or needed.

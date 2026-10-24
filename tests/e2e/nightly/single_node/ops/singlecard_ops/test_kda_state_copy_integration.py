@@ -30,40 +30,6 @@ def _forbid_compilation(monkeypatch):
             monkeypatch.setattr(module, "compile", forbidden)
 
 
-@pytest.mark.parametrize("to_cache", [False, True])
-@torch.inference_mode()
-def test_direct_compiled_launch_keeps_constexpr_arguments(to_cache):
-    """Direct launches preserve the complete Triton-bound kernel signature."""
-    state = torch.empty((8, 1, 1, 1), dtype=torch.float32, device="npu")
-    packed = torch.empty((2, 1, 1, 1), dtype=torch.float32, device="npu")
-    indices = torch.tensor([0, 1], dtype=torch.int32, device="npu")
-    flags = torch.ones(2, dtype=torch.bool, device="npu")
-    launches = []
-
-    class RecordingKernel:
-        def __getitem__(self, grid):
-            assert grid == (2, 3, 1)
-
-            def launch(*args):
-                launches.append(args)
-
-            return launch
-
-    plan = KDAStateCopyPlan()
-    plan._tiles = 3
-    plan._scalars = (8, 1, 1, 1)
-    plan._compiled = {(torch.int32, to_cache): RecordingKernel()}
-    plan._launch(state, packed, indices, flags, to_cache=to_cache)
-
-    (args,) = launches
-    assert len(args) == 12
-    for actual, expected in zip(args[:3], (state, packed, indices)):
-        assert actual is expected
-    assert args[3] is (indices if to_cache else flags)
-    assert args[4:9] == (*plan._scalars, 0 if to_cache else 1)
-    assert args[9:] == (to_cache, not to_cache, lowlevel.DEFAULT_KDA_BLOCK_SIZE)
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("shape", [(2, 3, 4), (1, 1, 8193)])
 @torch.inference_mode()
@@ -316,6 +282,41 @@ def test_auto_fp16_fallback_is_precompiled(monkeypatch, index_dtype, page_stride
         view = expected_backing.as_strided(state.shape, state.stride(), 1)
         view[ids_cpu[valid]] = 17
         torch.testing.assert_close(backing.cpu(), expected_backing, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("to_cache", [False, True])
+@torch.inference_mode()
+def test_fallback_direct_launch_with_constexpr_and_byte_tail(monkeypatch, dtype, index_dtype, to_cache):
+    """Exercise the real fallback launcher beyond one byte-copy tile, without JIT."""
+    from vllm_ascend.ops import kda_state_copy_plan as production
+
+    payload, stride = 4097, 4113
+    backing = torch.full((4 * stride + 1,), -23, dtype=dtype, device="npu")
+    state = backing.as_strided((4, 1, 1, payload), (stride, payload, payload, 1), 1)
+    state.copy_(torch.arange(4, device="npu")[:, None, None, None])
+    initial = backing.cpu()
+    plan = production.StridedKDAFallbackPlan.prepare(state, 4)
+    plan.seal()
+    torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
+    _forbid_compilation(monkeypatch)
+    monkeypatch.setattr(production.batch_memcpy_kernel, "run", Mock(side_effect=AssertionError("serving JIT")))
+    ids = torch.tensor([3, -1, 4, 0], dtype=index_dtype, device="npu")
+    if to_cache:
+        packed = torch.full((4, 1, 1, payload), 17, dtype=dtype, device="npu")
+        plan.scatter(state, packed, ids)
+        expected = initial.clone()
+        view = expected.as_strided(state.shape, state.stride(), 1)
+        view[[3, 0]] = 17
+        torch.testing.assert_close(backing.cpu(), expected, rtol=0, atol=0)
+    else:
+        flags = torch.tensor([True, True, True, False], device="npu")
+        packed = plan.gather(state, ids, flags)
+        expected = torch.zeros((4, 1, 1, payload), dtype=dtype)
+        expected[0].fill_(3)
+        torch.testing.assert_close(packed.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
 
 
 @torch.inference_mode()

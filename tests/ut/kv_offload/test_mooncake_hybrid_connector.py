@@ -24,11 +24,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     KVCacheSendingThread,
     KVCacheTaskTracker,
     MooncakeAgentMetadata,
+    MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     _reconstruct_shared_pages,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 
 class MockRequest:
@@ -973,3 +975,13 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
         self.assertEqual(params["num_prompt_blocks"], 2)
+
+
+class TestMooncakeHybridConnectorLoadedGroups(unittest.TestCase):
+    def test_loaded_group_ids_hook_is_version_gated(self):
+        # vLLM main added the scheduler hook `get_loaded_kv_cache_group_ids`,
+        # which reads `_kv_cache_config`; v0.31.0 has neither.
+        if vllm_version_is("0.31.0"):
+            self.assertNotIn("get_loaded_kv_cache_group_ids", MooncakeConnector.__dict__)
+        else:
+            self.assertIn("get_loaded_kv_cache_group_ids", MooncakeConnector.__dict__)

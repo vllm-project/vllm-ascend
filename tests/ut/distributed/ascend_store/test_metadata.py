@@ -18,6 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -218,12 +219,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+        predicate = MagicMock(return_value=True)
 
         result = list(
             db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
+                chunk_filter=predicate,
             )
         )
 
@@ -235,6 +238,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
+        self.assertEqual(predicate.call_count, 4)
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -296,17 +300,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
+        predicate = MagicMock(return_value=True)
         result = list(
             self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                chunk_filter=lambda start: store_mask[start // 16],
+                chunk_mask=store_mask,
+                chunk_filter=predicate,
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+        self.assertEqual(predicate.call_count, 3)
+
+    def test_lookup_mask_start_and_short_mask_bounds(self):
+        for mask, expected in ((None, [32, 48]), ([], []), ([True, True, True], [32])):
+            with self.subTest(mask=mask):
+                result = list(self.db.process_token_key_strings(64, ["a", "b", "c", "d"], mask_num=17, chunk_mask=mask))
+                self.assertEqual([item[0] for item in result], expected)
 
     def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
         db = ChunkedTokenDatabase(
@@ -531,6 +544,35 @@ class TestRequestTracker(unittest.TestCase):
 
 
 class TestReqMeta(unittest.TestCase):
+    def test_save_base_state_preserves_untracked_and_blocks_windows(self):
+        for state in (None, ["ZERO", "ZERO"], ["ZERO", "WINDOW"], ["ZERO", "UNPROVABLE"]):
+            for with_load in (False, True):
+                with self.subTest(state=state, with_load=with_load):
+                    tracker = RequestTracker(
+                        req_id="r1",
+                        token_len=32,
+                        allocated_block_ids_by_group=[[1, 2], [3, 4]],
+                        save_window_base_state=state,
+                    )
+                    load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True)
+                    # Partial saves allow load and save together, so the window
+                    # gate itself must suppress saves without discarding loads.
+                    meta = ReqMeta.from_request_tracker(
+                        tracker,
+                        cache_transfer_granularity=16,
+                        block_hashes=[b"h0", b"h1"],
+                        load_spec=load_spec if with_load else None,
+                        save_partial_block=with_load,
+                    )
+                    can_save = state is None or all(value == "ZERO" for value in state)
+                    assert tracker.num_saved_tokens == (32 if can_save else 0)
+                    if can_save or with_load:
+                        assert meta is not None
+                        assert bool(meta.can_save) == can_save
+                        assert meta.load_spec == (load_spec if with_load else None)
+                    else:
+                        assert meta is None
+
     def test_from_request_tracker_basic_save(self):
         tracker = RequestTracker(
             req_id="r1",

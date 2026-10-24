@@ -109,6 +109,7 @@ class TestH2DCompletionOwnership(unittest.TestCase):
         obj.task_tracker = KVCacheTaskTracker()
         obj.task_tracker.add_req_to_process("D-request")
         obj.failed_recv_requests = set()
+        obj.use_request_level_recv_errors = False
         obj.failed_recv_requests_lock = threading.Lock()
         obj.invalid_block_ids = set()
         obj.pending_reformat = {}

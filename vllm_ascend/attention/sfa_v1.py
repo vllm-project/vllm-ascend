@@ -70,6 +70,7 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -255,18 +256,17 @@ class SparseMLAMetadataState:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        if self.use_smla:
+            config = get_ascend_config()
+            self.use_smla = not (config.enable_sparse_sfa_c8 or config.enable_sparse_sfa_turboquant)
         self.block_size = kernel_block_size
         self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
-        self.block_table_buffer = torch.empty(
-            # Mixed FULL graphs can append one padding request.
-            vllm_config.scheduler_config.max_num_seqs + 1,
-            table_width,
-            dtype=torch.int32,
-            device=device,
-        )
+        capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or []
+        table_rows = max([vllm_config.scheduler_config.max_num_seqs + 1, *capture_sizes])
+        self.block_table_buffer = torch.empty(table_rows, table_width, dtype=torch.int32, device=device)
         if self.use_smla:
             config = vllm_config.model_config.hf_text_config
             self.num_heads = (
@@ -301,16 +301,20 @@ class SparseMLAMetadataState:
         if width > self.block_table_buffer.shape[1]:
             raise ValueError("Sparse MLA block table exceeds its persistent buffer.")
         table = self.block_table_buffer[: expanded.shape[0], :width]
-        torch.div(expanded[:, :: self.table_stride], self.table_stride, rounding_mode="floor", out=table)
+        if self.table_stride == 1:
+            table.copy_(expanded)
+        else:
+            torch.div(expanded[:, :: self.table_stride], self.table_stride, rounding_mode="floor", out=table)
         metadata.block_table = table
         metadata.block_size = self.block_size
         if self.use_smla:
             positions = metadata.positions
             if positions.numel() > self.length_buffer.shape[0]:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
-            valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens
             mask = self.valid_mask_buffer[: positions.numel()]
-            mask[:, 0].copy_(valid)
+            mask.fill_(True)
+            if metadata.num_actual_tokens < positions.numel():
+                mask[metadata.num_actual_tokens :].zero_()
             metadata.smla_valid_mask = mask
             metadata.smla_topk_length = self.length_buffer[: positions.numel()]
             metadata.smla_metadata = self.metadata_buffer
@@ -352,6 +356,12 @@ class AscendSFABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
 
     @staticmethod
     def get_builder_cls():
@@ -588,11 +598,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=common_attn_metadata.pcp_context),
         )
         if (
             self.use_pcp
-            and kwargs.get("pcp_context") is not None
+            and common_attn_metadata.pcp_context is not None
             and needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded)
         ):
             assert metadata.pcp_slot_mapping is not None

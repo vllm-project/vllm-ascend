@@ -203,6 +203,7 @@ class MooncakeBaseConnectorWorker:
         views can share one allocation while their first blocks are many pages
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
+        Their contiguous block spans must cover that entire stride.
         """
         if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
@@ -219,9 +220,22 @@ class MooncakeBaseConnectorWorker:
 
         page_base_addr = min(cache.data_ptr() for cache in caches)
         block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
-        if any(
-            cache.data_ptr() - page_base_addr + block_len > page_stride for cache, block_len in zip(caches, block_lens)
-        ):
+        # Storage capacity does not prove that this layer owns a whole page:
+        # its views may occupy only a subregion of a larger shared allocation.
+        # Merge only internally contiguous blocks whose union covers the full
+        # stride. Overlapping aliases are allowed, but holes and padding are not.
+        if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
+            return None
+        block_ranges = sorted(
+            (cache.data_ptr() - page_base_addr, cache.data_ptr() - page_base_addr + block_len)
+            for cache, block_len in zip(caches, block_lens)
+        )
+        covered_end = 0
+        for start, end in block_ranges:
+            if start > covered_end or end > page_stride:
+                return None
+            covered_end = max(covered_end, end)
+        if covered_end != page_stride:
             return None
 
         storage = caches[0].untyped_storage()

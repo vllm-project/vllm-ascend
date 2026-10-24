@@ -84,7 +84,7 @@ def create_dyntra_lb_scheduler(
     scheduler_cls: type[SchedulerT],
     num_blocks: int = 10000,
 ) -> SchedulerT:
-    """Create a scheduler subclass for DyntraLB unit tests."""
+    """Create a V1 scheduler subclass for DyntraLB unit tests."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -103,13 +103,17 @@ def create_dyntra_lb_scheduler(
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
-    return scheduler_cls(
+    scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
+    # These fixtures assert legacy V1 scheduler output structures. Tests that
+    # exercise V2 opt in explicitly after construction.
+    scheduler.use_v2_model_runner = False
+    return scheduler
 
 
 def test_dyntra_lb_scheduler_uses_policy_mixin():
