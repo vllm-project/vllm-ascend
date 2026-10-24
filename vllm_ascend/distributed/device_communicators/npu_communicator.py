@@ -18,6 +18,12 @@
 import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.logger import logger
+
+from vllm_ascend import envs
+from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+    QuantizedAllReduce,
+)
 
 
 class _NpuAll2AllManager:
@@ -60,3 +66,18 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+        # Optional int8 quantized all-reduce for large bf16 TP collectives.
+        self.quantized_ar: QuantizedAllReduce | None = None
+        if envs.VLLM_ASCEND_QUANTIZED_ALL_REDUCE:
+            self.quantized_ar = QuantizedAllReduce(self.device_group)
+            logger.info(
+                "Quantized all-reduce enabled (min_numel=%d, max_q=%d).",
+                self.quantized_ar.min_numel,
+                self.quantized_ar.max_q,
+            )
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.quantized_ar is not None and self.world_size > 1:
+            return self.quantized_ar.all_reduce(input_)
+        dist.all_reduce(input_, group=self.device_group)
+        return input_
