@@ -16,7 +16,7 @@ This document covers supported features, environment and model preparation, sing
 
     **Current status and constraints**
 
-    - `MiniMax-M3.1-Flash` is provided **out-of-the-box** through the Docker image described in [Installation](#4-installation). The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - `MiniMax-M3.1-Flash` is provided **out-of-the-box** through the Docker images described in [Installation](#4-installation). The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for `MiniMax-M3.1-Flash`. This is an early-access version; performance optimization and reliability validation are still in progress.
 
 ## 2 Supported Features
@@ -45,12 +45,11 @@ Prepare the business network and the NPU interconnect by following
 
 ### 4.1 A3 Docker Container
 
-Run the following on each A3 host. Set the model path to the W8A8 checkpoint and
-use `ycl-m31flash-p` and `ycl-m31flash-d` as the two container names.
+Run the following on each A3 host. Set the model path to the W8A8 checkpoint.
 
 ```bash
 export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a3-openeuler"
-export CONTAINER_NAME=ycl-m31flash-p
+export CONTAINER_NAME=minimax_m31_flash
 export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
 mkdir -p "$WORK_DIR"
@@ -82,13 +81,11 @@ docker run -it --name "$CONTAINER_NAME" \
 
 ### 4.2 A5 Docker Container
 
-Use the Docker image below and mount the prepared deployment directory at `/work`. It contains `.venv`, `src/vllm`, and `src/vllm-ascend`, including the compiled A5 operators.
-
-Run the following on each host, using `ycl-m31flash-a5-p` and `ycl-m31flash-a5-d` as the container names. Mount each node's own `/etc/hixlep` and `/etc/hccl_rootinfo.json`.
+Run the following on each A5 host. Set the model path to the W8A8-MXFP8 checkpoint.
 
 ```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a3-openeuler"
-export CONTAINER_NAME=ycl-m31flash-a5-p
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a5-openeuler"
+export CONTAINER_NAME=minimax_m31_flash
 export MODEL_DIR="<MINIMAX_M31_FLASH_A5_WEIGHT_PATH>"
 export WORK_DIR="<PREPARED_A5_DEPLOYMENT_DIRECTORY>"
 
@@ -109,7 +106,7 @@ docker run -it --name "$CONTAINER_NAME" \
     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
     -v /etc/hixlep:/etc/hixlep:ro \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
-    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-A5:ro \
+    -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8-MXFP8:ro \
     -v "$WORK_DIR":/work \
     -w /work "$IMAGE" bash
 ```
@@ -464,14 +461,14 @@ cd /work/prefill
 export LOCAL_IP="<CURRENT_NODE_IP>"
 export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
 export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6884 SERVICE_PORT=31050
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-A5"
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
 exec bash /work/prefill/run_dp_template.sh
 ```
 
 Start it on the Prefill host:
 
 ```bash
-docker exec -d ycl-m31flash-a5-p bash /work/prefill/start.sh
+docker exec -d minimax_m31_flash bash /work/prefill/start.sh
 ```
 
 Check health after model loading completes:
@@ -533,14 +530,14 @@ cd /work/decode
 export LOCAL_IP="<CURRENT_NODE_IP>"
 export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
 export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6885 SERVICE_PORT=31060
-export MODEL_PATH="/models/MiniMax-M3.1-Flash-A5"
+export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
 exec bash /work/decode/run_dp_template.sh
 ```
 
 Start it on the Decode host:
 
 ```bash
-docker exec -d ycl-m31flash-a5-d bash /work/decode/start.sh
+docker exec -d minimax_m31_flash bash /work/decode/start.sh
 ```
 
 Check health after model loading completes:
@@ -571,7 +568,7 @@ exec /work/.venv/bin/python /work/src/vllm-ascend/examples/disaggregated_prefill
 Start the proxy on the Prefill host:
 
 ```bash
-docker exec -d ycl-m31flash-a5-p bash /work/start_proxy.sh
+docker exec -d minimax_m31_flash bash /work/start_proxy.sh
 ```
 
 Service logs are `/work/logs/prefill-rank0.log`, `/work/logs/decode-rank0.log`, and `/work/logs/proxy.log`.
