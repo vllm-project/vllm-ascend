@@ -58,7 +58,6 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
-| `engram_config`                    | dict | `{}` | Engram enablement, backend, overlap and optional placement policies. Disabled by default; see Engram configuration below. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
@@ -359,43 +358,46 @@ batch, not PCP-local segment offsets.
 
 ## Engram configuration
 
-Configure Engram in one `additional_config.engram_config` object:
+Engram uses the native `--engram-config` option, independently of
+`--additional-config`. Its first field, `enabled`, is the master opt-in and
+is `false` by default. Omitting the option or setting `enabled=false` skips
+Engram model modules, weights, hashes/history, communication groups and
+execution. Other Engram settings cannot implicitly enable it. Bypassing
+these layers changes model outputs.
 
 ```bash
+# UVA with automatic placement and overlap defaults
+vllm serve /path/to/model --engram-config '{"enabled":true}'
+
+# ElasticBuffer, with serial preparation
 vllm serve /path/to/model \
-  --additional-config '{"engram_config":{"enabled":true,"backend":"elastic","overlap":false}}'
+  --engram-config '{"enabled":true,"backend":"elastic","overlap":false}'
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master opt-in. Disabled Engram skips its modules, checkpoint weights, hash/history preparation, communication groups and execution, even if the checkpoint declares Engram layers. Bypassing these layers changes model outputs. |
-| `backend` | `"uva"` or `"elastic"` | `"uva"` | Existing head-sharded implementation or native MXFP8 row-sharded ElasticBuffer. Selecting a backend does not enable Engram. |
-| `overlap` | bool or null | `null` | Automatic hardware default: enabled on A5, disabled elsewhere. `false` selects serial execution. Elastic overlap supports eager/FULL decode and rejects PIECEWISE before fetch submission. |
-| `cpu_offload` | bool or null | `null` | Automatic host placement (`true`). The UVA backend also accepts `false` for HBM tables. Elastic requires `true`. |
-| `dp_shared_memory` | bool or null | `null` | Elastic automatically selects `false`. UVA host tables use sharing automatically for V2 with DP/PCP peers; otherwise the default is `false`. Explicit values are validated and never silently overwritten in the new format. |
+| `enabled` | bool | `false` | Master feature switch. All other fields apply only when enabled. |
+| `backend` | `"uva"` or `"elastic"` | `"uva"` | Head-sharded UVA/HBM implementation or native MXFP8 row-sharded ElasticBuffer. |
+| `overlap` | bool or null | `null` | Automatic hardware default: enabled on A5, disabled elsewhere. `false` selects serial execution. Elastic overlap rejects PIECEWISE before fetch submission. |
+| `cpu_offload` | bool or null | `null` | Automatic host placement (`true`). UVA accepts `false` for HBM tables; Elastic requires `true`. |
+| `dp_shared_memory` | bool or null | `null` | Automatic: `false` for Elastic, `true` for V2 UVA host tables with DP/PCP peers, otherwise `false`. Unsupported explicit values are rejected. |
 
-Elastic derives its row-shard `group_size` from `world_size_across_dp`, requires
+Most deployments need only `enabled`, `backend` and optionally `overlap`.
+For HBM tables, add `"cpu_offload":false`; the runner derives its internal
+local replica policy without reporting HBM storage as shared host memory.
+Automatic host placement is independent of `VLLM_PLE_CPU_OFFLOAD`.
+Startup logs print the final resolved configuration.
+
+Elastic derives its row-shard group size from `world_size_across_dp`, requires
 at least two participating ranks on the same host, and requires PP=PCP=DCP=1.
 It rejects dummy weights, MoE sequence parallelism and host table sharing.
-Its speculative combination supports disabled speculation or explicit DSpark,
-with lengths fitting the model's state ring. These checks do not select a
-proposer or change the global MoE/speculative configuration.
+Speculation must be disabled or explicitly use DSpark with lengths fitting
+the model's state ring. These checks do not change proposer selection.
 
-For UVA host tables, `{"engram_config":{"enabled":true}}` is sufficient.
-For HBM tables, add `"cpu_offload":false`. Host sharing cannot be enabled for
-HBM tables; V2 uses an internal replicated lookup policy where needed.
-The new format's host placement is independent of `VLLM_PLE_CPU_OFFLOAD`.
-Startup logs print the resolved values and their input source.
-
-The flat keys `enable_engram`, `engram_offload_backend`,
-`multistream_engram_overlap`, `engram_tp_size`, and the native `--engram-config`
-remain accepted as one legacy configuration, with a deprecation warning.
-Legacy native defaults continue to honor `VLLM_PLE_CPU_OFFLOAD`. Do not mix
-these old inputs with the new nested object, even when the values agree.
-Migrate the whole Engram configuration at once; unrelated additional-config
-keys can remain beside the nested object in the same JSON.
-
-`engram_tp_size` has no independent supported value under the current Elastic
-topology constraints: its legacy value must match the derived group size.
-`embedding_across_dp=true` remains unsupported on Ascend. Neither field is
-accepted in the new nested object.
+Remove `additional_config.engram_config` and the old flat Engram keys
+`enable_engram`, `engram_offload_backend`, `multistream_engram_overlap` and
+`engram_tp_size`: they now produce a migration error instead of introducing
+another input path. Keep unrelated `--additional-config` settings as usual.
+The native `embedding_across_dp` field remains accepted only as `false`;
+it is unsupported on Ascend and does not need to be specified. Group size
+is derived and has no public setting.

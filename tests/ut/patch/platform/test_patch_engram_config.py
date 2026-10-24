@@ -29,13 +29,13 @@ def test_engram_patch_is_noop_without_upstream_config(monkeypatch):
 def engram_config():
     config_module = pytest.importorskip("vllm.config.engram")
     return SimpleNamespace(
-        additional_config={"enable_engram": True},
+        additional_config={},
         use_v2_model_runner=False,
         model_config=SimpleNamespace(
             architecture="DeepseekV41ForCausalLM", hf_text_config=SimpleNamespace(engram_layer_ids=[1])
         ),
         speculative_config=None,
-        engram_config=config_module.EngramConfig(cpu_offload=True, dp_shared_memory=True),
+        engram_config=config_module.EngramConfig(enabled=True, cpu_offload=True, dp_shared_memory=True),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
             data_parallel_size=4,
@@ -71,7 +71,7 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     config = engram_config
     config.parallel_config.data_parallel_size = dp
     config.parallel_config.prefill_context_parallel_size = pcp
-    original = EngramConfig(cpu_offload=True, dp_shared_memory=shared) if shared is not None else None
+    original = EngramConfig(enabled=True, cpu_offload=True, dp_shared_memory=shared)
     config.engram_config = original
     if draft:
         target = config.model_config
@@ -125,3 +125,48 @@ def test_platform_leaves_non_engram_models_alone(engram_config):
     engram_config.model_config.architecture = "OtherModel"
     _validate_engram_config(engram_config)
     assert engram_config.engram_config is None
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_disabled_native_config_skips_all_upstream_engram_checks(supplied):
+    from vllm.config import EngramConfig, VllmConfig
+
+    # No model/parallel/load attributes: even upstream's DBO check is forbidden.
+    native = EngramConfig(backend="elastic", cpu_offload=False, dp_shared_memory=True) if supplied else None
+    value = SimpleNamespace(engram_config=native)
+    VllmConfig._resolve_and_verify_engram_config(value)
+    assert value.engram_config is None
+
+
+def test_native_cli_schema_and_vllm_config_schema_accept_extended_fields():
+    from pydantic import TypeAdapter
+    from vllm.config import EngramConfig, VllmConfig, replace
+
+    config = TypeAdapter(EngramConfig).validate_json('{"enabled":true,"backend":"elastic","overlap":false}')
+    assert config.enabled and config.backend == "elastic" and config.overlap is False
+    assert replace(config).enabled
+    assert "enabled" in TypeAdapter(VllmConfig).json_schema()["$defs"]["EngramConfig"]["properties"]
+    assert "_ascend_requested" not in TypeAdapter(EngramConfig).json_schema()["properties"]
+    assert "_ascend_requested" not in TypeAdapter(EngramConfig).dump_python(config)
+    before = config.compute_hash()
+    config._ascend_requested = object()
+    assert config.compute_hash() == before
+
+
+def test_native_cli_uses_original_engram_flag():
+    import argparse
+    from dataclasses import dataclass
+
+    from vllm.config import EngramConfig
+    from vllm.engine.arg_utils import get_kwargs
+
+    @dataclass
+    class CliConfig:
+        engram_config: EngramConfig | None = None
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--engram-config", **get_kwargs(CliConfig)["engram_config"])
+    args = parser.parse_args(["--engram-config", '{"enabled":true,"backend":"elastic","overlap":false}'])
+    assert args.engram_config.enabled
+    assert args.engram_config.backend == "elastic"
+    assert args.engram_config.overlap is False

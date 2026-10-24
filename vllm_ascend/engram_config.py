@@ -7,10 +7,13 @@ upstream configuration and model-specific checks are lazy, and no runtime
 resources are created here.
 """
 
-from dataclasses import dataclass, replace
-from typing import Any, Literal
+from copy import copy
+from dataclasses import dataclass, field, fields, replace
+from typing import Literal
 
 from pydantic import TypeAdapter
+from pydantic.dataclasses import rebuild_dataclass
+from pydantic.json_schema import SkipJsonSchema
 
 from vllm_ascend.config_utils import config
 
@@ -24,7 +27,7 @@ LEGACY_ENGRAM_KEYS = (
 
 @config(frozen=True)
 class AscendEngramConfig:
-    """The only public Ascend Engram input schema; None means automatic."""
+    """Fields added to the native --engram-config; None means automatic."""
 
     enabled: bool = False
     backend: Literal["uva", "elastic"] = "uva"
@@ -45,77 +48,48 @@ class ResolvedEngramConfig:
     group_size: int | None = None
     # HBM replicas need local lookups under V2, but do not share host storage.
     replicate_across_dp: bool = False
-    source: str = "default"
 
 
-@dataclass(frozen=True)
-class _EngramInput:
-    # Preserve original upstream fields, not a subsequently derived projection.
-    native: tuple[bool, bool, bool] | None = None
-    shared_override: bool | None = None
-
-
-@dataclass(frozen=True)
-class _EngramState:
-    inputs: _EngramInput
-    projection: Any
-
-
-def copy_engram_projection(engram_config, **changes):
-    """Preserve input provenance when adapting the replicated PCP draft."""
-    copied = replace(engram_config, **changes)
-    inputs = getattr(engram_config, "_ascend_engram_input", None)
-    if isinstance(inputs, _EngramInput):
-        copied._ascend_engram_input = replace(inputs, shared_override=changes.get("dp_shared_memory"))
-    return copied
-
-
-def _original_input(vllm_config) -> _EngramInput:
-    native = getattr(vllm_config, "engram_config", None)
-    inputs = getattr(native, "_ascend_engram_input", None)
-    if isinstance(inputs, _EngramInput):
-        return inputs
-    state = getattr(vllm_config, "_ascend_engram_state", None)
-    if isinstance(state, _EngramState) and native is state.projection:
-        return state.inputs
-    if native is None:
-        return _EngramInput()
-    return _EngramInput(
-        native=(
-            bool(getattr(native, "cpu_offload", False)),
-            bool(getattr(native, "dp_shared_memory", False)),
-            bool(getattr(native, "embedding_across_dp", False)),
-        )
+@dataclass
+class _EngramMetadata:
+    # A declared, non-input field: vLLM replace() inspects every __dict__ key.
+    # Exclude provenance from the CLI schema, serialization and graph hash.
+    _ascend_requested: SkipJsonSchema[AscendEngramConfig | None] = field(
+        default=None, init=False, repr=False, compare=False, metadata={"exclude": True}
     )
 
 
-def _parse_input(vllm_config, inputs):
-    additional = vllm_config.additional_config or {}
-    legacy = {key: additional[key] for key in LEGACY_ENGRAM_KEYS if key in additional}
-    if "engram_config" in additional:
-        if legacy or inputs.native is not None:
-            raise ValueError(
-                "Do not mix additional_config.engram_config with legacy Engram keys or --engram-config; "
-                "move all Engram options into additional_config.engram_config."
-            )
-        raw = additional["engram_config"]
-        if not isinstance(raw, dict):
-            raise ValueError("additional_config.engram_config must be an object")
-        return TypeAdapter(AscendEngramConfig).validate_python(raw), None, "additional_config.engram_config"
-    raw = {
-        new: legacy[old]
-        for old, new in (
-            ("enable_engram", "enabled"),
-            ("engram_offload_backend", "backend"),
-            ("multistream_engram_overlap", "overlap"),
-        )
-        if old in legacy
-    }
-    if inputs.native is not None:
-        raw["cpu_offload"], raw["dp_shared_memory"], _ = inputs.native
-    size = TypeAdapter(int | None).validate_python(legacy.get("engram_tp_size"))
-    source = "legacy" if legacy or inputs.native is not None else "default"
-    return TypeAdapter(AscendEngramConfig).validate_python(raw), size, source
+def extend_native_engram_config(native) -> None:
+    """Extend the existing class in place so cached CLI type references work."""
+    if "enabled" in native.__dataclass_fields__:
+        return
+    for cls in (AscendEngramConfig, _EngramMetadata):
+        for item in fields(cls):
+            native.__annotations__[item.name] = item.type
+            native.__dataclass_fields__[item.name] = copy(item)
+            setattr(native, item.name, item.default)
+    # Cross-field validation belongs after the enabled gate and automatic
+    # placement resolution, rather than during raw CLI parsing.
+    native.__pydantic_decorators__.model_validators["_validate_shared_memory"].func = lambda self: self
+    rebuild_dataclass(native, force=True)
+
+
+def _requested(native) -> AscendEngramConfig:
+    requested = getattr(native, "_ascend_requested", None)
+    if requested is not None:
+        return requested
+    return TypeAdapter(AscendEngramConfig).validate_python(
+        {item.name: getattr(native, item.name) for item in fields(AscendEngramConfig)}
+    )
+
+
+def copy_engram_projection(engram_config, **changes):
+    """Adapt the PCP draft without altering the target or adding dynamic keys."""
+    from vllm.config import replace as replace_vllm_config
+
+    copied = replace_vllm_config(engram_config, **changes)
+    copied._ascend_requested = replace(_requested(engram_config), **changes)
+    return copied
 
 
 def default_engram_overlap() -> bool:
@@ -147,7 +121,7 @@ def _validate_model_and_parallel(vllm_config, model) -> None:
         raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
 
 
-def _validate_elastic(config, vllm_config, legacy_size) -> int:
+def _validate_elastic(config, vllm_config) -> int:
     if not config.cpu_offload:
         raise ValueError("Engram backend='elastic' requires cpu_offload=True")
     if config.dp_shared_memory:
@@ -162,8 +136,6 @@ def _validate_elastic(config, vllm_config, legacy_size) -> int:
     local = int(getattr(parallel, "local_world_size", world)) * int(getattr(parallel, "data_parallel_size_local", 1))
     if world < 2 or world > local:
         raise ValueError("ElasticBuffer requires >=2 node-local participating ranks")
-    if legacy_size is not None and legacy_size != world:
-        raise ValueError("Legacy engram_tp_size must equal world_size_across_dp; group_size is now derived")
     if getattr(parallel, "use_sequence_parallel_moe", False):
         raise ValueError("ElasticBuffer Engram does not yet support MoE sequence parallelism")
     if vllm_config.load_config.load_format == "dummy":
@@ -193,21 +165,13 @@ def _validate_elastic_speculation(speculative_config) -> None:
         raise ValueError(f"ElasticBuffer Engram DSpark dynamic lengths must be in 0..{STATE_RING_ROWS - 1}")
 
 
-def _publish(vllm_config, resolved, inputs, projection):
+def _publish(vllm_config, resolved, projection):
     from vllm.logger import logger
 
     vllm_config.engram_config = projection
-    if projection is not None:
-        projection._ascend_engram_input = inputs
-    vllm_config._ascend_engram_state = _EngramState(inputs, projection)
-    if resolved.source == "legacy":
-        logger.warning_once(
-            "Legacy Engram options are deprecated; use only additional_config.engram_config "
-            "with enabled/backend/overlap/cpu_offload/dp_shared_memory."
-        )
     logger.info_once(
         "Engram resolved: enabled=%s backend=%s overlap=%s cpu_offload=%s dp_shared_memory=%s "
-        "group_size=%s replicate_across_dp=%s source=%s",
+        "group_size=%s replicate_across_dp=%s",
         resolved.enabled,
         resolved.backend,
         resolved.overlap,
@@ -215,59 +179,46 @@ def _publish(vllm_config, resolved, inputs, projection):
         resolved.dp_shared_memory,
         resolved.group_size,
         resolved.replicate_across_dp,
-        resolved.source,
     )
     return resolved
 
 
 def resolve_engram_config(vllm_config) -> ResolvedEngramConfig:
-    """Normalize once before model/group setup; safe to repeat after config copies."""
-    inputs = _original_input(vllm_config)
-    requested, legacy_size, source = _parse_input(vllm_config, inputs)
-    if not requested.enabled:
-        return _publish(vllm_config, ResolvedEngramConfig(backend=requested.backend, source=source), inputs, None)
+    """Gate Engram first, then resolve the native config before runtime setup."""
+    additional = vllm_config.additional_config or {}
+    if any(key in additional for key in ("engram_config", *LEGACY_ENGRAM_KEYS)):
+        raise ValueError(
+            "Engram options have moved to --engram-config. Remove additional-config Engram keys; "
+            'use --engram-config \'{"enabled":true,"backend":"elastic","overlap":false}\'.'
+        )
+    native = getattr(vllm_config, "engram_config", None)
+    if isinstance(native, dict):
+        from vllm.config import EngramConfig
+
+        native = TypeAdapter(EngramConfig).validate_python(native)
+    if native is None or not native.enabled:
+        return _publish(vllm_config, ResolvedEngramConfig(), None)
+    requested = _requested(native)
 
     model = _target_model(vllm_config)
-    if (
-        model is None
-        or model.architecture != "DeepseekV41ForCausalLM"
-        or not getattr(model.hf_text_config, "engram_layer_ids", None)
-    ):
-        # Keep the legacy no-op on models without Engram, but reject an explicit
-        # new request rather than reporting an enabled feature with no layers.
-        if source == "additional_config.engram_config" or inputs.native is not None:
-            raise ValueError("Enabled Engram requires a supported model with non-empty Engram layer ids")
-        return _publish(vllm_config, ResolvedEngramConfig(backend=requested.backend, source=source), inputs, None)
     _validate_model_and_parallel(vllm_config, model)
-    if inputs.native is not None and inputs.native[2]:
+    if not getattr(model.hf_text_config, "engram_layer_ids", None):
+        raise ValueError("Enabled Engram requires a supported model with non-empty Engram layer ids")
+    if native.embedding_across_dp:
         raise ValueError("Ascend Engram does not support embedding_across_dp")
 
     from vllm.config import EngramConfig, VllmConfig
 
-    cpu_offload = requested.cpu_offload
+    cpu_offload = True if requested.cpu_offload is None else requested.cpu_offload
     shared = requested.dp_shared_memory
-    if source == "legacy" and inputs.native is None:
-        # Preserve the upstream environment default only for legacy input.
-        defaults = EngramConfig()
-        cpu_offload, shared = defaults.cpu_offload, defaults.dp_shared_memory
-    if cpu_offload is None:
-        cpu_offload = True
     parallel = vllm_config.parallel_config
     peers = parallel.data_parallel_size > 1 or parallel.prefill_context_parallel_size > 1
     v2_local = vllm_config.use_v2_model_runner and peers and requested.backend != "elastic"
     replicate = v2_local and not cpu_offload
-    # The PCP draft override applies only while it has no DP/PCP peers.
-    shared_override = inputs.shared_override if not peers else None
     if shared is None:
         shared = v2_local and cpu_offload
     elif v2_local and cpu_offload and not shared:
-        if source != "legacy" and shared_override is None:
-            raise ValueError("V2 Engram with DP/PCP requires dp_shared_memory=true; use null for automatic selection")
-        shared = True
-    if shared_override is not None:
-        shared = shared_override
-    if replicate and source == "legacy":
-        shared = False
+        raise ValueError("V2 Engram with DP/PCP requires dp_shared_memory=true; omit it for automatic selection")
     if shared and not cpu_offload:
         raise ValueError("dp_shared_memory requires cpu_offload=True")
     overlap = requested.overlap if requested.overlap is not None else default_engram_overlap()
@@ -278,17 +229,23 @@ def resolve_engram_config(vllm_config) -> ResolvedEngramConfig:
         cpu_offload=cpu_offload,
         dp_shared_memory=shared,
         replicate_across_dp=replicate,
-        source=source,
     )
     if resolved.backend == "elastic":
-        resolved = replace(resolved, group_size=_validate_elastic(resolved, vllm_config, legacy_size))
-    projection = EngramConfig(cpu_offload=cpu_offload, dp_shared_memory=shared, embedding_across_dp=False)
+        resolved = replace(resolved, group_size=_validate_elastic(resolved, vllm_config))
+    projection = EngramConfig(
+        enabled=True,
+        backend=resolved.backend,
+        overlap=overlap,
+        cpu_offload=cpu_offload,
+        dp_shared_memory=shared,
+        embedding_across_dp=False,
+    )
+    projection._ascend_requested = requested
     previous = getattr(vllm_config, "engram_config", None)
     vllm_config.engram_config = projection
     try:
         VllmConfig._resolve_and_verify_engram_config(vllm_config)
     except Exception:
-        # Do not leave an unmarked projection behind if validation fails.
         vllm_config.engram_config = previous
         raise
-    return _publish(vllm_config, resolved, inputs, projection)
+    return _publish(vllm_config, resolved, projection)

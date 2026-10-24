@@ -454,13 +454,6 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
-            "engram_config": {
-                "enabled": false,
-                "backend": "uva",
-                "overlap": null,
-                "cpu_offload": null,
-                "dp_shared_memory": null
-            },
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -603,7 +596,7 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
-    # Factory-injected normalized policy; user input is validated by its own schema.
+    # Read-only policy resolved from native --engram-config, never additional_config input.
     engram_config: ResolvedEngramConfig = dataclasses.field(default_factory=ResolvedEngramConfig)
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
