@@ -47,6 +47,63 @@ def test_prompt_token_count_reads_store_without_runner():
         RequestGuardStore.reset_for_tests()
 
 
+def test_append_output_backfills_prefix_when_device_already_has_step(monkeypatch):
+    """First append after IO turns on keeps the runner prefix and does not double-count."""
+    RequestIoSnapshotManager.reset_for_tests()
+    try:
+        mgr = RequestIoSnapshotManager.get()
+        monkeypatch.setattr(
+            "vllm_ascend.observability.runtime_guard.io._output_from_req_states",
+            lambda *_a, **_k: (3, [1, 2, 3]),
+        )
+        mgr.append_output("r1", [3], runner=object())
+        state = RequestGuardStore.get().get_state("r1")
+        assert state is not None
+        assert state.output_token_ids == [1, 2, 3]
+    finally:
+        RequestIoSnapshotManager.reset_for_tests()
+
+
+def test_append_output_backfills_prefix_then_appends_new_step(monkeypatch):
+    """Device row that lags this step is the prefix; the new ids are appended once."""
+    RequestIoSnapshotManager.reset_for_tests()
+    try:
+        mgr = RequestIoSnapshotManager.get()
+        monkeypatch.setattr(
+            "vllm_ascend.observability.runtime_guard.io._output_from_req_states",
+            lambda *_a, **_k: (2, [1, 2]),
+        )
+        mgr.append_output("r1", [3], runner=object())
+        state = RequestGuardStore.get().get_state("r1")
+        assert state is not None
+        assert state.output_token_ids == [1, 2, 3]
+    finally:
+        RequestIoSnapshotManager.reset_for_tests()
+
+
+def test_append_output_does_not_backfill_over_existing_or_reaped(monkeypatch):
+    RequestIoSnapshotManager.reset_for_tests()
+    try:
+        mgr = RequestIoSnapshotManager.get()
+        monkeypatch.setattr(
+            "vllm_ascend.observability.runtime_guard.io._output_from_req_states",
+            lambda *_a, **_k: (3, [1, 2, 3]),
+        )
+        mgr.append_output("live", [9])
+        mgr.append_output("live", [4], runner=object())
+        assert RequestGuardStore.get().get_state("live").output_token_ids == [9, 4]
+
+        store = RequestGuardStore.get()
+        store.get_or_create("gone")
+        store.clear("gone")
+        mgr.append_output("gone", [8], runner=object())
+        zombie = store.get_state("gone")
+        assert zombie is not None
+        assert zombie.output_token_ids == [8]
+    finally:
+        RequestIoSnapshotManager.reset_for_tests()
+
+
 def test_include_token_ids_cache_invalidated_after_append_output():
     RequestIoSnapshotManager.reset_for_tests()
     try:

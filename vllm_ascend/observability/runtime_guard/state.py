@@ -162,8 +162,8 @@ class WaveTracker:
         self._wave = 0
         self._sample_waves: dict[str, deque[int]] = {}
 
-    def advance(self, *, allow_manual_dump: bool = True) -> None:
-        if not allow_manual_dump:
+    def advance(self, *, has_scheduled_tokens: bool = True) -> None:
+        if not has_scheduled_tokens:
             return
         with self._lock:
             self._wave += 1
@@ -230,8 +230,8 @@ class DumpQuota:
         self.sync_from_config()
 
     def sync_from_config(self) -> None:
-        self._max_times = int(self._runtime_config.dump_max_times())
-        self._cooldown = float(self._runtime_config.dump_cooldown_seconds())
+        self._max_times = int(self._runtime_config.auto_dump_max_times())
+        self._cooldown = float(self._runtime_config.auto_dump_cooldown_seconds())
 
     @property
     def total_count(self) -> int:
@@ -584,6 +584,38 @@ class RequestGuardStore:
                 self.clear(str(req_id), detectors=detectors)
 
     # ---- IO helpers -------------------------------------------------------
+
+    def seed_output_ids_if_empty(
+        self,
+        req_id: str,
+        token_ids: list[int],
+        *,
+        dedupe_chunk: tuple[int, ...] | None = None,
+    ) -> bool:
+        """Set output ids once, when this request has none yet.
+
+        Used to backfill a prefix from the runner the first time cumulative IO
+        turns on. A reaped id is left alone so a late append cannot inherit the
+        previous owner's tokens. ``dedupe_chunk`` makes the following
+        ``append_output_ids`` of that chunk a no-op when the seeded row already
+        includes it.
+        """
+        if not req_id or not token_ids:
+            return False
+        rid = str(req_id)
+        with self._lock:
+            state = self._by_req.get(rid)
+            if state is None:
+                if rid in self._reaped_set:
+                    return False
+                state = RequestGuardState(req_id=rid)
+                self._by_req[rid] = state
+            if state.output_token_ids:
+                return False
+            state.output_token_ids = list(token_ids)
+            if dedupe_chunk:
+                state.last_append_chunk = dedupe_chunk
+            return True
 
     def append_output_ids(self, req_id: str, token_ids: list[int]) -> None:
         if not req_id or not token_ids:
