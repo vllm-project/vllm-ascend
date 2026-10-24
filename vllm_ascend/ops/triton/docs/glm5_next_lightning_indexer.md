@@ -3,12 +3,56 @@
 ## Description
 
 - **Function**: `glm5_next_lightning_indexer_triton` selects compressed KeyPools for each query, expands the selected pools into original token indices, and appends the visible incomplete pool as a causal tail. GLM-5.3-Flash uses 32 query heads, head dimension 128, pool size 4, and `index_topk = 2048`, producing 2051 output columns.
-- **Formula**: For query token `t`, head `h`, dimension `d`, and pool `j`, `qbar[t, d] = sum_h(weights[t, h] * query[t, h, d])` and `score[t, j] = sum_d(qbar[t, d] * cache[j, d])`. This preserves the existing head-weighted-query scoring semantics. Only pools before `min((positions[t] + 1) // P, indexer_seq_lens[r])` are visible. Select up to `index_topk // P` pools by descending score, then expand pool `j` to `[j * P, ..., j * P + P - 1]`. Tail positions range from `((positions[t] + 1) // P) * P` through `positions[t]`.
+- **Legacy BF16 helper formula**: For query token `t`, head `h`, dimension `d`, and pool `j`, `qbar[t, d] = sum_h(weights[t, h] * query[t, h, d])` and `score[t, j] = sum_d(qbar[t, d] * cache[j, d])`. This preserves the existing head-weighted-query scoring semantics. Only pools before `min((positions[t] + 1) // P, indexer_seq_lens[r])` are visible. Select up to `index_topk // P` pools by descending score, then expand pool `j` to `[j * P, ..., j * P + P - 1]`. Tail positions range from `((positions[t] + 1) // P) * P` through `positions[t]`.
 - **Algorithm flow**:
     1. Split the token batch into chunks targeting a 256 MiB score-buffer budget. Compute the head-weighted query with the existing FP32 multiplication and reduction.
     2. For larger batches, a bounded Triton gather reuses paged keys in a contiguous scratch cache. A Triton kernel maps tokens to requests, computes FP32 dot products with the head-weighted query, writes all score cells, and maps invisible, NaN, and negative-infinite scores to the lowest finite FP32 value. Positive infinity maps to the largest finite value. This avoids separate score initialization and sanitization passes.
     3. Apply `torch.topk` and convert its IDs once to int32. A Triton kernel expands pools, writes the causal tail, clears graph padding and alignment columns, and optionally writes directly into the SFA output buffer. The result contains logical token indices, not physical cache slots.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay with Triton-Ascend.
+
+## INT8 model execution
+
+All LI C8 queries use glm5_next_c8_quant_indexer: eager prefill,
+single-token decode, MTP, and FULL graph capture/replay. Q is dynamically
+quantized per head; CANN QLI v2 multiplies INT8 Q/K with INT32 accumulation,
+then applies scales, per-head ReLU and head weights. There is no floating
+QK fallback and no query-count or workspace-budget dispatch threshold.
+
+Within each cache page, B*128 contiguous INT8 key bytes are followed by B
+FP16 scales. The allocation retains B*132 bytes, with 2*B bytes reserved.
+The original block table and physical page strides are passed directly to
+QLI v2, avoiding history-sized gathering, dequantization or mirrored caches.
+This page layout replaces the previous interleaved key/FP32-scale format;
+workers must start with fresh caches when changing versions.
+
+The scoring relation is
+`score[k] = key_scale[k] * sum_h(weight[h] * query_scale[h] * relu(dot(q8[h], k8[k])))`.
+Query quantization and the operator's FP16 scale/weight arithmetic introduce
+rounding, so model accuracy and throughput both require validation.
+
+The integer scorer requires QLI v2 and its metadata operator, 32/64 heads,
+head dimension 128, page rows divisible by 16 in [16,1024], a power-of-two
+pool size <=128, and at most 2048 selected pools. Unsupported configurations
+raise an error rather than silently switching to floating QK. Query metadata
+is shared only within a forward; capture records its device-side updates so
+sequence lengths and page-table contents can change on replay.
+
+For MTP, size FULL decode graphs for verification tokens:
+`concurrency * (num_speculative_tokens + 1)`. With TP16, eight requests,
+MTP5 and DSA-CP disabled, the largest verification batch is 48 tokens.
+The following capture sizes cover the tested five- and eight-request cases:
+
+```bash
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,30,48]}'
+```
+
+Capture sizes count tokens. A maximum of 8 leaves the 30/48-token
+verification batches in eager execution. The current Ascend runner also
+uses the capture limit when sizing MC2 capacity, so this setting can affect
+MoE communication. Compare C8 and BF16 with identical capture settings;
+measure normal-sampling decode throughput separately from prefill throughput.
+
+The parameters and constraints below describe the legacy BF16 helper only.
 
 ## Parameters
 
@@ -28,7 +72,7 @@
 | `max_pool_seq_len` | Attribute | Upper bound on complete pool count and width of the score buffer | Python int | Scalar, keyword-only |
 | `output_buffer` | Optional output | Existing `[capacity, width]` buffer; width covers the result and any SFA alignment padding | int32 | Same device; contiguous columns and nonoverlapping rows |
 | `pack_tail` | Attribute | Place the tail immediately after the causal history prefix; default `False`, enabled by the model caller | Python bool | Scalar, keyword-only |
-| `allow_cache_packing` | Attribute | Allow the shape-based packed-cache optimization; default `True`, disabled by the model caller in FULL graph mode | Python bool | Scalar, keyword-only |
+| `allow_cache_packing` | Attribute | Allow the shape-based packed-cache optimization; default `True`, disable for graphs without query reuse | Python bool | Scalar, keyword-only |
 | Return value | Output | Logical token indices, `[T, 1, index_topk + P - 1]`; unused columns are `-1` | int32 | ND |
 
 ## Constraints
@@ -41,7 +85,7 @@
 - Cache address offsets use int32 only when the full tensor span fits. Larger caches use scalar int64 page bases and int32 offsets within a page; the page span must fit in int32 and the block size must be a power of two.
 - Capture/replay requires stable shapes, addresses, strides, and scalar attributes (including `max_pool_seq_len`). Query values, weights, positions, pool lengths, and page-table contents may change in the existing buffers. The kernel skips invisible pool sub-tiles at runtime.
 - Outside a captured graph, pool capacities and selected-pool counts are runtime parameters, avoiding a new Triton binary for each context length. Tensor strides and tiling choices still specialize the kernels.
-- The score scratch budget controls token chunking; at least one score row is allocated. Its size is `max_pool_seq_len * sizeof(float32)`, so a single extremely long row can exceed the budget. No constant context-length cutoff is imposed by the wrapper. The optional prefill cache has a separate 256 MiB budget, so combined scratch can approach 512 MiB. Packing requires `allow_cache_packing=True`, original cache offsets fitting in int32, and more token rows than requests. The model disables packing for FULL graphs: padded rows do not imply query reuse, and replay does not rerun Python dispatch. Other model execution modes trim token rows to the actual count before dispatch; a mixed batch can still contain requests without reuse. Direct callers with padded rows should also disable packing unless reuse has been established for that captured workload.
+- The score scratch budget controls token chunking; at least one score row is allocated. Its size is `max_pool_seq_len * sizeof(float32)`, so a single extremely long row can exceed the budget. No constant context-length cutoff is imposed by the wrapper. The optional prefill cache has a separate 256 MiB budget, so combined scratch can approach 512 MiB. Packing requires `allow_cache_packing=True`, original cache offsets fitting in int32, and more token rows than requests. Callers should disable packing for FULL graphs without query reuse: padded rows do not imply reuse, and replay does not rerun Python dispatch. Mixed batches may also contain requests without reuse. These BF16 helper heuristics do not apply to the LI C8 integer path, which reads pages directly.
 
 ## Origin and Differences
 

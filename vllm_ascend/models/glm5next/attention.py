@@ -10,6 +10,7 @@ from vllm.config import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -28,6 +29,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
@@ -106,7 +108,16 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # Completed pools store BF16 vectors without quantization scales.
+        # Completed pools store BF16 vectors by default. With LI C8
+        # (attention_config.indexer_kv_dtype=int8) each pooled row is
+        # allocated with four scale bytes per row; the C8 adapter stores
+        # contiguous INT8 keys and FP16 scales separately within each page.
+        li_c8_dtype = None
+        if get_ascend_config().is_kpool_li_c8_enabled():
+            li_c8_dtype = torch.int8
+            logger.info_once(
+                "GLM-Next KPool indexer LI C8 enabled: pooled pages store %s keys + FP16 scales.", li_c8_dtype
+            )
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
             dtype=torch.bfloat16,
@@ -114,6 +125,7 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
+            quant_dtype=li_c8_dtype,
         )
         # Request-owned FP32 K/gate ring retains the incomplete pool.
         self.tail_cache = Glm5NextTailCache(

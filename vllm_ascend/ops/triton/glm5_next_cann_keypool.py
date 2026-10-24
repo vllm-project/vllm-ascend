@@ -1,10 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
+"""Fused adapters for CANN pooled indexing: metadata, cache access and indices."""
 
 from types import SimpleNamespace
 
+import torch
 from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _gather_keypool_state_kernel(
+    tail,
+    history,
+    output,
+    PAGE_ROWS: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    HISTORY_WIDTH: tl.constexpr,
+    HISTORY_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    source = tl.load(history + row // HISTORY_WIDTH * HISTORY_STRIDE + row % HISTORY_WIDTH).to(tl.int64)
+    address = source // PAGE_ROWS * PAGE_STRIDE + source % PAGE_ROWS * WIDTH + cols
+    value = tl.load(tail + address, cols < WIDTH, other=0)
+    tl.store(output + row * WIDTH + cols, value, cols < WIDTH)
+
+
+def gather_keypool_state(tail, history, output, page_rows):
+    """Copy retained rows from padded physical pages in one launch."""
+    _gather_keypool_state_kernel[(history.numel(),)](
+        tail,
+        history,
+        output,
+        page_rows,
+        tail.stride(0),
+        tail.shape[-1],
+        history.shape[1],
+        history.stride(0),
+        triton.next_power_of_2(tail.shape[-1]),
+    )
 
 
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
@@ -31,6 +67,8 @@ def _write_keypool_caches_kernel(
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
     BLOCK: tl.constexpr,
+    QUANT: tl.constexpr,
+    TAIL_STRIDE: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, BLOCK)
@@ -47,17 +85,34 @@ def _write_keypool_caches_kernel(
         else:
             source = tl.load(state_rows + input_row, valid, other=0).to(tl.int64)
             tail_value = tl.load(state + source * 2 * HEAD_DIM + cols, valid & (cols < 2 * HEAD_DIM), other=0)
-        tl.store(tail + dest * 2 * HEAD_DIM + cols, tail_value, valid & (cols < 2 * HEAD_DIM))
+        tail_address = tail + dest // PAGE_ROWS * TAIL_STRIDE + dest % PAGE_ROWS * 2 * HEAD_DIM + cols
+        tl.store(tail_address, tail_value, valid & (cols < 2 * HEAD_DIM))
     else:
         pool_row = row - tail_rows
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
-        address = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * HEAD_DIM + cols
-        tl.store(address, pool_value, valid & (cols < HEAD_DIM))
+        page_base = cache + slot // BLOCK_SIZE * CACHE_STRIDE
+        row_base = page_base + slot % BLOCK_SIZE * HEAD_DIM
+        if QUANT:
+            values = pool_value.to(tl.float32)
+            abs_max = tl.max(tl.abs(values))
+            scale = tl.where(abs_max > 0, tl.div_rn(abs_max, 127.0), 1.0)
+            quantized = tl.extra.cann.libdevice.nearbyint(tl.div_rn(values, scale))
+            quantized = tl.minimum(tl.maximum(quantized, -127.0), 127.0).to(tl.int8)
+            tl.store(row_base + cols, quantized, valid & (cols < HEAD_DIM))
+            scale_base = page_base + BLOCK_SIZE * HEAD_DIM + slot % BLOCK_SIZE * 2
+            scale_ptr = scale_base.to(tl.pointer_type(tl.float16))
+            tl.store(scale_ptr, tl.where(abs_max > 0, scale, 0.0), valid)
+        else:
+            tl.store(row_base + cols, pool_value, valid & (cols < HEAD_DIM))
 
 
 def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state):
+    head_dim = tail.shape[-1] // 2
+    quant = cache.dtype == torch.int8
+    if cache.shape[-1] != head_dim + (4 if quant else 0):
+        raise ValueError("KPool cache row width must match the key and packed scale.")
     inputs = tail_metadata.cann_inputs
     writes = inputs.write_indices
     tail_rows = writes.numel()
@@ -74,7 +129,7 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         state,
         metadata.pooled_slot_mapping,
         tail_rows,
-        cache.shape[-1],
+        head_dim,
         inputs.page_rows,
         tail.shape[0],
         tail.shape[1],
@@ -85,7 +140,9 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         writes.stride(0),
         writes.shape[1],
         key is not None,
-        triton.next_power_of_2(2 * cache.shape[-1]),
+        triton.next_power_of_2(2 * head_dim),
+        quant,
+        tail.stride(0),
     )
 
 

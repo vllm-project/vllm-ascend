@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged GLM KPool scoring and fused token-index expansion."""
+"""Legacy BF16 GLM KPool scoring and fused token-index expansion."""
 
 from __future__ import annotations
 
@@ -237,6 +237,10 @@ def glm5_next_lightning_indexer_triton(
         return output[:, :output_width].unsqueeze(1)
     if cum_query_lens.numel() == 0:
         raise ValueError("GLM KPool nonempty queries require request boundaries.")
+    if indexer_cache.dtype != torch.bfloat16:
+        raise TypeError("The legacy KPool scorer accepts BF16 only; LI C8 must use the integer scorer.")
+    if indexer_cache.shape[3] != head_dim:
+        raise ValueError("GLM KPool BF16 cache width must match the query head dimension.")
     cache_span = sum((size - 1) * stride for size, stride in zip(indexer_cache.shape, indexer_cache.stride()))
     index32 = cache_span <= torch.iinfo(torch.int32).max
     page_span = (indexer_cache.shape[1] - 1) * indexer_cache.stride(1) + (head_dim - 1) * indexer_cache.stride(3)

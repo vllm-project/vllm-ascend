@@ -182,6 +182,39 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
 
 
+def test_li_c8_indexer_spec_packs_scale_into_small_page():
+    """LI C8 indexer rows carry head_dim quantized bytes plus one FP32 scale."""
+    pool = 4
+    specs = make_specs(pool)
+    specs["model.layers.3.indexer.k_cache"] = AscendMLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        model_version="glm5_next",
+        indexes_kv_by_block_stride=True,
+        **_ratio_kwargs(pool),
+    )
+    groups = get_glm5_next_kv_cache_groups(make_config(), specs)
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    # 128 compressed rows per block, 132 bytes each (128 INT8 + FP32 scale).
+    assert layout.small_page_size == 128 * 132
+    bf16_small_page = _get_glm5_next_cache_layout(get_glm5_next_kv_cache_groups(make_config(), make_specs(pool)))
+    assert bf16_small_page is not None
+    assert layout.small_page_size < bf16_small_page.small_page_size
+
+    bytes_per_block = layout.main_page_size + layout.small_page_size
+    plan = get_glm5_next_kv_cache_config(make_config(), groups, 7 * bytes_per_block)
+    assert plan.num_blocks == 7
+    assert {tensor.size for tensor in plan.kv_cache_tensors} == {
+        7 * layout.main_page_size,
+        7 * layout.small_page_size,
+    }
+
+
 def test_missing_paired_cache_is_rejected():
     specs = make_specs()
     del specs["model.layers.3.indexer.tail_cache"]
