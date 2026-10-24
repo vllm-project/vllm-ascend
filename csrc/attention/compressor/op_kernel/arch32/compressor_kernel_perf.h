@@ -521,6 +521,9 @@ __aicore__ inline void CompressorKernelPerf<COMP>::InitWorkspace(__gm__ uint8_t 
     // vec2Input
     vec2InputGm.SetGlobalBuffer(
         (__gm__ VEC1_OUT_T *)(workspace + beforeVecOffset));
+    if constexpr (COMP::cacheMode == CACHE_MODE::CYCLE) {
+        blockVec_.InitHistoryWorkspace(workspace + offset);
+    }
 }
 
 template <typename COMP>
@@ -660,6 +663,10 @@ __aicore__ inline void CompressorKernelPerf<COMP>::Process()
         return;
     }
     AllocEventID();
+
+    if ASCEND_IS_AIV {
+        blockVec_.SnapshotHistory();
+    }
 
     BatchInfo batchInfo{};
 

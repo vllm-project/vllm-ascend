@@ -99,12 +99,14 @@ enum class TEMPLATE_ID : uint8_t {
     FULL_LOAD = 2
 };
 
-template <X_LAYOUT X_L, X_DTYPE X_T, COFF C, ROTARY_MODE Rotary_Mode, typename... Args>
+template <X_LAYOUT X_L, X_DTYPE X_T, COFF C, ROTARY_MODE Rotary_Mode, CACHE_MODE Cache_Mode,
+          typename... Args>
 struct COMPType {
     static constexpr X_LAYOUT xLayout = X_L;
     static constexpr X_DTYPE xDtype = X_T;
     static constexpr COFF coff = C;
     static constexpr ROTARY_MODE rotaryMode = Rotary_Mode;
+    static constexpr CACHE_MODE cacheMode = Cache_Mode;
 };
 
 struct LoopInfo {

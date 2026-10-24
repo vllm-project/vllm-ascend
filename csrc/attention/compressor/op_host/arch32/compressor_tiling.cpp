@@ -165,10 +165,9 @@ ge::graphStatus CompressorTiling::SetPageAttentionInfo()
 {
     pageAttentionParams_->blockNum = context_->stateCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0);
     pageAttentionParams_->blockSize = context_->stateCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
-    if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CONTINUOUS)) {
-        pageAttentionParams_->maxBlockNumPerBatch =
-            context_->stateBlockTable.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
-    }
+    const auto &tableShape = context_->stateBlockTable.shape->GetStorageShape();
+    pageAttentionParams_->maxBlockNumPerBatch =
+        tableShape.GetDimNum() == 1 ? 1 : tableShape.GetDim(COMPRESSOR_DIM_INDEX_1);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -269,6 +268,10 @@ ge::graphStatus CompressorTiling::CalcWorkSpace()
         workspaceParams_->vec1TailCacheSize * MM1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio * 2; // 2 kv和score
     workspaceSize_ +=
         workspaceParams_->vec1ResSize * maxGroupNum * V1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio;
+    if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CYCLE)) {
+        workspaceSize_ += static_cast<uint64_t>(baseParams_->batchSize) * coff * baseParams_->cmpRatio *
+                          2 * coff * baseParams_->headDim * MM1_RES_ELEM_SIZE;
+    }
 
     if (context_->workSpaces) {
         context_->workSpaces[0] = workspaceSize_;
@@ -814,6 +817,21 @@ ge::graphStatus CompressorTiling::CheckFeature() const
         return ge::GRAPH_FAILED);
     uint64_t cacheStride =
         context_->stateCache.shape->GetShape().GetDim(1) * context_->stateCache.shape->GetShape().GetDim(2);
+    if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CYCLE)) {
+        // Match the pinned A3 template set used by the serving path.
+        OP_CHECK_IF(context_->layout != LayoutType::LAYOUT_TH,
+                    OP_LOGE(context_->opName, "A3 fixed-tail CYCLE requires packed TH inputs"),
+                    return ge::GRAPH_FAILED);
+        const uint32_t tailTokens = coff * baseParams_->cmpRatio;
+        const uint32_t ringBlocks =
+            (tailTokens + pageAttentionParams_->blockSize - 1) / pageAttentionParams_->blockSize;
+        OP_CHECK_IF(pageAttentionParams_->maxBlockNumPerBatch < ringBlocks,
+                    OP_LOGE(context_->opName, "CYCLE block-table row must contain at least %u ring pages", ringBlocks),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(pageAttentionParams_->blockNum < baseParams_->batchSize * ringBlocks,
+                    OP_LOGE(context_->opName, "CYCLE state pool is too small for private request rings"),
+                    return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(baseParams_->stateCacheStrideDim0 < cacheStride,
                 OP_LOGE(context_->opName,
                         "state_cache first axis stride should not be less than the contiguous stride %u, but got %u",
