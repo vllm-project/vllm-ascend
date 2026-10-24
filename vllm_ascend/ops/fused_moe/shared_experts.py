@@ -72,7 +72,7 @@ LinearInput: TypeAlias = torch.Tensor | PreparedLinearInput | tuple[torch.Tensor
 
 @dataclass(frozen=True)
 class PreparedSharedExpertExecution:
-    """Shared MLP input preparation submitted before the router matmul.
+    """Shared MLP input preparation queued on the shared-expert stream.
 
     ``gate_up_input`` may contain scheme-owned activation quantization that is
     already queued on the shared-expert stream. Gate-Up consumes it immediately
@@ -83,6 +83,8 @@ class PreparedSharedExpertExecution:
     hidden_states: torch.Tensor
     gate_up_input: LinearInput
     local_dp_metadata: tuple[int, int] | None
+    # Event already waited on by input preparation on the shared stream.
+    input_ready_event: torch.npu.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -431,6 +433,7 @@ class AscendSharedExperts:
             hidden_states=hidden_states,
             gate_up_input=gate_up_input,
             local_dp_metadata=local_dp_metadata,
+            input_ready_event=shared_input_ready,
         )
 
     def _prepare_gate_up_input(self, hidden_states: torch.Tensor) -> LinearInput:
@@ -471,17 +474,21 @@ class AscendSharedExperts:
         prepared_execution: PreparedSharedExpertExecution,
         router_output_ready: torch.npu.Event | None,
     ) -> SubmittedSharedExpertGateUp:
-        """Submit Gate-Up before routed TopK/dispatch are enqueued.
+        """Submit Gate-Up after its router dependency is satisfied.
 
         Gate-Up remains ordered after the router through ``router_output_ready``
-        but is placed on the auxiliary stream immediately, allowing its Cube
-        work to cover routed TopK and dispatch instead of missing that window
-        because of host-side submission order.
+        and follows input preparation on the same auxiliary stream. Callers
+        may submit it before routed TopK/dispatch or as part of a complete
+        shared forward after routed submission.
         """
         path = self._select_mlp_path()
         gate_up_input_scale = None
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-            self._wait_for_milestone(router_output_ready, "router_output_ready")
+            # External/already-computed gates can reuse the input-ready event.
+            # Preparation has already waited on it on this same shared stream.
+            # Keep missing-event validation and waits for distinct router events.
+            if router_output_ready is None or router_output_ready is not prepared_execution.input_ready_event:
+                self._wait_for_milestone(router_output_ready, "router_output_ready")
             if path is SharedExpertMLPPath.A8_INT_FUSED:
                 # W8A8/W4A8: INT8 activations with INT8 or INT4 weights.
                 assert isinstance(prepared_execution.gate_up_input, tuple)
@@ -520,7 +527,7 @@ class AscendSharedExperts:
 
         Both quantization modes use INT8 activations. W8A8 supplies INT8
         weights, while W4A8 supplies INT4 weights. Gate-Up has already been
-        submitted before routed TopK/dispatch; this stage performs fused
+        submitted on the shared stream; this stage performs fused
         activation/requantization and the Down projection.
         """
         pertoken_scale = submitted_gate_up.gate_up_input_scale
@@ -671,8 +678,8 @@ class AscendSharedExperts:
             milestones.shared_activation_overlap_start,
             "shared_activation_overlap_start",
         )
-        # MC2 and All2All prepare Down during routed GMM1/GMM2; AllGather
-        # starts at GMM2. The Down matmul remains behind combine.
+        # Prepare Down during routed GMM2. The Down matmul remains behind
+        # the routed combine-start event.
         if submitted_gate_up.path is SharedExpertMLPPath.W8A8_MXFP_LINEAR:
             down_input = self._prepare_w8a8_mxfp_down_input(submitted_gate_up.gate_up)
         else:
@@ -751,6 +758,7 @@ class AscendSharedExperts:
                 hidden_states=hidden_states,
                 gate_up_input=gate_up_input,
                 local_dp_metadata=local_dp_metadata,
+                input_ready_event=milestones.shared_input_ready if self.multistream_overlap else None,
             )
             submitted_gate_up = self.enqueue_gate_up_after_router(
                 prepared_execution,
