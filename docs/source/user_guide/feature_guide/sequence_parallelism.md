@@ -75,3 +75,10 @@ vllm serve <moe-model> \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
 ```
+
+### Legacy environment fallback
+
+`VLLM_ASCEND_ENABLE_FLASHCOMM1` remains a migration-period fallback only when
+`additional_config.enable_flashcomm1` is absent. If both are set and disagree,
+the explicit `additional_config` value wins and the configuration layer logs the
+override. New deployments should use `additional_config.enable_flashcomm1`.
