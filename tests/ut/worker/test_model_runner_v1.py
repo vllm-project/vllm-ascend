@@ -4450,5 +4450,65 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
         group.backend.get_kv_cache_shape.assert_not_called()
 
 
+class TestDPMetadataSync(unittest.TestCase):
+    def test_sync_metadata(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enable_return_routed_experts=False))
+        runner.dp_size = 2
+        runner.dp_rank = 0
+        runner.ascend_config = SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(
+                oproj_tensor_parallel_size=0,
+                lmhead_tensor_parallel_size=0,
+                embedding_tensor_parallel_size=0,
+                mlp_tensor_parallel_size=0,
+            )
+        )
+
+        def synchronize(packed_tensor, **kwargs):
+            packed_tensor[0, 1] = 8
+            packed_tensor[1, 1] = CUDAGraphMode.NONE.value
+
+        for is_draft_model in (False, True):
+            for lmhead_tp in (False, True):
+                for can_skip in (False, True):
+                    runner.ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2 if lmhead_tp else 0
+                    with (
+                        self.subTest(is_draft_model=is_draft_model, lmhead_tp=lmhead_tp, can_skip=can_skip),
+                        patch(
+                            "vllm_ascend.worker.v1.model_runner.should_skip_allreduce_across_dp_group",
+                            return_value=can_skip and not lmhead_tp,
+                        ),
+                        patch("vllm_ascend.worker.v1.model_runner.select_moe_comm_method", return_value=object()),
+                        patch("vllm_ascend.worker.v1.model_runner.get_dp_group"),
+                        patch("vllm_ascend.worker.v1.model_runner.dist.all_reduce", side_effect=synchronize) as reduce,
+                    ):
+                        max_tokens, tokens, mode = runner._sync_metadata_across_dp(4, is_draft_model)
+                        skip = can_skip and not lmhead_tp
+                        self.assertEqual(reduce.call_count, 0 if skip else 1)
+                        self.assertEqual(max_tokens, 4 if skip else 8)
+                        self.assertEqual(mode, CUDAGraphMode.NONE)
+                        expected = [4, 4] if skip else ([8, 8] if is_draft_model or lmhead_tp else [4, 8])
+                        self.assertEqual(tokens.tolist(), expected)
+
+    def test_single_dp_rank_needs_no_sync(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 1
+        with patch("vllm_ascend.worker.v1.model_runner.dist.all_reduce") as reduce:
+            self.assertEqual(runner._sync_metadata_across_dp(4), (4, None, CUDAGraphMode.NONE))
+            reduce.assert_not_called()
+
+    def test_lmhead_padding_uses_synced_token_count(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.max_num_reqs = 16
+        runner.uniform_decode_query_len = 2
+        for dcp_size in (1, 2):
+            runner.dcp_size = dcp_size
+            for tokens, expected in ((None, 32), ([4, 8], 8), ([32, 64], 32)):
+                with self.subTest(dcp_size=dcp_size, tokens=tokens):
+                    synced_tokens = None if tokens is None else torch.tensor(tokens)
+                    self.assertEqual(runner._get_lmhead_pad_size(synced_tokens), expected if dcp_size == 1 else 32)
+
+
 if __name__ == "__main__":
     unittest.main()

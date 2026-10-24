@@ -635,3 +635,15 @@ def test_mla_dcp_draft_dummy_metadata_preserves_existing_layout(draft_index):
         assert getattr(common, key) is value
     for key, value in tensor_values.items():
         torch.testing.assert_close(getattr(common, key), value)
+
+
+@pytest.mark.parametrize("method,dcp_size", [("mtp", 1), ("mtp", 2), ("eagle3", 1)])
+def test_lmhead_pad_size_uses_dp_sync(method, dcp_size):
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=16))
+    proposer.runner = SimpleNamespace(uniform_decode_query_len=1)
+    proposer.method = method
+    proposer.dcp_size = dcp_size
+    uses_synced_tokens = method == "mtp" and dcp_size == 1
+    assert proposer._get_lmhead_pad_size(8) == (8 if uses_synced_tokens else 16)
+    assert proposer._get_lmhead_pad_size(32) == 16
