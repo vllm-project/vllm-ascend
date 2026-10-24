@@ -283,7 +283,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --served-model-name minimax-m31-flash \
+        --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
         --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
         --language-model-only \
@@ -370,7 +370,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --served-model-name minimax-m31-flash \
+        --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
         --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
         --language-model-only \
@@ -446,19 +446,19 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
 === "950DT products"
 
-    Use one Prefill node and one Decode node, each with all eight NPUs and DP2 × TP4 × PP1 / EP8. Each node starts one vLLM API service, which manages both local DP ranks. Speculative decoding is disabled in this configuration.
+    Use one Prefill node and one Decode node, each with all eight NPUs. Prefill uses DP1 × TP4 × PP2, and Decode uses DP2 × TP4 × PP1. Each node starts one vLLM API service. Speculative decoding is disabled in this configuration.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
+    | DP × TP × PP | 1 × 4 × 2 | 2 × 4 × 1 |
     | API port | 31050 | 31060 |
     | DP RPC port | 6884 | 6885 |
     | KV transfer port | 30000 | 26900 |
     | max-num-seqs | 128 | 256 |
     | HCCL_BUFFSIZE (MB) | 512 | 2048 |
     | Main-model execution | Eager | FULL_DECODE_ONLY |
-    | fuse_norm_quant | true | false |
 
     **Prefill Node**
 
@@ -480,30 +480,25 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     MAX_BATCHED_TOKENS=32768
     GPU_MEMORY_UTILIZATION=0.92
 
-    # Fixed runtime configuration.
-    if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
-        source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
-    fi
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --data-parallel-size 2 \
-        --data-parallel-size-local 2 \
+        --data-parallel-size 1 \
+        --data-parallel-size-local 1 \
         --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size 4 \
-        --pipeline-parallel-size 1 \
-        --served-model-name minimax-m3 \
+        --pipeline-parallel-size 2 \
+        --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
         --dtype bfloat16 \
         --max-num-seqs "$MAX_NUM_SEQS" \
@@ -511,20 +506,42 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --max-model-len "$MAX_MODEL_LEN" \
         --disable-hybrid-kv-cache-manager \
         --enable-expert-parallel \
-        --quantization mxfp8 \
+        --quantization ascend \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --distributed-executor-backend mp \
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --enable-auto-tool-choice \
         --tool-call-parser minimax_m3 \
-        --limit-mm-per-prompt '{"image":1,"video":1}' \
+        --language-model-only \
         --safetensors-load-strategy prefetch \
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":true,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_producer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 2,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
     ```
 
     Start the Prefill engine inside the Prefill container:
@@ -553,17 +570,12 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     MAX_BATCHED_TOKENS=32768
     GPU_MEMORY_UTILIZATION=0.92
 
-    # Fixed runtime configuration.
-    if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
-        source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
-    fi
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -576,7 +588,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size 4 \
         --pipeline-parallel-size 1 \
-        --served-model-name minimax-m3 \
+        --served-model-name minimax-m3.1-flash \
         --trust-remote-code \
         --dtype bfloat16 \
         --max-num-seqs "$MAX_NUM_SEQS" \
@@ -584,19 +596,45 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --max-model-len "$MAX_MODEL_LEN" \
         --disable-hybrid-kv-cache-manager \
         --enable-expert-parallel \
-        --quantization mxfp8 \
+        --quantization ascend \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --distributed-executor-backend mp \
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --enable-auto-tool-choice \
         --tool-call-parser minimax_m3 \
-        --limit-mm-per-prompt '{"image":1,"video":1}' \
+        --language-model-only \
         --safetensors-load-strategy prefetch \
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_norm_quant": false,
+                "fuse_qknorm_rope": true
+            },
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 2,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
     ```
 
     Start the Decode engine inside the Decode container:
@@ -624,7 +662,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
 ## 6 Functional Verification
 
-Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in the requests below with the configured `--served-model-name`: `minimax-m3.1-flash` for single-node deployment, `minimax-m31-flash` for A3 PD disaggregation, or `minimax-m3` for 950DT PD disaggregation.
+Replace `{ip}` and `{port}` with the service endpoint. All examples use `minimax-m3.1-flash` as the served model name.
 
 ### 6.1 Text
 
@@ -633,7 +671,7 @@ Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in t
     -H "Content-Type: application/json" \
     -d @- <<EOF
   {
-    "model": "minimax-m3",
+    "model": "minimax-m3.1-flash",
     "messages": [
       {
         "role": "user",
@@ -660,7 +698,7 @@ Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in t
     -H "Content-Type: application/json" \
     -d @- <<EOF
   {
-    "model": "minimax-m3",
+    "model": "minimax-m3.1-flash",
     "messages": [
       {
         "role": "user",
@@ -686,7 +724,7 @@ Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in t
   curl http://{ip}:{port}/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-      "model": "minimax-m3",
+      "model": "minimax-m3.1-flash",
       "messages": [
         {
           "role": "user",
@@ -722,7 +760,7 @@ Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in t
     -H "Content-Type: application/json" \
     -d @- <<EOF
   {
-    "model": "minimax-m3",
+    "model": "minimax-m3.1-flash",
     "messages": [
       {
         "role": "user",
@@ -743,10 +781,6 @@ Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in t
 
 ## 7 Accuracy Evaluation
 
-The evaluation results below are copied from the [MiniMax-M3 accuracy evaluation](MiniMax-M3.md#8-accuracy-evaluation) as reference results for MiniMax-M3. They have not been measured for MiniMax-M3.1-Flash.
-
-The context-limit entries below use the unified serving setting `max-model-len=133000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
-
 ### 7.1 Using AISBench
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
@@ -755,44 +789,4 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| GSM8K   | 8 H20 (96G × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
-| GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
-| AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
-| AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
-| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
-
-### 7.3 Multimodal Evaluation
-
-MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
-
-The Video-MME results below are measured on chunk1 and chunk2, not the full dataset.
-
-For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the recommended MiniMax-M3 settings are:
-
-- serve with `--limit-mm-per-prompt '{"image":0,"video":1}'`;
-- do not set `media_io_kwargs.video.num_frames`, so vLLM uses the default 32 sampled frames;
-- use `max-model-len=133000` and `max_out_len=8192`;
-- evaluate Video-MME chunk1 and chunk2, not the full dataset.
-
-The AISBench command used for the Video-MME chunk1+chunk2 evaluation is:
-
-```bash
-ais_bench \
-  --models vllm_api_general_chat \
-  --datasets videomme_subset_1_2.py \
-  --mode all \
-  --dump-eval-details \
-  --merge-ds
-```
-
-`videomme_subset_1_2.py` is a local AISBench dataset config derived from the original Video-MME config, such as `videomme_gen.py`. It points `path` to the parquet file filtered from the full Video-MME metadata by the locally available chunk1/chunk2 videos, and points `video_path` to the extracted chunk1/chunk2 `.mp4` directory. This keeps the evaluation lightweight while preserving the standard Video-MME request and scoring flow.
-
-| Dataset | Modality | Tool | Hardware | ViT DP | max-model-len | max_out_len | Input Config | generation_kwargs | Score |
-|---------|----------|------|----------|--------|---------------|-------------|--------------|-------------------|-------|
-| TextVQA | Image | AISBench | GPU | disabled | 133000 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 70.82 |
-| TextVQA | Image | AISBench | NPU | disabled | 133000 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 72.75 |
-| Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
-| Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
+| AIME2026 | — | — | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
