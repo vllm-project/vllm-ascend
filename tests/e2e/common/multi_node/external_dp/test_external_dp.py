@@ -19,6 +19,7 @@ from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     RankResolver,
     resolve_current_node_index,
 )
+from tests.e2e.common.multi_node.external_dp.log_archive import periodic_rank_log_archive
 from tests.e2e.common.multi_node.external_dp.runtime import (
     ExternalDPProxyLauncher,
     ExternalDPServerManager,
@@ -47,6 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOG_ROOT = Path("/tmp/external_dp_logs")
+DEFAULT_MAX_WAIT_SECONDS = 3 * 60 * 60
 
 
 def _install_special_dependencies(config: ExternalDPConfig) -> None:
@@ -223,7 +225,7 @@ def test_external_dp() -> None:
     ranks = RankResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
-    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "5400"))
+    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", str(DEFAULT_MAX_WAIT_SECONDS)))
     is_master = current_node_index == 0
     profile_spec = ProfileSpec.from_env()
     if is_master and profile_spec.enabled:
@@ -245,6 +247,7 @@ def test_external_dp() -> None:
 
     try:
         with (
+            periodic_rank_log_archive(log_root, current_node_index),
             kv_pool_manager,
             ExternalDPServerManager(
                 config=config,
