@@ -116,6 +116,7 @@ def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
 def _vllm_config(model_type: str) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+        use_v2_model_runner=False,
     )
 
 
@@ -128,7 +129,7 @@ def test_select_seq_lens_defaults_to_cpu_mirror() -> None:
 @pytest.mark.parametrize(
     ("method", "parallel_drafting", "model_type", "expected"),
     [
-        # DSpark on the GLM5.2 family keeps the CPU seq_lens mirror.
+        # MRV1 DSpark on the GLM5.2 family keeps the CPU seq_lens mirror.
         ("dspark", True, "glm5_next", CPU_SEQ_LENS[:NUM_REQS]),
         ("dspark", True, "glm_moe_dsa", CPU_SEQ_LENS[:NUM_REQS]),
         # DSpark on other models and other parallel-drafting methods (DFlash,
@@ -165,6 +166,24 @@ def test_select_seq_lens_cross_attention_uses_npu_seq_lens() -> None:
     )
 
     assert seq_lens is NPU_SEQ_LENS
+
+
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm_moe_dsa"])
+@pytest.mark.parametrize(("exact", "upper"), [(45, 48), (1151, 1152)])
+def test_select_seq_lens_mrv2_dspark_rejection_uses_current_exact(model_type: str, exact: int, upper: int) -> None:
+    common = _common_attn_metadata()
+    common.num_reqs = 1
+    common.seq_lens = torch.tensor([exact], dtype=torch.int32)
+    common._seq_lens_cpu = torch.tensor([upper], dtype=torch.int32)
+    config = _vllm_config(model_type)
+    config.use_v2_model_runner = True
+
+    selected = _select_seq_lens(common, None, _spec_config("dspark", True), config)
+
+    # MRV2's CPU mirror is an optimistic bound after rejection. Native
+    # attention must consume the current preparation's exact device length.
+    assert selected is common.seq_lens
+    assert selected.tolist() == [exact]
 
 
 def test_get_or_register_attention_buffer() -> None:

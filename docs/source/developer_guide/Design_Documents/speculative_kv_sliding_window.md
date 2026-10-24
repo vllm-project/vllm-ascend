@@ -154,6 +154,13 @@ window proposal owns the metadata.
 
 ### Actual consumers and parallel execution
 
+MRV2 parallel drafting consumes the current device sequence lengths even
+with Window disabled. Its common CPU mirror can be an optimistic upper bound
+after rejection and must not supply native attention's KV lengths. The GLM
+DSpark CPU-mirror optimization is retained only for MRV1. A certified Window
+read pair can reuse its own current exact CPU snapshot; generic native-list
+consumers still synchronize when converting current device lengths.
+
 Backend selection uses the actual backend, builder, spec, and layer names,
 not the target model's architecture. For example, a DSA target can use a dense
 MLA or GQA draft. Ordinary TP/EP and sequence-parallel hidden-state collectives
