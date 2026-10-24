@@ -32,6 +32,15 @@ class TestRegisterScheme(TestBase):
 
 
 class TestGetSchemeClass(TestBase):
+    def test_qk_int8_dynamic_is_an_attention_only_alias(self):
+        legacy_scheme = get_scheme_class("INT8_DYNAMIC", "attention")
+        self.assertIsNotNone(legacy_scheme)
+        self.assertIs(get_scheme_class("QK_INT8_DYNAMIC", "attention"), legacy_scheme)
+        for layer_type in ("linear", "moe"):
+            self.assertIsNone(get_scheme_class("QK_INT8_DYNAMIC", layer_type))
+        for quant_type in ("Q_INT8_DYNAMIC", "K_INT8_DYNAMIC", "QK_FP8_DYNAMIC"):
+            self.assertIsNone(get_scheme_class(quant_type, "attention"))
+
     def test_get_existing_scheme_class_existing_linear(self):
         cls = get_scheme_class("W8A8_DYNAMIC", "linear")
         self.assertIsNotNone(cls)

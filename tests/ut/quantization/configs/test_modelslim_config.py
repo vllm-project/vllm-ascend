@@ -20,6 +20,8 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
 )
+from vllm_ascend.quantization.method_adapters import AscendKVCacheMethod
+from vllm_ascend.quantization.methods.kv_cache.kv_c8 import AscendSFAQuantAttentionMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
@@ -214,6 +216,52 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, None)
             method = self.ascend_config.get_quant_method(attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
+
+    def test_get_quant_method_for_qk_int8_dynamic_indexer(self):
+        attention_layer = MagicMock(spec=AttentionLayerBase)
+        runtime_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="glm_moe_dsa", index_head_dim=128))
+        )
+        # Official GLM metadata uses the legacy global name and a QK-prefixed
+        # per-layer name. Also cover a global QK name used by the fallback lookup.
+        for global_type in ("INT8_DYNAMIC", "QK_INT8_DYNAMIC"):
+            with self.subTest(global_type=global_type):
+                config = AscendModelSlimConfig(
+                    {
+                        "indexer_quant_type": global_type,
+                        "model.layers.5.self_attn.indexer.quant_type": "QK_INT8_DYNAMIC",
+                    }
+                )
+                config.packed_modules_mapping = {}
+                with (
+                    patch(
+                        "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                        return_value=runtime_config,
+                    ),
+                    patch(
+                        "vllm_ascend.quantization.methods.kv_cache.kv_c8.get_current_vllm_config",
+                        return_value=runtime_config,
+                    ),
+                ):
+                    for prefix in ("model.layers.5.self_attn", "model.layers.5.self_attn.mla_attn"):
+                        method = config.get_quant_method(attention_layer, prefix)
+                        self.assertIsInstance(method, AscendKVCacheMethod)
+                        self.assertIsInstance(method.quant_method, AscendSFAQuantAttentionMethod)
+                        layer = torch.nn.Module()
+                        method.create_weights(layer)
+                        # Reuse the existing rotation parameter layout and loader.
+                        weights = {
+                            "indexer.q_rot": torch.eye(128),
+                            "indexer.k_rot": -torch.eye(128),
+                        }
+                        layer.load_state_dict(weights, strict=True)
+                        method.process_weights_after_loading(layer)
+                        self.assertEqual(set(dict(layer.named_parameters())), set(weights))
+                        for name, param in layer.named_parameters():
+                            self.assertEqual(param.dtype, torch.float32)
+                            self.assertFalse(param.requires_grad)
+                            torch.testing.assert_close(param, weights[name])
+                    self.assertIsNone(config.get_quant_method(attention_layer, "model.layers.4.self_attn"))
 
     def test_modelslim_moe_weight_loader_maps_scale_bias_to_scale_path(self):
         upstream_loader = MagicMock(return_value=True)

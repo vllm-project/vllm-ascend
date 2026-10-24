@@ -73,7 +73,10 @@ class AscendFAQuantAttentionMethod:
 
 
 @register_scheme("INT8_DYNAMIC", "attention")
+@register_scheme("QK_INT8_DYNAMIC", "attention")
 class AscendSFAQuantAttentionMethod:
+    """Dynamic INT8 indexer Q/K quantization, including ModelSlim's QK-prefixed name."""
+
     def __init__(self):
         vllm_config = get_current_vllm_config()
         config = vllm_config.model_config.hf_config
