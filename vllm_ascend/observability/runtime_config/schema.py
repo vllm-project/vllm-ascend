@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-FieldKind = Literal["bool", "int", "float", "list_int"]
+FieldKind = Literal["bool", "int", "float", "list_int", "int_or_list_int"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,8 @@ class ConfigField:
     kind: FieldKind = "bool"
     min_value: float | int | None = None
     max_value: float | int | None = None
+    min_items: int | None = None
+    max_items: int | None = None
     help: str = ""
 
 
@@ -61,7 +63,13 @@ def coerce_bool_inplace(container: dict[str, Any], key: str, field: str) -> None
     raise ValueError(f"{field} must be bool")
 
 
-def coerce_int(value: Any, field: str, *, min_value: int | None = None) -> int:
+def coerce_int(
+    value: Any,
+    field: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
         raise ValueError(f"{field} must be a number, got {value!r}")
     if isinstance(value, float) and not value.is_integer():
@@ -69,6 +77,8 @@ def coerce_int(value: Any, field: str, *, min_value: int | None = None) -> int:
     iv = int(value)
     if min_value is not None and iv < min_value:
         raise ValueError(f"{field} must be >= {min_value}, got {iv}")
+    if max_value is not None and iv > max_value:
+        raise ValueError(f"{field} must be <= {max_value}, got {iv}")
     return iv
 
 
@@ -102,6 +112,55 @@ def coerce_list_int(raw: Any, field: str) -> list[int]:
     return out
 
 
+def coerce_int_or_list_int(
+    value: Any,
+    field: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int | list[int]:
+    """Coerce an int (scalar) or a list of ints; validate every element.
+
+    A scalar int keeps the legacy single-window meaning; a list enables
+    multi-window detection. The returned value keeps the same shape as the
+    input (int stays int, list stays list) so ``RuntimeConfig.detector_get``
+    round-trips the user's value; detectors normalize to a list themselves.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an int or list of ints, got {value!r}")
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError(f"{field} must be an integer, got {value!r}")
+        iv = int(value)
+        if min_value is not None and iv < min_value:
+            raise ValueError(f"{field} must be >= {min_value}, got {iv}")
+        if max_value is not None and iv > max_value:
+            raise ValueError(f"{field} must be <= {max_value}, got {iv}")
+        return iv
+    if isinstance(value, (list, tuple)):
+        out: list[int] = []
+        for i, item in enumerate(value):
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError(f"{field}[{i}] must be int, got {item!r}")
+            iv = int(item)
+            if min_value is not None and iv < min_value:
+                raise ValueError(f"{field}[{i}] must be >= {min_value}, got {iv}")
+            if max_value is not None and iv > max_value:
+                raise ValueError(f"{field}[{i}] must be <= {max_value}, got {iv}")
+            out.append(iv)
+        return out
+    raise ValueError(f"{field} must be an int or list of ints, got {type(value).__name__}")
+
+
+def _check_list_bounds(value: Any, path: str, field: ConfigField) -> None:
+    """Enforce ``min_items`` / ``max_items`` on list-typed fields."""
+    count = len(value) if isinstance(value, (list, tuple)) else 1
+    if field.min_items is not None and count < field.min_items:
+        raise ValueError(f"{path} must have at least {field.min_items} entries, got {count}")
+    if field.max_items is not None and count > field.max_items:
+        raise ValueError(f"{path} must have at most {field.max_items} entries, got {count}")
+
+
 def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -> None:
     """Coerce known fields on ``section`` in place (action override keys untouched)."""
     prefix = f"detector.{schema.section_key}"
@@ -118,6 +177,7 @@ def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -
                 section[f.name],
                 path,
                 min_value=int(f.min_value) if f.min_value is not None else None,
+                max_value=int(f.max_value) if f.max_value is not None else None,
             )
         elif f.kind == "float":
             section[f.name] = coerce_float(
@@ -128,5 +188,14 @@ def validate_detector_section(schema: DetectorSchema, section: dict[str, Any]) -
             )
         elif f.kind == "list_int":
             section[f.name] = coerce_list_int(section[f.name], path)
+            _check_list_bounds(section[f.name], path, f)
+        elif f.kind == "int_or_list_int":
+            section[f.name] = coerce_int_or_list_int(
+                section[f.name],
+                path,
+                min_value=int(f.min_value) if f.min_value is not None else None,
+                max_value=int(f.max_value) if f.max_value is not None else None,
+            )
+            _check_list_bounds(section[f.name], path, f)
         else:
             raise ValueError(f"unknown ConfigField.kind {f.kind!r} for {path}")
