@@ -163,6 +163,7 @@ The repository contains runnable examples for weight transfer:
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
+- [`rlhf_sparse_hccl.py`](../../../../examples/rl/rlhf_sparse_hccl.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
@@ -181,11 +182,10 @@ vllm serve /path/to/checkpoint \
     --additional-config '{"rl_config": {"enabled": true}}'
 ```
 
-Use the [HCCL example](../../../../examples/rl/rlhf_sparse_hccl.py)
-for trainer initialization and TP2 launch commands. The example explicitly
-enables expert parallelism. Reserve a separate NPU for the trainer; the transfer
-group size is `1 + TP * DP`, with no additional EP factor. Pipeline parallelism
-is currently unsupported.
+Run `rlhf_sparse_hccl.py` to initialize the trainer and send sparse checkpoint
+updates. Its TP2 launch commands explicitly enable expert parallelism. Reserve
+a separate NPU for the trainer; the transfer group size is `1 + TP * DP`, with
+no additional EP factor. Pipeline parallelism is currently unsupported.
 
 Sparse HCCL requires unquantized ND weights and static expert placement with
 EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and packed
