@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm_ascend.ops.triton.glm5_next_cann_keypool import gather_keypool_state
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 
 
@@ -25,10 +26,7 @@ def prepare_keypool_state(tail, starts, tail_metadata, pool):
         # Packed int8 indexer pages share storage with the FP32 tail. Their
         # byte size need not be a multiple of a tail row, so preserve the
         # physical page stride instead of flattening across page boundaries.
-        history = inputs.history_indices
-        blocks = torch.div(history, inputs.page_rows, rounding_mode="floor")
-        offsets = history % inputs.page_rows
-        state[1 : n + 1].copy_(tail[blocks, offsets])
+        gather_keypool_state(tail, inputs.history_indices, state[1 : n + 1], inputs.page_rows)
     else:
         torch.index_select(
             _cache_rows(tail), 0, inputs.history_indices.flatten(), out=state[1 : n + 1].view(n * pool, width)

@@ -99,3 +99,28 @@ def test_cann_pooled_cache_writer_preserves_tail_and_padded_pages(quant, specula
     gathered = prepare_keypool_state(tail, torch.zeros(2, device="npu", dtype=torch.int32), tail_metadata, POOL_SIZE)
     expected_history = torch.stack((expected_tail_view[0, [0, 1, 2, 3]], expected_tail_view[1, [2, 3, 0, 1]]))
     torch.testing.assert_close(gathered[1:3].cpu(), expected_history, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_padded_tail_gather_replay_reads_updated_history_and_cache():
+    from vllm_ascend.ops.triton.glm5_next_cann_keypool import gather_keypool_state
+
+    # C8 pages can have both an offset and padding smaller than a tail row.
+    page_rows, capacity, width = 37, 9, 2 * HEAD_DIM
+    stride = page_rows * width + 32
+    storage = torch.randn(3 * stride + 16, device="npu")
+    tail = storage.as_strided((3, capacity, width), (stride, width, 1), 16)
+    history_storage = torch.zeros(2, 8, dtype=torch.int64, device="npu")
+    history = history_storage[:, :POOL_SIZE]
+    output = torch.empty(2, POOL_SIZE, width, device="npu")
+    gather_keypool_state(tail, history, output, page_rows)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        gather_keypool_state(tail, history, output, page_rows)
+    for page in (2, 0, 1):
+        history.copy_(torch.arange(8, device="npu").view(2, POOL_SIZE) + page * page_rows)
+        tail.add_(0.25)
+        expected = tail[history // page_rows, history % page_rows]
+        graph.replay()
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)

@@ -155,7 +155,13 @@ def test_cache_writer_passes_padded_page_and_block_layout_without_running_kernel
 
 
 @pytest.mark.parametrize("page_bytes", [32768, 38016])
-def test_cann_history_gather_preserves_packed_indexer_page_stride(page_bytes):
+def test_cann_history_gather_preserves_packed_indexer_page_stride(page_bytes, monkeypatch):
+    # CPU orchestration check; real padded-page kernel values are covered by
+    # test_cann_pooled_cache_writer_preserves_tail_and_padded_pages on NPU.
+    def gather_reference(tail, history, output, page_rows):
+        output.copy_(tail[history // page_rows, history % page_rows])
+
+    monkeypatch.setattr(state_adapters, "gather_keypool_state", gather_reference)
     # 38016 bytes is the real int8 page: 288 * (128 key bytes + 4 scale bytes).
     dim, blocks, capacity, pool = 128, 3, 7, 4
     page_elements = page_bytes // 4

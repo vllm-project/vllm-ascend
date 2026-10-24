@@ -1,11 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
+"""Fused adapters for CANN pooled indexing: metadata, cache access and indices."""
 
 from types import SimpleNamespace
 
 import torch
 from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _gather_keypool_state_kernel(
+    tail,
+    history,
+    output,
+    PAGE_ROWS: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    HISTORY_WIDTH: tl.constexpr,
+    HISTORY_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    source = tl.load(history + row // HISTORY_WIDTH * HISTORY_STRIDE + row % HISTORY_WIDTH).to(tl.int64)
+    address = source // PAGE_ROWS * PAGE_STRIDE + source % PAGE_ROWS * WIDTH + cols
+    value = tl.load(tail + address, cols < WIDTH, other=0)
+    tl.store(output + row * WIDTH + cols, value, cols < WIDTH)
+
+
+def gather_keypool_state(tail, history, output, page_rows):
+    """Copy retained rows from padded physical pages in one launch."""
+    _gather_keypool_state_kernel[(history.numel(),)](
+        tail,
+        history,
+        output,
+        page_rows,
+        tail.stride(0),
+        tail.shape[-1],
+        history.shape[1],
+        history.stride(0),
+        triton.next_power_of_2(tail.shape[-1]),
+    )
 
 
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
