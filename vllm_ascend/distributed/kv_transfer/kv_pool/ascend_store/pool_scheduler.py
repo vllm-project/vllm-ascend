@@ -832,6 +832,7 @@ class KVPoolScheduler:
         prefill_tokens = _new_req_prefill_tokens(request)
         request_tracker = RequestTracker(
             req_id=request.req_id,
+            session_id=getattr(request_real, "session_id", None),
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids_by_group,
             num_saved_tokens=0,
@@ -874,6 +875,7 @@ class KVPoolScheduler:
         previous_tracker = self._request_trackers.get(req_id)
         request_tracker = RequestTracker(
             req_id=req_id,
+            session_id=getattr(request_real, "session_id", None),
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=new_block_ids_by_group,
             num_saved_tokens=0,
@@ -976,6 +978,7 @@ class KVPoolScheduler:
         previous_tracker = self._request_trackers.get(request_id)
         request_tracker = RequestTracker(
             req_id=request_id,
+            session_id=getattr(request, "session_id", None),
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids,
             num_saved_tokens=0,
