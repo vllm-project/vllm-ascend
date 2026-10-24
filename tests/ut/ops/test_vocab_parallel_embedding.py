@@ -36,6 +36,54 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
 
+@pytest.mark.parametrize("layer_cls", [AscendVocabParallelEmbedding, AscendParallelLMHead])
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("preselected", [False, True])
+def test_draft_head_quant_method_and_linear_metadata(layer_cls, tp_size, preselected):
+    """Upstream #59973 supplies a method independently of checkpoint quantization."""
+    method = MagicMock()
+    quant_config = MagicMock()
+    quant_config.get_quant_method.return_value = method
+    plan = SimpleNamespace(
+        mode=VocabParallelMode.STANDARD,
+        shard_rank=tp_size - 1,
+        shard_world_size=tp_size,
+        token_exchange_group=None,
+        output_reduce_group=None,
+    )
+
+    def create_weights(layer, input_size, output_sizes, full_input_size, full_output_size, **kwargs):
+        # Online methods read these attributes while constructing their kernel,
+        # before weights are loaded or quantized.
+        assert layer.input_size == layer.input_size_per_partition == input_size == full_input_size == 4
+        assert layer.output_size == full_output_size == 16
+        assert layer.output_size_per_partition == 16 // tp_size
+        assert layer.output_partition_sizes == output_sizes == [16 // tp_size]
+        assert layer.prefix == "model.lm_head"
+
+    method.create_weights.side_effect = create_weights
+    with (
+        patch("vllm_ascend.ops.vocab_parallel_embedding._resolve_vocab_parallel_plan", return_value=plan),
+        patch.object(layer_cls, "update_param_tp_status"),
+    ):
+        layer = layer_cls(
+            num_embeddings=16,
+            embedding_dim=4,
+            org_num_embeddings=12,
+            padding_size=4,
+            quant_config=quant_config,
+            prefix="model.lm_head",
+            **({"quant_method": method} if preselected else {}),
+        )
+
+    assert layer.quant_method is method
+    method.create_weights.assert_called_once()
+    if preselected:
+        quant_config.get_quant_method.assert_not_called()
+    else:
+        quant_config.get_quant_method.assert_called_once_with(layer, prefix="model.lm_head")
+
+
 class TestCustomVocabParallelEmbedding(unittest.TestCase):
     def setUp(self):
         self.num_embeddings = 50

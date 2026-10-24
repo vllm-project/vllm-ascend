@@ -177,6 +177,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         nn.Module.__init__(self)
         self.disable_tp = disable_tp
@@ -220,8 +221,27 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
-        quant_method = None
-        if quant_config is not None:
+        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
+        self.num_embeddings_per_partition = divide(self.num_embeddings_padded, self.tp_size)
+        assert self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
+        self.num_org_embeddings_per_partition = (
+            self.shard_indices.org_vocab_end_index - self.shard_indices.org_vocab_start_index
+        )
+        self.num_added_embeddings_per_partition = (
+            self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
+        )
+
+        # Online draft-head quantization uses the linear weight factory and
+        # reconstructs the head from these dimensions and its original prefix.
+        self.input_size = self.input_size_per_partition = embedding_dim
+        self.output_size = self.num_embeddings_padded
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.output_partition_sizes = [self.output_size_per_partition]
+        self.prefix = prefix
+
+        # A preselected draft-head method takes precedence over checkpoint
+        # quantization; otherwise retain the existing config/default dispatch.
+        if quant_method is None and quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
@@ -242,17 +262,6 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
-        # Divide the weight matrix along the vocaburaly dimension.
-        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
-        self.num_embeddings_per_partition = divide(self.num_embeddings_padded, self.tp_size)
-        assert self.shard_indices.num_elements_padded == self.num_embeddings_per_partition
-        self.num_org_embeddings_per_partition = (
-            self.shard_indices.org_vocab_end_index - self.shard_indices.org_vocab_start_index
-        )
-        self.num_added_embeddings_per_partition = (
-            self.shard_indices.added_vocab_end_index - self.shard_indices.added_vocab_start_index
-        )
-
         self.quant_method.create_weights(
             self,
             self.embedding_dim,
@@ -433,6 +442,7 @@ class AscendParallelLMHead(ParallelLMHead):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         AscendVocabParallelEmbedding.__init__(
             self,
@@ -444,6 +454,7 @@ class AscendParallelLMHead(ParallelLMHead):
             quant_config,
             prefix,
             disable_tp=disable_tp,
+            quant_method=quant_method,
         )
         self.quant_config = quant_config
         if bias:
