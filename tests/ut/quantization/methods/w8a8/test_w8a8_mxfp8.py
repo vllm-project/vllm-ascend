@@ -17,12 +17,15 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.utils import reshape_wo_a_to_3d
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.model_config.hf_config = SimpleNamespace(model_type="other")
         scale_alg = patch(
             "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg", return_value=0
         )
@@ -144,6 +147,88 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         layer = self._make_wo_a_layer(2)
         with self.assertRaisesRegex(ValueError, "complete o_lora_rank groups"):
             self.scheme.process_weights_after_loading(layer)
+
+    def test_wo_a_rank_does_not_require_deepseek_model_type(self):
+        for hf_config in (SimpleNamespace(o_lora_rank=4), SimpleNamespace(model_type="other", o_lora_rank=4)):
+            with self.subTest(config=hf_config):
+                config = create_mock_vllm_config()
+                config.model_config.hf_config = hf_config
+                with patch(
+                    "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                    return_value=config,
+                ):
+                    scheme = AscendW8A8MXFP8DynamicLinearMethod()
+                layer = self._make_wo_a_layer(2)
+                scheme.process_weights_after_loading(layer)
+                self.assertEqual(layer.weight.shape, (2, 128, 4))
+
+    def test_shared_wo_a_layout_matches_bf16_checkpoint_rows(self):
+        for groups in (1, 2, 16):
+            weight = torch.arange(groups * 4 * 128, dtype=torch.float32).reshape(groups * 4, 128).to(torch.bfloat16)
+            expected = torch.stack([weight[g * 4 : (g + 1) * 4].T for g in range(groups)])
+            actual = reshape_wo_a_to_3d(weight, 4)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            self.assertTrue(actual.is_contiguous())
+
+    def test_grouped_wo_a_weight_switch_reconstructs_output_shards(self):
+        self.scheme.o_lora_rank = 4
+        for world_size in (2, 4):
+            with self.subTest(world_size=world_size):
+                full_layer = self._make_wo_a_layer(world_size * 2)
+                checkpoint_weight = full_layer.weight.detach().clone()
+                checkpoint_scale = full_layer.weight_scale.detach().clone()
+                shards = []
+                for rank in range(world_size):
+                    layer = self._make_wo_a_layer(2)
+                    layer.weight.data.copy_(checkpoint_weight[rank * 8 : (rank + 1) * 8])
+                    layer.weight_scale.data.copy_(checkpoint_scale[rank * 8 : (rank + 1) * 8])
+                    layer.output_size = world_size * 8
+                    layer.output_size_per_partition = 8
+                    self.scheme.process_weights_after_loading(layer)
+                    shards.append(layer)
+                expected_weight = reshape_wo_a_to_3d(checkpoint_weight, 4)
+                expected_scale = reshape_wo_a_to_3d(checkpoint_scale.reshape(world_size * 8, 2, 2), 4)
+                for rank, layer in enumerate(shards):
+                    config = WeightSwitchConfig(group=object(), world_size=world_size, rank=rank, shard_axis="output")
+                    state = self.scheme.enable_weight_switch(layer, config)
+                    self.assertEqual({p.spec.gather_dim for p in state.gather_parts.values()}, {0})
+                    self.assertEqual(state.gather_parts["weight"].full_tensor.shape, expected_weight.shape)
+                    self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, expected_scale.shape)
+                    local_weight = layer.weight.detach().clone()
+                    local_scale = layer.weight_scale.detach().clone()
+                    for _ in range(2):
+                        # Simulate the collective without a process group: each
+                        # output must concatenate the exact per-rank inputs.
+                        def gather(tensor, group, *, output, async_op, shards=shards):
+                            name = "weight" if tensor.ndim == 3 else "weight_scale"
+                            values = torch.cat([getattr(shard, name).detach() for shard in shards], dim=0)
+                            output.copy_(values)
+                            return output, None
+
+                        with patch("vllm_ascend.distributed.utils.all_gather_async", side_effect=gather) as collective:
+                            self.scheme.all_gather_weight(state, config)
+                            self.scheme.wait_weight_all_gather(state)
+                            self.assertEqual(collective.call_count, 2)
+                        self.scheme.switch_weight(layer, state, use_full_weight=True)
+                        torch.testing.assert_close(layer.weight.float(), expected_weight.float(), rtol=0, atol=0)
+                        torch.testing.assert_close(layer.weight_scale, expected_scale)
+                        self.scheme.switch_weight(layer, state, use_full_weight=False)
+                        torch.testing.assert_close(layer.weight.float(), local_weight.float(), rtol=0, atol=0)
+                        torch.testing.assert_close(layer.weight_scale, local_scale)
+
+    def test_ordinary_output_weight_switch_keeps_transposed_axis(self):
+        self.scheme.o_lora_rank = 4
+        grouped = self._make_wo_a_layer(2)
+        self.scheme.process_weights_after_loading(grouped)
+        # Processing grouped wo_a on the same scheme must not change other layers.
+        ordinary = self._make_wo_a_layer(2)
+        ordinary.prefix = "model.layers.0.self_attn.wo_b"
+        self.scheme.process_weights_after_loading(ordinary)
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0, shard_axis="output")
+        state = self.scheme.enable_weight_switch(ordinary, config)
+        self.assertEqual({p.spec.gather_dim for p in state.gather_parts.values()}, {1})
+        self.assertEqual(state.gather_parts["weight"].full_tensor.shape, (128, 16))
+        self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (2, 16, 2))
 
     def test_get_weight_various_input_sizes(self):
         sizes = [(128, 64), (512, 256), (1024, 512)]
