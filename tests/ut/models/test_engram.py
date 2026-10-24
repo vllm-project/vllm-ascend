@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
+import ctypes
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +36,57 @@ from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+
+
+@pytest.mark.parametrize("failure", [None, "register", "device_pointer"])
+def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure):
+    alignment, size = 65536, 4096
+
+    class Library:
+        def __init__(self):
+            self.storage = ctypes.create_string_buffer(size + 4 * alignment)
+            base = ctypes.addressof(self.storage)
+            self.original = (base + alignment - 1) // alignment * alignment + 4096
+            self.registered = self.unregistered = self.freed = None
+
+        def aclrtMallocHost(self, output, count, flags):
+            assert count == size + alignment - 1
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = self.original
+            return 0
+
+        def aclrtHostRegisterV2(self, pointer, count, flags):
+            assert count == size and pointer.value % alignment == 0
+            self.registered = pointer.value
+            return 1 if failure == "register" else 0
+
+        def aclrtHostGetDevicePointer(self, pointer, output, flags):
+            assert pointer.value == self.registered
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x100000000
+            return 1 if failure == "device_pointer" else 0
+
+        def aclrtHostUnregister(self, pointer):
+            self.unregistered = pointer.value
+            return 0
+
+        def aclrtFreeHost(self, pointer):
+            self.freed = pointer.value
+            return 0
+
+    lib = Library()
+    monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    if failure:
+        with pytest.raises(RuntimeError):
+            npu.HostUvaBuffer((size,), torch.uint8, "cpu")
+    else:
+        buffer = npu.HostUvaBuffer((size,), torch.uint8, "cpu")
+        assert buffer.tensor.data_ptr() == lib.registered
+        assert lib.original < lib.registered and lib.registered + size <= lib.original + size + alignment - 1
+        buffer.tensor.fill_(17)
+        assert ctypes.c_uint8.from_address(lib.registered).value == 17
+        buffer.close()
+        buffer.close()
+    assert lib.unregistered == lib.registered
+    assert lib.freed == lib.original
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):

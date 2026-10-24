@@ -151,10 +151,14 @@ class HostUvaBuffer:
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
-        self.pointer = ctypes.c_void_p()
-        rc = self.lib.aclrtMallocHost(ctypes.byref(self.pointer), size, 0)
+        # Small malloc-host suballocations can map from a rounded-down base on
+        # A3. Register an aligned payload, retaining the allocation for free.
+        alignment = 64 * 1024
+        self._allocation_pointer = ctypes.c_void_p()
+        rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
         if rc:
             raise RuntimeError(f"aclrtMallocHost failed: rc={rc} size={size}")
+        self.pointer = ctypes.c_void_p((self._allocation_pointer.value + alignment - 1) // alignment * alignment)
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:
@@ -174,7 +178,7 @@ class HostUvaBuffer:
             # A half-built buffer must not leave the host range registered: the
             # caller only sees the exception, so nothing else can release it.
             self.lib.aclrtHostUnregister(self.pointer)
-            self.lib.aclrtFreeHost(self.pointer)
+            self.lib.aclrtFreeHost(self._allocation_pointer)
             self.tensor = None
             self.buffer = None
             self.pointer = ctypes.c_void_p()
@@ -197,7 +201,7 @@ class HostUvaBuffer:
         self.tensor = None
         self.buffer = None
         self.ptrs = None
-        rc = self.lib.aclrtFreeHost(self.pointer)
+        rc = self.lib.aclrtFreeHost(self._allocation_pointer)
         if rc:
             raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.pointer = ctypes.c_void_p()
