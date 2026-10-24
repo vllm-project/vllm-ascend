@@ -42,6 +42,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.triton.dcp.dcp_a2a import fused_dcp_lse_combine
+from vllm_ascend.ops.triton.dcp.flashmla_prepare import prepare_flashmla_current, prepare_flashmla_query
 from vllm_ascend.utils import cp_decode_comm_stream, weak_ref_tensors
 
 
@@ -578,6 +579,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             preprocessed.current_k_pe,
             fused_cache.shape[1],
             metadata,
+            current_q_nope=getattr(preprocessed, "current_q_nope", None),
+            current_q_pe=getattr(preprocessed, "current_q_pe", None),
         )
 
     def _prepare_dcp_flashmla_current(self, flash, q_nope, q_pe, k_nope, k_pe):
@@ -585,16 +588,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current = flash.current
         assert current is not None
         assert k_nope is not None and k_pe is not None
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
-            value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
-            key_cache=current.cache[..., : self.kv_lora_rank],
-            value_cache=current.cache[..., self.kv_lora_rank :],
-            slot_mapping=current.slots,
-            cache_mode="Norm",
-        )
-        current.query[..., : self.kv_lora_rank].copy_(q_nope)
-        current.query[..., self.kv_lora_rank :].copy_(q_pe)
+        prepare_flashmla_current(q_nope, q_pe, k_nope, k_pe, current.query, current.cache, current.slots)
 
     def _run_dcp_flashmla_attention(self, flash, q_nope, q_pe, k_nope, k_pe, *, attention_kind):
         """Adapt FlashMLA to TND/TN1; current KV/Q must already be staged."""
@@ -608,8 +602,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             query, cache = flash.query, k_nope
             adapter, schedule = flash.adapter, flash.schedule
             block_table, cache_lens, attn_mask = flash.block_table, flash.cache_lens, None
-            query[..., : self.kv_lora_rank].copy_(q_nope)
-            query[..., self.kv_lora_rank :].copy_(q_pe)
+            prepare_flashmla_query(q_nope, q_pe, query)
         output, lse = adapter.attention(
             query,
             cache,
@@ -731,6 +724,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current_k_pe: torch.Tensor | None,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
+        *,
+        current_q_nope: torch.Tensor | None = None,
+        current_q_pe: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flash = getattr(attn_metadata, "external_flashmla", None)
         decode_meta = attn_metadata.decode
@@ -741,9 +737,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
         num_tokens = q_nope.size(0)
         num_heads = q_nope.size(1)
-        q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
+        q_nope = q_nope.view(num_tokens, num_heads, -1)
         q_pe = q_pe.view(num_tokens, num_heads, -1)
         if flash is None:
+            q_nope = q_nope.contiguous()
             assert cache_k_pe is not None
             history_k_nope = cache_k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
             history_k_pe = cache_k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -754,9 +751,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         has_current = flash is None or flash.current is not None
         if has_current:
             assert current_k_nope is not None and current_k_pe is not None
-            current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
-            current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
-            current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
+            if flash is None or current_q_nope is None or current_q_pe is None:
+                # Legacy callers may only supply the gathered query. External
+                # FlashMLA preprocessing retains the original local heads.
+                current_q_nope, current_q_pe = self._local_decode_query(q_nope, q_pe, num_heads=self.num_heads)
+            current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
+            current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
+            if flash is None:
+                current_k_nope = current_k_nope.contiguous()
+                current_k_pe = current_k_pe.contiguous()
 
         if _EXTRA_CTX.capturing and flash is None:
             assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
@@ -837,7 +840,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             )
 
         # Stage FlashMLA's current KV and Q on the main stream so its AIV
-        # scatter/copies cannot contend with history output packing. Only
+        # fused input preparation cannot contend with history output packing. Only
         # current attention overlaps packing and exchange on the side stream.
         # The ready event also protects the history FIA's shared workspace.
         main_stream = torch.npu.current_stream()

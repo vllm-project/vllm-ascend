@@ -3021,6 +3021,7 @@ class TestAscendMLAImpl(TestBase):
         kv_cache = MagicMock()
 
         attn_metadata = MagicMock()
+        attn_metadata.external_flashmla = None
         attn_metadata.num_decodes = 2
         attn_metadata.num_prefills = 2
         attn_metadata.num_decode_tokens = 2
@@ -3070,6 +3071,8 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
+        self.assertIsNone(decode_res.current_q_nope)
+        self.assertIsNone(decode_res.current_q_pe)
 
     def test_mla_preprocess_prefill_pcp_empty_rank(self):
         self.impl.pcp_enabled = True
