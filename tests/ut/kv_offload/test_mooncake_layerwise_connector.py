@@ -893,6 +893,15 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         kv_cache_config = MockKVCacheConfig()
         self.scheduler = MooncakeLayerwiseConnectorScheduler(config, kv_cache_config, "test_engine")
 
+    def test_consumer_pcp_rejected_at_init(self):
+        """Layerwise transfer disables prefill context parallel on decoder nodes."""
+        config = MockVllmConfig()
+        config.kv_transfer_config.is_kv_producer = False
+        config.kv_transfer_config.is_kv_consumer = True
+        config.parallel_config.prefill_context_parallel_size = 2
+        with self.assertRaisesRegex(AssertionError, "Prefill context parallel is not support on decoder nodes"):
+            MooncakeLayerwiseConnectorScheduler(config, MockKVCacheConfig(), "test_engine")
+
     def test_get_num_new_matched_tokens(self):
         request = MockRequest("req1")
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(request, 0)

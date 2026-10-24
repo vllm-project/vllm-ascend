@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 import json
 import os
+import types
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
     collect_storage_merged_register_regions,
+    context_parallel_parameters_check,
     inject_qos,
 )
 
@@ -115,3 +117,34 @@ class TestKVRegisterRegions(unittest.TestCase):
         self.assertEqual(regions.lengths, [36 * cache.element_size()])
         self.assertEqual(regions.logical_total_bytes, cache.nbytes)
         self.assertEqual(regions.logical_tensor_count, 1)
+
+
+class TestContextParallelParametersCheck(unittest.TestCase):
+    """P/D CP geometry must divide cleanly before any KV shard planning."""
+
+    @staticmethod
+    def _parallel_info(pcp_size, dcp_size, tp_size, use_mla):
+        return types.SimpleNamespace(pcp_size=pcp_size, dcp_size=dcp_size, tp_size=tp_size, use_mla=use_mla)
+
+    def test_valid_combinations_pass(self):
+        # MLA: only the pcp*dcp divisibility applies.
+        context_parallel_parameters_check(
+            1, 2, self._parallel_info(1, 2, 4, True), self._parallel_info(1, 2, 4, True), 1
+        )
+        # GQA with head counts that divide cleanly.
+        context_parallel_parameters_check(
+            1, 2, self._parallel_info(1, 2, 4, False), self._parallel_info(1, 2, 4, False), 8
+        )
+
+    def test_cp_product_not_divisible_rejected(self):
+        with self.assertRaises(AssertionError):
+            context_parallel_parameters_check(
+                1, 3, self._parallel_info(2, 2, 4, True), self._parallel_info(1, 2, 4, True), 1
+            )
+
+    def test_non_mla_head_mismatch_rejected(self):
+        # heads=5: per-rank heads ceil(5/3)=2 on P vs ceil(5/2)=3 on D -> not divisible.
+        with self.assertRaises(AssertionError):
+            context_parallel_parameters_check(
+                1, 2, self._parallel_info(1, 2, 3, False), self._parallel_info(1, 2, 4, False), 5
+            )
