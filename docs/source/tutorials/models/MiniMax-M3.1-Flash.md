@@ -12,6 +12,14 @@ MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately
 428B total parameters and 23B activated parameters per token. It uses sparse
 attention throughout the model.
 
+!!! warning
+
+    **Current status and constraints**
+
+    - The deployment examples require the platform-specific integration images, source snapshots, and compiled operators described in [Hardware and Software Preparation](#32-hardware-and-software-preparation). Public image references, quantized checkpoint download locations, and the matching source/operator delivery are still pending. A standard `pip install` or source build alone does not reproduce these prepared environments.
+    - The configurations described here are Atlas 800I A3 with W8A8 weights and text-only serving, and 950DT products with MXFP8 weights and FP8 KV cache. Other hardware and weight configurations have not been validated by this guide.
+    - The [Supported Features](#2-supported-features) section links to the model support matrix; these entries do not imply support for every feature or deployment combination. This guide is an early-access draft, and the documented commands still require reproduction with public artifacts and further performance and reliability validation.
+
 ## 2 Supported Features
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
