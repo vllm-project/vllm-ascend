@@ -804,6 +804,11 @@ class KVPoolScheduler:
         force_skip_save: bool,
     ) -> ReqMeta | None:
         if self.vllm_config.use_v2_model_runner:
+            # MRV2 resumes through scheduled_new_reqs with a full block table.
+            # Clear the marker so the next RUNNING delta extends this table instead
+            # of rebuilding the tracker from the delta and resetting save progress.
+            # MRV1 resumes through cached requests and consumes the marker in
+            # _process_preempted_cached_request.
             self._preempted_req_ids.discard(request.req_id)
         load_spec = self.load_specs.pop(request.req_id, None)
         num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
