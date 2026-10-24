@@ -1934,7 +1934,7 @@ layerwise setting and topology.
     - Both roles retain chunked prefill, async scheduling, seed 1024, and
       memory utilization 0.92. Prefill enables prefix caching, DSA CP,
       FlashComm1, `enable_fused_mc2=2`, and `enable_shared_expert_dp=true`.
-      Non-pooled Decode uses prefix caching and NPU graph/static-kernel
+      Non-pooled Decode disables prefix caching and NPU graph/static-kernel
       compilation with shared-expert multistream overlap, without fused MC2.
       Both use `glm47` tool and reasoning parsers and the served model name `glm`.
     - `MooncakeConnectorV2` declares the same Prefill DP1/PP2/TP16 and
@@ -3526,7 +3526,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
     PP node rank, API port, local IP, instance leader IP, and visible devices.
-    All four PP stages of one instance use the same master address and partition.
+    Both PP stages of one instance use the same master address and partition.
     The Prefill instance uses its own master address.
 
     ```shell
@@ -3773,7 +3773,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         ```
 
     2. Export the settings from [Prepare MemCache](#glm53-pool-a2-prepare)
-       on **every** Prefill node. Start all four PP stages of the Prefill instance in
+       on **every** Prefill node. Start both PP stages of each instance in
        separate terminals before waiting for the instance to become ready:
 
         ```shell
