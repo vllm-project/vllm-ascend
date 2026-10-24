@@ -1,0 +1,4 @@
+pr: 19674
+entries:
+  - category: bugfix
+    text: Fixed grouped output-projection weight loading for ModelSlim DeepSeek-V4 MXFP8 checkpoints to prevent a decode startup error.
