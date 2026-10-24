@@ -224,6 +224,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         grouped_wo_a = self.o_lora_rank is not None and getattr(layer, "prefix", "").endswith("wo_a")
         layer._mxfp8_grouped_wo_a_layout = grouped_wo_a
         if grouped_wo_a:
+            assert self.o_lora_rank is not None
             transposed_weight = reshape_wo_a_to_3d(padded_weight, self.o_lora_rank)
             target_scale = reshape_wo_a_to_3d(reshaped_scale, self.o_lora_rank)
         else:
@@ -685,6 +686,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         if layer.prefix.endswith("wo_a"):
+            assert self.o_lora_rank is not None
             layer.weight.data = reshape_wo_a_to_3d(layer.weight.data, self.o_lora_rank)
             layer.weight_scale.data = reshape_wo_a_to_3d(layer.weight_scale.data, self.o_lora_rank)
         else:
