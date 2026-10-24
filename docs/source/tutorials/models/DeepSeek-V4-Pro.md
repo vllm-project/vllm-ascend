@@ -1210,7 +1210,7 @@ ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 120GB
 ock.mmc.local_service.max.dram.size = 1024GB
 ock.mmc.local_service.storage.enabled = true
-ubsio.disk.path = /dev/loop0
+ubsio.disk.path = <DISK_PATH>
 ubsio.mem.size_in_gb = 600
 ubsio.standalone.device_count = 1
 ubsio.standalone.force_new_disk = true
@@ -1229,7 +1229,7 @@ The `600GB` configured by `ubsio.mem.size_in_gb` is a separate host-memory pool
 for UBS IO, not the storage-device capacity. Reserve host memory for both
 allocations as well as the operating system and vLLM.
 
-`/dev/loop0` is the cache device used in this example. Set `ubsio.disk.path` to
+`<DISK_PATH>` is the cache device path used in this example. Set `ubsio.disk.path` to
 the dedicated, unmounted cache device on each node. With
 `ubsio.standalone.force_new_disk = true`, UBS IO clears that device at startup.
 The MetaService eviction watermarks are `70` (high) and `60` (low).
