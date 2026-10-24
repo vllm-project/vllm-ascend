@@ -1,0 +1,5 @@
+pr: 19555
+entries:
+  - category: performance
+    text: Reduced shared expert addition and eligible DCP16 attention merge overhead during decode on Ascend NPUs.
+    hardware: [A3]
