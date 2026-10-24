@@ -9,8 +9,8 @@ architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
 restoration. Cases whose model is not ready for the transaction are skipped in
 both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
-attention-sink fix that lives in #16355 — so the matrix carries Qwen3.5-35B-A3B
-and GLM-5.1 today.
+attention-sink fix that lives in #16355. One-card CI runs the Qwen3.5-35B-A3B
+MoE transaction; GLM-5.1 stays on the shared matrix for the two-card lane.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -84,6 +84,8 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
+    if case.id == "glm-5.1-sfa-derived-kv":
+        pytest.skip(f"{case.id}: one-card CI keeps the Qwen3.5 MoE transaction")
     if packed:
         pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
