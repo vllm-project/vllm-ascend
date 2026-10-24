@@ -1,0 +1,15 @@
+pr: 19712
+entries:
+  - category: bugfix
+    text: >-
+      Batch invariance now also patches the FlashAttention v2 entry points
+      (npu_fused_infer_attention_score_v2 and its workspace helpers), which MLA
+      and AscendAttention call on recent CANN and which previously bypassed the
+      batch-invariant kernel.
+  - category: breaking
+    text: >-
+      VLLM_BATCH_INVARIANT=1 is now rejected at startup for model families whose
+      attention or expert GEMM path has no batch-invariant kernel, including
+      GLM-5, GLM-5.1, GLM-5.2, DeepSeek-V3.2 and kpool-indexer models. These
+      families previously started with non-invariant kernels and produced results
+      that changed with the batch composition.
