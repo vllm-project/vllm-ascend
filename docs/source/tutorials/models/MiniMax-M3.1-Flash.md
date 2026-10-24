@@ -194,7 +194,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
-    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${MODEL_PATH} \
@@ -487,7 +487,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_IF_IP="$LOCAL_IP"
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
@@ -567,7 +567,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP="$LOCAL_IP"
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
