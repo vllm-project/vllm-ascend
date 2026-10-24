@@ -18,9 +18,14 @@ vLLM Ascend for offline batch classification and online service deployment.
 The model runs through the pooling runner with the `classify` task
 (`supported_tasks=('classify', 'token_classify')`). Because it is a
 classification model there is no sampling path: greedy/non-greedy criteria
-do not apply, and inference is near-deterministic (the same input yields
-near-identical probabilities; the residual kernel-level noise on the Ascend
-custom-op path is ~1e-3).
+do not apply, and inference is near-deterministic. Measured noise on this
+model (33-sample Korean corpus): repeated runs are bit-identical for 32/33
+samples (~1e-3 otherwise), single-vs-batch differs by ~2e-3, and the
+end-to-end bf16-vs-fp32 probability difference is <= 4e-3 for
+high-confidence samples and up to ~2e-2 for soft ones (p ~ 0.7, where the
+small logit error is amplified ~4.7x). The tests therefore compare
+probabilities with atol=1e-2 on the high-confidence subset and atol=2.5e-2
+on the full corpus, and require exact argmax agreement everywhere.
 
 ## 3 Prerequisites
 
@@ -86,7 +91,8 @@ This is the PR-validated configuration (verified with
 (`enable_custom_op()` returns `False`) and falls back to
 `torch_npu.npu_add_rms_norm`. Note that this mode also makes
 single-vs-batch outputs bit-exact, which the default custom op path does
-not guarantee (~2e-3 kernel-level batch correlation is normal there).
+not guarantee: measured single-vs-batch differences there are ~2e-3,
+within the atol=1e-2 tolerance the tests use.
 
 ## 6 Online Service Deployment
 
@@ -115,8 +121,9 @@ vllm serve jason9693/Qwen2.5-1.5B-apeach \
 Key parameter descriptions:
 
 - `--runner pooling`: required for embedding/pooling/classification models.
-- `--dtype bfloat16`: bf16 keeps the probability tolerance vs the fp32
-  reference within 1e-2 for confident inputs. Avoid fp16 on this model:
+- `--dtype bfloat16`: with bf16 the measured difference from the fp32
+  reference is <= 4e-3 for high-confidence samples and up to ~2e-2 for
+  soft ones on this corpus (the tests use atol=1e-2 / 2.5e-2 accordingly). Avoid fp16 on this model:
   a same-lineage fp16 test was historically flaky and is on the CI skip
   list.
 - `--max-model-len 4096`: classification inputs are short (< 512 tokens),
@@ -181,10 +188,13 @@ for out in outputs:
 - Language coverage: the model is Korean-only. Chinese/English inputs run
   without crashing but are out of the model's domain.
 - Soft probabilities: for benign Korean inputs the model naturally emits
-  probabilities around 0.5-0.9. End-to-end bf16 accumulation across the 28
-  transformer layers (a single bf16 rounding step is only ~2e-3) shifts the
-  probability by up to ~3e-3 in measured bf16-vs-fp32 comparisons on this
-  corpus; argmax labels remain stable.
+  probabilities around 0.5-0.9. In that regime |dp| ~ p(1-p)|dz| amplifies
+  the bf16 logit error ~4.7x, so measured end-to-end bf16-vs-fp32
+  differences reach ~2e-2 for one soft sample (0.0198: HF fp32 p=0.6907 vs
+  vLLM 0.7105; deterministic across runs and independent of batching),
+  against <= 4e-3 for high-confidence samples. Argmax labels remain stable
+  in both cases. Run-to-run differences are bit-exact for 32/33 samples
+  (~1e-3 otherwise) and single-vs-batch differences are ~2e-3.
 
 ## 9 FAQ
 
