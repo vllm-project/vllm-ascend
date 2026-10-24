@@ -45,6 +45,8 @@ class WeightUpdateModelCase:
     trust_remote_code: bool = True
     split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
+    # One representative model covers both backends and packing modes.
+    full_transfer_matrix: bool = False
     skip_reason: str | None = None
     """Why neither lane can carry this case yet.
 
@@ -201,6 +203,7 @@ MODEL_CASES = (
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
         model="Qwen/Qwen3.5-35B-A3B",
+        full_transfer_matrix=True,
         hf_overrides={
             "architectures": ["Qwen3_5MoeForCausalLM"],
             "text_config": {
@@ -350,11 +353,23 @@ def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: in
     return shape
 
 
-def pytest_model_cases() -> list[Any]:
-    """Return model params with per-checkpoint CI discovery markers."""
+def pytest_model_cases(backend: str) -> list[Any]:
+    """Cover every model over unpacked IPC and transport modes on a representative."""
     import pytest
 
-    return [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in MODEL_CASES]
+    if backend not in ("npu_ipc", "hccl"):
+        raise ValueError(f"Unsupported weight transfer backend: {backend}")
+    return [
+        pytest.param(
+            case,
+            packed,
+            id=f"{'packed' if packed else 'unpacked'}-{case.id}",
+            marks=pytest.mark.e2e_model(case.model),
+        )
+        for packed in (False, True)
+        for case in MODEL_CASES
+        if (backend == "npu_ipc" and not packed) or case.full_transfer_matrix
+    ]
 
 
 # The packed lanes are disabled here because the packed HCCL transfer is flaky: a

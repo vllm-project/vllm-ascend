@@ -22,7 +22,8 @@ signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. The packed lane is currently skipped
+graph-captured storage of the first update. Every model covers unpacked IPC;
+Qwen3.5 additionally covers packed IPC. The packed lane is currently skipped
 on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
 
 The lane is the same-chip deployment this backend exists for: the trainer
@@ -79,8 +80,7 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
 )
-@pytest.mark.parametrize("case", pytest_model_cases())
-@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc"))
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")

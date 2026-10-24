@@ -50,6 +50,27 @@ PACKED_BUFFER_FLOOR_BYTES = 2**30
 PACKED_BUFFER_HEADROOM_BYTES = 128 * 2**20
 
 
+@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
+def test_model_matrix_separates_model_and_transport_coverage(backend):
+    parameters = utils.pytest_model_cases(backend)
+    representative = next(case for case in MODEL_CASES if case.model == "Qwen/Qwen3.5-35B-A3B")
+    expected = {(representative.id, False), (representative.id, True)}
+    if backend == "npu_ipc":
+        expected |= {(case.id, False) for case in MODEL_CASES}
+
+    assert {(case.id, packed) for param in parameters for case, packed in [param.values]} == expected
+    assert len(parameters) == len(expected)
+    for parameter in parameters:
+        case, packed = parameter.values
+        assert parameter.id == f"{'packed' if packed else 'unpacked'}-{case.id}"
+        assert any(mark.name == "e2e_model" and mark.args == (case.model,) for mark in parameter.marks)
+
+
+def test_model_matrix_rejects_unknown_backend():
+    with pytest.raises(ValueError, match="Unsupported weight transfer backend"):
+        utils.pytest_model_cases("unknown")
+
+
 def _checkpoint_source(model, case):
     # Only supply num_experts when the case does not override an expert field.
     # Otherwise an incorrect fallback could pass by reading this default.
