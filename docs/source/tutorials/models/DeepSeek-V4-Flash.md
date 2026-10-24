@@ -1894,6 +1894,7 @@ Deployment Verification:
 After the four nodes are up, send a request through the proxy port on the Prefill head node to verify that Prefill and Decode work together. Then check the Decode-side concurrency to confirm the configuration is effective: with DSpark each sequence processes 6 tokens per step, so the concurrency one Decode engine can hold equals `max-num-batched-tokens / 6` (bounded by `--max-num-seqs`). `vllm:num_requests_running`, `vllm:num_requests_waiting_by_reason{reason="capacity"}` and `vllm:kv_cache_usage_perc` should be read together: if `running` is pinned at `--max-num-seqs` while `kv_cache_usage_perc` stays low, the deployment is limited by request concurrency, not by HBM.
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
+
 ### 5.3 A3 1P1D Deployment with Memcache KV Cache Pool
 
 This example deploys the DSpark checkpoint `DeepSeek-V4-Flash-0731-w8a8` on
