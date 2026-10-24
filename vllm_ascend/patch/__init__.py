@@ -742,6 +742,35 @@
 #       Remove this patch once upstream carries the replay start on the V1
 #       resume path as well, i.e. once `CachedRequestData` declares the field.
 #
+# ** 20a. File: platform/patch_tokenizer_cache.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.base.BaseRenderer.__init__`
+#      `vllm.renderers.hf.HfRenderer.__init__` (legacy-cache cores only)
+#      `vllm.renderers.base.BaseRenderer._tokenize_prompt`
+#      `vllm.renderers.hf.safe_apply_chat_template`
+#      `vllm.renderers.deepseek_v4.DeepseekV4Renderer._apply_chat_template`
+#      `vllm.renderers.deepseek_v32.DeepseekV32Renderer._apply_chat_template`
+#    Why:
+#       Prefix caching removes the compute for a repeated conversation prefix,
+#       but tokenization still runs over the full prompt on every turn, so at a
+#       high prefix-cache hit rate the tokenizer becomes the dominant frontend
+#       cost of agent workloads on vLLM cores without tokenizer caching.
+#    How:
+#       Reuse a native vLLM tokenizer cache when its configuration field is
+#       available, preserving a positive native budget and forwarding the
+#       legacy budget through a renderer-local config copy otherwise. In that
+#       mode only BaseRenderer initialization is adapted. On older cores,
+#       restrict the segment cache to supported stateless HF ByteLevel BPE
+#       tokenizers and run additional identity probes; unsupported tokenizers
+#       and option-bearing requests fall back to ordinary encoding. Attach the
+#       HF cache after thread-pool construction and preserve DeepSeek prompt
+#       metadata. Opt in via `additional_config.tokenizer_cache_gb` (0 = off).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/16298
+#    Future Plan:
+#       Remove the legacy cache when all supported vLLM cores provide native
+#       caching, then deprecate the additional-config alias separately.
+#
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
