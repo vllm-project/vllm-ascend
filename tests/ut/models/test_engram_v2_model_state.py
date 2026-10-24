@@ -285,7 +285,7 @@ def make_state(model, monkeypatch):
         state_mod, "triton", SimpleNamespace(next_power_of_2=lambda value: 1 << (value - 1).bit_length())
     )
     state = object.__new__(state_mod.EngramModelState)
-    state.vllm_config = SimpleNamespace()
+    state.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL))
     state.max_num_reqs, state.device = 4, torch.device("cpu")
     state.rope_state = None
     state.supports_mm_inputs = False

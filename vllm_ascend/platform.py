@@ -1415,6 +1415,14 @@ def _setup_compile_backend(
                 "vllm::minimax_m3_fused_sparse_forward",
             ]
         )
+        if (
+            compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+            and vllm_config.parallel_config.enable_expert_parallel
+        ):
+            # AlltoAllV uses data-dependent expert counts and host-side split
+            # arrays. In pure PIECEWISE mode, keep its MoE custom ops outside
+            # graph capture, which cannot synchronize dynamic sizes.
+            compilation_config.splitting_ops.extend(["vllm::moe_forward", "vllm::moe_forward_shared"])
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False

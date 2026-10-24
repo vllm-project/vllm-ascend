@@ -39,6 +39,7 @@ def inputs(*, dummy=False):
         is_prefilling_np=np.array([False, True, True]),
         idx_mapping_np=np.array([2, 0, 1]),
         seq_lens_np=np.array([1, 6, 6], dtype=np.int32),
+        num_tokens_after_padding=13,
         is_dummy=dummy,
     )
     return replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 13), [], torch.zeros(3, dtype=torch.int32))
@@ -179,6 +180,29 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
 def test_graph_step_clears_previous_replay(state, mode):
     state.layers.rows = torch.arange(2)
     state.prepare(inputs(), mode)
+    assert state.layers.rows is None
+    state._gather.assert_not_called()
+
+
+def test_large_piecewise_batch_uses_padded_replay_graph(state):
+    state.layers.trim_threshold = 12
+    descriptor = SimpleNamespace(cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=16)
+    state.graph_manager = SimpleNamespace(dispatch=Mock(return_value=descriptor), run=Mock())
+
+    state.prepare(inputs(), CUDAGraphMode.PIECEWISE)
+
+    state.graph_manager.dispatch.assert_called_once_with(3, 5, None, 0)
+    assert state.num_actual_tokens == 5
+    assert state.num_tokens == 16
+    assert state.graph_mode == CUDAGraphMode.PIECEWISE
+    assert state.graph_descriptor.num_tokens == 16
+    assert state.layers.rows.numel() == 16
+    assert state.layers.graph_runner is state.graph_manager.run
+
+
+def test_small_piecewise_batch_keeps_whole_model_graph(state):
+    state.layers.trim_threshold = 16
+    state.prepare(inputs(), CUDAGraphMode.PIECEWISE)
     assert state.layers.rows is None
     state._gather.assert_not_called()
 
