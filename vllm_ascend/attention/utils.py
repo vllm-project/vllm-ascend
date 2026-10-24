@@ -303,7 +303,26 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
 
 
 def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
-    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    """Require contiguous K/V for hidden-state drafts, MiniMax M3, or PA."""
+    # Both runners allocate target and draft caches through this policy. Keep
+    # these paths on separate K/V storage until block-strided cache accuracy
+    # is validated. Packed MLA/MXFP8 layouts are handled by their allocators.
+    architectures = getattr(getattr(vllm_config.model_config, "hf_config", None), "architectures", None) or ()
+    contiguous_architectures = (
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+        "Qwen3DSparkModel",
+        "Qwen3OmniDSparkModel",
+        "Eagle3LlamaForCausalLM",
+        "LlamaForCausalLMEagle3",
+        "LlamaForCausalLMVwnEagle3",
+    )
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if any(arch in contiguous_architectures for arch in architectures) or getattr(
+        speculative_config, "method", None
+    ) in ("eagle", "eagle3", "dspark"):
+        return True
+
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
