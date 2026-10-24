@@ -48,6 +48,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
+from vllm_ascend.worker.v2.spec_decode.sliding_window import DraftSlidingWindowMixin
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
+class AscendAutoRegressiveSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
@@ -458,6 +459,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             self.attn_architecture = "GQA"
         else:
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
+        self._init_draft_sliding_window()
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
@@ -672,19 +674,22 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         offload_kwargs = self._sparse_kv_offload_metadata.build_kwargs(
             self.input_batch, self.model_state, num_reqs, batch_desc, query_start_loc_np, step
         )
-        with build_attn_metadata_factory(
-            self.input_buffers.positions,
-            batch_desc.num_tokens,
-            is_prefilling,
-            seq_lens_cpu=seq_lens_cpu,
-            parallel_config=self.draft_vllm_config.parallel_config,
-            offload_kwargs=offload_kwargs,
+        with (
+            build_attn_metadata_factory(
+                self.input_buffers.positions,
+                batch_desc.num_tokens,
+                is_prefilling,
+                seq_lens_cpu=seq_lens_cpu,
+                parallel_config=self.draft_vllm_config.parallel_config,
+                offload_kwargs=offload_kwargs,
+            ),
+            self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs,
                 batch_desc,
                 query_start_loc_np,
-                seq_lens_cpu_upper_bound,
+                windowed_ub,
                 step,
                 causal,
                 dcp_local_seq_lens,
