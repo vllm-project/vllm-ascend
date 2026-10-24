@@ -85,6 +85,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         down = Mock(return_value=(7, None))
         down.quant_method = SimpleNamespace(quant_method=scheme)
         down.mxfp8_tp_padding = (0, 0)
+        down.mxfp4_tp_padding = (0, 0)
         down.input_is_parallel = True
         down.weight_scale = object()
         self.executor.layer = SimpleNamespace(
@@ -208,6 +209,32 @@ class TestSharedMXFPActivation(unittest.TestCase):
                 self.assertEqual(
                     self.executor._can_fuse_w8a8_mxfp_activation(self.gate_up), quant is self.quant.W8A8MXFP
                 )
+
+    def test_mxfp4_padding_selects_scheme_owned_quantization(self):
+        self.executor.quant_type = self.quant.W4A8MXFP
+        for linear in (self.executor.layer.gate_up_proj, self.executor.layer.down_proj):
+            with self.subTest(linear=linear), patch.object(linear, "mxfp4_tp_padding", (28, 16), create=True):
+                self.assertIs(self.executor._select_mlp_path(), self.paths.LINEAR_WRAPPER)
+                self.executor._prepare_gate_up_input("input")
+                self.executor._prepare_linear_input_for_overlap.assert_called_with(
+                    self.executor.layer.gate_up_proj, "input"
+                )
+
+    def test_mxfp4_delegated_padding_selects_linear_wrapper(self):
+        class LinearWrapper:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        self.executor.quant_type = self.quant.W4A8MXFP
+        for name in ("gate_up_proj", "down_proj"):
+            with (
+                self.subTest(linear=name),
+                patch.object(self.executor.layer, name, LinearWrapper(SimpleNamespace(mxfp4_tp_padding=(28, 16)))),
+            ):
+                self.assertIs(self.executor._select_mlp_path(), self.paths.LINEAR_WRAPPER)
 
     def test_lora_selects_generic_wrapper_for_every_quantization(self):
         self.executor.lora_context = object()
