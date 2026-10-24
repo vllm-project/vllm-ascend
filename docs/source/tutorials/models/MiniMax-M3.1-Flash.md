@@ -2,14 +2,15 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately
 428B total parameters and 23B activated parameters per token. It uses sparse
 attention throughout the model.
-
-This document describes Prefill-Decode (PD) disaggregation on Atlas 800I A3 and
-Ascend 950DT products. The A3 commands use W8A8 weights and the text-only serving entry point.
-The A5 commands use MXFP8 weights and FP8 KV cache. Both examples use
-one Prefill node and one Decode node without speculative decoding.
 
 ## 2 Supported Features
 
