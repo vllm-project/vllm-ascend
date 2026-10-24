@@ -453,9 +453,6 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
     | DP × TP × PP | 1 × 4 × 2 | 2 × 4 × 1 |
-    | API port | 31050 | 31060 |
-    | DP RPC port | 6884 | 6885 |
-    | KV transfer port | 30000 | 26900 |
     | max-num-seqs | 128 | 256 |
     | HCCL_BUFFSIZE (MB) | 512 | 2048 |
     | Main-model execution | Eager | FULL_DECODE_ONLY |
@@ -789,4 +786,4 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| AIME2026 | — | — | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
+| AIME2026 | — | — | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, chat_template_kwargs={"reasoning_effort":"max","thinking_mode":"enabled"} |
