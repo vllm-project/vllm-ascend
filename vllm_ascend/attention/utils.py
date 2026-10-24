@@ -303,7 +303,12 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
 
 
 def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
-    """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
+    """Require contiguous K/V for MiniMax M3 or ordinary Attention eligible for PA."""
+    # Keep MiniMax M3 K/V allocations separate and contiguous in both runners.
+    architectures = getattr(getattr(vllm_config.model_config, "hf_config", None), "architectures", None) or ()
+    if any(arch in ("MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration") for arch in architectures):
+        return True
+
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
