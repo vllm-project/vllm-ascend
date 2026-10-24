@@ -81,13 +81,21 @@ def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int
 class MonitoredNumPyArray:
     """A wrapper around a NumPy array that monitors modifications."""
 
-    def __init__(self, array: np.ndarray, callback: Callable):
+    def __init__(self, array: np.ndarray, callback: Callable, range_callback: Callable[[int], None] | None = None):
         self._array = array
         self._callback = callback
+        self._range_callback = range_callback
 
     def __setitem__(self, key, value):
         self._array[key] = value
         dim_size = self._array.shape[0]
+        first = key[0] if isinstance(key, tuple) and key else key
+        if self._range_callback is not None and isinstance(first, slice):
+            start, stop, step = first.indices(dim_size)
+            if start == 0 and step == 1:
+                # copy_to_uva writes a prefix; avoid materializing one index per row.
+                self._range_callback(stop)
+                return
         row_indices = get_row_indices_from_key(key, dim_size)
         for row in row_indices:
             self._callback(row)
@@ -151,6 +159,7 @@ class UvaBufferWrapper:
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._modified_prefix = 0
         requested_real_uva = is_uva_available()
         if requested_real_uva:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
@@ -164,17 +173,33 @@ class UvaBufferWrapper:
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
+    def _mark_cpu_prefix(self, stop: int) -> None:
+        self._modified_prefix = max(self._modified_prefix, stop)
+
     @property
     def cpu(self):
         return self._cpu if self._use_real_uva else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
 
     @property
     def np(self):
-        return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return (
+            self._np
+            if self._use_real_uva
+            else MonitoredNumPyArray(self._np, self._mark_cpu_modified, self._mark_cpu_prefix)
+        )
 
     def _sync_dirty_rows(self) -> None:
-        if not self._use_real_uva and self._modified_indices:
-            dirty_rows = sorted(self._modified_indices)
+        if self._use_real_uva:
+            return
+        prefix = self._modified_prefix
+        if prefix:
+            _int64_storage(self._uva[:prefix]).copy_(_int64_storage(self._cpu[:prefix]), non_blocking=True)
+            self._modified_prefix = 0
+        if self._modified_indices:
+            dirty_rows = sorted(i for i in self._modified_indices if i >= prefix)
+            if not dirty_rows:
+                self._modified_indices.clear()
+                return
             n_dirty = len(dirty_rows)
             if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
                 # Common path: dirty rows are a contiguous prefix [0..n-1].
