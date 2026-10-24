@@ -32,10 +32,33 @@ You can use our official docker image to run `E5-Mistral-7B-Instruct` model dire
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "A2/A3 series"
+=== "A2 series"
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --privileged=true \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "A3 series"
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -63,7 +86,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ## 5 Online Service Deployment
 
-=== "A2/A3 series"
+=== "A2 series / A3 series"
 
     ```shell
     #!/bin/sh
@@ -77,9 +100,12 @@ If you don't want to use the docker image as above, you can also build all from 
       --port 8000
     ```
 
+    The command is identical on A2 and A3 series products; only the docker image
+    differs (the A3 image tag carries an `-a3` suffix, see 4.1).
+
 Key parameter descriptions:
 
-- `--runner pooling` selects the pooling runner; the embedding task of this MistralModel variant needs it (an equivalent legacy spelling is `--task embed`).
+- `--runner pooling` selects the pooling runner; the embedding task of this MistralModel variant needs it. The task itself can also be spelled `--convert embed`, but `auto` (the default) already resolves to `embed` for this model, so passing it is optional.
 - `--pooler-config '{"pooling_type":"LAST"}'` forces last-token pooling, matching the model card recipe; the embedding pooler head applies L2 normalization by default on vLLM 0.26+.
 - `--dtype bfloat16` matches the model card usage; `--max-model-len 4096` is the official recommended upper limit (the config allows 32768).
 - `--enforce-eager` is recommended for the first bring-up; remove it after the graph path is verified.
@@ -141,6 +167,9 @@ The service returns HTTP 200 OK with a JSON response containing the `embedding` 
 }
 ```
 
+The `embedding` array is abbreviated above for readability: a real response
+returns 4096 dims in total (the two values shown are its first entries).
+
 For more usage examples, please reference the [examples](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed).
 
 ## 7 Accuracy Evaluation
@@ -160,14 +189,18 @@ Here are two accuracy evaluation methods.
 
     from mteb.models.vllm_wrapper import VllmEncoderWrapper
 
+    # ModelScope cache layout: ~/.cache/modelscope/hub/models/<namespace>/<model-name>
+    # Download the weight first, for example:
+    #   modelscope download --model intfloat/e5-mistral-7b-instruct --local_dir "$MODEL_PATH"
+    MODEL_PATH = os.path.expanduser("~/.cache/modelscope/hub/models/intfloat/e5-mistral-7b-instruct")
+
     if __name__ == "__main__":
 
         data_path = "/home/data/mteb_data"
         os.environ["HF_DATASETS_CACHE"] = data_path
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-        # ModelScope 1.39+ cache layout: ~/.cache/modelscope/models/<namespace>--<name>/snapshots/<revision>
-        model = VllmEncoderWrapper("/root/.cache/modelscope/models/intfloat--e5-mistral-7b-instruct/snapshots/master",
+        model = VllmEncoderWrapper(MODEL_PATH,
                                     dtype="bfloat16",
                                     max_model_len=4096,
                                     pooler_config={"pooling_type": "LAST"},
@@ -180,10 +213,12 @@ Here are two accuracy evaluation methods.
         print(df)
     ```
 
-    Note the asymmetric input template also applies here: the wrapper does not add
-    the e5-mistral instruction template automatically, so for retrieval tasks the
-    query side should carry the `Instruct: {task instruction}\nQuery:` prefix
-    (passages stay bare) to match the model card recipe.
+    Note this snippet does **not** add the asymmetric instruction prefix: the
+    wrapper above encodes the raw texts, so the printed scores only show that the
+    model loads and encodes, and are meant as a smoke-run reference rather than an
+    accuracy baseline. To follow the model card recipe, put
+    `Instruct: {task instruction}\nQuery: ` in front of the queries (passages stay
+    bare), e.g. through mteb's `prompt_dict` / `use_instructions` options.
 
 3. After execution, you can get the result.
 
