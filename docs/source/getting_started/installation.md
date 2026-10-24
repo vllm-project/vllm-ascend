@@ -131,6 +131,11 @@ Before building vLLM Ascend, explicitly set the build target and disable automat
     - Atlas 300I DUO / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`
     - 950DT Products: `export SOC_VERSION=ascend950dt_9582`
 
+    Because this workflow sets `COMPILE_CUSTOM_KERNELS=0`, leaving `SOC_VERSION`
+    unset does not fail the build: `SOC_VERSION` defaults to a dummy value and
+    a warning is logged. However, it is advised to set it explicitly if you want
+    `_build_info.py` to record the device type you are targeting.
+
 ???+ tip "Enable batch invariance"
 
     Batch invariance requires the `batch_invariant_ops` wheel. Set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend to build and install the wheel as part of the installation flow. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
