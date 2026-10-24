@@ -22,6 +22,7 @@ from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSampl
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
+from vllm_ascend.worker.v2.spec_decode.sliding_window import DraftSlidingWindowMixin
 
 # Upstream uses the attention kernel block size for DCP ownership, which is
 # incorrect when physical KV blocks are larger than kernel blocks. Bind the
@@ -138,7 +139,9 @@ else:
         return prepare_with_block_size
 
 
-class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
+    _draft_sliding_window_method = "dflash"
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -245,6 +248,23 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 self.vllm_config.cache_config.block_size,
                 block_tables,
             )
+        self._init_draft_sliding_window()
+
+    def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        """Window draft builder inputs before upstream metadata construction."""
+        num_reqs = kwargs["num_reqs"] if "num_reqs" in kwargs else args[0]
+        if "seq_lens_cpu_upper_bound" in kwargs:
+            seq_lens_cpu_upper_bound = kwargs["seq_lens_cpu_upper_bound"]
+            bound_via_kwargs = True
+        else:
+            seq_lens_cpu_upper_bound = args[3]
+            bound_via_kwargs = False
+        with self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub:
+            if bound_via_kwargs:
+                kwargs = {**kwargs, "seq_lens_cpu_upper_bound": windowed_ub}
+                return super()._build_attn_metadata(*args, **kwargs)
+            args = (*args[:3], windowed_ub, *args[4:])
+            return super()._build_attn_metadata(*args, **kwargs)
 
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
     # vLLM #60335 added `num_speculative_tokens`. Define the per-version public

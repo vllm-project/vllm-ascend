@@ -142,7 +142,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
         ),
         SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
-        SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(additional_config={"enable_dsa_cp": True}),
         SimpleNamespace(additional_config={"enable_dsa_cp": "true"}),
         SimpleNamespace(additional_config={"enable_dsa_cp": 1}),
@@ -160,7 +159,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "vl-encoder-disaggregation",
         "vl-encoder-only",
         "vl-encoder-graph",
-        "draft-window-size",
         "enable-dsa-cp",
         "enable-dsa-cp-string",
         "enable-dsa-cp-int",
@@ -176,6 +174,13 @@ def test_blacklisted_features_default_to_v1(monkeypatch, config):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
 
     assert use_v2_model_runner(config) is False
+
+
+def test_draft_window_size_defaults_to_v2(monkeypatch):
+    """MRV2 supports draft_window_size; it must not force the V1 fallback."""
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+
+    assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
 
 
 def test_310p_follows_default_v2_path(monkeypatch):

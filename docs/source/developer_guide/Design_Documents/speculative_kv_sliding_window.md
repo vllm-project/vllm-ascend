@@ -17,7 +17,7 @@ at 32k, up to +381% end-to-end throughput in the original evaluation).
 ## Configuration
 
 The window is enabled through `additional_config` and is available for the
-EAGLE3 / DFlash / DSpark draft paths on the default (MRV1) model runner:
+EAGLE3 / DFlash / DSpark draft paths on Model Runner V1 and Model Runner V2:
 
 ```json
 {"draft_window_size": 2048}
@@ -88,15 +88,19 @@ There are two apply points because of how the drafts construct metadata:
 
 ## MRV2 status
 
-Model Runner V2 is not yet covered by this feature. The MRV2 speculator
-system bakes `seq_lens` / block tables into the final per-layer metadata
-inside `build_attn_metadata` - there is no shared `common_attn_metadata` to
-mutate after the build, so porting the window requires applying it to the
-**builder inputs** (windowed `input_buffers.seq_lens`, gathered per-group
-block-table clones, capped `seq_lens_cpu_upper_bound`) around the
-`_build_draft_attn_metadata` call in
-`vllm_ascend/worker/v2/spec_decode/dspark/speculator.py`. The window math
-and the two invariants above carry over unchanged.
+Model Runner V2 is supported. The MRV2 speculator system bakes `seq_lens` /
+block tables into the final per-layer metadata inside `_build_attn_metadata`,
+so there is no shared `common_attn_metadata` to mutate after the build.
+`DraftSlidingWindowMixin` (`vllm_ascend/worker/v2/spec_decode/sliding_window.py`)
+applies the same window math to the **builder inputs** around that call:
+
+- windowed `input_buffers.seq_lens`
+- cropped per-group `block_tables.input_block_tables` clones
+- capped `seq_lens_cpu_upper_bound`
+
+Wired into Ascend DSpark, DFlash (and DFlash2), and autoregressive EAGLE
+speculators. Slot mappings remain absolute. `draft_window_size` no longer
+forces the V1 model-runner fallback.
 
 ## Expected behavior
 
@@ -116,3 +120,5 @@ and the two invariants above carry over unchanged.
 
 - Shared window adapter: `vllm_ascend/worker/v1/spec_decode/utils.py`
 - MRV1 proposer (apply points, config validation): `vllm_ascend/worker/v1/spec_decode/llm_base_proposer.py`
+- MRV2 builder-input helper: `vllm_ascend/worker/v2/spec_decode/sliding_window.py`
+- MRV2 DSpark / DFlash / Eagle apply points: `vllm_ascend/worker/v2/spec_decode/{dspark,dflash,autoregressive}/speculator.py`

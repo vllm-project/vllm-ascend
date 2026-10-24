@@ -53,10 +53,12 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
     prepare_replicated_pcp_config,
 )
+from vllm_ascend.worker.v2.spec_decode.sliding_window import DraftSlidingWindowMixin
 
 
-class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
+class AscendDSparkSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    _draft_sliding_window_method = "dspark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin sample_draft alignment is not used; instead load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -262,6 +264,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     self.vllm_config.cache_config.block_size,
                     block_tables,
                 )
+        self._init_draft_sliding_window()
 
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
@@ -310,6 +313,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         ):
             # vLLM main (#56181) replaced _build_draft_attn_metadata with
             # _build_uniform_attn_metadata (BatchExecutionDescriptor).
+            # Sliding window is applied inside `_build_attn_metadata`.
             batch_desc = BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.FULL,
                 num_tokens=num_tokens_padded,
@@ -340,15 +344,16 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if self.attn_architecture not in ("GQA", "MLA"):
             # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
             # Ascend CPU-side DCP preparation.
-            return super()._build_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                query_start_loc_np=query_start_loc_np,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=step,
-                causal=causal,
-                dcp_local_seq_lens=dcp_local_seq_lens,
-            )
+            with self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub:
+                return super()._build_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=windowed_ub,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
@@ -365,12 +370,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
+            self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 query_start_loc_np=query_start_loc_np,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                seq_lens_cpu_upper_bound=windowed_ub,
                 step=step,
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,

@@ -1,0 +1,9 @@
+# Fork fragment (no upstream PR number yet). Rename to <PR>.yaml when opening upstream.
+pr: 0
+entries:
+  - category: feature
+    text: >
+      Model Runner V2 now honors additional_config.draft_window_size for
+      EAGLE3, DFlash, and DSpark drafts, restoring long-context draft acceptance
+      without falling back to Model Runner V1.
+    highlight: true
