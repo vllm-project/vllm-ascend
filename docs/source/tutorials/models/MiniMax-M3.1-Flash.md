@@ -27,15 +27,14 @@ Refer to the [Supported Models](../../user_guide/support_matrix/supported_models
 
 ### 3.1 Model Weight
 
+The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash). However, its routed MoE experts use the NVFP4 data format, which cannot run directly on Ascend hardware. The following quantized weights are adapted for Ascend:
+
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | A3, two-node PD disaggregation | `<MINIMAX_M31_FLASH_W8A8_PATH>` |
-| MiniMax-M3.1-Flash (A5 MXFP8 deployment weights) | A5, two-node PD disaggregation | `<MINIMAX_M31_FLASH_A5_WEIGHT_PATH>` |
-| MiniMax-M3.1-Flash | Official model release | [Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-MXFP8 | 950DT products, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
-The A3 commands use the ModelSlim W8A8 checkpoint with `--quantization ascend`
-and BF16 KV cache. Download the weight variant used by the serving commands to
-the same model directory on both nodes.
+Download the weight variant used by the serving commands to the same model directory on both nodes. It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Hardware and Software Preparation
 
