@@ -1023,3 +1023,61 @@ def test_eagle_mixed_decode_prompt_without_exact_copy(setup, monkeypatch):
             assert read.capacity == 2208
             assert metadata.slot_mapping is slots and metadata.positions is positions
             assert torch.equal(table, before)
+
+
+@pytest.mark.parametrize("method", ["dflash", "dspark"])
+def test_parallel_continuing_prefill_reuses_certified_prompt_exact_without_full_gather(setup, monkeypatch, method):
+    runtime, spec, _, _ = setup
+    runtime.method, runtime._dense_device_reads = method, True
+    runtime.window_size, runtime.anchor_block_span = 1024, 128
+    spec.max_model_len, spec.num_query_per_req = 4096, 8
+    table = torch.arange(6 * 32, dtype=torch.int32).reshape(6, 32)
+    spec.block_tables.block_tables = [SimpleNamespace(gpu=table)]
+    spec.block_tables.kernel_block_sizes = [128]
+    spec.block_tables.num_blocks.np = np.full((1, 6), 32, dtype=np.int32)
+    state = batch(computed=(1136, 1264), prompt=(4096, 4096), scheduled=(7, 9), drafts=None)
+    state.query_start_loc_np = np.array([0, 7, 16])
+    state.idx_mapping = torch.tensor(state.idx_mapping_np)
+    metadata = common(exact=(1151, 1281), upper=(1152, 1282))
+    metadata.query_start_loc_cpu = torch.tensor([0, 8, 16, 16], dtype=torch.int32)
+    spec.input_buffers.seq_lens = metadata.seq_lens
+    original_to = torch.Tensor.to
+
+    def no_exact_cpu_copy(tensor, *args, **kwargs):
+        if kwargs.get("device") == "cpu" and kwargs.get("copy") is True:
+            pytest.fail("Certified continuing prompt producer copied device exact")
+        return original_to(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", no_exact_cpu_copy)
+    before = table.clone()
+    slots, positions = metadata.slot_mapping, metadata.positions
+    with runtime.proposal_context(spec, state):
+        runtime.metadata_callback(8, 2)(0, metadata)
+        assert not hasattr(metadata, "_draft_window_device_read"), "Full prompt unexpectedly gathered private FP32 KV"
+        read = metadata._draft_window_read
+        assert read.starts_cpu.tolist() == [0, 0]
+        assert read.seq_lens.cpu().tolist() == [1151, 1281, 0]
+        assert read.exact_cpu_for(metadata)[:2].tolist() == [1151, 1281]
+        assert metadata.slot_mapping is slots and metadata.positions is positions
+        assert torch.equal(table, before)
+
+
+@pytest.mark.parametrize("invalid", ["mixed_decode", "terminal", "placeholder", "query_width", "replicated_pcp"])
+def test_parallel_prompt_producer_rejects_uncertified_preparation(setup, invalid):
+    runtime, spec, _, _ = setup
+    runtime._dense_device_reads = True
+    spec.max_model_len, spec.num_query_per_req = 4096, 8
+    state = batch(computed=(1136, 1264), prompt=(4096, 4096), scheduled=(7, 9), drafts=None)
+    state.query_start_loc_np = np.array([0, 7, 16])
+    if invalid == "mixed_decode":
+        state.is_prefilling_np[0] = False
+    elif invalid == "terminal":
+        state.prefill_len_np[0] = 1143
+    elif invalid == "placeholder":
+        state.num_draft_tokens_per_req = np.array([1, 0])
+    elif invalid == "query_width":
+        state.query_start_loc_np[-1] += 1
+    else:
+        spec.replicated_pcp = True
+    with pytest.raises(RuntimeError, match="did not consume"), runtime.proposal_context(spec, state):
+        assert runtime._parallel_prefill_exact_lengths(2) is None

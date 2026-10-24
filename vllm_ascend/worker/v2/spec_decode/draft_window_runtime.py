@@ -263,8 +263,62 @@ class DraftWindowRuntime:
                 return self._dense_metadata_callback(num_reqs, legacy, eagle_step=step)
             return legacy
         if legacy is not None and getattr(self, "_dense_device_reads", False):
+            prompt_exact = self._parallel_prefill_exact_lengths(num_reqs)
+            if prompt_exact is not None:
+                # Preserve the original Full native reader for unfinished
+                # prompts, without gathering their entire KV into FP32 or
+                # copying E back from device. This producer is certified
+                # separately from the DSpark MLA preparation's exact copy.
+                return self._host_metadata_callback(
+                    step,
+                    num_reqs,
+                    prepared_exact_cpu=prompt_exact,
+                    prepared_exact_device=self.speculator.input_buffers.seq_lens[:num_reqs],
+                )
             return self._dense_metadata_callback(num_reqs, legacy)
         return legacy
+
+    def _parallel_prefill_exact_lengths(self, num_reqs: int) -> torch.Tensor | None:
+        """Certify current unsharded, unfinished prompt rows before parallel KV.
+
+        The shared parallel preparation places its query block immediately
+        after the last valid target position. With no speculative placeholders
+        and all prompts unfinished, the sampler rejects zero target tokens.
+        Current prompt progress + actual scheduled prompt width + this method's
+        real query width therefore gives its clamped native E. No CPU upper or
+        accepted-count estimate is used. Mixed, terminal and replicated-PCP
+        rows retain their existing device-exact route.
+        """
+        batch = self._input_batch
+        if (
+            self.method not in ("dflash", "dspark")
+            or not self._dense_device_reads
+            or getattr(self.speculator, "replicated_pcp", False)
+            or batch.num_reqs != num_reqs
+            or not batch.is_prefilling_np[:num_reqs].all()
+        ):
+            return None
+        drafts = batch.num_draft_tokens_per_req
+        boundaries = getattr(batch, "query_start_loc_np", None)
+        if (drafts is not None and drafts[:num_reqs].any()) or boundaries is None:
+            return None
+        progress = batch.num_computed_prefill_tokens_np[:num_reqs]
+        scheduled = batch.num_scheduled_tokens[:num_reqs]
+        ends = progress + scheduled
+        if (
+            len(boundaries) < num_reqs + 1
+            or not np.array_equal(np.diff(boundaries[: num_reqs + 1]), scheduled)
+            or np.any(progress < 0)
+            or np.any(scheduled <= 0)
+            or np.any(ends >= batch.prefill_len_np[:num_reqs])
+            or np.any(ends > self.speculator.max_model_len)
+        ):
+            return None
+        return torch.tensor(
+            np.minimum(ends + self.speculator.num_query_per_req, self.speculator.max_model_len),
+            dtype=torch.int32,
+            device="cpu",
+        )
 
     def _full_prefill_metadata_callback(self, step: int, num_reqs: int):
         """Retain Full addressing and current prompt-exact native lengths.
@@ -566,9 +620,10 @@ class DraftWindowRuntime:
     ):
         """Project current prepared lengths; CPU reuse requires an explicit pair.
 
-        The caller must have completed a copy from this device input into fresh
-        CPU storage in the active proposal and current request order. It must
-        not modify that snapshot afterward. A common CPU field alone is not an
+        The caller owns a fresh exact snapshot in this active proposal and
+        request order: either a completed copy from the device input or the
+        separately certified unfinished-parallel-prompt producer. It must not
+        modify that snapshot afterward. A common CPU field alone is not an
         exactness certificate. The proposal retains the supplied snapshot.
         """
         if self._bypass:
