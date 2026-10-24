@@ -1627,7 +1627,7 @@ def _disable_expandable_segments() -> None:
 
 
 def _validate_flash_attn_backend(backend_key, selector) -> bool:
-    """Select CANN FlashAttn for A5 V2 DFlash2 eager drafts with GLM MoE DSA targets."""
+    """Select CANN FlashAttn for A5 GLM DFlash2 and MiniMax-M3 DSpark drafts."""
     # backend_key is (use_mla, use_sparse, use_compress).
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.DEVICE_LENGTH_FLASH_ATTN
@@ -1639,20 +1639,28 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
     config = get_current_vllm_config_or_none()
     spec = config.speculative_config if config is not None else None
-    if spec is None or not spec.enforce_eager:
-        return False
-    # V2 keeps the target model_config while loading the draft. Read the live
-    # loader tag rather than relying on V1's runner_type="draft" convention.
-    if backends.model_tag != "dflash_head":
+    if spec is None:
         return False
     target = spec.target_model_config
-    # Restrict target models to the GLM MoE DSA family, including GLM-5.3.
-    if target.hf_text_config.model_type != "glm_moe_dsa":
+    # V2 keeps the target model_config while loading the draft. Match the live
+    # loader tag so the target and other auxiliary models retain their backend.
+    if spec.method == "dflash":
+        if not spec.enforce_eager:
+            return False
+        if backends.model_tag != "dflash_head" or target.hf_text_config.model_type != "glm_moe_dsa":
+            return False
+        draft_architecture = "DFlash2DraftModel"
+    elif spec.method == "dspark":
+        if backends.model_tag != "dspark_head" or not _MINIMAX_M3_ARCHITECTURES.intersection(
+            target.hf_config.architectures or ()
+        ):
+            return False
+        draft_architecture = "Qwen3DSparkModel"
+    else:
         return False
 
     return (
-        spec.method == "dflash"
-        and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
+        draft_architecture in (spec.draft_model_config.architectures or [])
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
         and selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")

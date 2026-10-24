@@ -2039,6 +2039,14 @@ def test_pp_exact_counts_override_device_length_exemption(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def test_m3_dspark_retains_target_host_length_sync():
+    runner, _, _ = _device_length_runner()
+    runner.model_config.architecture = "MiniMaxM3SparseForConditionalGeneration"
+    runner.speculative_config.method = "dspark"
+    runner.use_fia = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 @pytest.mark.parametrize("rejected", [0, 1, 5])
 def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected):
     runner, output, _ = _device_length_runner()
