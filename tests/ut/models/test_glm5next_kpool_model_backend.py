@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fcntl
 import importlib.util
+import time
+from multiprocessing import get_context
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -363,6 +366,87 @@ def test_cann_backend_reports_missing_operator_dependencies(monkeypatch, missing
     with pytest.raises(RuntimeError, match="CANN ops-transformer operator package and Triton cache/index adapters"):
         Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)._init_cann_ops()
     assert missing in [call.args[0] for call in loader.call_args_list]
+
+
+def test_cann_initialization_timeout_preserves_existing_lock(monkeypatch, tmp_path):
+    marker = tmp_path / "initialization.lock"
+    marker.touch()
+    monkeypatch.setattr(backend_module, "_CANN_OPS_INITIALIZATION_LOCK_TIMEOUT", 0)
+
+    with (
+        pytest.raises(TimeoutError, match="confirming all initializers have stopped"),
+        backend_module._cann_ops_initialization_lock(str(tmp_path)),
+    ):
+        pytest.fail("An existing initialization lock must not be bypassed")
+
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("is_moe", [False, True])
+def test_cann_backend_serializes_concurrent_operator_initialization(monkeypatch, tmp_path, is_moe):
+    # Model shared filesystems whose flock does not exclude another node.
+    monkeypatch.setattr(fcntl, "flock", lambda *args: None)
+    context = get_context("fork")
+    barrier = context.Barrier(2)
+    ready = context.Value("i", 0)
+    building = context.Lock()
+    loaded = set()
+    monkeypatch.setattr(backend_module, "_get_build_directory", lambda *args, **kwargs: str(tmp_path), raising=False)
+
+    def build(name):
+        if name in loaded:
+            return
+        assert building.acquire(block=False), f"Concurrent CANN JIT builds: {name}"
+        try:
+            time.sleep(0.1)
+            loaded.add(name)
+        finally:
+            building.release()
+
+    def load(name):
+        if name == "cann_ops_transformer":
+            build("import")
+        elif name.startswith("cann_ops_transformer.ops.attention."):
+            op_name = name.rsplit(".", 1)[1]
+            return SimpleNamespace(**{f"{op_name}_op_builder": SimpleNamespace(load=lambda: build(op_name))})
+        return MagicMock()
+
+    monkeypatch.setattr(backend_module, "import_module", load)
+    monkeypatch.setattr(
+        torch.ops,
+        "cann_ops_transformer",
+        SimpleNamespace(key_pool=lambda: build("key_pool"), pool_key_indexer=lambda: build("pool_key_indexer")),
+    )
+
+    def synchronize():
+        assert {"import", "key_pool", "pool_key_indexer"} <= loaded
+        with ready.get_lock():
+            ready.value += 1
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(backend_module, "get_ep_group", lambda: SimpleNamespace(barrier=synchronize))
+
+    def initialize():
+        barrier.wait(timeout=10)
+        backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
+        backend._init_cann_ops(is_moe=is_moe)
+        assert ready.value == (2 if is_moe else 0)
+        barrier.wait(timeout=10)
+        backend._key_pool()
+        backend._pool_key_indexer()
+
+    workers = [context.Process(target=initialize) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(timeout=10)
+            assert worker.exitcode == 0
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join()
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
