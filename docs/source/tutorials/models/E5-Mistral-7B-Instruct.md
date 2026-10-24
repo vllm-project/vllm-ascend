@@ -216,9 +216,10 @@ Here are two accuracy evaluation methods.
     Note this snippet does **not** add the asymmetric instruction prefix: the
     wrapper above encodes the raw texts, so the printed scores only show that the
     model loads and encodes, and are meant as a smoke-run reference rather than an
-    accuracy baseline. To follow the model card recipe, put
-    `Instruct: {task instruction}\nQuery: ` in front of the queries (passages stay
-    bare), e.g. through mteb's `prompt_dict` / `use_instructions` options.
+    accuracy baseline. To follow the model card recipe, prepend the
+    `Instruct: {task instruction}` line, a newline and `Query:` (followed by a
+    space) to every query, while passages stay bare, e.g. through mteb's
+    `prompt_dict` / `use_instructions` options.
 
 3. After execution, you can get the result.
 
