@@ -1,0 +1,4 @@
+pr: 19538
+entries:
+  - category: bugfix
+    text: Fixed MRV2 autoregressive draft prefill compatibility with vLLM's skip_sample argument for unused-draft steps, while preserving draft KV updates and compatibility with older vLLM revisions.
