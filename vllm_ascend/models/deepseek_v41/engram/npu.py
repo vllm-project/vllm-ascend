@@ -158,7 +158,10 @@ class HostUvaBuffer:
         rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
         if rc:
             raise RuntimeError(f"aclrtMallocHost failed: rc={rc} size={size}")
-        self.pointer = ctypes.c_void_p((self._allocation_pointer.value + alignment - 1) // alignment * alignment)
+        allocation_address = self._allocation_pointer.value
+        if allocation_address is None:
+            raise RuntimeError("aclrtMallocHost returned a NULL pointer")
+        self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
         self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
         self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
         try:

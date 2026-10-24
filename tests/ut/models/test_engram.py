@@ -38,20 +38,27 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
-@pytest.mark.parametrize("failure", [None, "register", "device_pointer"])
-def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure):
+@pytest.mark.parametrize("failure", [None, "malloc", "null", "register", "device_pointer"])
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("offset", [0, 4096, 65535])
+def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure, dtype, offset):
     alignment, size = 65536, 4096
 
     class Library:
         def __init__(self):
             self.storage = ctypes.create_string_buffer(size + 4 * alignment)
             base = ctypes.addressof(self.storage)
-            self.original = (base + alignment - 1) // alignment * alignment + 4096
+            self.original = (base + alignment - 1) // alignment * alignment + offset
             self.registered = self.unregistered = self.freed = None
+            self.free_count = self.unregister_count = 0
 
         def aclrtMallocHost(self, output, count, flags):
             assert count == size + alignment - 1
-            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = self.original
+            if failure == "malloc":
+                return 1
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = (
+                None if failure == "null" else self.original
+            )
             return 0
 
         def aclrtHostRegisterV2(self, pointer, count, flags):
@@ -66,27 +73,39 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
 
         def aclrtHostUnregister(self, pointer):
             self.unregistered = pointer.value
+            self.unregister_count += 1
             return 0
 
         def aclrtFreeHost(self, pointer):
             self.freed = pointer.value
+            self.free_count += 1
             return 0
 
     lib = Library()
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    shape = (size // torch.empty((), dtype=dtype).element_size(),)
     if failure:
-        with pytest.raises(RuntimeError):
-            npu.HostUvaBuffer((size,), torch.uint8, "cpu")
+        message = "NULL pointer" if failure == "null" else "failed: rc=1"
+        with pytest.raises(RuntimeError, match=message):
+            npu.HostUvaBuffer(shape, dtype, "cpu")
     else:
-        buffer = npu.HostUvaBuffer((size,), torch.uint8, "cpu")
+        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
         assert buffer.tensor.data_ptr() == lib.registered
-        assert lib.original < lib.registered and lib.registered + size <= lib.original + size + alignment - 1
+        assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
         buffer.tensor.fill_(17)
-        assert ctypes.c_uint8.from_address(lib.registered).value == 17
+        value = torch.frombuffer(
+            lib.storage, dtype=dtype, count=1, offset=lib.registered - ctypes.addressof(lib.storage)
+        )
+        assert value.item() == 17
         buffer.close()
         buffer.close()
-    assert lib.unregistered == lib.registered
-    assert lib.freed == lib.original
+    if failure in ("malloc", "null"):
+        assert lib.registered is lib.unregistered is lib.freed is None
+        assert lib.free_count == lib.unregister_count == 0
+    else:
+        assert lib.unregistered == lib.registered
+        assert lib.freed == lib.original
+        assert lib.free_count == lib.unregister_count == 1
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
