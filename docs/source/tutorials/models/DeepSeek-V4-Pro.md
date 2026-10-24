@@ -1682,6 +1682,318 @@ After the PD separation service is fully started, send a request through the pro
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
+### 5.3 950DT products PD Separation Deployment with Memcache KV Cache Pool
+
+This section extends the 2P1D deployment of [Section 5.2.3](#523-950dt-products-pd-separation-deployment) with a Memcache KV Cache Pool on the same 8 Ascend 950DT nodes (96GB × 8) and the `DeepSeek-V4-Pro-0813` checkpoint. `MooncakeConnectorV2` still transfers KV cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV cache in Memcache so that requests sharing a prefix can skip Prefill recomputation. Both connectors are configured as children of `MultiConnector`. Prefill enables layerwise Memcache access with `use_layerwise: true` and `layerwise_prefetch_layers: 3`; Decode uses the default non-layerwise mode.
+
+This example uses the embedded LocalService mode: every vLLM process loads `mmc-local.conf` from `MMC_LOCAL_CONFIG_PATH` and joins the pool itself, so no standalone Memcache process is required. Before starting vLLM, install `memfabric-hybrid` and `memcache-hybrid` and prepare the configuration files below. For details, refer to the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). All Prefill and Decode nodes must use the same MetaService endpoint.
+
+#### 5.3.1 Prepare the Memcache Services
+
+Create `mmc-meta.conf` on the node that runs MetaService:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:8000
+ock.mmc.log_level = info
+```
+
+Create `mmc-local.conf` on all Prefill and Decode nodes for the LocalService embedded in vLLM:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:6000
+ock.mmc.log_level = info
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_urma
+ock.mmc.local_service.dram.size = 40GB
+ock.mmc.local_service.max.dram.size = 2049GB
+```
+
+Use `device_urma` for 950DT products Device UB; for UBOE, replace it with `device_uboe`. `world_size` is the maximum number of LocalServices supported by the pool, not the number of NPUs used by this example; changing it after LocalServices connect requires restarting MetaService. `max.dram.size` must be at least the largest `dram.size` contributed by any LocalService. Because this example uses the embedded LocalService mode, `dram.size` must be greater than `0GB`, and no standalone LocalService process is started.
+
+Start MetaService with `mmc-meta.conf`:
+
+```shell
+export MMC_META_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-meta.conf"
+python -c "from memcache_hybrid import MetaService; MetaService.main()"
+```
+
+The startup scripts below export `PYTHONHASHSEED=0` and `MMC_LOCAL_CONFIG_PATH`. `PYTHONHASHSEED=0` must be identical on all engines so that they compute the same block keys for the shared pool. `MMC_LOCAL_CONFIG_PATH` points to the absolute path of `mmc-local.conf`, for example `/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf`; change it to the actual path in your environment.
+
+#### 5.3.2 Start the Prefill Nodes with Pooling
+
+Reuse `launch_online_dp.py` from [Section 5.2.3](#523-950dt-products-pd-separation-deployment) on the Decode nodes. The Prefill engines are still started directly by `vllm serve`, with the environment variables and `MultiConnector` configuration required by the pool.
+
+1. `run_p_node0.sh` on the master node of Prefill instance 1:
+
+    ```bash
+    #!/usr/bin/env bash
+    nic_name="xxx"              # change to your NIC name
+    local_ip="xx.xx.xx.x"       # change to your IP
+    node0_ip="xx.xx.xx.x"       # service IP of this instance's master node
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=1024
+
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=CCU_SCHED
+    export TASK_QUEUE_ENABLE=1
+
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=1200
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+    export VLLM_PP_LAYER_PARTITION="32,29"
+    export VLLM_USE_FASTOKENS=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+    # Parameters required by the Memcache KV Cache Pool. Change the config
+    # path to the actual path of mmc-local.conf in your environment.
+    export PYTHONHASHSEED=0
+    export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
+
+    vllm serve /root/.cache/DeepSeek-V4-Pro-0813 \
+        --host 0.0.0.0 \
+        --served-model-name dsv4 \
+        --port $1 \
+        --nnodes 2 \
+        --node-rank 0 \
+        --master-addr $node0_ip \
+        --tensor-parallel-size 1 \
+        --prefill-context-parallel-size 8 \
+        --data-parallel-size 1 \
+        --pipeline-parallel-size 2 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 16 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --trust-remote-code \
+        --block-size 32 \
+        --kv-cache-dtype fp8 \
+        --attention_config.indexer_kv_dtype fp8 \
+        --enable-prefix-caching \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --gpu-memory-utilization 0.94 \
+        --enforce-eager \
+        --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_producer",
+            "kv_port":"30000",
+            "engine_id":"0",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV2",
+                        "kv_role":"kv_producer",
+                        "kv_port":"30000",
+                        "kv_connector_extra_config":{
+                            "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                            "decode":{"dp_size":32,"tp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_producer",
+                        "kv_connector_extra_config":{
+                            "backend":"memcache",
+                            "use_layerwise":true,
+                            "layerwise_prefetch_layers":3
+                        }
+                    }
+                ]
+            }
+        }'
+    ```
+
+2. `run_p_node1.sh` on the worker node of Prefill instance 1: use the same content as `run_p_node0.sh` with these changes: set `local_ip` to the IP of this node, keep `node0_ip` as the master node's service IP, change `--node-rank` to `1`, and append `--headless` to `vllm serve` so that this node runs only its PP stage without starting an API server.
+
+3. Prefill instance 2: prepare `run_p_node2.sh` (master node) and `run_p_node3.sh` (worker node) the same way, with these changes: set `local_ip` to the IP of each node, set `node0_ip` to this instance's own master node IP, and assign a unique `kv_port` to the outer `MultiConnector` and its `MooncakeConnectorV2` child, for example `"kv_port":"30200"`. Keep all other settings identical so that both Prefill instances present the same `prefill` topology to the Decode pool.
+
+#### 5.3.3 Start the Decode Nodes with Pooling
+
+Prepare `run_dp_template.sh` on each Decode node. Compared with [Section 5.2.3](#523-950dt-products-pd-separation-deployment), only the Memcache environment variables and `--kv-transfer-config` change; `launch_online_dp.py` still passes the visible devices, port, DP size, DP rank, DP address, DP RPC port, and TP size as `$1` through `$7`.
+
+```bash
+#!/usr/bin/env bash
+nic_name="xxx"              # change to your NIC name
+local_ip="xx.xx.xx.x"       # change to your IP
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export HCCL_BUFFSIZE=2048
+
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+export HCCL_EXEC_TIMEOUT=2040
+export HCCL_CONNECT_TIMEOUT=1200
+
+export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_USE_FASTOKENS=1
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+
+# Parameters required by the Memcache KV Cache Pool. Change the config
+# path to the actual path of mmc-local.conf in your environment.
+export PYTHONHASHSEED=0
+export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
+
+vllm serve /root/.cache/DeepSeek-V4-Pro-0813 \
+    --host 0.0.0.0 \
+    --served-model-name dsv4 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --max-model-len 1048576 \
+    --max-num-batched-tokens 512 \
+    --max-num-seqs 32 \
+    --async-scheduling \
+    --block-size 32 \
+    --kv-cache-dtype fp8 \
+    --attention_config.indexer_kv_dtype fp8 \
+    --no-enable-prefix-caching \
+    --no-disable-hybrid-kv-cache-manager \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --trust-remote-code \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 \
+    --gpu-memory-utilization 0.92 \
+    --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":false}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/home/profiling","torch_profiler_with_stack":false}' \
+    --kv-transfer-config '{
+        "kv_connector":"MultiConnector",
+        "kv_role":"kv_consumer",
+        "kv_port":"30100",
+        "engine_id":"1",
+        "kv_connector_extra_config":{
+            "connectors":[
+                {
+                    "kv_connector":"MooncakeConnectorV2",
+                    "kv_role":"kv_consumer",
+                    "kv_port":"30100",
+                    "kv_connector_extra_config":{
+                        "prefill":{"dp_size":1,"tp_size":1,"pp_size":2,"pp_layer_partition":"32,29"},
+                        "decode":{"dp_size":32,"tp_size":1}
+                    }
+                },
+                {
+                    "kv_connector":"AscendStoreConnector",
+                    "kv_role":"kv_consumer",
+                    "kv_connector_extra_config":{
+                        "backend":"memcache"
+                    }
+                }
+            ]
+        }
+    }' \
+    --additional-config '{
+        "ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},
+        "enable_cpu_binding":true,
+        "multistream_overlap_shared_expert":true,
+        "scheduler_config":{"recompute_scheduler_enable":true},
+        "enable_shared_expert_dp":true,
+        "combine_quant_mode":4
+    }'
+```
+
+#### 5.3.4 Startup and Verification
+
+Start the components in this order:
+
+1. MetaService on the node containing `mmc-meta.conf`. Wait until its logs show that the Meta Service has launched.
+2. Decode engines on all four Decode nodes. Wait until every engine reports `Application startup complete`.
+3. Prefill nodes. For each Prefill instance, start the master node (`--node-rank 0`) before its worker node. The first argument is the engine port passed to `--port $1`.
+
+    1. Prefill instance 1, master node:
+
+        ```shell
+        bash run_p_node0.sh 8000
+        ```
+
+    2. Prefill instance 1, worker node (headless):
+
+        ```shell
+        bash run_p_node1.sh 8000
+        ```
+
+    3. Prefill instance 2, master node:
+
+        ```shell
+        bash run_p_node2.sh 8000
+        ```
+
+    4. Prefill instance 2, worker node (headless):
+
+        ```shell
+        bash run_p_node3.sh 8000
+        ```
+
+4. Decode nodes. Run each command from the directory containing `launch_online_dp.py` and `run_dp_template.sh`:
+
+    1. Decode node 0
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
+        ```
+
+    2. Decode node 1
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
+        ```
+
+    3. Decode node 2
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
+        ```
+
+    4. Decode node 3
+
+        ```shell
+        # change ip to your own
+        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
+        ```
+
+5. Deploy the P-D disaggregation proxy. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) and register all Prefill and Decode engine endpoints started above, the same way as [Section 5.2.3](#523-950dt-products-pd-separation-deployment).
+
+Deployment Verification:
+
+After the PD separation service is fully started, send a request through the proxy to verify that Prefill and Decode nodes are working correctly together. Then send the same request again to verify the KV Cache Pool: check the Prefill logs for Memcache lookup, get, put, and cache-hit activity, and confirm that Decode logs still show normal Prefill-to-Decode KV transfer. An HTTP 200 response alone does not confirm pool reuse. For details, refer to the [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
 ## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
