@@ -440,7 +440,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 PD Separation Deployment
 
-For standard PD disaggregation, we recommend using [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md). [Section 5.2.4](#524-950dt-series-pd-separation-deployment) describes PD separation on a single node with 950DT products, and [Section 5.4](#54-950dt-single-node-pd-separation-deployment) extends that topology with a Memcache-backed KV Cache Pool.
+We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -449,7 +449,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated NPU groups, each configured independently, on one or more nodes. This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-The following sections describe multi-node PD separation deployment on Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8), and single-node PD separation on 950DT products (96GB × 8).
+The following sections describe PD separation deployment on both Atlas 800I A3 (128GB × 8) and Atlas 800I A2 (64GB × 8) multi-node environments.
 
 #### 5.2.1 A3 Series PD Separation Deployment
 
