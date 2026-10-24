@@ -17,6 +17,7 @@ def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
     impl._dcp_index_topk = 8
     impl._remap_order = torch.arange(8, dtype=torch.float32)
     impl._remap_invalid_index = torch.tensor(-1.0)
+    impl.vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_batched_tokens=192))
     return impl
 
 
@@ -107,7 +108,14 @@ def test_sfa_custom_op_passes_optional_lse_to_combine():
         actual = kernels.dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
     assert actual is expected
     combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False
+        output,
+        lse,
+        1,
+        1,
+        scatter_group=None,
+        pcp_group=None,
+        return_lse=True,
+        defer_combine=False,
     )
 
 
