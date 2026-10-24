@@ -175,6 +175,44 @@ def test_norm_bias_lookup_reports_missing_bias(clean_norm_bias_cache):
     assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is False
 
 
+def test_norm_bias_lookup_ignores_indexer_k_norm_bias(clean_norm_bias_cache):
+    """GLM-5.2's indexer.k_norm.bias merely contains the "norm.bias" substring.
+
+    Regression test: these keys flipped the global switch and made every
+    AscendRMSNorm create a bias that the checkpoint never provides, which
+    broke MTP draft loading with "weights were not initialized" errors.
+    """
+    quant_description = {
+        "model.layers.0.self_attn.indexer.k_norm.bias": "FLOAT",
+        "model.layers.1.self_attn.indexer.k_norm.bias": "FLOAT",
+        "model.layers.0.self_attn.q_proj.weight": "W8A8",
+    }
+
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is False
+
+
+def test_norm_bias_lookup_still_honors_real_norm_bias_alongside_k_norm(clean_norm_bias_cache):
+    """A real RMSNorm bias must still enable the switch next to indexer keys."""
+    quant_description = {
+        "model.layers.0.self_attn.indexer.k_norm.bias": "FLOAT",
+        "model.layers.0.input_layernorm.bias": "W8A8",
+    }
+
+    assert ascend_layernorm._quant_description_has_norm_bias(quant_description) is True
+
+
+def test_RMSNorm_does_not_create_bias_for_indexer_k_norm(default_vllm_config):
+    quant_config = MagicMock()
+    quant_config.quant_description = {
+        "model.layers.0.self_attn.indexer.k_norm.bias": "FLOAT",
+    }
+    default_vllm_config.quant_config = quant_config
+
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+
+    assert layer.bias is None
+
+
 def test_norm_bias_lookup_ignores_a_stale_entry(clean_norm_bias_cache):
     """An id can only be reused after the old dict is gone; never trust it blindly."""
     quant_description = {"model.layers.0.input_layernorm.norm.bias": "FLOAT"}
