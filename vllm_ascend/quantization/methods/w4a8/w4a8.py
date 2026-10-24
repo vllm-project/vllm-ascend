@@ -228,9 +228,13 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
                 is_per_channel_weight=self.is_per_channel_weight,
+                low_rank=self.get_low_rank_weights(layer),
             ),
             quant_method=self,
         )
+
+    def get_low_rank_weights(self, layer):
+        return None
 
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list:

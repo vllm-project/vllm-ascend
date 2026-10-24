@@ -29,11 +29,21 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @dataclass(frozen=True, slots=True)
+class MoELowRankLinear:
+    left: torch.Tensor
+    right: torch.Tensor
+    left_scale: torch.Tensor
+    right_scale: torch.Tensor
+    left_bias: torch.Tensor
+    right_bias: torch.Tensor
+
+
+@dataclass(frozen=True, slots=True)
 class MoEWeights:
     """Dense and quantized weight payloads consumed by MoE execution."""
 
-    w1: torch.Tensor | list[torch.Tensor]
-    w2: torch.Tensor | list[torch.Tensor]
+    w1: torch.Tensor | list[torch.Tensor] | None
+    w2: torch.Tensor | list[torch.Tensor] | None
     w1_bias: torch.Tensor | None = None
     w2_bias: torch.Tensor | None = None
     w1_scale: torch.Tensor | list[torch.Tensor] | None = None
@@ -42,6 +52,7 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
+    low_rank: tuple[MoELowRankLinear, MoELowRankLinear, MoELowRankLinear] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +111,7 @@ def build_fused_experts_input(
     w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
+    low_rank: tuple[MoELowRankLinear, MoELowRankLinear, MoELowRankLinear] | None = None,
     lora_context=None,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
@@ -118,6 +130,7 @@ def build_fused_experts_input(
             w2_scale_bias=w2_scale_bias,
             w1_offset=w1_offset,
             w2_offset=w2_offset,
+            low_rank=low_rank,
         ),
         routing=MoeRouterInput(
             expert_map=expert_map,

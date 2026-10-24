@@ -290,6 +290,59 @@ class TestAscendModelSlimConfig(TestBase):
             return_success=True,
         )
 
+    def test_get_quant_method_selects_low_rank_moe_before_description_lookup(self):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        low_rank = {
+            "format_version": 1,
+            "weight_bits": 4,
+            "activation_bits": 8,
+            "group_size": 0,
+            "rank": 1024,
+            "layers": [3],
+        }
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "deepseek_v3"
+        mock_config.model_config.hf_config.moe_svd = low_rank
+        tid2eid = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer",
+                side_effect=AssertionError("description lookup must not run"),
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_svd.AscendW4A8SVDFusedMoEMethod",
+                return_value=MagicMock(),
+            ) as mock_svd_method,
+        ):
+            method = self.ascend_config.get_quant_method(layer, "model.layers.3.mlp.experts", tid2eid)
+
+        self.assertIs(method, mock_svd_method.return_value)
+        mock_svd_method.assert_called_once_with(layer.moe_config, low_rank, tid2eid)
+
+    def test_get_quant_method_rejects_invalid_low_rank_layer_indices(self):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "deepseek_v3"
+        for layers in (None, [], "3", [True], [-1], [3, 3], [1.5], [{}]):
+            mock_config.model_config.hf_config.moe_svd = {"layers": layers}
+            with (
+                self.subTest(layers=layers),
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                    return_value=mock_config,
+                ),
+                self.assertRaisesRegex(ValueError, "moe_svd.layers"),
+            ):
+                self.ascend_config.get_quant_method(layer, "model.layers.3.mlp.experts")
+
     def test_get_quant_method_for_c8_kv_cache_attention(self):
         c8_config = AscendModelSlimConfig(
             {
