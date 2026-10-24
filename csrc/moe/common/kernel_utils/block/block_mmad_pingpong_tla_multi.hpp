@@ -677,7 +677,10 @@ public:
             AscendC::LocalTensor<ElementAccumulator> co2Temp =
                 resourcePtr->ubBuf.template GetBufferByByte<ElementAccumulator>(0);
 
-            AscendC::PipeBarrier<PIPE_ALL>();
+            // Mmad (M) must retire before the V-pipe pulls L0C into UB. That is one
+            // M->V edge, not a reason to stall MTE1/MTE2/MTE3/S as well.
+            AscendC::SetFlag<AscendC::HardEvent::M_V>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::M_V>(EVENT_ID6);
 
             // L0C → UB: BLOCK_MODE_MATRIX copies raw NZ fractals to UB
             // For float: blockLen unit = 1024B (one 16×16 fractal)
@@ -689,11 +692,15 @@ public:
             AscendC::DataCopyEnhancedParams enhParams;
             enhParams.blockMode = AscendC::BlockMode::BLOCK_MODE_MATRIX;
             AscendC::DataCopy(co2Temp, l0CTensorList[l0CListId], l0c2ubParams, enhParams);
-            AscendC::PipeBarrier<PIPE_ALL>();
+            // The staging buffer is produced on V and consumed by a DMA (the writeback
+            // below, or the caller's UB->UB deformat when the writeback is skipped).
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
 
-            // UB → GM: fractal-by-fractal with strided DataCopy (NZ→ND deformat)
+            // UB → GM: fractal-by-fractal with strided DataCopy (NZ→ND deformat).
             // NZ in UB: [N/16 Z-cols][M/16 fractals][16 rows][16 cols]
             // ND in GM: [M rows][N cols]
+            //
             auto dstOffset = tensorC.layout()(tensorC.coord());
             uint32_t gmStride = tla::get<0>(tensorC.stride());
             uint32_t mFracs = mAligned / 16;
@@ -712,7 +719,19 @@ public:
                     AscendC::DataCopy(tensorC.data()[gmOff], co2Temp[ubOff], fracParams);
                 }
             }
-            AscendC::PipeBarrier<PIPE_ALL>();
+            // The PipeBarrier<PIPE_ALL> that used to sit here was covering THREE
+            // distinct edges; replacing it with only the L0C one silently broke
+            // chunk_gated_delta_rule_fwd_h (44/48 shapes), whose epilogue reads the
+            // writeback back out of GM. All three, explicitly:
+            //   1. V (the BLOCK_MODE_MATRIX read of L0C) -> M (the next mmad).
+            //   2. MTE3 (the GM writeback) -> MTE2 (a consumer re-reading it from GM).
+            //   3. MTE3 (the GM writeback) -> V (the next tile's write into co2Temp).
+            AscendC::SetFlag<AscendC::HardEvent::V_M>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID6);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
             l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
         }
 #else
