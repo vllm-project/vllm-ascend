@@ -1,4 +1,4 @@
-# MiniMax-M3.1-Flash
+# MiniMax-M3.1-Flash (Experimental)
 
 ## 1 Introduction
 
@@ -233,12 +233,11 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
 ### 5.2 PD Disaggregation
 
-PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prepare the common environment from the matching platform tab below, using each host's own IP address and network interface. Use `/workspace/env.sh` for A3 or `/workspace/runtime_env.sh` for A5, then start the corresponding Prefill and Decode services.
+PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
 === "A3"
 
-    Here, 1P1D means one Prefill host and one Decode host. The Decode host runs four
-    TP4 replicas in one DP4 group.
+    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
@@ -248,55 +247,9 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     | API ports | 19100 | 19200–19203 |
     | DP RPC port | — | 16920 |
     | KV base ports | 24000 | 25000 + 32 × DP rank |
-    | max-model-len | 263000 | 263000 |
-    | max-num-batched-tokens | 32768 | 32768 |
     | max-num-seqs | 32 | 128 per replica |
-    | KV cache dtype | BF16 | BF16 |
     | Execution mode | Eager | FULL_DECODE_ONLY |
-
-    **Common Environment**
-
-    Save the following as `/workspace/env.sh` in the A3 container. Set `LOCAL_IP` and `NIC_NAME` to the current host's business IP address and network interface.
-
-    ```bash
-    #!/usr/bin/env bash
-    unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
-    export NO_PROXY='*' no_proxy='*'
-
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    source /usr/local/Ascend/nnal/atb/set_env.sh
-
-    export LOCAL_IP="<CURRENT_NODE_IP>"
-    export NIC_NAME="<CURRENT_NODE_NIC>"
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    export VLLM_BATCH_INVARIANT=0
-    export OMP_NUM_THREADS=1
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ENGINE_READY_TIMEOUT_S=3600
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_CONNECT_TIMEOUT=600
-    export HCCL_EXEC_TIMEOUT=600
-    export HCCL_IF_IP="$LOCAL_IP"
-    export VLLM_HOST_IP="$LOCAL_IP"
-    export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export GLOO_SOCKET_IFNAME="$NIC_NAME"
-    export TP_SOCKET_IFNAME="$NIC_NAME"
-    export HCCL_OP_EXPANSION_MODE=AIV
-    unset HCCL_INTRA_ROCE_ENABLE
-    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
-    export ASCEND_CONNECT_TIMEOUT=30000
-    export ASCEND_TRANSFER_TIMEOUT=30000
-
-    export ASCEND_SOURCE=/opt/m31flash/code/vllm-ascend
-    export OP_VENDOR="$ASCEND_SOURCE/vllm_ascend/_cann_ops_custom/vendors/custom_transformer"
-    export ASCEND_CUSTOM_OPP_PATH="$OP_VENDOR"
-    export LD_LIBRARY_PATH="$OP_VENDOR/op_api/lib:${LD_LIBRARY_PATH:-}"
-    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-    export PYTHONPATH="$ASCEND_SOURCE:/opt/m31flash/code/vllm:${PYTHONPATH:-}"
-    ```
+    | HCCL_BUFFSIZE (MB) | 1024 | 2048 |
 
     **Prefill Node**
 
@@ -304,20 +257,36 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     ```bash
     #!/usr/bin/env bash
-    source ./env.sh
+    set -e
 
-    # P: one PP4 x TP4 engine, all 16 chips.
-    export TP_SIZE=4
-    export PP_SIZE=4
-    export DP_SIZE=1
-    export SERVICE_PORT=19100
-    export VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=19100
+    KV_PORT=24000
+    MAX_NUM_SEQS=32
+    MAX_MODEL_LEN=263000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+    export VLLM_BATCH_INVARIANT=0
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_PP_LAYER_PARTITION=15,15,15,15
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
-    export HCCL_NPU_SOCKET_PORT_RANGE=28000-28255
-    export KV_PORT=24000
-    export MAX_NUM_SEQS=${P_MAX_NUM_SEQS:-32}
+    export HCCL_IF_IP="$LOCAL_IP"
+    unset HCCL_INTRA_ROCE_ENABLE
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    export LD_LIBRARY_PATH="/opt/m31flash/code/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH:-}"
+    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -328,15 +297,15 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --language-model-only \
         --quantization ascend \
         --dtype bfloat16 \
-        --tensor-parallel-size "$TP_SIZE" \
-        --pipeline-parallel-size "$PP_SIZE" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 4 \
         --enable-expert-parallel \
         --distributed-executor-backend mp \
         --seed 1024 \
-        --max-model-len "${MAX_MODEL_LEN:-263000}" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
-        --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-32768}" \
-        --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --block-size 128 \
         --kv-cache-dtype bfloat16 \
         --enable-chunked-prefill \
@@ -344,7 +313,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --reasoning-parser minimax_m3 \
         --enable-auto-tool-choice \
         --tool-call-parser minimax_m3 \
-        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-size 1 \
         --enforce-eager \
         --long-prefill-token-threshold 2048 \
         --additional-config '{
@@ -381,23 +350,38 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     ```bash
     #!/usr/bin/env bash
-    source ./env.sh
+    set -e
 
-    # D: this script starts ONE of four TP4 replicas. The host launcher starts 0..3.
-    export DP_RANK=${1:-${DP_RANK:-0}}
-    export TP_SIZE=4
-    export PP_SIZE=1
-    export DP_SIZE=4
-    export DP_ADDRESS="$LOCAL_IP"
-    export DP_RPC_PORT=16920
-    export SERVICE_PORT=$((19200 + DP_RANK))
-    export VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
-    export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    DP_RANK=${1:-0}
+    SERVICE_PORT=$((19200 + DP_RANK))
+    DP_RPC_PORT=16920
+    KV_PORT=$((25000 + DP_RANK*32))
+    MAX_NUM_SEQS=128
+    MAX_MODEL_LEN=263000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+    export VLLM_BATCH_INVARIANT=0
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
-    export HCCL_NPU_SOCKET_PORT_RANGE="$((30000+DP_RANK*128))-$((30127+DP_RANK*128))"
-    export KV_PORT=$((25000 + DP_RANK*32))
-    export MAX_NUM_SEQS=${D_MAX_NUM_SEQS:-128}
+    export HCCL_IF_IP="$LOCAL_IP"
+    unset HCCL_INTRA_ROCE_ENABLE
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
+    export LD_LIBRARY_PATH="/opt/m31flash/code/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH:-}"
+    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
@@ -408,15 +392,15 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --language-model-only \
         --quantization ascend \
         --dtype bfloat16 \
-        --tensor-parallel-size "$TP_SIZE" \
-        --pipeline-parallel-size "$PP_SIZE" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
         --enable-expert-parallel \
         --distributed-executor-backend mp \
         --seed 1024 \
-        --max-model-len "${MAX_MODEL_LEN:-263000}" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
-        --max-num-batched-tokens "${MAX_BATCHED_TOKENS:-32768}" \
-        --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --block-size 128 \
         --kv-cache-dtype bfloat16 \
         --enable-chunked-prefill \
@@ -424,10 +408,10 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --reasoning-parser minimax_m3 \
         --enable-auto-tool-choice \
         --tool-call-parser minimax_m3 \
-        --data-parallel-size "$DP_SIZE" \
+        --data-parallel-size 4 \
         --data-parallel-size-local 1 \
         --data-parallel-rank "$DP_RANK" \
-        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{
@@ -465,10 +449,10 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     inside the Prefill container:
 
     ```bash
-    export PREFILL_IP="<PREFILL_NODE_IP>"
-    export DECODE_IP="<DECODE_NODE_IP>"
+    PREFILL_IP="<PREFILL_NODE_IP>"
+    DECODE_IP="<DECODE_NODE_IP>"
 
-    python3 "$ASCEND_SOURCE/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py" \
+    python3 "/opt/m31flash/code/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py" \
         --host 0.0.0.0 --port 19080 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 19100 \
         --decoder-hosts "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" \
@@ -479,35 +463,39 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     Use one Prefill node and one Decode node, each with all eight NPUs and DP2 × TP4 × PP1 / EP8. Each node starts one vLLM API service, which manages both local DP ranks. Speculative decoding is disabled in this configuration.
 
+    The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
+
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
-    | Hardware | Ascend 950DT9582, 8 NPUs | Ascend 950DT9582, 8 NPUs |
-    | DP × TP × PP | 2 × 4 × 1 | 2 × 4 × 1 |
-    | Expert parallel size | 8 | 8 |
-    | Visible NPU IDs | 0–7 | 0–7 |
     | API port | 31050 | 31060 |
     | DP RPC port | 6884 | 6885 |
     | KV transfer port | 30000 | 26900 |
-    | Weight quantization | MXFP8 | MXFP8 |
-    | Compute / KV cache dtype | BF16 / FP8 | BF16 / FP8 |
-    | max-model-len | 133000 | 133000 |
-    | max-num-batched-tokens | 32768 | 32768 |
     | max-num-seqs | 128 | 256 |
     | HCCL_BUFFSIZE (MB) | 1024 | 2048 |
-    | KV cache manager | `--disable-hybrid-kv-cache-manager` | `--disable-hybrid-kv-cache-manager` |
     | Main-model execution | Eager | FULL_DECODE_ONLY |
     | fuse_norm_quant | true | false |
-    | fuse_qknorm_rope | true | true |
-    | Speculative decoding | Disabled | Disabled |
 
-    **Common Environment**
+    **Prefill Node**
 
-    A5 uses MXFP8 main-model weights and FP8 KV cache. The environment uses CANN 9.2, torch 2.10.0, and Triton/Triton-Ascend 3.6.0, with the Python environment at `/workspace/.venv`.
-
-    Save the following as `/workspace/runtime_env.sh` in the A5 container and set `NIC_NAME` to the current host's network interface. The launch commands set `LOCAL_IP` before sourcing this file.
+    Save the following as `/workspace/prefill/start.sh`. Configure the model path, host IP address, and network interface at the beginning of the script.
 
     ```bash
     #!/usr/bin/env bash
+    set -e
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=31050
+    DP_RPC_PORT=6884
+    KV_PORT=30000
+    MAX_NUM_SEQS=128
+    MAX_MODEL_LEN=133000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
         source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
@@ -515,51 +503,36 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
         source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
     fi
-    unset ftp_proxy https_proxy http_proxy all_proxy FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
-    export NIC_NAME="<CURRENT_NODE_NIC>"
-    export PATH=/workspace/.venv/bin:/workspace/bin:$PATH
-    export PYTHONPATH=/workspace/src/vllm:/workspace/src/vllm-ascend:${PYTHONPATH:-}
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-    export HCCL_IF_IP=$LOCAL_IP
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    ```
 
-    **Prefill Node**
-
-    Save the following as `/workspace/prefill/run_dp_template.sh`.
-
-    ```bash
-    #!/usr/bin/env bash
-    set -e
-    source /workspace/runtime_env.sh
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export HCCL_BUFFSIZE=1024
-    DP_RANK_ARGS=(--data-parallel-size-local "$DP_SIZE")
     mkdir -p /workspace/logs
     exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --data-parallel-size "$DP_SIZE" \
-        "${DP_RANK_ARGS[@]}" \
-        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 2 \
+        --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --pipeline-parallel-size "$PP_SIZE" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
         --served-model-name minimax-m3 \
         --trust-remote-code \
         --dtype bfloat16 \
-        --max-num-seqs 128 \
-        --max-num-batched-tokens 32768 \
-        --max-model-len 133000 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --disable-hybrid-kv-cache-manager \
         --enable-expert-parallel \
         --quantization mxfp8 \
-        --gpu-memory-utilization 0.92 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --distributed-executor-backend mp \
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
@@ -571,20 +544,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":true,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/prefill-rank${DP_RANK}.log 2>&1
-    ```
-
-    Save the following as `/workspace/prefill/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
-
-    ```bash
-    #!/usr/bin/env bash
-    set -e
-    cd /workspace/prefill
-    export LOCAL_IP="<CURRENT_NODE_IP>"
-    export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
-    export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6884 SERVICE_PORT=31050
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
-    exec bash /workspace/prefill/run_dp_template.sh
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/prefill-rank0.log 2>&1
     ```
 
     Start it on the Prefill host:
@@ -601,35 +561,62 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
 
     **Decode Node**
 
-    Save the following as `/workspace/decode/run_dp_template.sh`.
+    Save the following as `/workspace/decode/start.sh`. Configure the model path, host IP address, and network interface at the beginning of the script.
 
     ```bash
     #!/usr/bin/env bash
     set -e
-    source /workspace/runtime_env.sh
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    SERVICE_PORT=31060
+    DP_RPC_PORT=6885
+    KV_PORT=26900
+    MAX_NUM_SEQS=256
+    MAX_MODEL_LEN=133000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
+        source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
+    fi
+    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
+    fi
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
-    DP_RANK_ARGS=(--data-parallel-size-local "$DP_SIZE")
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/python3.12.13/lib/python3.12/site-packages/mooncake:${LD_LIBRARY_PATH:-}
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
     mkdir -p /workspace/logs
     exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --data-parallel-size "$DP_SIZE" \
-        "${DP_RANK_ARGS[@]}" \
-        --data-parallel-address "$DP_ADDRESS" \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 2 \
+        --data-parallel-address "$LOCAL_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --pipeline-parallel-size "$PP_SIZE" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
         --served-model-name minimax-m3 \
         --trust-remote-code \
         --dtype bfloat16 \
-        --max-num-seqs 256 \
-        --max-num-batched-tokens 32768 \
-        --max-model-len 133000 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
         --disable-hybrid-kv-cache-manager \
         --enable-expert-parallel \
         --quantization mxfp8 \
-        --gpu-memory-utilization 0.92 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --distributed-executor-backend mp \
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
@@ -640,20 +627,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/decode-rank${DP_RANK}.log 2>&1
-    ```
-
-    Save the following as `/workspace/decode/start.sh` and set `LOCAL_IP` to this node's compute-network IP. `MODEL_PATH` matches the A5 checkpoint mounted in the container.
-
-    ```bash
-    #!/usr/bin/env bash
-    set -e
-    cd /workspace/decode
-    export LOCAL_IP="<CURRENT_NODE_IP>"
-    export DP_SIZE=2 TP_SIZE=4 PP_SIZE=1 DP_RANK=0
-    export DP_ADDRESS="$LOCAL_IP" DP_RPC_PORT=6885 SERVICE_PORT=31060
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
-    exec bash /workspace/decode/run_dp_template.sh
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/decode-rank0.log 2>&1
     ```
 
     Start it on the Decode host:
@@ -675,10 +649,9 @@ PD disaggregation runs Prefill and Decode on separate hosts. On both hosts, prep
     ```bash
     #!/usr/bin/env bash
     set -e
-    export PREFILL_IP="<PREFILL_NODE_IP>"
-    export DECODE_IP="<DECODE_NODE_IP>"
-    export LOCAL_IP="$PREFILL_IP"
-    source /workspace/runtime_env.sh
+    PREFILL_IP="<PREFILL_NODE_IP>"
+    DECODE_IP="<DECODE_NODE_IP>"
+
     mkdir -p /workspace/logs
     exec /workspace/.venv/bin/python /workspace/src/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8009 \
