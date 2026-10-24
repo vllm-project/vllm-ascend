@@ -32,7 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz, maybe_trans_nz_with_scale, reshape_wo_a_to_3d
 
 from ..base import (
     AscendLinearScheme,
@@ -71,7 +71,15 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         self.group_size = quant_description.get("group_size", 32)
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
         hf_config = vllm_config.model_config.hf_config
-        self.o_lora_rank = hf_config.o_lora_rank if hf_config.model_type == "deepseek_v4" else None
+        self.o_lora_rank = getattr(hf_config, "o_lora_rank", None)
+
+    def _get_weight_switch_specs(self, layer, config):
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        if shard_axis == "output" and getattr(layer, "_mxfp8_grouped_wo_a_layout", False):
+            # Grouped weight [G, K, R] and scale [G, K/64, R, 2]
+            # carry output shards along G, unlike ordinary [K, N] linears.
+            gather_specs = tuple(WeightSwitchGatherSpec(spec.attr_name, gather_dim=0) for spec in gather_specs)
+        return gather_specs, repeat_specs, shard_axis
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
@@ -211,27 +219,16 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        target_scale = reshaped_scale.transpose(0, 1)
-
-        transposed_weight = padded_weight.transpose(0, 1).contiguous()
         # DSV4 attention consumes wo_a through a grouped transpose BMM,
         # rather than the ordinary two-dimensional Linear.apply path.
         grouped_wo_a = self.o_lora_rank is not None and getattr(layer, "prefix", "").endswith("wo_a")
         layer._mxfp8_grouped_wo_a_layout = grouped_wo_a
         if grouped_wo_a:
-            if transposed_weight.shape[1] % self.o_lora_rank:
-                raise ValueError("wo_a output shard must contain complete o_lora_rank groups")
-            # Derive the local group count from the loaded shard for TP/OTP.
-            n_local_groups = transposed_weight.shape[1] // self.o_lora_rank
-            transposed_weight = (
-                transposed_weight.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
-            )
-            target_scale = (
-                target_scale.transpose(0, 1)
-                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
-                .transpose(1, 2)
-                .contiguous()
-            )
+            transposed_weight = reshape_wo_a_to_3d(padded_weight, self.o_lora_rank)
+            target_scale = reshape_wo_a_to_3d(reshaped_scale, self.o_lora_rank)
+        else:
+            transposed_weight = padded_weight.transpose(0, 1).contiguous()
+            target_scale = reshaped_scale.transpose(0, 1)
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
@@ -687,23 +684,13 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        layer.weight.data = layer.weight.data.transpose(0, 1)
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
-
         if layer.prefix.endswith("wo_a"):
-            # The layer may use OTP instead of the model's ordinary TP group.
-            # Derive the group count from the loaded output shard.
-            n_local_groups = layer.weight.shape[1] // self.o_lora_rank
-            layer.weight.data = (
-                layer.weight.data.T.reshape(n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
-            )
-            layer.weight_scale.data = (
-                layer.weight_scale.data.transpose(0, 1)
-                .reshape(n_local_groups, self.o_lora_rank, -1, 2)
-                .transpose(1, 2)
-                .contiguous()
-            )
-        elif layer.prefix.endswith("wo_b"):
+            layer.weight.data = reshape_wo_a_to_3d(layer.weight.data, self.o_lora_rank)
+            layer.weight_scale.data = reshape_wo_a_to_3d(layer.weight_scale.data, self.o_lora_rank)
+        else:
+            layer.weight.data = layer.weight.data.transpose(0, 1)
+            layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+        if layer.prefix.endswith("wo_b"):
             # DSA PCP gathers these tensors directly along the leading
             # dimension, which requires contiguous HCCL inputs.
             layer.weight.data = layer.weight.data.contiguous()
