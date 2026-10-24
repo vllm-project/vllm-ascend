@@ -1,0 +1,8 @@
+pr: 17715
+entries:
+  - category: feature
+    text: >-
+      Added native Messages and synchronous Responses API forwarding to the
+      disaggregated prefill proxy, including prefiller cache usage reporting.
+      Responses requests must provide explicit conversation history;
+      background mode and previous_response_id are not supported.
