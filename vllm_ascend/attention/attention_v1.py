@@ -667,9 +667,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        sparse_mode = 4 if self.sliding_window is not None else 3 if attn_metadata.causal else 0
+        pre_tokens = self.sliding_window if self.sliding_window is not None else SWA_INT_MAX
+        next_tokens = 0 if self.sliding_window is not None else SWA_INT_MAX
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
