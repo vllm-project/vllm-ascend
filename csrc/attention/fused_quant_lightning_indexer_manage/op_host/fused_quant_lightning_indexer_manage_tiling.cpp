@@ -6,12 +6,171 @@
 #include <algorithm>
 #include "../op_kernel/fused_quant_lightning_indexer_manage_template_tiling_key.h"
 // s2 chunk 粒度与 kernel 侧单一来源(host 兼容 shim 见该头)。
-#include "../op_kernel/fused_quant_lightning_indexer_manage_workspace.h"
+#include "../op_kernel/arch22/fused_quant_lightning_indexer_manage_workspace.h"
+#include <limits>
+#include "../op_kernel/arch35/fused_quant_lightning_indexer_manage_tiling.h"
+#include "../op_kernel/arch35/fused_quant_lightning_indexer_manage_workspace.h"
+#include "../op_kernel/arch35/lim_payload_layout.h"
+#include "../op_kernel/arch35/lim_simt_config.h"
 
 using namespace ge;
 using namespace AscendC;
 
 namespace optiling {
+
+namespace arch35 {
+namespace {
+enum InputIndex : size_t {
+    INDEX_WEIGHTS = 0, QUERY_DEQUANT_SCALE, QUERY,
+    INDEX_KEY_DEQUANT_SCALE, INDEX_KEY_CACHE, INDEX_BLOCK_TABLE,
+    ACTUAL_SEQ_LENGTHS_QUERY, ACTUAL_SEQ_LENGTHS_KEY,
+    OFFLOAD_SEQ_LENGTHS_KEY, NUM_CACHE_TOKENS, REQUEST_STATE,
+    REQ_POOL_ENTRIES, CACHE_SLOTS_POOL,
+};
+constexpr int64_t BLOCK_SIZE = lim_request_limits::BLOCK_SIZE;
+constexpr int64_t HEAD_DIM = 128;
+constexpr int64_t MAX_ROUTES = lim_request_limits::MAX_ROUTES;
+constexpr int64_t MAX_SOURCE_CAPACITY = lim_payload_layout::MAX_SOURCE_CAPACITY;
+constexpr size_t ATTR_KEY_STRIDE = 0;
+constexpr size_t ATTR_SCALE_STRIDE = 1;
+constexpr size_t ATTR_WEIGHT_STRIDE = 2;
+
+bool Rank(const gert::Shape &shape, size_t rank) { return shape.GetDimNum() == rank; }
+}
+
+static ge::graphStatus TilingFusedQuantLightningIndexerManage(
+    gert::TilingContext *context)
+{
+    if (context == nullptr || context->GetPlatformInfo() == nullptr) return ge::GRAPH_FAILED;
+    for (size_t i = 0; i <= CACHE_SLOTS_POOL; ++i) {
+        if (context->GetInputShape(i) == nullptr || context->GetInputDesc(i) == nullptr)
+            return ge::GRAPH_FAILED;
+    }
+    const auto dtype = [context](size_t i) { return context->GetInputDesc(i)->GetDataType(); };
+    if (dtype(INDEX_WEIGHTS) != ge::DT_BF16 ||
+        dtype(QUERY_DEQUANT_SCALE) != ge::DT_FLOAT ||
+        dtype(QUERY) != ge::DT_FLOAT8_E4M3FN ||
+        dtype(INDEX_KEY_DEQUANT_SCALE) != ge::DT_FLOAT ||
+        dtype(INDEX_KEY_CACHE) != ge::DT_FLOAT8_E4M3FN) return ge::GRAPH_FAILED;
+    for (size_t i = INDEX_BLOCK_TABLE; i <= CACHE_SLOTS_POOL; ++i)
+        if (dtype(i) != ge::DT_INT32) return ge::GRAPH_FAILED;
+
+    const auto weights = context->GetInputShape(INDEX_WEIGHTS)->GetStorageShape();
+    const auto queryScale = context->GetInputShape(QUERY_DEQUANT_SCALE)->GetStorageShape();
+    const auto query = context->GetInputShape(QUERY)->GetStorageShape();
+    const auto keyScale = context->GetInputShape(INDEX_KEY_DEQUANT_SCALE)->GetStorageShape();
+    const auto key = context->GetInputShape(INDEX_KEY_CACHE)->GetStorageShape();
+    const auto blockTable = context->GetInputShape(INDEX_BLOCK_TABLE)->GetStorageShape();
+    const auto queryEnds = context->GetInputShape(ACTUAL_SEQ_LENGTHS_QUERY)->GetStorageShape();
+    const auto pool = context->GetInputShape(CACHE_SLOTS_POOL)->GetStorageShape();
+    if (!Rank(weights, 2) || !Rank(queryScale, 2) || !Rank(query, 3) ||
+        !Rank(keyScale, 3) || !Rank(key, 4) || !Rank(blockTable, 2) ||
+        !Rank(queryEnds, 1) || !Rank(pool, 2)) return ge::GRAPH_FAILED;
+    const int64_t totalQueries = query.GetDim(0);
+    const int64_t heads = query.GetDim(1);
+    const int64_t batch = queryEnds.GetDim(0);
+    const int64_t sourceCapacity = blockTable.GetDim(1) * BLOCK_SIZE;
+    if (batch <= 0 || totalQueries < batch || totalQueries > batch * MAX_ROUTES ||
+        (heads != 32 && heads != 64) || query.GetDim(2) != HEAD_DIM ||
+        weights.GetDim(0) != totalQueries || weights.GetDim(1) != heads ||
+        queryScale.GetDim(0) != totalQueries || queryScale.GetDim(1) != heads ||
+        key.GetDim(0) <= 0 || key.GetDim(1) != BLOCK_SIZE ||
+        key.GetDim(2) != 1 || key.GetDim(3) != HEAD_DIM ||
+        keyScale.GetDim(0) != key.GetDim(0) || keyScale.GetDim(1) != BLOCK_SIZE ||
+        keyScale.GetDim(2) != 1 || blockTable.GetDim(0) != batch ||
+        sourceCapacity <= 0 || sourceCapacity > MAX_SOURCE_CAPACITY ||
+        pool.GetDim(0) <= 0 || pool.GetDim(1) != sourceCapacity)
+        return ge::GRAPH_FAILED;
+    for (size_t i = ACTUAL_SEQ_LENGTHS_KEY; i <= REQ_POOL_ENTRIES; ++i) {
+        const auto shape = context->GetInputShape(i)->GetStorageShape();
+        if (!Rank(shape, 1) || shape.GetDim(0) != batch) return ge::GRAPH_FAILED;
+    }
+
+    const auto *attrs = context->GetAttrs();
+    if (attrs == nullptr) return ge::GRAPH_FAILED;
+    const int64_t *keyStride = attrs->GetAttrPointer<int64_t>(ATTR_KEY_STRIDE);
+    const int64_t *scaleStride = attrs->GetAttrPointer<int64_t>(ATTR_SCALE_STRIDE);
+    const int64_t *weightStride = attrs->GetAttrPointer<int64_t>(ATTR_WEIGHT_STRIDE);
+    if (keyStride == nullptr || scaleStride == nullptr || weightStride == nullptr ||
+        *keyStride < BLOCK_SIZE * HEAD_DIM || *scaleStride < BLOCK_SIZE ||
+        *weightStride < heads ||
+        static_cast<uint64_t>(*keyStride) > std::numeric_limits<uint32_t>::max() ||
+        static_cast<uint64_t>(*scaleStride) > std::numeric_limits<uint32_t>::max() ||
+        static_cast<uint64_t>(*weightStride) > std::numeric_limits<uint32_t>::max())
+        return ge::GRAPH_FAILED;
+
+    platform_ascendc::PlatformAscendC platform(context->GetPlatformInfo());
+    const uint32_t mixGroups = std::min<uint32_t>(
+        platform.GetCoreNumAic(), platform.GetCoreNumAiv() / 2U);
+    if (mixGroups == 0U) return ge::GRAPH_FAILED;
+    // A5 switches 32-head launches to one four-route tile above 64 query
+    // rows. Also switch when two reserved tiles per request would exceed
+    // the available mix groups: Q=1/2 leaves every second tile empty, so
+    // modulo scheduling would serialize requests on only half the cores.
+    const uint32_t queryTileSize =
+        heads == 32 &&
+            (totalQueries > 64 || static_cast<uint32_t>(batch) * 2U > mixGroups)
+        ? 4U : 2U;
+    // The LI phase balances the flattened S2 block pool across mix groups;
+    // a group may process more than one query tile. Reserve the full launch.
+    const uint32_t usedCores = mixGroups;
+    // Shape alone does not reveal the largest per-request Q. Reserve enough
+    // rows for either the original B x 4 layout or the compact T-row layout.
+    const uint64_t routeStorageRows = std::max<uint64_t>(
+        4U * static_cast<uint64_t>(batch),
+        static_cast<uint64_t>(totalQueries));
+    const uint64_t scoreStride =
+        4U * static_cast<uint64_t>(sourceCapacity) * sizeof(uint16_t);
+    const uint64_t candidateSegments =
+        fused_quant_li_manage_workspace::CandidateSegmentCapacity(
+            static_cast<uint64_t>(sourceCapacity), usedCores);
+    const uint64_t qliWorkspace =
+        fused_quant_li_manage_workspace::TotalBytes(
+            static_cast<uint64_t>(sourceCapacity), routeStorageRows,
+            candidateSegments,
+            sourceCapacity > lim_payload_layout::PACKED_SOURCE_CAPACITY);
+    if (routeStorageRows > std::numeric_limits<uint32_t>::max() ||
+        scoreStride > std::numeric_limits<uint32_t>::max() ||
+        qliWorkspace > std::numeric_limits<uint32_t>::max())
+        return ge::GRAPH_FAILED;
+    auto *tiling = context->GetTilingData<::FusedQuantLightningIndexerManageTilingData>();
+    if (tiling == nullptr || context->GetWorkspaceSizes(1) == nullptr) return ge::GRAPH_FAILED;
+    tiling->usedCoreNum = usedCores;
+    tiling->batchSize = static_cast<uint32_t>(batch);
+    tiling->totalQueryRows = static_cast<uint32_t>(totalQueries);
+    tiling->poolSize = static_cast<uint32_t>(pool.GetDim(0));
+    tiling->sourceCapacity = static_cast<uint32_t>(sourceCapacity);
+    tiling->indexHeads = static_cast<uint32_t>(heads);
+    tiling->maxBlockNumPerBatch = static_cast<uint32_t>(blockTable.GetDim(1));
+    tiling->weightStride = static_cast<uint32_t>(*weightStride);
+    tiling->keyStride = static_cast<uint32_t>(*keyStride);
+    tiling->scaleStride = static_cast<uint32_t>(*scaleStride);
+    tiling->managementWorkspaceOffset = static_cast<uint32_t>(qliWorkspace);
+    tiling->scoreWorkspaceStride = static_cast<uint32_t>(scoreStride);
+    tiling->scoreRowStride = static_cast<uint32_t>(sourceCapacity);
+    tiling->queryTileSize = queryTileSize;
+    tiling->routeStorageRows = static_cast<uint32_t>(routeStorageRows);
+    tiling->compactRouteRows = 0U;
+    const uint64_t managementWorkspace =
+        static_cast<uint64_t>(batch + totalQueries) * 32U;
+    context->GetWorkspaceSizes(1)[0] = platform.GetLibApiWorkSpaceSize() +
+        qliWorkspace + managementWorkspace;
+    context->SetBlockDim(platform.CalcTschBlockDim(
+        usedCores * 2U, usedCores, usedCores * 2U));
+    context->SetScheduleMode(1);
+#if LIM_SIMT_POSTPROCESS
+    // Match the A5 reference: reserve 32 KiB for SIMT DCache and 8 KiB
+    // for runtime/stack so TPipe UB buffers cannot overlap those regions.
+    if (context->SetLocalMemorySize(LIM_SIMT_USER_UB_BYTES) !=
+        ge::GRAPH_SUCCESS)
+        return ge::GRAPH_FAILED;
+#endif
+    context->GetRawTilingData()->SetDataSize(sizeof(*tiling));
+    context->SetTilingKey(GET_TPL_TILING_KEY(static_cast<uint32_t>(ge::DT_FLOAT8_E4M3FN)));
+    return ge::GRAPH_SUCCESS;
+}
+} // namespace arch35
+
 
 ge::graphStatus FusedQuantLightningIndexerManageTiling::GetNpuInfo(FusedQuantLightningIndexerManageTilingInfo &tilingInfo) const
 {
@@ -434,6 +593,15 @@ ge::graphStatus TilingForFusedQuantLightningIndexerManage(gert::TilingContext *c
     OPS_ERR_IF(context == nullptr,
                OPS_REPORT_VECTOR_INNER_ERR("FusedQuantLightningIndexerManage", "Tiling context is null."),
                return ge::GRAPH_FAILED);
+    auto *platformInfo = context->GetPlatformInfo();
+    OPS_ERR_IF(platformInfo == nullptr,
+               OPS_LOG_E("FusedQuantLightningIndexerManage", "GetPlatformInfo is nullptr."),
+               return ge::GRAPH_FAILED);
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
+    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
+        return arch35::TilingFusedQuantLightningIndexerManage(context);
+    }
+    // arch22 retains the existing A2/A3 validation and tiling implementation.
     FusedQuantLightningIndexerManageTilingInfo liInfo;
     FusedQuantLightningIndexerManageTiling liTiling(context, true);
     if (liTiling.ParseAndCheck(liInfo) != ge::GRAPH_SUCCESS) {
