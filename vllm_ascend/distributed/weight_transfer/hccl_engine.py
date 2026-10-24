@@ -19,7 +19,6 @@ from vllm.distributed.weight_transfer.base import (
     ParamMeta,
     VLLMWeightSyncClient,
     WeightSource,
-    WeightTransferInitInfo,
 )
 from vllm.distributed.weight_transfer.nccl_common import worker_init_payload
 from vllm.distributed.weight_transfer.nccl_engine import (
@@ -30,6 +29,10 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 
 from vllm_ascend.distributed.weight_transfer import hccl_common
+from vllm_ascend.distributed.weight_transfer.hccl_common import (
+    HCCLWeightTransferInitInfo,
+    _validate_packed_params,
+)
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
@@ -39,49 +42,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
-
-
-def _validate_packed_params(info: Any) -> None:
-    """Validate the three-valued packed wire params shared by every dataclass.
-
-    ``None`` means "not fixed here": a legacy trainer may still send the value
-    per update, so it has to stay distinguishable from an explicit ``False``.
-    """
-    if info.packed is not None and not isinstance(info.packed, bool):
-        raise ValueError(f"`packed` must be a boolean or None, got {info.packed!r}")
-    for name in ("packed_buffer_size_bytes", "packed_num_buffers"):
-        value = getattr(info, name)
-        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
-            raise ValueError(f"`{name}` must be a positive integer or None, got {value!r}")
-
-
-@dataclass(kw_only=True)
-class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Worker-side init info: TCP rendezvous plus optional packed wire params.
-
-    Keyword-only for the same reason upstream's `NCCLWeightTransferInitInfo` is:
-    the fields after ``world_size`` are optional, so a positional call would
-    silently shift when another one is added.
-    """
-
-    master_address: str
-    """IP address of the trainer (rank 0) for HCCL process group setup."""
-    master_port: int
-    """Port on the trainer for HCCL process group setup."""
-    rank_offset: int
-    """Offset added to each vLLM worker's rank within the HCCL group.
-    Typically 1 (trainer is rank 0, workers start at rank 1)."""
-    world_size: int
-    """Total number of participants in the HCCL group (trainer + all workers)."""
-    packed: bool | None = None
-    """Packed mode fixed at init; ``None`` leaves it to each update."""
-    packed_buffer_size_bytes: int | None = None
-    """Packed buffer size fixed at init; ``None`` leaves it to each update."""
-    packed_num_buffers: int | None = None
-    """Number of packed buffers fixed at init; ``None`` leaves it to each update."""
-
-    def __post_init__(self) -> None:
-        _validate_packed_params(self)
 
 
 @dataclass
@@ -116,7 +76,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
     if TYPE_CHECKING:
         model_update_group: PyHcclCommunicator | None  # type: ignore[assignment]
 
-    init_info_cls = HCCLWeightTransferInitInfo  # type: ignore[assignment]
+    init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
     # Tests and alternate HCCL transports can swap the group constructor.
     _stateless_init_process_group = staticmethod(hccl_common.stateless_init_process_group)

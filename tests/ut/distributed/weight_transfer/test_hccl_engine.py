@@ -9,16 +9,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+from vllm.distributed.weight_transfer.nccl_common import NCCLWeightTransferInitInfo, worker_init_payload
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerWeightTransferEngine,
     NCCLWeightTransferEngine,
 )
 
+from vllm_ascend.distributed.weight_transfer.hccl_common import HCCLWeightTransferInitInfo
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerInitInfo,
     HCCLTrainerWeightTransferEngine,
     HCCLWeightTransferEngine,
-    HCCLWeightTransferInitInfo,
     HCCLWeightTransferUpdateInfo,
 )
 
@@ -100,6 +101,33 @@ def test_inherits_upstream_orchestration():
     assert HCCLTrainerWeightTransferEngine._checked_iter is NCCLTrainerWeightTransferEngine._checked_iter
 
 
+def test_init_info_preserves_upstream_payload_contract():
+    init_info = HCCLWeightTransferInitInfo(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+
+    assert isinstance(init_info, NCCLWeightTransferInitInfo)
+    assert HCCLWeightTransferEngine.init_info_cls is HCCLWeightTransferInitInfo
+    assert worker_init_payload(init_info) == dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    restored = HCCLWeightTransferInitInfo(**worker_init_payload(init_info))
+    assert restored == init_info
+    assert restored.packed is None
+    assert restored.packed_buffer_size_bytes is None
+    assert restored.packed_num_buffers is None
+
+
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"master_address": None}, "master_address"),
+        ({"master_port": None}, "master_port"),
+        ({"nccl_unique_id_b64": "unsupported"}, "TCP rendezvous"),
+    ],
+)
+def test_init_info_requires_tcp_rendezvous(overrides, match):
+    args = dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    with pytest.raises(ValueError, match=match):
+        HCCLWeightTransferInitInfo(**(args | overrides))
+
+
 @pytest.mark.parametrize("name,value", [("packed", True), ("packed_buffer_size_bytes", 64), ("packed_num_buffers", 3)])
 def test_wire_params_preserve_legacy_updates_and_reject_init_conflicts(name, value):
     engine = _make_engine()
@@ -124,6 +152,10 @@ def test_wire_params_preserve_legacy_updates_and_reject_init_conflicts(name, val
 
 @pytest.mark.parametrize("name,value", [("packed", "yes"), ("packed_buffer_size_bytes", 0), ("packed_num_buffers", -1)])
 def test_rejects_invalid_wire_params(name, value):
+    with pytest.raises(ValueError, match=name):
+        HCCLWeightTransferInitInfo(
+            master_address="host", master_port=1234, rank_offset=1, world_size=2, **{name: value}
+        )
     with pytest.raises(ValueError, match=name):
         HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], **{name: value})
 
