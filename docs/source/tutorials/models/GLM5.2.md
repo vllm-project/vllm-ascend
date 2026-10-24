@@ -1963,7 +1963,7 @@ layerwise setting and topology.
     executor with `--nnodes 4`; Decode uses a launcher to start one TP2
     engine per DP rank. Both roles pin the V1 model runner and use int8
     attention and indexer KV caches. This deployment uses pipeline parallelism
-    (PP2); the [A2 pooling topology in Section 5.1.3](#glm53-pool-a2) is different.
+    (PP2); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
     Prepare identical weights and software on all eight nodes, verify
     [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect),
@@ -2363,7 +2363,7 @@ layerwise setting and topology.
     ```
 
     The same check and conditional fix apply to the pooled Prefill PP
-    headless workers in the [A2 pooling tab of Section 5.1.3](#glm53-pool-a2).
+    headless workers in the [A2 pooling tab of Section 5.1.4](#glm53-pool-a2).
     Confirm that the active Python package contains the change on every
     Prefill node, then start all members of the Prefill group before waiting
     for it to become ready.
