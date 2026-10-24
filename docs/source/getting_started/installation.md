@@ -30,8 +30,8 @@ The following hardware and software stack is validated together for this release
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
     | Host enablement | Ascend HDK | `{{ release_hdk_version }}` | Driver and firmware requirements for the selected CANN release |
-    | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
-    | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
+    | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` / `9.2.0` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
+    | Ascend runtime | NNAL | `{{ release_nnal_version }}` / `9.2.0` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
     | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
@@ -39,6 +39,8 @@ The following hardware and software stack is validated together for this release
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
     The versions and requirements in the table above are validated as one compatibility set. Do not arbitrarily mix versions from different releases.
+
+    This release is compatible with both CANN 9.1.0 and CANN 9.2.0 (with the matching NNAL 9.2.0). The CANN 9.2.0 stack has been validated with the release models, and prebuilt images with the full package are available at [quay.io/ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags).
 
     For another release, select a complete row from [Versioning Policy > Release compatibility matrix](../community/versioning_policy.md#release-compatibility-matrix).
 
