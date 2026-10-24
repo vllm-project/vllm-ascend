@@ -270,14 +270,19 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             MoEPrepareOutput, possibly sliced/padded.
         """
         self.replace_allreduce = replace_allreduce
+        # Keep at least one masked token per TP rank, even when every DP
+        # rank is empty. MC2 collectives must still run with a nonzero M.
+        self.padded_num_tokens = max(_EXTRA_CTX.padded_num_tokens, self.tp_size)
         mc2_mask = _EXTRA_CTX.mc2_mask
+        if mc2_mask.shape[0] < self.padded_num_tokens:
+            mc2_mask = nn.functional.pad(mc2_mask, (0, self.padded_num_tokens - mc2_mask.shape[0]), value=False)
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.
             self.num_tokens = hidden_states.shape[0]
             start = self.tp_rank * self.num_tokens
             mc2_mask = mc2_mask[start : start + self.num_tokens]
-            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            pad_size = self.padded_num_tokens // self.tp_size - self.num_tokens
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
@@ -290,7 +295,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         padded_hidden_states_shape = hidden_states.shape
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            target_pad_length = _EXTRA_CTX.padded_num_tokens
+            target_pad_length = self.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
             if pad_size > 0:
@@ -333,11 +338,11 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             # already shard them. Align to the local hidden states first.
             if input_ids.numel() != self.num_tokens:
                 input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
-            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            pad_size = self.padded_num_tokens // self.tp_size - self.num_tokens
             if pad_size > 0:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
         else:
-            target_pad_length = _EXTRA_CTX.padded_num_tokens
+            target_pad_length = self.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
             if pad_size > 0:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
