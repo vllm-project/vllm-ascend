@@ -188,7 +188,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node.
+Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), use the complete container command below.
 
 ```bash
 # Update the vllm-ascend image
@@ -233,38 +233,52 @@ docker run --rm \
 
 ### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
 
-For Atlas 850/850E/950 SuperPod (950PR/950DT), adapt the device mappings and mounts to the host and selected transport. For automatically generated UB communication configuration, include the following options in your `docker run` command, before the image name:
+For an eight-device 950PR/950DT host, use the following command. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
 
 ```bash
---device=/dev/ummu \
---device=/dev/uburma \
--v /usr/bin/urma_admin:/usr/bin/urma_admin \
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+export NAME=vllm-ascend-950
+
+docker run --rm \
+    --name "$NAME" \
+    --net=host \
+    --privileged \
+    --shm-size=1g \
+    --ulimit memlock=-1:-1 \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+    -v /usr/local/dcmi:/usr/local/dcmi:ro \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin:ro \
+    -it "$IMAGE" bash
 ```
 
-Mounting `/lib/route.conf` is optional. If you choose to mount it manually, generate the file on the host before starting the container. See the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) for generation and configuration instructions, then add:
+Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` inside the container to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
+
+For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
+
+For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
 ```bash
--v /lib/route.conf:/lib/route.conf \
-```
-
-RoCE requires the following device and driver configuration mounts:
-
-```bash
---device=/dev/infiniband \
--v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro \
-```
-
-Make the RoCE endpoint directory available inside the container, for example:
-
-```bash
+--device /dev/infiniband \
+-v /usr/lib64/libhrn5-rdmav34.so:/usr/lib64/libhrn5-rdmav34.so:ro \
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
 
-Optionally, mount the host's `hiroce5` executable to inspect RoCE network cards from inside the container. Use its actual path on the host; for example:
-
-```bash
--v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5 \
-```
+- Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
+- `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
+- Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake
 
