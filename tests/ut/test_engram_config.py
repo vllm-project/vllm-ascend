@@ -15,8 +15,6 @@ from pydantic import TypeAdapter, model_validator
 from vllm_ascend.config_utils import config as config_dataclass
 from vllm_ascend.engram_config import (
     AscendEngramConfig,
-    copy_engram_projection,
-    extend_native_engram_config,
     resolve_engram_config,
 )
 
@@ -38,8 +36,6 @@ def native(monkeypatch):
                 raise ValueError("dp_shared_memory requires cpu_offload=True")
             return self
 
-    extend_native_engram_config(Native)
-
     def verify(vc):
         shared = vc.engram_config.dp_shared_memory
         parallel = vc.parallel_config
@@ -58,13 +54,11 @@ def native(monkeypatch):
 
 
 def vc(options=None, *, native=None, v2=True, dp=4, pcp=1):
-    from vllm.config import EngramConfig
-
     text = SimpleNamespace(engram_layer_ids=[1, 14])
     model = SimpleNamespace(architecture="DeepseekV41ForCausalLM", hf_text_config=text, hf_config=text)
     values = dict(
-        additional_config={},
-        engram_config=native if native is not None else EngramConfig(**(options or {})),
+        additional_config={"engram_config": options or {}},
+        engram_config=native,
         model_config=model,
         speculative_config=None,
         parallel_config=SimpleNamespace(
@@ -98,7 +92,7 @@ def test_default_schema_and_resolved_config_are_read_only(native):
 @pytest.mark.parametrize("options", [{}, {"enabled": False}, {"enabled": "false", "backend": "elastic"}])
 def test_disabled_never_loads_upstream_or_device_policy(monkeypatch, native, options):
     monkeypatch.setattr("vllm_ascend.engram_config.default_engram_overlap", Mock(side_effect=AssertionError("device")))
-    config = SimpleNamespace(additional_config={}, engram_config=native.cls(**options))
+    config = SimpleNamespace(additional_config={"engram_config": options}, engram_config=native.cls())
     resolved = resolve_engram_config(config)
     assert not resolved.enabled and not resolved.overlap and resolved.group_size is None
     assert config.engram_config is None
@@ -114,43 +108,39 @@ def test_disabled_never_loads_upstream_or_device_policy(monkeypatch, native, opt
         {"backend": "bad"},
         {"overalp": True},
         {"engram_tp_size": 4},
-        {"_ascend_requested": {}},
+        {"cpu_offload": False},
+        {"dp_shared_memory": True},
     ],
 )
-def test_invalid_native_input_is_rejected(native, options):
+def test_invalid_additional_input_is_rejected(native, options):
+    config = vc()
+    config.additional_config["engram_config"] = options
     with pytest.raises(ValueError):
-        TypeAdapter(native.cls).validate_python(options)
+        resolve_engram_config(config)
 
 
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("engram_config", {"enabled": False}),
         ("enable_engram", False),
         ("engram_offload_backend", "uva"),
         ("multistream_engram_overlap", True),
         ("engram_tp_size", None),
     ],
 )
-def test_additional_config_engram_inputs_are_rejected(native, key, value):
+def test_flat_engram_switches_are_rejected(native, key, value):
     config = vc({"enabled": False})
     config.additional_config[key] = value
-    with pytest.raises(ValueError, match="moved to --engram-config"):
+    with pytest.raises(ValueError, match="additional_config.engram_config"):
         resolve_engram_config(config)
 
 
-def test_native_cli_schema_keeps_only_public_fields(native):
+def test_native_config_has_no_ascend_fields_or_metadata(native):
     schema = TypeAdapter(native.cls).json_schema()
-    assert set(schema["properties"]) == {
-        "enabled",
-        "backend",
-        "overlap",
-        "cpu_offload",
-        "dp_shared_memory",
-        "embedding_across_dp",
-    }
-    payload = TypeAdapter(native.cls).dump_python(native.cls(enabled=True))
-    assert "_ascend_requested" not in payload
+    assert set(schema["properties"]) == {"cpu_offload", "dp_shared_memory", "embedding_across_dp"}
+    for extra in ("enabled", "backend", "overlap", "_ascend_requested"):
+        with pytest.raises(ValueError):
+            native.cls(**{extra: True})
 
 
 @pytest.mark.parametrize("overlap", [None, True, False])
@@ -173,25 +163,25 @@ def test_uva_auto_sharing_follows_runner_and_topology(native, v2, dp, pcp, expec
     assert config.engram_config.dp_shared_memory is expected
 
 
-def test_new_explicit_false_is_not_silently_overwritten(native):
-    with pytest.raises(ValueError, match="V2.*automatic"):
-        resolve_engram_config(vc({"enabled": True, "dp_shared_memory": False}))
+def test_existing_native_v2_host_sharing_policy_is_preserved(native):
+    supplied = native.cls(dp_shared_memory=False)
+    config = vc({"enabled": True}, native=supplied)
+    assert resolve_engram_config(config).dp_shared_memory
+    assert supplied.dp_shared_memory is False
 
 
 def test_hbm_replicas_are_not_reported_as_shared_host_storage(native):
-    config = vc({"enabled": True, "cpu_offload": False})
+    config = vc({"enabled": True}, native=native.cls(cpu_offload=False))
     result = resolve_engram_config(config)
     assert not result.cpu_offload and not result.dp_shared_memory and result.replicate_across_dp
     assert not config.engram_config.dp_shared_memory
-    with pytest.raises(ValueError, match="requires cpu_offload"):
-        resolve_engram_config(vc({"enabled": True, "cpu_offload": False, "dp_shared_memory": True}))
 
 
 @pytest.mark.parametrize("case", ["cpu_offload", "dp_shared_memory", "world", "node", "dummy", "sp", "mtp"])
 def test_elastic_rejects_invalid_combinations(native, case):
     config = vc({"enabled": True, "backend": "elastic"})
     if case in ("cpu_offload", "dp_shared_memory"):
-        setattr(config.engram_config, case, case == "dp_shared_memory")
+        config.engram_config = native.cls(**{case: case == "dp_shared_memory"})
     elif case == "world":
         config.parallel_config.world_size_across_dp = 1
     elif case == "node":
@@ -256,16 +246,16 @@ def test_speculative_constraints_are_local_to_elastic(native, enabled, backend):
 
 
 @pytest.mark.parametrize("deep", [False, True])
-def test_projection_provenance_survives_reentry_and_copies(native, deep):
+def test_additional_switches_survive_reentry_and_copies(native, deep):
     config = vc({"enabled": True, "backend": "elastic"})
     expected = resolve_engram_config(config)
     assert resolve_engram_config(config) == expected
     copied = copy.deepcopy(config) if deep else copy.copy(config)
     assert resolve_engram_config(copied) == expected
-    # Reconstruct a VllmConfig using its declared fields and marked projection.
+    # Reconstruct using only declared fields and the original native type.
     fresh = vc({"enabled": True, "backend": "elastic"}, native=config.engram_config)
     assert resolve_engram_config(fresh) == expected
-    config.engram_config = native.cls(enabled=True, backend="elastic", overlap=False)
+    config.additional_config["engram_config"]["overlap"] = False
     assert resolve_engram_config(config).overlap is False
 
 
@@ -281,23 +271,24 @@ def test_actual_vllm_replace_accepts_normalized_config_without_dynamic_fields(na
     assert set(vars(copied)) == {item.name for item in fields(copied)}
     if enabled:
         assert set(vars(copied.engram_config)) <= {item.name for item in fields(copied.engram_config)}
-        assert replace(copied.engram_config).enabled
+        assert replace(copied.engram_config).cpu_offload
 
 
-def test_replicated_pcp_projection_retains_source_without_affecting_target(native):
-    target = vc({"enabled": True, "dp_shared_memory": True}, dp=1, pcp=2)
+def test_replicated_pcp_copy_does_not_affect_target(native):
+    from vllm.config import replace
+
+    target = vc({"enabled": True}, native=native.cls(dp_shared_memory=True), dp=1, pcp=2)
     resolve_engram_config(target)
-    projection = copy_engram_projection(target.engram_config, dp_shared_memory=False)
-    draft = vc(dp=1, pcp=1, native=projection)
+    projection = replace(target.engram_config, dp_shared_memory=False)
+    draft = vc({"enabled": True}, dp=1, pcp=1, native=projection)
     result = resolve_engram_config(draft)
     assert not result.dp_shared_memory
     assert target.engram_config.dp_shared_memory
-    assert target.engram_config._ascend_requested.dp_shared_memory
 
 
 def test_validation_failure_does_not_erase_explicit_native_input(native):
-    supplied = native.cls(enabled=True, embedding_across_dp=True)
-    config = vc(native=supplied)
+    supplied = native.cls(embedding_across_dp=True)
+    config = vc({"enabled": True}, native=supplied)
     with pytest.raises(ValueError, match="embedding_across_dp"):
         resolve_engram_config(config)
     assert config.engram_config is supplied
@@ -351,10 +342,10 @@ def test_hbm_embedding_uses_replica_shards_and_local_lookups(replicate, expected
     assert calls == [replicate]
 
 
-def test_actual_pcp_adapter_preserves_native_input_provenance(native):
+def test_actual_pcp_adapter_preserves_additional_switches(native):
     from vllm.config import replace
 
-    target = vc({"enabled": True, "dp_shared_memory": True}, dp=1, pcp=2)
+    target = vc({"enabled": True}, native=native.cls(dp_shared_memory=True), dp=1, pcp=2)
     target.parallel_config.enable_eplb = False
     target.parallel_config.eplb_config = object()
     resolve_engram_config(target)
@@ -370,7 +361,7 @@ def test_actual_pcp_adapter_preserves_native_input_provenance(native):
     adapter = production_function(
         "vllm_ascend/worker/v2/spec_decode/pcp_utils.py",
         "prepare_replicated_pcp_config",
-        {"replace": reconstruct, "copy_engram_projection": copy_engram_projection},
+        {"replace": reconstruct},
     )
     draft, replicated = adapter(target)
     assert replicated and draft.parallel_config.prefill_context_parallel_size == 1
@@ -378,7 +369,7 @@ def test_actual_pcp_adapter_preserves_native_input_provenance(native):
     assert target.engram_config.dp_shared_memory
 
 
-def test_factory_injects_native_policy_and_preserves_other_input(native):
+def test_factory_injects_additional_policy_and_preserves_other_input(native):
     from vllm_ascend.engram_config import LEGACY_ENGRAM_KEYS, ResolvedEngramConfig
 
     config = vc({"enabled": True, "backend": "elastic"})

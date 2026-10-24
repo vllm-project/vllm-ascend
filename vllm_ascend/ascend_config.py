@@ -454,6 +454,7 @@ class AscendConfig:
             "refresh": false,
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
+            "engram_config": {"enabled": false, "backend": "uva", "overlap": null},
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
@@ -596,7 +597,7 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
-    # Read-only policy resolved from native --engram-config, never additional_config input.
+    # Read-only policy derived from Ascend switches and the native placement config.
     engram_config: ResolvedEngramConfig = dataclasses.field(default_factory=ResolvedEngramConfig)
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -1862,7 +1863,7 @@ def init_ascend_config(vllm_config: VllmConfig, *, engram_config: ResolvedEngram
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
     _NON_USER_INPUT_KEYS = {
-        # Engram input and legacy aliases are normalized before schema construction.
+        # Ascend Engram switches are normalized before schema construction.
         "engram_config",
         *LEGACY_ENGRAM_KEYS,
         # control-flow flag (singleton/cache refresh), not a configuration field

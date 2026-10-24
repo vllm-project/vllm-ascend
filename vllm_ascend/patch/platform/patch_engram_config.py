@@ -14,25 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Expose the native Engram opt-in and allow host sharing across PCP replicas.
-
-The platform applies this before CLI parsing. Preserve the existing class
-identity and rebuild schemas so EngineArgs aliases accept the new fields.
-Remove the schema extension once upstream exposes an equivalent feature gate
-and backend policy. This patch only changes configuration-time behavior.
-"""
+"""Allow Engram on Ascend and host table sharing across PCP replicas."""
 
 import importlib.util
 
-from pydantic.dataclasses import rebuild_dataclass
-
-from vllm_ascend.engram_config import extend_native_engram_config
-
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
-    from vllm.config import VllmConfig
     from vllm.config.engram import EngramConfig, model_has_engram_layers
-    from vllm.config.utils import get_hash_factors, hash_factors
 
     def verify_model_config(self, model_config) -> None:
         # Keep upstream's model/layer checks; only its CUDA requirement is lifted.
@@ -55,27 +43,3 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
 
     EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config
-
-    def compute_hash(self) -> str:
-        return hash_factors(get_hash_factors(self, {"_ascend_requested"}))
-
-    def install_native_engram_config() -> None:
-        """Keep class identity for EngineArgs and refresh VllmConfig's schema."""
-        if "enabled" in EngramConfig.__dataclass_fields__:
-            return
-        extend_native_engram_config(EngramConfig)
-        original_resolver = VllmConfig._resolve_and_verify_engram_config
-
-        def resolve_enabled_engram(config) -> None:
-            # The upstream method checks DBO before its None gate. Disabled
-            # Engram must skip those checks as well as group/model validation.
-            if config.engram_config is None or not config.engram_config.enabled:
-                config.engram_config = None
-                return
-            original_resolver(config)
-
-        EngramConfig.compute_hash = compute_hash
-        VllmConfig._resolve_and_verify_engram_config = resolve_enabled_engram
-        rebuild_dataclass(VllmConfig, force=True)
-
-    install_native_engram_config()
