@@ -116,9 +116,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# vLLM #61183 moved the planning helpers on main; v0.32.0 keeps them
+# in kv_cache_utils, so importing the main-only module breaks worker startup.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core.kv_cache_utils import (
         get_kv_cache_groups,
         unify_hybrid_kv_cache_specs,
@@ -955,10 +955,10 @@ class NPUWorker(WorkerBase):
         # vLLM #57516 reclaims cached memory inside `load_model` via
         # `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable
         # memory pool `torch.npu.empty_cache()` trips "captures_underway.empty()",
-        # so on main neutralize it while weights load; the pool is reclaimed by
-        # sleep()/wake_up(). The v0.31.0 lane does not reclaim inside load_model.
+        # so neutralize it while weights load on both supported lanes; the pool
+        # is reclaimed by sleep()/wake_up().
         empty_cache_context: AbstractContextManager[Any]
-        if self.vllm_config.model_config.enable_sleep_mode and not vllm_version_is("0.31.0"):
+        if self.vllm_config.model_config.enable_sleep_mode:
             empty_cache_context = patch("torch.npu.empty_cache", lambda: None)
         else:
             empty_cache_context = nullcontext()

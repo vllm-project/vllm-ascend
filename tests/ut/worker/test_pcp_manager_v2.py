@@ -87,7 +87,7 @@ def _make_pcp_config(
 
 
 def _partition_batch(manager, batch, *, padded_num_tokens=None, batch_desc=None):
-    """Use the 0.31 descriptor API, without token/request padding by default."""
+    """Use the batch descriptor API without token/request padding by default."""
     if batch_desc is None:
         batch_desc = BatchExecutionDescriptor(
             CUDAGraphMode.NONE,
@@ -128,6 +128,11 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == expected
 
 
+def test_constructor_forwards_decode_sharding_with_release_compatible_arguments():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True, moe_gathers_tokens=True)
+    assert manager.shard_decode_requests is True
+
+
 def test_decode_sharding_does_not_add_a_parallel_config_field():
     parallel_config = ParallelConfig(prefill_context_parallel_size=2, decode_context_parallel_size=1)
     parallel_config.worker_cls = "test-worker"
@@ -150,12 +155,8 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
     ):
         hardware_profile.return_value.supports.return_value = False
         _setup_worker_and_scheduler(config, ascend_config)
-
-    if vllm_version_is("0.31.0"):
-        assert not hasattr(parallel_config, "pcp_shard_decode_requests")
-    else:
-        # vLLM main declares this on ParallelConfig itself.
-        assert parallel_config.pcp_shard_decode_requests is True
+    # vLLM main declares this on ParallelConfig itself.
+    assert parallel_config.pcp_shard_decode_requests is True
     replace(parallel_config)
     assert is_pcp_decode_sharding_enabled(config) is True
 
@@ -988,7 +989,7 @@ def test_validate_config_rejects_unsupported_speculator_options(
 def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
     """Lock the keyword contracts added by vLLM #53694 and #53869."""
     # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
-    dp_sync_param = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
+    dp_sync_param = "dp_sync_state"
     for speculator_cls in (
         AscendAutoRegressiveSpeculator,
         AscendDFlashSpeculator,
@@ -1111,10 +1112,9 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.prompt_logprobs_worker = None
     # vLLM main added these ExecuteModelState fields.
     state_kwargs: dict = {}
-    state_kwargs["dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"] = None
+    state_kwargs["dp_sync_state"] = None
     state_kwargs["cudagraph_stats"] = None
-    if not vllm_version_is("0.31.0"):
-        state_kwargs["num_spec_tokens_to_schedule"] = 0
+    state_kwargs["num_spec_tokens_to_schedule"] = 0
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
@@ -1252,7 +1252,7 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
     local_batch = _make_local_pcp_batch()
 
     # vLLM main renamed the upstream staging hook; patch and call the live name.
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name) as stage,
         patch.object(manager, "partition_batch", return_value=local_batch) as partition,
@@ -1274,7 +1274,7 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
     legacy_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
-    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.32.0") else "prepare_inputs_for_capture_or_profile"
     with (
         patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,

@@ -319,9 +319,9 @@ def rejection_sample(
     # `_is_bonus_logit`, which masks its look-ahead load with the total logit
     # count. Passing `num_speculative_steps` there makes the kernels treat every
     # logit after the first one as a bonus token and return early, leaving the
-    # `new_empty` block-statistics buffers uninitialized. v0.31.0 still expects
+    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
     # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.31.0") else num_logits
+    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton

@@ -74,148 +74,72 @@ class AscendPCPManager(PCPManager):
     # The runner's global input buffers, which back global graph metadata.
     global_input_buffers: AscendInputBuffers | None = None
 
-    # vLLM main made `shard_decode_requests` a required PCPManager argument and
-    # `maybe_build_pcp_manager` passes it; v0.31.0 has neither. Define the
-    # public `__init__` per lane; the Ascend-only buffer setup is inlined below.
-    if vllm_version_is("0.31.0"):
+    def __init__(
+        self,
+        pcp_world_size: int,
+        pcp_rank: int,
+        device: torch.device,
+        shard_decode_requests: bool = False,
+        req_states: RequestState | None = None,
+        max_num_reqs: int | None = None,
+        max_num_tokens: int | None = None,
+        block_tables: BlockTables | None = None,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_interleave: int = 1,
+        # vLLM #60946 (main) added this argument and
+        # `maybe_build_pcp_manager` always passes it.
+        moe_gathers_tokens: bool = False,
+    ) -> None:
+        super().__init__(
+            pcp_world_size=pcp_world_size,
+            pcp_rank=pcp_rank,
+            device=device,
+            shard_decode_requests=shard_decode_requests,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            block_tables=block_tables,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_interleave=cp_interleave,
+            **({} if vllm_version_is("0.32.0") else {"moe_gathers_tokens": moe_gathers_tokens}),
+        )
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
+        if block_tables is not None:
+            slot_dtype = block_tables.slot_mappings.dtype
+            if self._global_batch_slot_mappings is not None:
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
+            if self._gathered_kv_slot_mappings is not None:
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
+            self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
 
-        def __init__(
-            self,
-            pcp_world_size: int,
-            pcp_rank: int,
-            device: torch.device,
-            req_states: RequestState | None = None,
-            max_num_reqs: int | None = None,
-            max_num_tokens: int | None = None,
-            block_tables: BlockTables | None = None,
-            dcp_world_size: int = 1,
-            dcp_rank: int = 0,
-            cp_interleave: int = 1,
-        ) -> None:
-            super().__init__(
-                pcp_world_size=pcp_world_size,
-                pcp_rank=pcp_rank,
-                device=device,
-                max_num_reqs=max_num_reqs,
+        # vLLM #53515 made the PCP-local buffers persistent and uses them for
+        # graph capture. Preserve that ownership while providing the extra CPU
+        # and NumPy sequence-length views required by AscendInputBatch.
+        if max_num_reqs is not None and max_num_tokens is not None:
+            self._input_buffers = AscendInputBuffers(
+                max_num_reqs=2 * max_num_reqs,
                 max_num_tokens=max_num_tokens,
-                block_tables=block_tables,
-                dcp_world_size=dcp_world_size,
-                dcp_rank=dcp_rank,
-                cp_interleave=cp_interleave,
-            )
-            # PCP supplies its own output buffers to compute_slot_mappings, so their
-            # dtype must match Ascend block-table slots for cache-write operators.
-            if block_tables is not None:
-                slot_dtype = block_tables.slot_mappings.dtype
-                if self._global_batch_slot_mappings is not None:
-                    self._global_batch_slot_mappings = torch.empty_like(
-                        self._global_batch_slot_mappings, dtype=slot_dtype
-                    )
-                if self._gathered_kv_slot_mappings is not None:
-                    self._gathered_kv_slot_mappings = torch.empty_like(
-                        self._gathered_kv_slot_mappings, dtype=slot_dtype
-                    )
-                self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
-
-            # vLLM #53515 made the PCP-local buffers persistent and uses them for
-            # graph capture. Preserve that ownership while providing the extra CPU
-            # and NumPy sequence-length views required by AscendInputBatch.
-            if max_num_reqs is not None and max_num_tokens is not None:
-                self._input_buffers = AscendInputBuffers(
-                    max_num_reqs=2 * max_num_reqs,
-                    max_num_tokens=max_num_tokens,
-                    device=device,
-                )
-                # The upstream PCP manager copies exactly max_num_reqs + 1
-                # offsets into the whole query_start_loc tensor. AscendInputBuffers
-                # normally reserves one additional FIA padding slot, but PCP never
-                # uses that slot; expose the exact upstream-sized view here.
-                self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
-                # Restore indices cover the global graph extent, which can exceed
-                # the scheduled tokens that upstream assigns to rank segments.
-                self._hidden_restore_idx_buffer = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-
-            # Whether the runner already restored the target hidden states to the
-            # global PCP layout for the current sampling step (replicated PCP
-            # draft). A second all-gather in restore_for_sampling would reorder
-            # them, so the sampling path consumes this flag instead of inferring
-            # the layout from the tensor length, which is ambiguous under
-            # piecewise/FULL graphs where each rank pads its local batch to the
-            # same global padded length.
-            self._sampling_hidden_restored = False
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            pcp_world_size: int,
-            pcp_rank: int,
-            device: torch.device,
-            shard_decode_requests: bool = False,
-            req_states: RequestState | None = None,
-            max_num_reqs: int | None = None,
-            max_num_tokens: int | None = None,
-            block_tables: BlockTables | None = None,
-            dcp_world_size: int = 1,
-            dcp_rank: int = 0,
-            cp_interleave: int = 1,
-            # vLLM #60946 (main) added this argument and
-            # `maybe_build_pcp_manager` always passes it.
-            moe_gathers_tokens: bool = False,
-        ) -> None:
-            super().__init__(
-                pcp_world_size=pcp_world_size,
-                pcp_rank=pcp_rank,
                 device=device,
-                shard_decode_requests=shard_decode_requests,
-                max_num_reqs=max_num_reqs,
-                max_num_tokens=max_num_tokens,
-                block_tables=block_tables,
-                dcp_world_size=dcp_world_size,
-                dcp_rank=dcp_rank,
-                cp_interleave=cp_interleave,
-                moe_gathers_tokens=moe_gathers_tokens,
             )
-            # PCP supplies its own output buffers to compute_slot_mappings, so their
-            # dtype must match Ascend block-table slots for cache-write operators.
-            if block_tables is not None:
-                slot_dtype = block_tables.slot_mappings.dtype
-                if self._global_batch_slot_mappings is not None:
-                    self._global_batch_slot_mappings = torch.empty_like(
-                        self._global_batch_slot_mappings, dtype=slot_dtype
-                    )
-                if self._gathered_kv_slot_mappings is not None:
-                    self._gathered_kv_slot_mappings = torch.empty_like(
-                        self._gathered_kv_slot_mappings, dtype=slot_dtype
-                    )
-                self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
+            # The upstream PCP manager copies exactly max_num_reqs + 1
+            # offsets into the whole query_start_loc tensor. AscendInputBuffers
+            # normally reserves one additional FIA padding slot, but PCP never
+            # uses that slot; expose the exact upstream-sized view here.
+            self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+            # Restore indices cover the global graph extent, which can exceed
+            # the scheduled tokens that upstream assigns to rank segments.
+            self._hidden_restore_idx_buffer = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
 
-            # vLLM #53515 made the PCP-local buffers persistent and uses them for
-            # graph capture. Preserve that ownership while providing the extra CPU
-            # and NumPy sequence-length views required by AscendInputBatch.
-            if max_num_reqs is not None and max_num_tokens is not None:
-                self._input_buffers = AscendInputBuffers(
-                    max_num_reqs=2 * max_num_reqs,
-                    max_num_tokens=max_num_tokens,
-                    device=device,
-                )
-                # The upstream PCP manager copies exactly max_num_reqs + 1
-                # offsets into the whole query_start_loc tensor. AscendInputBuffers
-                # normally reserves one additional FIA padding slot, but PCP never
-                # uses that slot; expose the exact upstream-sized view here.
-                self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
-                # Restore indices cover the global graph extent, which can exceed
-                # the scheduled tokens that upstream assigns to rank segments.
-                self._hidden_restore_idx_buffer = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-
-            # Whether the runner already restored the target hidden states to the
-            # global PCP layout for the current sampling step (replicated PCP
-            # draft). A second all-gather in restore_for_sampling would reorder
-            # them, so the sampling path consumes this flag instead of inferring
-            # the layout from the tensor length, which is ambiguous under
-            # piecewise/FULL graphs where each rank pads its local batch to the
-            # same global padded length.
-            self._sampling_hidden_restored = False
+        # Whether the runner already restored the target hidden states to the
+        # global PCP layout for the current sampling step (replicated PCP
+        # draft). A second all-gather in restore_for_sampling would reorder
+        # them, so the sampling path consumes this flag instead of inferring
+        # the layout from the tensor length, which is ambiguous under
+        # piecewise/FULL graphs where each rank pads its local batch to the
+        # same global padded length.
+        self._sampling_hidden_restored = False
 
     @property
     def is_decode_sharded(self) -> bool:
@@ -424,7 +348,7 @@ class AscendPCPManager(PCPManager):
     # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
     # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
     # ``is_padding`` to the rows the MoE routes.
-    if vllm_version_is("0.31.0"):
+    if vllm_version_is("0.32.0"):
 
         def prepare_inputs_to_capture(
             self,
