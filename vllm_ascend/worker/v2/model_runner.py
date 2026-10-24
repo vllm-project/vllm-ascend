@@ -313,6 +313,15 @@ class NPUModelRunner(GPUModelRunner):
             join_nz_warm_thread()
             join_early_kernel_warmup("load_model")
 
+        from vllm.model_executor.models.interfaces import supports_multimodal_pruning
+
+        mm_config = self.model_config.multimodal_config
+        self.is_multimodal_pruning_enabled: bool = bool(
+            supports_multimodal_pruning(self.model)
+            and mm_config is not None
+            and mm_config.is_multimodal_pruning_enabled()
+        )
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
