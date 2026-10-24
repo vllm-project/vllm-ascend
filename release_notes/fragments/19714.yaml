@@ -1,0 +1,4 @@
+pr: 19714
+entries:
+  - category: bugfix
+    text: Preserve fine-grained prefill checkpoints and select verified hybrid cache states when restoring prefixes from AscendStore.
