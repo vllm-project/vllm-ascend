@@ -28,7 +28,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
@@ -1834,6 +1834,66 @@ class TestAscendMLAImpl(TestBase):
         self.assertFalse(impl.enable_mlapo)
         mock_enabling_mlapo.assert_not_called()
 
+    def _rebuild_impl(self):
+        """Rebuild the impl from ``setUp`` so tests can tweak projection kwargs."""
+        return AscendMLAImpl(
+            num_heads=self.impl.num_heads,
+            head_size=self.impl.head_size,
+            scale=self.impl.scale,
+            num_kv_heads=self.impl.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.impl.kv_cache_dtype,
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            kv_lora_rank=self.impl.kv_lora_rank,
+            qk_nope_head_dim=self.impl.qk_nope_head_dim,
+            qk_rope_head_dim=self.impl.qk_rope_head_dim,
+            qk_head_dim=self.impl.qk_head_dim,
+            v_head_dim=self.impl.v_head_dim,
+            q_lora_rank=self.impl.q_lora_rank,
+            q_proj=self.impl.q_proj,
+            q_b_proj=self.impl.q_proj,
+            kv_b_proj=self.impl.kv_b_proj,
+            o_proj=self.impl.o_proj,
+            kv_a_proj_with_mqa=self.impl.kv_a_proj_with_mqa,
+            fused_qkv_a_proj=self.impl.fused_qkv_a_proj,
+            kv_a_layernorm=self.impl.kv_a_layernorm,
+            rotary_emb=self.impl.rotary_emb,
+            g_proj=None,
+            use_mla_rope=True,
+        )
+
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_qkv_a_fused_output_gate_disables_mlapo(self, mock_get_current_vllm_config, mock_enabling_mlapo):
+        """Kimi-K3 fuses its gate as a third QKV-A shard; MLAPO cannot carry it."""
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
+        # Only vLLM main builds the three-shard QKV-A-gate projection; release
+        # v0.31.0 keeps a separate gate and a two-shard projection.
+        gate_fused = not vllm_version_is("0.31.0")
+
+        impl = self._rebuild_impl()
+
+        self.assertEqual(impl.qkv_a_gate_fused, gate_fused)
+        self.assertEqual(impl.use_output_gate, gate_fused)
+        self.assertEqual(impl.enable_mlapo, not gate_fused)
+        mock_enabling_mlapo.assert_called_once()
+
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_plain_qkv_a_projection_is_not_gate_fused(self, mock_get_current_vllm_config):
+        """The two-shard projection must not be mistaken for the fused layout."""
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        self.impl.fused_qkv_a_proj.output_sizes = [64, 32]
+
+        impl = self._rebuild_impl()
+
+        self.assertFalse(impl.qkv_a_gate_fused)
+        self.assertFalse(impl.use_output_gate)
+
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
         """Test head padding computation for num_heads that are not power of 2 (e.g. GLM-4.7-Flash with 20 heads)."""
@@ -2972,7 +3032,7 @@ class TestAscendMLAImpl(TestBase):
                 if prefills:
                     expected.append("prefill_cache")
                 self.assertEqual(events, expected)
-                self.assertEqual(actual, (decode if decodes else None, prefill if prefills else None))
+                self.assertEqual(actual, (decode if decodes else None, prefill if prefills else None, None))
 
     def test_kvpp_fused_decode_and_profile_hook(self):
         from vllm_ascend.attention import mla_v1
@@ -3066,10 +3126,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl._q_proj_and_k_up_proj.return_value = [MagicMock(), MagicMock()]
         self.impl.num_kv_heads = self.impl.num_heads
 
-        decode_res, prefill_res = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata)
+        decode_res, prefill_res, gate = self.impl._mla_preprocess("mock_layer", hidden_states, kv_cache, attn_metadata)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
+        self.assertIsNone(gate)
 
     def test_mla_preprocess_prefill_pcp_empty_rank(self):
         self.impl.pcp_enabled = True
@@ -3526,3 +3587,34 @@ def test_mla_nope_decode_preserves_current_kv_contract():
         if return_current_kv:
             assert result[2].shape == (2, 1, 1, 0)
             torch.testing.assert_close(result[3].reshape(2, 4), tokens)
+
+
+def _split_impl(qkv_a_gate_fused: bool) -> AscendMLAImpl:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.q_lora_rank = 4
+    impl.kv_lora_rank = 3
+    impl.qk_rope_head_dim = 2
+    impl.qkv_a_gate_fused = qkv_a_gate_fused
+    return impl
+
+
+def test_split_fused_qkv_lora_plain_layout_has_no_gate():
+    """The two-shard MLA projection must keep the gate attribute unset."""
+    qkv_lora = torch.arange(9, dtype=torch.float32).reshape(1, 9)
+
+    q_c, kv_no_split, gate = _split_impl(False)._split_fused_qkv_lora(qkv_lora)
+
+    assert gate is None
+    torch.testing.assert_close(q_c, qkv_lora[:, :4])
+    torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:])
+
+
+def test_split_fused_qkv_lora_peels_kimi_output_gate():
+    """A gate-fused layout returns the trailing shard separately from q/kv."""
+    qkv_lora = torch.arange(15, dtype=torch.float32).reshape(1, 15)
+
+    q_c, kv_no_split, gate = _split_impl(True)._split_fused_qkv_lora(qkv_lora)
+
+    torch.testing.assert_close(q_c, qkv_lora[:, :4])
+    torch.testing.assert_close(kv_no_split, qkv_lora[:, 4:9])
+    torch.testing.assert_close(gate, qkv_lora[:, 9:])

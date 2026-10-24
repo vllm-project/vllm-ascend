@@ -96,6 +96,7 @@ else:
             max_num_tokens: int,
             max_model_len: int,
             sample_from_anchor: bool = False,
+            num_reqs_override: int | None = None,
         ) -> None:
             kernel_block_size = kernel_block_size_by_table.get(id(block_table))
             if kernel_block_size is None:
@@ -132,6 +133,7 @@ else:
                 max_num_tokens,
                 max_model_len,
                 sample_from_anchor,
+                num_reqs_override=num_reqs_override,
                 kv_cache_block_size=kv_cache_block_size,
             )
 
@@ -381,6 +383,7 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    num_reqs_override: int | None = None,
     *,
     kv_cache_block_size: int,
 ) -> None:
@@ -413,5 +416,6 @@ def prepare_dflash_inputs(
         max_num_tokens,
         max_model_len,
         sample_from_anchor,
+        num_reqs_override=num_reqs_override,
         kv_cache_block_size=kv_cache_block_size,
     )

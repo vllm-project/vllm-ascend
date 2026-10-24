@@ -42,7 +42,7 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch, vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -435,12 +435,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             .to(device=packed_param.device, dtype=packed_param.dtype)
             .contiguous()
         )
-        replace_parameter(
-            self,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
+        # vLLM main (#62326) keeps the parameter object by default and drops
+        # `prefer_copy`; v0.31.0 still requires `prefer_copy=True`.
+        if vllm_version_is("0.31.0"):
+            replace_parameter(
+                self,
+                _PACKED_CONV_WEIGHT_NAME,
+                packed_weight,
+                prefer_copy=True,
+            )
+        else:
+            replace_parameter(
+                self,
+                _PACKED_CONV_WEIGHT_NAME,
+                packed_weight,
+            )
 
     def _run_recurrent(
         self,

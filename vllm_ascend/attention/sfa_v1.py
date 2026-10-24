@@ -968,24 +968,21 @@ class AscendSFAImpl(MLAAttentionImpl):
         # scenario the graph is captured once, so every later weight update
         # reload has to refresh the stored tensors in place instead of
         # rebinding the attributes to freshly allocated tensors.
-        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
-        # copies into the existing storage while the new value stays
+        # `replace_parameter(..., prefer_copy=True)` does exactly that on
+        # v0.31.0: it copies into the existing storage while the new value stays
         # compatible, and rebinds only when shape/dtype/device actually
-        # changes. This mirrors how upstream vLLM refreshes
+        # changes. vLLM main (#62326) dropped `prefer_copy` and keeps the
+        # parameter object by default. This mirrors how upstream vLLM refreshes
         # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
         # raise on a shape mismatch.
-        replace_parameter(
-            self,
-            "W_UV",
-            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
-            prefer_copy=True,
-        )
-        replace_parameter(
-            self,
-            "W_UK_T",
-            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
-            prefer_copy=True,
-        )
+        w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
+        w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
+        if vllm_version_is("0.31.0"):
+            replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
+            replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
+        else:
+            replace_parameter(self, "W_UV", w_uv)
+            replace_parameter(self, "W_UK_T", w_uk_t)
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight

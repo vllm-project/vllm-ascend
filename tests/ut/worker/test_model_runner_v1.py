@@ -1308,6 +1308,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             layer.indexer = None
             layer.kv_cache_dtype = "auto"
             layer.head_size = 3
+            # Set by ``MLAAttention.__init__`` on vLLM main; this stub
+            # bypasses ``__init__`` but ``get_kv_cache_spec`` reads it.
+            layer.topk_buffer_width = None
             layer.sliding_window = None
             layer.non_causal_multi_token_decode = False
 
