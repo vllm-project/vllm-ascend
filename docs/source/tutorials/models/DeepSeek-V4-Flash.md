@@ -439,7 +439,7 @@ Expected Result:
 
 The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
-### 5.2 Multi-Node PD Separation Deployment
+### 5.2 PD Separation Deployment
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
