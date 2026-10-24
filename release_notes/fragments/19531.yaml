@@ -1,0 +1,6 @@
+pr: 19531
+entries:
+  - category: feature
+    text: >-
+      Added Qwen2.5-1.5B-apeach (Korean harmful-content classification) support
+      on Ascend NPUs, documented with a new model tutorial.
