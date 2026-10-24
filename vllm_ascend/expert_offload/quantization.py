@@ -36,10 +36,12 @@ class MXFP4ExpertAdapter:
         activation = getattr(self.activation, "value", self.activation)
         if activation not in ("silu", "situ"):
             raise ValueError(f"{prefix} requires a gated silu or situ activation; got {activation}")
-        tensors = {name: getattr(layer, name, None) for name in self.tensor_names}
-        for name, tensor in tensors.items():
+        tensors: dict[str, torch.Tensor] = {}
+        for name in self.tensor_names:
+            tensor = getattr(layer, name, None)
             if not isinstance(tensor, torch.Tensor) or tensor.ndim != 3:
                 raise ValueError(f"{prefix} requires a rank-3 {name} expert tensor")
+            tensors[name] = tensor
         w13, w2 = tensors["w13_weight"], tensors["w2_weight"]
         experts, hidden = layer.local_num_experts, w2.shape[1]
         intermediate = w13.shape[1] // 2
@@ -53,9 +55,10 @@ class MXFP4ExpertAdapter:
             "w2_weight_scale": (experts, hidden, intermediate // self.scheme.group_size),
         }
         for name, tensor in tensors.items():
-            allowed_dtypes = (torch.uint8,)
-            if name.endswith("_scale"):
-                allowed_dtypes += (getattr(torch, "float8_e8m0fnu", None),)
+            allowed_dtypes: tuple[torch.dtype, ...] = (torch.uint8,)
+            scale_dtype = getattr(torch, "float8_e8m0fnu", None)
+            if name.endswith("_scale") and scale_dtype is not None:
+                allowed_dtypes += (scale_dtype,)
             if tensor.dtype not in allowed_dtypes or tuple(tensor.shape) != expected_shapes[name]:
                 raise ValueError(
                     f"{prefix} has unsupported {name}: expected shape={expected_shapes[name]} "
