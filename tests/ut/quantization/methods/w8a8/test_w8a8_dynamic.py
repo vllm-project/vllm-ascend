@@ -135,6 +135,25 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             mock_rank.return_value = 0
             self.quant_method = AscendW8A8DynamicFusedMoEMethod()
 
+    def test_scale_reuse_disabled_for_eplb(self):
+        module = "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic"
+        for use_v2 in (False, True):
+            for dynamic_eplb in (False, True):
+                for enable_eplb in (False, True):
+                    with self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb):
+                        config = create_mock_vllm_config()
+                        config.use_v2_model_runner = use_v2
+                        config.parallel_config.enable_eplb = enable_eplb
+                        ascend_config = create_mock_ascend_config()
+                        ascend_config.eplb_config.dynamic_eplb = dynamic_eplb
+                        with (
+                            patch(f"{module}.get_current_vllm_config", return_value=config),
+                            patch(f"{module}.get_ascend_config", return_value=ascend_config),
+                            patch(f"{module}.get_mc2_group", side_effect=AttributeError),
+                        ):
+                            method = AscendW8A8DynamicFusedMoEMethod()
+                        self.assertEqual(method.enable_eplb, enable_eplb or (dynamic_eplb and not use_v2))
+
     def test_get_weight_various_expert_counts(self):
         expert_counts = [4, 8, 16, 32]
         for num_experts in expert_counts:
