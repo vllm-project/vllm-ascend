@@ -30,7 +30,8 @@ def _swiglu_reference(x: torch.Tensor) -> torch.Tensor:
 
 def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     scale = x.abs().amax(dim=-1) / INT8_MAX
-    quantized = torch.round(x / scale.unsqueeze(-1)).clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
+    inverse_scale = torch.where(scale == 0, torch.zeros_like(scale), scale.reciprocal())
+    quantized = torch.round(x * inverse_scale.unsqueeze(-1)).clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
     return quantized, scale
 
 
@@ -85,6 +86,18 @@ def test_swiglu_quant_without_quantization(dtype):
     assert actual.shape == expected.shape
     assert actual.dtype == dtype
     torch.testing.assert_close(actual.cpu().float(), expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_swiglu_quant_zero_scale(dtype):
+    x = torch.zeros((3, 4096), dtype=dtype, device=DEVICE)
+    group_list = torch.tensor([1, 0, 2], dtype=torch.int32, device=DEVICE)
+
+    actual, actual_scale = swiglu_quant(x, group_list, group_list_type=1)
+
+    assert torch.count_nonzero(actual).item() == 0
+    assert torch.count_nonzero(actual_scale).item() == 0
 
 
 def test_swiglu_quant_rejects_invalid_group_list_type():

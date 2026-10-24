@@ -30,7 +30,10 @@ def _quantize_indexer_query_kernel(
         # Quantize with the rounded FP16 scale, not the original FP32 value.
         scale = tl.div_rn(abs_max, QUANT_MAX).to(tl.float16).to(tl.float32)
         scale = tl.maximum(scale, MIN_SCALE)
-        normalized = tl.div_rn(query, scale[:, None])
+        # Match the fused AscendC quantization paths: compute one reciprocal
+        # per head instead of dividing all HEAD_DIM elements by the scale.
+        inverse_scale = tl.div_rn(1.0, scale)
+        normalized = query * inverse_scale[:, None]
         quantized = tl.extra.cann.libdevice.nearbyint(normalized)
         quantized = tl.minimum(tl.maximum(quantized, -QUANT_MAX), QUANT_MAX).to(tl.int8)
         tl.store(quantized_ptr + offsets, quantized, rows[:, None] < num_rows)

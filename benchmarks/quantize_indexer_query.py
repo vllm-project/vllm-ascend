@@ -19,7 +19,8 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 def reference(query):
     scale = (query.float().abs().amax(-1) / 127.0).half().clamp_min_(2.0**-24)
-    quantized = (query.float() / scale.float().unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8)
+    inverse_scale = scale.float().reciprocal()
+    quantized = (query.float() * inverse_scale.unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8)
     return quantized, scale
 
 

@@ -47,11 +47,15 @@ def _swiglu_quant_kernel(
         # quant
         if SCALE:
             scale = tl.max(tl.abs(out)).to(tl.float32) / DTYPE_MAX
+            # Division is substantially more expensive than multiplication on
+            # the vector core. Compute one reciprocal per row instead of
+            # dividing every output element by the same scale.
+            inverse_scale = tl.where(scale == 0.0, 0.0, 1.0 / scale)
             # store scale
             tl.store(scale_ptr + row_idx, scale.to(scale_ptr.dtype.element_ty))
             for col_blk_idx in range(0, HALF_COLS, COL_BLOCK_SIZE):
                 tmp_out = extract_slice(out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,))
-                tmp_out = (tmp_out.to(tl.float32) / scale).to(x_ptr.dtype.element_ty)
+                tmp_out = (tmp_out.to(tl.float32) * inverse_scale).to(x_ptr.dtype.element_ty)
                 tmp_out = tmp_out.cast(tl.int8, overflow_mode="saturate")
 
                 o_offsets = row_idx * HALF_COLS + col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)

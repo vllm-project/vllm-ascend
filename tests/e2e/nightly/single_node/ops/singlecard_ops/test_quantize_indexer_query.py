@@ -10,7 +10,8 @@ from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 
 def reference(query):
     scale = (query.float().abs().amax(-1) / 127.0).half().clamp_min_(2.0**-24)
-    quantized = (query.float() / scale.float().unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8)
+    inverse_scale = scale.float().reciprocal()
+    quantized = (query.float() * inverse_scale.unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8)
     return quantized, scale
 
 
@@ -50,6 +51,24 @@ def test_quantize_indexer_query_rounding_and_scale(dtype):
         expected[0][0, 0, :10].cpu(), torch.tensor([127, -127, 0, 0, 2, -2, 2, -2, 4, -4], dtype=torch.int8)
     )
     assert_quantized_equal(query, expected)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "maximum", "boundary", "expected_code"),
+    [
+        (torch.float32, 0.38349223136901855, -0.3185396194458008, -105),
+        (torch.float16, 0.00010645389556884766, -0.00010222196578979492, -123),
+    ],
+)
+@torch.inference_mode()
+def test_quantize_indexer_query_uses_reciprocal_multiply(dtype, maximum, boundary, expected_code):
+    query = torch.zeros((1, 1, 128), dtype=dtype, device="npu")
+    query[0, 0, 0] = maximum
+    query[0, 0, 1] = boundary
+
+    quantized, _ = quantize_indexer_query(query)
+
+    assert quantized[0, 0, 1].item() == expected_code
 
 
 @pytest.mark.parametrize("heads", [32, 64])
