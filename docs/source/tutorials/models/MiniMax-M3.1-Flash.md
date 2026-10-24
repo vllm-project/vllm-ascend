@@ -131,6 +131,8 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     Run the following inside the A3 container. It starts one API service with DP4 x TP4 / EP16 across all 16 NPUs, using W8A8 weights and DSpark speculative decoding with seven draft tokens.
 
+    Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation).
+
     ```bash
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
 
@@ -181,10 +183,12 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     **Start the Service**
 
-    Run the following inside the A5 container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8 weights, and DSpark speculative decoding with seven draft tokens. For this configuration, set `MODEL_DIR` to the W8A8 checkpoint and use `-v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro` as the model bind mount in the [A5 container command](#42-a5-docker-container).
+    Run the following inside the A5 container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8-MXFP8 weights, and DSpark speculative decoding with seven draft tokens.
+
+    Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation).
 
     ```bash
-    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
