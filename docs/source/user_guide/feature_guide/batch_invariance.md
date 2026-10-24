@@ -209,6 +209,22 @@ Batch invariance has been tested and verified on the following models:
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm-ascend/issues/new/choose).
 
+### Not yet supported
+
+Batch invariance is only claimed for models whose whole hot path has a
+batch-invariant kernel. The families below still route attention or expert GEMMs
+through kernels without a batch-invariant twin, so `VLLM_BATCH_INVARIANT=1` is
+rejected for them at startup instead of returning results that stay stable for
+one batch composition but drift as soon as the batch changes.
+
+| Model family | Kernels without a batch-invariant twin |
+| --- | --- |
+| `GLM-5`, `GLM-5.1`, `GLM-5.2` (`GlmMoeDsaForCausalLM`) | `npu_sparse_flash_attention`, `npu_kv_quant_sparse_flash_attention`, lightning indexer, `npu_grouped_matmul`, `npu_quant_matmul` |
+| `DeepSeek-V3.2` and other SFA models | sparse attention and lightning indexer |
+| `GLM-5.3`-style kpool indexer models | kpool indexer |
+
+Track the kernel work in the [tracking issue](https://github.com/vllm-project/vllm-ascend/issues/5487).
+
 ## Implementation Details
 
 When batch invariance is enabled, vLLM:

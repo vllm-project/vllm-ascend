@@ -545,6 +545,7 @@ class NPUPlatform(Platform):
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
         _validate_aux_output_config(vllm_config)
+        _validate_batch_invariance_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -1585,6 +1586,13 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
         if is_moe_model(vllm_config) and not vllm_config.parallel_config.enable_expert_parallel:
             raise AssertionError("Sequence parallelism requires enable_expert_parallel=True for MoE models.")
+
+
+def _validate_batch_invariance_config(vllm_config: VllmConfig) -> None:
+    """Reject batch-invariant mode for models without batch-invariant kernels."""
+    from vllm_ascend.batch_invariant import validate_batch_invariance_support
+
+    validate_batch_invariance_support(vllm_config)
 
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:

@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import os
+from typing import Any
 
 import torch
 import torch_npu
@@ -99,6 +100,50 @@ def reduce_sum(
     return torch_sum(x, dim, keepdim, dtype=dtype)
 
 
+# torch_npu FlashAttention entry points, mapped to the batch-invariant twins
+# registered by the AscendC ops package. ``npu_fused_infer_attention_score_v2``
+# is the entry point AscendAttention and MLA actually call on recent CANN, so
+# patching only the v1 form would leave every v2 caller on a batch-dependent
+# kernel while batch invariance looks enabled.
+_FIA_V2_BATCH_INVARIANT_OPS = {
+    "npu_fused_infer_attention_score_v2": "npu_fused_infer_attention_score_batch_invariant_v2",
+    "_npu_fused_infer_attention_score_v2_get_max_workspace": (
+        "_npu_fused_infer_attention_score_batch_invariant_v2_get_max_workspace"
+    ),
+    "_npu_fused_infer_attention_score_v2_infer_output": (
+        "_npu_fused_infer_attention_score_batch_invariant_v2_infer_output"
+    ),
+}
+
+
+def _get_batch_invariant_op(name: str):
+    """Return a registered batch-invariant op, or ``None`` when it is missing."""
+    return getattr(torch.ops.batch_invariant_ops, name, None)
+
+
+def patch_fused_infer_attention_score_v2() -> None:
+    """Route the FlashAttention v2 entry points to their batch-invariant twins.
+
+    The AscendC ops package registers the v2 variants with the same schema as
+    ``torch_npu``, including ``.out`` and the workspace helpers, so replacing the
+    module attributes keeps the existing call sites unchanged.
+    """
+    for torch_npu_name, batch_invariant_name in _FIA_V2_BATCH_INVARIANT_OPS.items():
+        if not hasattr(torch_npu, torch_npu_name):
+            # Older torch_npu: no caller can reach the v2 entry point.
+            continue
+        batch_invariant_op = _get_batch_invariant_op(batch_invariant_name)
+        if batch_invariant_op is None:
+            logger.warning_once(
+                "Batch-invariant op %s is not registered; %s keeps the default kernel "
+                "and batch invariance is not guaranteed for its callers.",
+                batch_invariant_name,
+                torch_npu_name,
+            )
+            continue
+        setattr(torch_npu, torch_npu_name, batch_invariant_op)
+
+
 def override_envs_for_invariance():
     from vllm_ascend.ascend_config import get_ascend_config
 
@@ -152,6 +197,9 @@ def enable_batch_invariant_mode():
         torch.sum = reduce_sum
         # Tensor.sum uses the same batch-invariant reduce_sum implementation.
         torch.Tensor.sum = reduce_sum
+        # The v2 entry points are what MLA and AscendAttention call on recent
+        # CANN; patch them too or batch invariance silently stops there.
+        patch_fused_infer_attention_score_v2()
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
@@ -161,6 +209,54 @@ def enable_batch_invariant_mode():
         # linear call matmul internally, so register linear only when ascendc
         # is not available. it will get better performance with ascendc.
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
+
+
+# Batch invariance is a per-model contract: it only holds when every kernel in
+# the hot path has a batch-invariant twin. The families below still run kernels
+# that the AscendC package does not cover (see the tracking issue).
+_BATCH_INVARIANT_TRACKING_ISSUE = "https://github.com/vllm-project/vllm-ascend/issues/5487"
+
+
+def unsupported_batch_invariant_reason(model_config: Any) -> str | None:
+    """Return why ``model_config`` cannot be batch invariant yet, else ``None``.
+
+    Sparse-attention models such as the GLM-5 family and DeepSeek-V3.2 run
+    ``npu_sparse_flash_attention``, the lightning indexer and quantized grouped
+    GEMMs, none of which the AscendC batch-invariant package provides.
+    """
+    from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
+
+    if model_uses_sfa_sparse(model_config):
+        return (
+            "its sparse attention path (npu_sparse_flash_attention and the lightning indexer) "
+            "and its quantized expert GEMMs have no batch-invariant kernel"
+        )
+    if model_uses_kpool_indexer(model_config):
+        return "its kpool indexer path has no batch-invariant kernel"
+    return None
+
+
+def validate_batch_invariance_support(vllm_config: Any) -> None:
+    """Reject batch invariance for a model whose hot path is not covered yet.
+
+    Accepting the request silently would make the engine return results that are
+    stable for one batch composition but drift as soon as the batch changes,
+    which is the exact failure mode batch invariance is meant to rule out.
+    """
+    if not envs.VLLM_BATCH_INVARIANT:
+        return
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return
+    reason = unsupported_batch_invariant_reason(model_config)
+    if reason is None:
+        return
+    model = getattr(model_config, "model", "this model")
+    raise ValueError(
+        f"VLLM_BATCH_INVARIANT=1 is not supported for {model!r} yet: {reason}. "
+        f"Unset VLLM_BATCH_INVARIANT to run it, and follow {_BATCH_INVARIANT_TRACKING_ISSUE} "
+        "for batch-invariant kernel coverage."
+    )
 
 
 def init_batch_invariance():

@@ -15,6 +15,7 @@
 #
 # type: ignore
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -266,6 +267,98 @@ class TestBatchInvariant:
         x.__add__.assert_called_once_with(residual)
         mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
         mock_torch_npu.npu_add_rms_norm.assert_called_once_with(x, residual, weight, eps)
+
+
+class TestFusedInferAttentionScoreV2Patch:
+    """The FlashAttention v2 entry points must be redirected as well."""
+
+    def test_all_v2_entry_points_are_redirected(self):
+        torch_npu_stub = SimpleNamespace(
+            npu_fused_infer_attention_score_v2="torch_npu.v2",
+            _npu_fused_infer_attention_score_v2_get_max_workspace="torch_npu.v2_workspace",
+            _npu_fused_infer_attention_score_v2_infer_output="torch_npu.v2_infer_output",
+        )
+        batch_invariant_ops = {
+            "npu_fused_infer_attention_score_batch_invariant_v2": "bi.v2",
+            "_npu_fused_infer_attention_score_batch_invariant_v2_get_max_workspace": "bi.v2_workspace",
+            "_npu_fused_infer_attention_score_batch_invariant_v2_infer_output": "bi.v2_infer_output",
+        }
+
+        with (
+            patch.object(batch_invariant, "torch_npu", torch_npu_stub),
+            patch.object(batch_invariant, "_get_batch_invariant_op", side_effect=batch_invariant_ops.get),
+        ):
+            batch_invariant.patch_fused_infer_attention_score_v2()
+
+        assert torch_npu_stub.npu_fused_infer_attention_score_v2 == "bi.v2"
+        assert torch_npu_stub._npu_fused_infer_attention_score_v2_get_max_workspace == "bi.v2_workspace"
+        assert torch_npu_stub._npu_fused_infer_attention_score_v2_infer_output == "bi.v2_infer_output"
+
+    def test_absent_v2_entry_point_is_skipped(self):
+        """Older torch_npu has no v2 op: patching must be a no-op, not a crash."""
+        torch_npu_stub = SimpleNamespace(npu_fused_infer_attention_score="torch_npu.v1")
+
+        with patch.object(batch_invariant, "torch_npu", torch_npu_stub):
+            batch_invariant.patch_fused_infer_attention_score_v2()
+
+        assert not hasattr(torch_npu_stub, "npu_fused_infer_attention_score_v2")
+
+    def test_unregistered_batch_invariant_op_keeps_default(self):
+        """A partially installed ops package must not leave a dead entry point."""
+        torch_npu_stub = SimpleNamespace(npu_fused_infer_attention_score_v2="torch_npu.v2")
+
+        with (
+            patch.object(batch_invariant, "torch_npu", torch_npu_stub),
+            patch.object(batch_invariant, "_get_batch_invariant_op", return_value=None),
+        ):
+            batch_invariant.patch_fused_infer_attention_score_v2()
+
+        assert torch_npu_stub.npu_fused_infer_attention_score_v2 == "torch_npu.v2"
+
+
+class TestBatchInvariantSupportValidation:
+    """``validate_batch_invariance_support`` fails fast instead of silently drifting."""
+
+    @staticmethod
+    def _vllm_config(model, **hf_fields):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(
+                model=model,
+                hf_text_config=SimpleNamespace(**hf_fields),
+                hf_config=None,
+            )
+        )
+
+    def test_sparse_attention_model_is_rejected(self):
+        vllm_config = self._vllm_config("zai-org/GLM-5.2", index_topk=2048)
+
+        with (
+            patch.object(batch_invariant.envs, "VLLM_BATCH_INVARIANT", True),
+            pytest.raises(ValueError, match="sparse attention"),
+        ):
+            batch_invariant.validate_batch_invariance_support(vllm_config)
+
+    def test_kpool_indexer_model_is_rejected(self):
+        vllm_config = self._vllm_config("zai-org/GLM-5.3", index_topk=2048, index_kpool=8)
+
+        with (
+            patch.object(batch_invariant.envs, "VLLM_BATCH_INVARIANT", True),
+            pytest.raises(ValueError, match="kpool indexer"),
+        ):
+            batch_invariant.validate_batch_invariance_support(vllm_config)
+
+    def test_dense_model_is_accepted(self):
+        """Qwen3-style dense attention keeps the supported path untouched."""
+        vllm_config = self._vllm_config("Qwen/Qwen3-8B", hidden_size=4096)
+
+        with patch.object(batch_invariant.envs, "VLLM_BATCH_INVARIANT", True):
+            batch_invariant.validate_batch_invariance_support(vllm_config)
+
+    def test_noop_when_batch_invariance_is_disabled(self):
+        vllm_config = self._vllm_config("zai-org/GLM-5.2", index_topk=2048)
+
+        with patch.object(batch_invariant.envs, "VLLM_BATCH_INVARIANT", False):
+            batch_invariant.validate_batch_invariance_support(vllm_config)
 
 
 if __name__ == "__main__":
