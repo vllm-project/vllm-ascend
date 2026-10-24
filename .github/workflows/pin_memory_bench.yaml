@@ -1,0 +1,516 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Pin-memory data line on CI machines: reproduce the blog-pin-memory
+# experiments on a self-hosted A5 (Ascend 950) runner in a single workflow
+# run, so one queue slot covers the whole verification set:
+#   1. h2d_d2h_bench.py          four-arm microbenchmark (pageable / torch /
+#                                native-unregistered / native-registered)
+#   2. test_npurt.py             npurt register chain probe (rc codes + is_pinned)
+#   3. torch allocator signature torch.is_pinned(pin_memory=True) == True
+#   4. verify_pin_memory.py      --safe driver + DeepSpeed hook bandwidth checks
+#   5. DeepSpeed pin_memory      upstream tests/unit/v1/pin_memory suite
+#   6. register_lottery_probe.py per-buffer fast/slow lottery probe
+#   7. run_maxseq.py             the three training groups (delock ZeRO-3
+#                                model-tensor offload / activation checkpoint
+#                                recipe C / saved-activation offload) x two
+#                                models (Qwen3-4B, Qwen3.5-4B): max-seq probe
+#                                on an 8k-16k-32k-64k ladder, then the full
+#                                unified-table protocol at the max seq
+#   8. run_challenge.py          optional repeated rounds hunting the best pin
+#                                ratio at the found max seq
+#
+# Key decisions:
+# - DeepSpeed pin backend is fully upstream: clone deepspeedai/DeepSpeed at a
+#   pinned commit (the clone also provides the pin_memory unit tests).
+# - torch_npu release wheels have no npurt (aclrtHostRegisterV2); the
+#   native-registered arm needs a source build of the v2.10.0 branch. The
+#   build is opt-in (`build_torch_npu`) and must use a repo carrying the
+#   driver-version fallthrough patch (VenusTZZ/pytorch v2.10.0 @ a98a694efc).
+#   Without the build, the run is a three-arm smoke test (1-4, register-based
+#   parts soft-fail); with the build, everything runs with hard gates.
+# - mlock: every shell is exec'd through an mlock-unlock clone (setrlimit
+#   RLIMIT_MEMLOCK -> unlimited, then exec) so the native backend's mlock
+#   never hits the default 64 MiB cap. If the shell raise does not stick, the
+#   helper gets file capabilities (cap_sys_resource,cap_ipc_lock+ep) so it
+#   can raise the limit on exec even when the shell's effective set lacks
+#   them; the step hard-fails if neither path reaches unlimited.
+# - Single-card collection rule: ASCEND_RT_VISIBLE_DEVICES pins one NPU.
+name: Pin Memory Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Self-hosted runner label. Default A5 (Ascend 950), the target machine for this data line.'
+        required: false
+        default: 'linux-aarch64-a5-4'
+        type: string
+      image_tag:
+        description: 'CANN container image tag; must match the runner chip.'
+        required: false
+        default: '9.2.0_20260928212200-950-ubuntu22.04-py3.12'
+        type: string
+      build_torch_npu:
+        description: 'Build torch_npu v2.10.0 from source (npurt + driver-version patch). Required for the native-registered arm.'
+        required: false
+        default: false
+        type: boolean
+      torch_npu_repo:
+        description: 'torch_npu source repo (must carry the driver-version patch commit).'
+        required: false
+        default: 'https://github.com/VenusTZZ/pytorch.git'
+        type: string
+      torch_npu_ref:
+        description: 'torch_npu branch/commit (v2.10.0 @ a98a694efc = patched).'
+        required: false
+        default: 'v2.10.0'
+        type: string
+      torch_npu_expected_sha:
+        description: 'Expected HEAD after checkout (gate on the patch commit; empty = skip).'
+        required: false
+        default: 'a98a694efcdf83d169cdcb405b5fbf0f5616a58f'
+        type: string
+      deepspeed_repo:
+        description: 'DeepSpeed source repo (pin-memory backend is upstream).'
+        required: false
+        default: 'https://github.com/deepspeedai/DeepSpeed.git'
+        type: string
+      deepspeed_ref:
+        description: 'DeepSpeed commit to install.'
+        required: false
+        default: 'b39bf260e'
+        type: string
+      git_proxy:
+        description: 'Prefix for GitHub clone URLs (empty = direct).'
+        required: false
+        default: 'https://gh-proxy.test.osinfra.cn/'
+        type: string
+      sizes_mib:
+        description: 'Benchmark sizes in MiB.'
+        required: false
+        default: '4 64 256'
+        type: string
+      warmup:
+        description: 'Warmup iterations per copy direction.'
+        required: false
+        default: 10
+        type: number
+      iters:
+        description: 'Timed iterations per copy direction.'
+        required: false
+        default: 50
+        type: number
+      dev_id:
+        description: 'NPU device id (single-card collection rule).'
+        required: false
+        default: '0'
+        type: string
+      run_verify:
+        description: 'Run verify_pin_memory.py --safe (driver + DeepSpeed hook bandwidth checks).'
+        required: false
+        default: true
+        type: boolean
+      run_deepspeed_ut:
+        description: 'Run the DeepSpeed repo pin_memory unit tests.'
+        required: false
+        default: true
+        type: boolean
+      run_training:
+        description: 'Run the three training experiment groups with max-seq probing (requires the torch_npu source build).'
+        required: false
+        default: true
+        type: boolean
+      training_filter:
+        description: 'Only run matching experiments: a group (delock/act/sao), a model short name (Qwen3-4B/Qwen3.5-4B), or group_model (e.g. sao_Qwen3-4B). Empty = all six.'
+        required: false
+        default: ''
+        type: string
+      force_seq:
+        description: 'Skip max-seq probing and run the full protocol at this seq (empty = probe).'
+        required: false
+        default: ''
+        type: string
+      challenge_rounds:
+        description: 'Challenge-phase rounds per experiment at the found max seq (0 = skip).'
+        required: false
+        default: 0
+        type: number
+      hf_endpoint:
+        description: 'HF endpoint for config downloads (experiments use random weights, configs only).'
+        required: false
+        default: 'https://hf-mirror.com'
+        type: string
+      model_m3:
+        description: 'HF id for the Qwen3-4B experiments.'
+        required: false
+        default: 'Qwen/Qwen3-4B'
+        type: string
+      model_m35:
+        description: 'HF id for the Qwen3.5-4B experiments.'
+        required: false
+        default: 'Qwen/Qwen3.5-4B'
+        type: string
+
+permissions:
+  contents: read
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be
+# explicitly declared as "shell: bash -el {0}" on steps that need to be
+# properly activated. It's used to activate ascend-toolkit environment
+# variables (same convention as the rest of this repo's workflows).
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: pin-memory-bench-${{ github.ref }}-${{ github.run_attempt }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ${{ inputs.runner }}
+    # Torch_npu build (~40-60 min) + full experiment set (max-seq probing
+    # plus full protocol rounds) can exceed 3 h; self-hosted runners allow
+    # timeouts beyond the hosted 360 min cap.
+    timeout-minutes: 600
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ inputs.image_tag }}
+      env:
+        ASCEND_RT_VISIBLE_DEVICES: ${{ inputs.dev_id }}
+        MAX_JOBS: 16
+    steps:
+      - name: Check trigger actor
+        run: |
+          # Manual-trigger-only workflow (workflow_dispatch, no PR/push/schedule
+          # triggers). Only the listed GitHub actor(s) may run it: unauthorized
+          # dispatches fail fast so the self-hosted runner is never occupied.
+          # The allowlist is hardcoded (not an input) on purpose — inputs can
+          # be changed by whoever dispatches; changing this list requires an
+          # auditable commit. Add more names by editing this file.
+          ALLOWED="VenusTZZ"
+          ACTOR="${{ github.actor }}"
+          case ",${ALLOWED}," in
+            *",${ACTOR},"*) echo "trigger actor ${ACTOR} allowed" ;;
+            *)
+              echo "::error::actor ${ACTOR} is not allowed to trigger this workflow (allowed: ${ALLOWED})"
+              exit 1 ;;
+          esac
+
+      - name: Check environment
+        run: |
+          set -euo pipefail
+          {
+            echo "=== npu-smi ==="
+            if ! npu-smi info; then
+              echo "::error::npu-smi failed: no NPU is visible in this container (runner/device mount problem)"
+              exit 1
+            fi
+            echo "=== uname ==="
+            uname -a
+            echo "=== driver version.info (read failures break the is_pinned recognition chain) ==="
+            if [ -r /usr/local/Ascend/driver/version.info ]; then
+              cat /usr/local/Ascend/driver/version.info
+            elif [ "${{ inputs.build_torch_npu }}" = "true" ]; then
+              echo "::warning::version.info missing/unreadable; the patched torch_npu should survive this (npurt gate verifies)"
+            else
+              echo "::error::/usr/local/Ascend/driver/version.info missing/unreadable and build_torch_npu=false: without the patch the is_pinned chain is broken"
+              exit 1
+            fi
+            echo "=== mlock limit (before) ==="
+            ulimit -l
+            echo "=== python stack ==="
+            python3 --version
+            python3 -c "import torch; print('torch', torch.__version__)" 2>/dev/null || echo "WARN: torch not installed yet"
+            python3 -c "import torch, torch_npu; print('torch_npu', torch_npu.__version__, 'npu:', torch.npu.is_available())" 2>/dev/null || echo "WARN: torch_npu not installed yet"
+            python3 -c "import torch; print('npurt:', hasattr(torch.npu, 'npurt'))" 2>/dev/null || echo "WARN: torch not importable"
+          } 2>&1 | tee env.log
+
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          apt-get update -y || true
+          apt-get install -y --no-install-recommends git gcc g++ cmake libnuma-dev || true
+          pip config set global.index-url https://repo.huaweicloud.com/repository/pypi/simple
+          pip config set global.extra-index-url "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
+
+          # torch CPU wheel first; torch_npu builds against it.
+          pip install torch==2.10.0
+          python3 -c "import torch; v = torch.__version__; assert v.startswith('2.10.0'), v; print('torch OK', v)"
+          # Release torch_npu wheels have no npurt: only install the wheel when
+          # skipping the source build (three-arm smoke run).
+          if [ "${{ inputs.build_torch_npu }}" != "true" ]; then
+            pip install torch-npu==2.10.0.post4
+            python3 -c "import torch_npu; v = torch_npu.__version__; assert v.startswith('2.10.0'), v; print('torch_npu OK', v)"
+          fi
+
+          # DeepSpeed pin-memory backend is upstream. Clone (not pip git+) so
+          # the repo's own pin_memory unit tests are available for a later step.
+          git clone "${{ inputs.git_proxy }}${{ inputs.deepspeed_repo }}" DeepSpeed-src
+          cd DeepSpeed-src && git checkout "${{ inputs.deepspeed_ref }}" && cd ..
+          pip install -e ./DeepSpeed-src
+          pip install pytest==8.3.2 pytest-forked==1.7.5 pytest-xdist==3.6.1
+          # Training experiments: Qwen3.5 needs transformers >= 5.16; recipe C
+          # (activation checkpoint) uses liger fused kernels.
+          pip install transformers==5.19.0 liger-kernel==0.8.4
+
+          python3 -c "import deepspeed; print('deepspeed', deepspeed.__version__)"
+          python3 -c "from deepspeed.utils.pin_memory import NativePinnedMemory; print('pin backend importable (op builds at first use)')"
+
+      - name: Build torch_npu from source
+        if: ${{ inputs.build_torch_npu }}
+        run: |
+          set -euxo pipefail
+          # CANN env is required for the build (GE headers, operator framework).
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          export MAX_JOBS=16
+
+          git clone "${{ inputs.git_proxy }}${{ inputs.torch_npu_repo }}" torch_npu-src
+          cd torch_npu-src
+          git checkout "${{ inputs.torch_npu_ref }}"
+          # The patch commit lives on the branch head (v2.10.0 @ a98a694efc):
+          # AclrtPointerGetAttributesExist falls through to the symbol probe
+          # when the driver version file is unreadable.
+          git log -1 --oneline
+          EXPECTED="${{ inputs.torch_npu_expected_sha }}"
+          if [ -n "$EXPECTED" ]; then
+            ACTUAL=$(git rev-parse HEAD)
+            case "$ACTUAL" in
+              "$EXPECTED"*)
+                echo "patch commit verified: $ACTUAL" ;;
+              *)
+                echo "::error::torch_npu HEAD $ACTUAL does not match the expected patch commit $EXPECTED (driver-version fallthrough patch missing)"
+                exit 1 ;;
+            esac
+          fi
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          # Clean stale generated files from op-plugin (known build pitfalls:
+          # leftover generated StructKernelNpuOpApi_*/OpInterface_* sources and
+          # yaml configs from previous builds break the build).
+          find third_party/op-plugin -name 'StructKernelNpuOpApi_*.cpp' -delete
+          find third_party/op-plugin -name 'OpInterface_*.cpp' -delete
+          rm -rf third_party/op-plugin/op_plugin/config/v2r* third_party/op-plugin/op_plugin/config/v3r*
+
+          bash ci/build.sh --python=3.12
+          pip install --force-reinstall --no-deps dist/torch_npu-*.whl
+
+      - name: Verify torch_npu npurt register chain
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 .github/workflows/pin_memory/test_npurt.py 2>&1 | tee npurt.log
+          if [ "${{ inputs.build_torch_npu }}" = "true" ]; then
+            # Triple signature of a fully working recognition chain:
+            # 1) npurt present, 2) every return-code check OK, 3) is_pinned=True.
+            grep -q "hasattr(torch.npu, 'npurt'): True" npurt.log || {
+              echo "::error::npurt is missing from the built torch_npu (build produced a wheel without npurt bindings)"
+              exit 1
+            }
+            if grep -q "!! UNEXPECTED" npurt.log; then
+              echo "::error::npurt return-code checks failed:"
+              grep "!! UNEXPECTED" npurt.log
+              exit 1
+            fi
+            grep -q "torch.is_pinned(registered view): got True" npurt.log || {
+              echo "::error::npurt register works but torch.is_pinned(registered)=False: recognition chain broken (check /usr/local/Ascend/driver/version.info)"
+              exit 1
+            }
+            echo "npurt gate PASSED"
+          elif grep -q "npurt missing" npurt.log; then
+            echo "::notice::npurt absent in the release wheel (expected with build_torch_npu=false); native-registered arm is skipped"
+          else
+            echo "::notice::npurt present even in the release wheel; consider build_torch_npu=true for the registered arm"
+          fi
+
+      - name: Prepare mlock-unlock wrapper
+        run: |
+          set -euo pipefail
+          echo "mlock before: $(ulimit -l)"
+          ulimit -l unlimited 2>/dev/null || true
+          LIMIT=$(ulimit -l)
+          echo "mlock after shell attempt: $LIMIT"
+
+          # Recreate the local mlock-unlock helper (setrlimit RLIMIT_MEMLOCK ->
+          # unlimited, then exec): the native backend mlocks registered ranges
+          # and aborts past the default 64 MiB cap. Always exec through it so
+          # the bench inherits the raised limit regardless of shell state.
+          gcc -O2 -o /usr/local/bin/mlock-unlock .github/workflows/pin_memory/mlock_unlock.c
+
+          # If the plain shell raise did not stick, give the helper file
+          # capabilities (cap_sys_resource,cap_ipc_lock+ep): the container
+          # shell usually lacks them in its effective set, but the binary
+          # reacquires them on exec (subject to the bounding set).
+          if [ "$LIMIT" != "unlimited" ]; then
+            # File caps are AND-combined with the capability bounding set on exec: if
+            # the container dropped the caps from CapBnd, nothing can help at
+            # runtime (rootless/--cap-drop pods included).
+            CAPBND=$(grep '^CapBnd' /proc/self/status | awk '{print $2}')
+            NEEDED=$(( (1 << 24) | (1 << 14) ))  # CAP_SYS_RESOURCE=24, CAP_IPC_LOCK=14
+            if [ "$(( 0x$CAPBND & NEEDED ))" != "$NEEDED" ]; then
+              echo "::error::capability bounding set (CapBnd=0x$CAPBND) excludes cap_sys_resource/cap_ipc_lock: file caps cannot help here; run with --sizes-mib '4 64' or fix the pod capability template"
+              exit 1
+            fi
+            apt-get install -y libcap2-bin >/dev/null 2>&1 || true
+            if command -v setcap >/dev/null 2>&1 && setcap 'cap_sys_resource,cap_ipc_lock+ep' /usr/local/bin/mlock-unlock; then
+              getcap /usr/local/bin/mlock-unlock
+            else
+              echo "::warning::setcap unavailable (needs root/CAP_SETFCAP): the wrapper likely stays capped"
+            fi
+          fi
+
+          WRAPPED=$(/usr/local/bin/mlock-unlock bash -c 'ulimit -l')
+          echo "mlock inside wrapper: $WRAPPED"
+          if [ "$WRAPPED" != "unlimited" ]; then
+            echo "::error::mlock is capped at $WRAPPED: the shell raise failed AND the setcap'd helper could not raise it (container bounding set excludes cap_sys_resource/cap_ipc_lock); 256 MiB native arms will abort with SIGABRT"
+            exit 1
+          fi
+          echo "mlock gate PASSED"
+
+      - name: Run h2d_d2h bench
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          ARGS=(--sizes-mib ${{ inputs.sizes_mib }} --warmup ${{ inputs.warmup }} --iters ${{ inputs.iters }})
+          if [ "${{ inputs.build_torch_npu }}" != "true" ]; then
+            # No npurt in the release wheel: the register-based arm would fail.
+            ARGS+=(--skip-native-register)
+          fi
+          /usr/local/bin/mlock-unlock python3 .github/workflows/pin_memory/h2d_d2h_bench.py "${ARGS[@]}" 2>&1 | tee bench.log
+          # Semantic gate: fail on missing arms / is_pinned=False / sub-12GB/s
+          # registered bandwidth instead of letting a degraded run pass green.
+          if [ "${{ inputs.build_torch_npu }}" = "true" ]; then
+            python3 .github/workflows/pin_memory/check_bench.py bench.log --expect-registered
+          else
+            python3 .github/workflows/pin_memory/check_bench.py bench.log
+          fi
+
+      - name: Check torch pin allocator signature
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python3 -c "
+          import torch, torch_npu  # noqa: F401
+          t = torch.empty(4096, dtype=torch.float32, pin_memory=True)
+          assert t.is_pinned(), 'torch pin allocator memory is not recognized as pinned'
+          print('torch allocator signature OK: is_pinned=True')
+          "
+
+      - name: Run verify_pin_memory --safe
+        if: ${{ inputs.run_verify }}
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set +e
+          /usr/local/bin/mlock-unlock python3 .github/workflows/pin_memory/verify_pin_memory.py --safe 2>&1 | tee verify_pin.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [ $RC -ne 0 ]; then
+            if [ "${{ inputs.build_torch_npu }}" = "true" ]; then
+              echo "::error::verify_pin_memory --safe FAILED (see [FAIL] lines above)"
+              exit 1
+            fi
+            echo "::notice::verify_pin_memory failed in smoke mode (release wheel lacks npurt; the [1]-[3] driver checks above are still meaningful)"
+          fi
+
+      - name: Run DeepSpeed pin_memory unit tests
+        if: ${{ inputs.run_deepspeed_ut }}
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          cd DeepSpeed-src
+          set +e
+          pytest tests/unit/v1/pin_memory/ -q > ../ut.log 2>&1
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            pytest --forked -n 4 tests/unit/v1/pin_memory/ --torch_ver=2.10 -q > ../ut.log 2>&1
+            RC=$?
+          fi
+          set -e
+          cd ..
+          cat ut.log
+          if [ $RC -ne 0 ]; then
+            if [ "${{ inputs.build_torch_npu }}" = "true" ]; then
+              echo "::error::DeepSpeed pin_memory unit tests failed"
+              exit 1
+            fi
+            echo "::notice::pin_memory unit tests failed in smoke mode (register-based tests need npurt)"
+          fi
+
+      - name: Run register lottery probe
+        if: ${{ inputs.build_torch_npu }}
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          /usr/local/bin/mlock-unlock python3 .github/workflows/pin_memory/register_lottery_probe.py \
+            --n-buf 8 --iters 10 2>&1 | tee lottery.log
+          echo "::notice::lottery probe completed; per-group fast/slow split is in lottery.log and the job summary"
+
+      - name: Run training experiments (maxseq probe + full rounds)
+        if: ${{ inputs.build_torch_npu && inputs.run_training }}
+        env:
+          HF_ENDPOINT: ${{ inputs.hf_endpoint }}
+          PIN_M3: ${{ inputs.model_m3 }}
+          PIN_M35: ${{ inputs.model_m35 }}
+          PIN_OUT: ./out
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          ARGS=()
+          if [ -n "${{ inputs.training_filter }}" ]; then ARGS+=("${{ inputs.training_filter }}"); fi
+          if [ -n "${{ inputs.force_seq }}" ]; then ARGS+=("${{ inputs.force_seq }}"); fi
+          # Three groups (delock / act / sao) x two models: probe the max seq
+          # on a 8k-16k-32k-64k ladder (one short arm per rung), then run the
+          # full unified-table protocol (steps 8 / warmup 5) at the max seq.
+          /usr/local/bin/mlock-unlock python3 .github/workflows/pin_memory/run_maxseq.py "${ARGS[@]}" 2>&1 | tee training.log
+          python3 .github/workflows/pin_memory/check_training.py out/results_maxseq.jsonl
+
+      - name: Run challenge rounds
+        if: ${{ inputs.build_torch_npu && inputs.challenge_rounds > 0 }}
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          /usr/local/bin/mlock-unlock python3 .github/workflows/pin_memory/run_challenge.py \
+            "${{ inputs.training_filter }}" "${{ inputs.challenge_rounds }}" 2>&1 | tee challenge.log
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pin-memory-bench-logs
+          path: |
+            env.log
+            npurt.log
+            bench.log
+            verify_pin.log
+            ut.log
+            lottery.log
+            training.log
+            challenge.log
+            out/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          # Show the table in the step log AND render it on the GitHub run
+          # page via the job summary ($GITHUB_STEP_SUMMARY markdown).
+          echo "=== bench result table ==="
+          if [ -f bench.log ]; then cat bench.log; else echo "(bench.log missing: an earlier step failed)"; fi
+          echo "=== job summary ==="
+          python3 .github/workflows/pin_memory/summarize_bench.py | tee -a "$GITHUB_STEP_SUMMARY"
