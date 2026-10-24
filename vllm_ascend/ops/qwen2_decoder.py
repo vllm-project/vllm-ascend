@@ -249,6 +249,11 @@ class AscendQwen2Model(Qwen2Model):
 class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
     def __init__(self, config: Qwen2Config, layer_idx: int):
         super().__init__(config, layer_idx)
+        # transformers>=5.5 no longer exposes attention_type on decoder layers.
+        if hasattr(config, "layer_types"):
+            self.attention_type = config.layer_types[layer_idx]
+        else:
+            self.attention_type = "full_attention"
         self.self_attn = AscendQwen2Attention(config=config, layer_idx=layer_idx)
         self.input_layernorm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
