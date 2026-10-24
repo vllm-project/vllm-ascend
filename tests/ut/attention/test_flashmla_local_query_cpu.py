@@ -217,7 +217,7 @@ def test_only_decode_prolog_retains_already_final_local_query(monkeypatch, use_r
         return q_nope, q_pe, None, None, None
 
     dependency = ModuleType("cann_ops_transformer")
-    dependency.mla_prolog = Mock(side_effect=prolog)
+    monkeypatch.setattr(dependency, "mla_prolog", Mock(side_effect=prolog), raising=False)
     monkeypatch.setitem(sys.modules, "cann_ops_transformer", dependency)
     scatter = Mock()
     scope = production_scope(

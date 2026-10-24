@@ -12,8 +12,10 @@ import ast
 import builtins
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/dcp/flashmla_prepare.py"
@@ -62,7 +64,7 @@ class Tensor:
 def strided(shape, strides, *, offset=19, dtype=np.float16):
     size = offset + sum(max(length - 1, 0) * stride for length, stride in zip(shape, strides)) + 23
     storage = np.full(size, SENTINEL, dtype=dtype)
-    array = np.ndarray(
+    array: npt.NDArray[Any] = np.ndarray(
         shape,
         dtype=dtype,
         buffer=storage,
@@ -199,7 +201,7 @@ def query_output(tokens, heads):
 
 def check_whole_query_storage(output, reference):
     expected = np.full_like(output.storage, SENTINEL)
-    expected_view = np.ndarray(
+    expected_view: npt.NDArray[Any] = np.ndarray(
         output.shape,
         dtype=output.dtype,
         buffer=expected,
@@ -249,7 +251,7 @@ def test_current_query_and_kv_exact_with_padding(production, tokens, requests, s
         (page_stride, token_stride, token_stride, 2),
     )
     expected = cache.storage.copy()
-    expected_cache = np.ndarray(
+    expected_cache: npt.NDArray[Any] = np.ndarray(
         cache.shape,
         dtype=cache.dtype,
         buffer=expected,
