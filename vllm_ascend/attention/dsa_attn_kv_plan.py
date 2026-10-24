@@ -29,17 +29,22 @@ def _supports_dsv4_compressed_cache() -> bool:
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
-    """Return the KV cache dtype the platform should pin for DeepSeek-V4.
+    """Return the KV cache dtype DeepSeek-V4 should pin for this request.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    The A5 KV layout is chosen from the literal string
+    (``is_a5_bf16_kv_enabled``): ``bfloat16`` selects the SparseFlashMla plan and
+    skips the fp8 compress epilog, everything else selects the compress epilog.
+    ``auto`` means the model dtype, bfloat16, but the literal does not say so -- the
+    page would be built as bfloat16 while the plan and the page-size spec assumed fp8
+    (``head_size + 96``), which the operator reports as ``ori_kv head dimension ...
+    512, should be 608``. Resolving the request once makes both sides read the same
+    value; an explicit non-bfloat16 request keeps its own string.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
-    return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
+    if str(cache_dtype).lower() in ("auto", "bfloat16", "bf16"):
+        return "bfloat16"
+    return str(cache_dtype)
 
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
