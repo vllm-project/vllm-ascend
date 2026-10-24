@@ -1,5 +1,5 @@
 [build-system]
-# Should be mirrored in requirements.txt
+# Isolated build requirements; runtime metadata is declared in [project].dependencies.
 requires = [
     "attrs",
     "cmake>=3.26",
@@ -33,6 +33,87 @@ requires = [
     "triton-ascend==3.2.2"
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm_ascend"
+# Keep Python support metadata in setup.py to preserve existing Ruff inference.
+dynamic = ["version", "requires-python"]
+authors = [{name = "vLLM-Ascend team"}]
+license = {text = "Apache 2.0"}
+description = "vLLM Ascend backend plugin"
+readme = {file = "README.md", content-type = "text/markdown"}
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+# Runtime metadata. Keep compatibility exports generated from this list.
+dependencies = [
+    "cmake>=3.26",
+    "decorator",
+    "einops",
+    "numpy",
+    "packaging",
+    "pip",
+    "pybind11",
+    "pyyaml",
+    "regex",
+    "scipy",
+    "pandas",
+    "psutil",
+    "setuptools>=64",
+    "setuptools-scm>=8",
+    "torch==2.10.0",
+    "torch-npu==2.10.0.post4",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "triton-ascend==3.2.2",
+    "wheel",
+    "xgrammar>=0.1.30",
+    "pandas-stubs",
+    "compressed_tensors>=0.11.0",
+
+    # Required for disaggregated prefill
+    "msgpack",
+    "quart",
+
+    # Required for N-gram speculative decoding
+    "numba",
+
+    # Required for kvpool supports memcache backend
+    "memfabric_hybrid==1.2.0",
+    "memcache_hybrid==1.2.0",
+
+    "arctic-inference==0.1.1",
+    "transformers==5.19.0",
+    "fastapi<0.124.0",
+    "fastokens==0.2.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/vllm-project/vllm-ascend"
+
+[project.entry-points."vllm.platform_plugins"]
+"ascend" = "vllm_ascend:register"
+
+[project.entry-points."vllm.general_plugins"]
+"ascend_kv_connector" = "vllm_ascend:register_connector"
+"ascend_model_loader" = "vllm_ascend:register_model_loader"
+"ascend_service_profiling" = "vllm_ascend:register_service_profiling"
+"ascend_model" = "vllm_ascend:register_model"
+
+[project.entry-points."ms_service_metric.providers"]
+"vllm-ascend" = "vllm_ascend.observability:get_metric_provider"
+
+[tool.setuptools]
+# Preserve the setup.py package-data behavior during metadata migration.
+include-package-data = false
 
 [tool.uv.extra-build-dependencies]
 pandas = ["setuptools<72"]

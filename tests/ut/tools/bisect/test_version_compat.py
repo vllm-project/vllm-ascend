@@ -47,6 +47,35 @@ def test_expected_versions_falls_back_to_pyproject(tmp_path: Path):
     assert expected_versions(tmp_path).torch_npu == "2.10.0.post3"
 
 
+def test_expected_versions_prefers_pyproject_runtime_requirements(tmp_path: Path):
+    # Fictional, distinct versions expose accidental use of the wrong source.
+    (tmp_path / "requirements.txt").write_text("torch-npu==3.0.0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["torch-npu==1.0.0"]\n[build-system]\nrequires = ["torch-npu==2.0.0"]\n',
+        encoding="utf-8",
+    )
+
+    assert expected_versions(tmp_path).torch_npu == "1.0.0"
+
+
+def test_expected_versions_reads_pyproject_runtime_at_commit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    contents = {
+        "requirements.txt": "torch-npu==3.0.0\n",
+        "pyproject.toml": '[project]\ndependencies = ["torch-npu==1.0.0"]\n'
+        '[build-system]\nrequires = ["torch-npu==2.0.0"]\n',
+    }
+    monkeypatch.setattr(git_ops, "file_at_commit", lambda repo, commit, path: contents.get(path))
+
+    assert expected_versions(tmp_path, "a" * 40).torch_npu == "1.0.0"
+
+
+def test_legacy_runtime_precedes_build_requirements(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("torch-npu==3.0.0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[build-system]\nrequires = ["torch-npu==2.0.0"]\n')
+
+    assert expected_versions(tmp_path).torch_npu == "3.0.0"
+
+
 def test_expected_versions_at_commit_reads_all_files_without_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
