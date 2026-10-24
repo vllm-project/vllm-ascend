@@ -3,7 +3,7 @@
 """CPU checks of the production FlashMLA DCP orchestration.
 
 Run with --confcutdir=tests/ut/attention without vLLM/torch_npu installed.
-Only dependencies, attention kernels and collectives are emulated. Dense
+Dependencies, input preparation, attention kernels and collectives are emulated. Dense
 attention is the independent reference; this is not NPU or ACL graph evidence.
 """
 
@@ -92,19 +92,26 @@ def runtime(monkeypatch):
     events: list[tuple[str, ...]] = []
     recorded_streams = []
     active_stream = ["main"]
-    current_query_storages: set[int] = set()
-    original_copy = torch.Tensor.copy_
-
-    def copy_tensor(destination, *args, **kwargs):
-        if destination.untyped_storage().data_ptr() in current_query_storages:
-            events.append(("query_copy", active_stream[0]))
-        return original_copy(destination, *args, **kwargs)
-
-    monkeypatch.setattr(torch.Tensor, "copy_", copy_tensor)
 
     def scatter(**kwargs):
         events.append(("scatter", active_stream[0]))
         return scatter_current(**kwargs)
+
+    def prepare_query(q_nope, q_pe, query_out):
+        events.append(("prepare_query", active_stream[0]))
+        query_out.copy_(torch.cat((q_nope, q_pe), dim=-1))
+
+    def prepare_current(q_nope, q_pe, k_nope, k_pe, query_out, cache, slots):
+        events.append(("prepare_current", active_stream[0]))
+        query_out.copy_(torch.cat((q_nope, q_pe), dim=-1))
+        scatter_current(
+            key=k_nope,
+            value=k_pe,
+            key_cache=cache[..., : k_nope.shape[-1]],
+            value_cache=cache[..., k_nope.shape[-1] :],
+            slot_mapping=slots,
+            cache_mode="Norm",
+        )
 
     class Stream:
         def __init__(self, name):
@@ -206,6 +213,8 @@ def runtime(monkeypatch):
     scope = {
         "torch": torch,
         "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter),
+        "prepare_flashmla_query": prepare_query,
+        "prepare_flashmla_current": prepare_current,
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
         "AscendMLAMetadata": object,
@@ -254,7 +263,6 @@ def runtime(monkeypatch):
         events=events,
         active_stream=active_stream,
         recorded_streams=recorded_streams,
-        current_query_storages=current_query_storages,
     )
 
 
@@ -540,14 +548,15 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
             q_pe=query[..., 512:],
             current_k_nope=current_kv[..., :512] if split else None,
             current_k_pe=current_kv[..., 512:] if split else None,
+            current_q_nope=query[:, owned, :512] if split else None,
+            current_q_pe=query[:, owned, 512:] if split else None,
         )
+        if split:
+            impl._local_decode_query = Mock(side_effect=AssertionError("current Q must use the retained local heads"))
         cache, backing, snapshot = caches[rank]
         runtime.events.clear()
         runtime.recorded_streams.clear()
         runtime.attention_op.reset_mock()
-        runtime.current_query_storages.clear()
-        if split:
-            runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
         # Production external metadata has no FIA CPU length mirrors.
         decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
         result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
@@ -558,10 +567,9 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         assert runtime.attention_op.call_count == (2 if split else 1)
         if split:
             assert runtime.events == [
+                ("prepare_query", "main"),
                 ("history", "main"),
-                ("scatter", "main"),
-                ("query_copy", "main"),
-                ("query_copy", "main"),
+                ("prepare_current", "main"),
                 ("record", "main"),
                 ("wait", "attn", "main"),
                 ("current", "attn"),
@@ -571,6 +579,8 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 ("merge", "main"),
                 ("project", "main"),
             ]
+            torch.testing.assert_close(flash.current.query, query[:, owned])
+            impl._local_decode_query.assert_not_called()
             for tensor in (
                 flash.current.query,
                 flash.current.cache,
@@ -589,8 +599,15 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 (tokens, local_heads, 1),
             ]
         else:
-            assert runtime.events == [("history", "main"), ("exchange", "main"), ("merge", "main"), ("project", "main")]
+            assert runtime.events == [
+                ("prepare_query", "main"),
+                ("history", "main"),
+                ("exchange", "main"),
+                ("merge", "main"),
+                ("project", "main"),
+            ]
             assert not runtime.recorded_streams
+        torch.testing.assert_close(flash.query, query)
         tolerance = 8e-4 if dtype == torch.bfloat16 else 1e-4
         # Unused query outputs are outside the attention result contract.
         torch.testing.assert_close(

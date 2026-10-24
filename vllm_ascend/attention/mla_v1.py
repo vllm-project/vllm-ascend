@@ -938,6 +938,8 @@ class DecodeMLAPreprocessResult(NamedTuple):
     dequant_scale_q_nope: torch.Tensor | None = None
     current_k_nope: torch.Tensor | None = None
     current_k_pe: torch.Tensor | None = None
+    current_q_nope: torch.Tensor | None = None
+    current_q_pe: torch.Tensor | None = None
 
 
 class PrefillMLAPreprocessResult(NamedTuple):
@@ -2453,7 +2455,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             if prolog_num_heads > self.num_heads:
                 decode_q_nope = decode_q_nope[:, : self.num_heads]
                 decode_q_pe = decode_q_pe[:, : self.num_heads]
-            decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+            decode_q_nope, decode_q_pe, current_q_nope, current_q_pe = self._reorg_decode_q_with_current(
+                decode_q_nope, decode_q_pe, attn_metadata
+            )
             if decode_requires_current_kv:
                 DeviceOperator.reshape_and_cache(
                     key=current_k_nope,
@@ -2470,6 +2474,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 dequant_scale_q_nope=decode_dequant_scale,
                 current_k_nope=current_k_nope,
                 current_k_pe=current_k_pe,
+                current_q_nope=current_q_nope,
+                current_q_pe=current_q_pe,
             )
 
         if num_actual_tokens > num_decode_tokens:
@@ -2964,6 +2970,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = decode_q_pe[:, : self.num_heads]
         return decode_q_nope, decode_q_pe
 
+    def _reorg_decode_q_with_current(self, decode_q_nope, decode_q_pe, attn_metadata):
+        """Keep this rank's final Q components before FlashMLA's head gather."""
+        flash = getattr(attn_metadata, "external_flashmla", None)
+        current_q_nope = current_q_pe = None
+        if flash is not None and flash.current is not None:
+            # PROLOG may pad its local head count. Current attention consumes
+            # only the effective TP-local heads, with the original strides.
+            if decode_q_nope.shape[1] > self.num_heads:
+                decode_q_nope = decode_q_nope[:, : self.num_heads]
+                decode_q_pe = decode_q_pe[:, : self.num_heads]
+            current_q_nope, current_q_pe = decode_q_nope, decode_q_pe
+        decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+        return decode_q_nope, decode_q_pe, current_q_nope, current_q_pe
+
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         flash = metadata.external_flashmla
         assert flash is not None
@@ -3090,7 +3110,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_q_nope = decode_q_nope.view(bsz, self.mlapo_num_heads, self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
 
-        decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
+        decode_q_nope, decode_q_pe, current_q_nope, current_q_pe = self._reorg_decode_q_with_current(
+            decode_q_nope, decode_q_pe, attn_metadata
+        )
         current_k_nope = current_k_pe = None
         if return_current_kv:
             current_k_nope = current_nope_cache.flatten(0, 1)[:bsz]
@@ -3111,6 +3133,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             dequant_scale_q_nope=dequant_scale_q_nope,
             current_k_nope=current_k_nope,
             current_k_pe=current_k_pe,
+            current_q_nope=current_q_nope,
+            current_q_pe=current_q_pe,
         )
         return decode_preprocess_res, None
 
@@ -3176,11 +3200,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         cos = attn_metadata.decode.cos
         sin = attn_metadata.decode.sin
         decode_ql_nope, decode_q_pe = self._q_proj_and_k_up_proj(decode_q_c)
-        decode_ql_nope, decode_q_pe = self.reorg_decode_q(
-            decode_ql_nope,
-            decode_q_pe,
+        flash = getattr(attn_metadata, "external_flashmla", None)
+        keep_current_query = flash is not None and flash.current is not None
+        if keep_current_query:
+            # RoPE acts independently on each head, so rotating local heads
+            # before the gather also retains the final current Q without a
+            # second rotation. For NoPE this preserves the raw PE component.
+            decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+        decode_ql_nope, decode_q_pe, current_q_nope, current_q_pe = self._reorg_decode_q_with_current(
+            decode_ql_nope, decode_q_pe, attn_metadata
         )
-        decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+        if not keep_current_query:
+            decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
         if self.fa_quant_layer and self.support_fp8_attention:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
@@ -3213,6 +3244,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             dequant_scale_q_nope=dequant_scale_q_nope,
             current_k_nope=current_k_nope,
             current_k_pe=current_k_pe,
+            current_q_nope=current_q_nope,
+            current_q_pe=current_q_pe,
         )
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
