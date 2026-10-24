@@ -17,6 +17,7 @@ import torch
 
 from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager, OffloadState
+from vllm_ascend.expert_offload.lifecycle import expert_offload_model_loading
 from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter, maybe_offload_quant_method
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -57,6 +58,16 @@ def load_hook_class(path, class_name, methods, parent, namespace):
     namespace = {**namespace, "Parent": parent}
     exec(compile(ast.fix_missing_locations(isolated), str(ROOT / path), "exec"), namespace)
     return namespace[class_name]
+
+
+@pytest.fixture(autouse=True)
+def loading_memory(monkeypatch):
+    memory_allocated = Mock(side_effect=[100, 164])
+    monkeypatch.setattr(
+        "vllm_ascend.expert_offload.lifecycle.torch",
+        SimpleNamespace(npu=SimpleNamespace(memory_allocated=memory_allocated)),
+    )
+    return memory_allocated
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +164,8 @@ def make_runner(*, manager=None, fail_load=False, fail_forward=False, has_prefil
         {"load_model", "execute_model", "gather_batch_req_state", "shutdown"},
         Parent,
         {
-            "torch": SimpleNamespace(npu=SimpleNamespace(memory_allocated=Mock(side_effect=[100, 164]))),
+            "torch": torch,
+            "expert_offload_model_loading": expert_offload_model_loading,
             "CUDAGraphMode": SimpleNamespace(NONE=0),
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
             "IntermediateTensors": type("IntermediateTensors", (), {}),
@@ -206,11 +218,12 @@ def test_load_only_adopts_target_and_preserves_native_draft():
     assert not hasattr(runner.speculator, "expert_offload_manager")
 
 
-def test_disabled_load_does_not_allocate_or_finalize_offload():
+def test_disabled_load_does_not_allocate_or_finalize_offload(loading_memory):
     runner, events = make_runner()
     runner.load_model(True)
     assert events == [("parent_load", True, (), {})]
     assert runner.model_memory_usage == 1000
+    loading_memory.assert_not_called()
 
 
 def test_dummy_load_rejected_before_parent_and_loading_failure_closes_manager():
@@ -226,34 +239,64 @@ def test_dummy_load_rejected_before_parent_and_loading_failure_closes_manager():
     manager.finalize_loading.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", ["start", "load", "join", "finalize"])
-def test_loading_failures_join_both_warmups_and_close_offload(warmups, failure):
-    manager = Mock()
+@pytest.mark.parametrize(
+    "enabled,failure",
+    [(enabled, failure) for enabled in (False, True) for failure in ("start_nz", "start", "load", "join", "join_early")]
+    + [(True, "finalize")],
+)
+def test_loading_failure_preserves_native_warmup_behavior_and_closes_offload(warmups, enabled, failure):
+    manager = Mock() if enabled else None
     runner, _ = make_runner(manager=manager, fail_load=failure == "load")
-    if failure == "start":
+    if failure == "start_nz":
+        warmups.nz_warmup.start_nz_warm_thread.side_effect = RuntimeError("start_nz failed")
+    elif failure == "start":
         warmups.early_kernel_warmup.start_early_kernel_warmup.side_effect = RuntimeError("start failed")
     elif failure == "join":
         warmups.nz_warmup.join_nz_warm_thread.side_effect = RuntimeError("join failed")
+    elif failure == "join_early":
+        warmups.early_kernel_warmup.join_early_kernel_warmup.side_effect = RuntimeError("join_early failed")
     elif failure == "finalize":
+        assert manager is not None
         manager.finalize_loading.side_effect = RuntimeError("finalize failed")
     with pytest.raises(RuntimeError, match=f"{failure} failed"):
         runner.load_model()
-    warmups.nz_warmup.join_nz_warm_thread.assert_called_once_with()
-    warmups.early_kernel_warmup.join_early_kernel_warmup.assert_called_once_with("load_model")
+    if failure in ("start_nz", "start"):
+        warmups.nz_warmup.join_nz_warm_thread.assert_not_called()
+    else:
+        warmups.nz_warmup.join_nz_warm_thread.assert_called_once_with()
+    if failure in ("start_nz", "start", "join"):
+        warmups.early_kernel_warmup.join_early_kernel_warmup.assert_not_called()
+    else:
+        warmups.early_kernel_warmup.join_early_kernel_warmup.assert_called_once_with("load_model")
+    if manager is not None:
+        manager.close.assert_called_once_with()
+        if failure != "finalize":
+            manager.finalize_loading.assert_not_called()
+
+
+def test_loading_cleanup_failure_preserves_the_original_error():
+    manager = Mock()
+    manager.close.side_effect = RuntimeError("cleanup failed")
+    runner, _ = make_runner(manager=manager, fail_load=True)
+    with (
+        patch("vllm_ascend.expert_offload.lifecycle.logger.exception") as log,
+        pytest.raises(RuntimeError, match="load failed"),
+    ):
+        runner.load_model()
     manager.close.assert_called_once_with()
-    if failure != "finalize":
-        manager.finalize_loading.assert_not_called()
+    log.assert_called_once_with("Failed to clean up expert offload after model loading failure")
 
 
-def test_pool_accounting_starts_after_both_warmups(warmups):
+def test_pool_accounting_starts_after_both_warmups(warmups, loading_memory):
     manager = Mock()
     runner, _ = make_runner(manager=manager)
     order = Mock()
     order.attach_mock(warmups.nz_warmup.join_nz_warm_thread, "join_nz")
     order.attach_mock(warmups.early_kernel_warmup.join_early_kernel_warmup, "join_early")
     order.attach_mock(manager.finalize_loading, "finalize")
+    order.attach_mock(loading_memory, "memory")
     runner.load_model()
-    assert [entry[0] for entry in order.mock_calls] == ["join_nz", "join_early", "finalize"]
+    assert [entry[0] for entry in order.mock_calls] == ["join_nz", "join_early", "memory", "finalize", "memory"]
     assert runner.model_memory_usage == 1064
 
 

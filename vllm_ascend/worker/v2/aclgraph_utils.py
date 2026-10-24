@@ -302,7 +302,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             )
         try:
             offload = getattr(self.model_runner, "expert_offload_manager", None)
-            with communicator_switch(), offload.graph_capture() if offload is not None else nullcontext():
+            capture_context = offload.graph_capture() if offload is not None else nullcontext()
+            with communicator_switch(), capture_context:
                 return super().capture(
                     model,
                     model_state,
