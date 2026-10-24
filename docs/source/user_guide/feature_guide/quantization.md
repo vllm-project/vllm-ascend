@@ -10,6 +10,25 @@ Model quantization is a technique that reduces model size and computational over
 > See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
 > Before you quantize a model, ensure sufficient RAM is available.
 
+## Lightning Indexer C8 layer selection
+
+For supported sparse-attention models, Lightning Indexer C8 is derived from
+`--indexer-kv-dtype int8` or `fp8`. When the checkpoint contains per-layer
+`.indexer.quant_type` or `.indexer.wq_b.weight` metadata, the layer filter
+selects only `INT8_DYNAMIC` and `W8A8_MXFP8` entries.
+
+If LI C8 is enabled but that metadata selects no eligible layers, startup
+logs a warning that LI C8 will not be used. Check the checkpoint's Indexer
+quantization metadata rather than treating the global switch as proof that
+the optimization is active. `W8A8_DYNAMIC`, `W8A8`, and `FLOAT` entries do
+not become eligible because of this warning. The existing behavior without
+per-layer metadata is unchanged; it does not trigger the empty-selection
+warning.
+
+Do not change the quantization metadata or widen the supported types simply
+to suppress the warning: mixed Indexer KV layouts require separate cache
+compatibility and accuracy validation.
+
 ## Quantization Tools
 
 vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Compressor`.
