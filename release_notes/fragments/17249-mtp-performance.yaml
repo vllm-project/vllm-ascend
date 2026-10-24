@@ -1,0 +1,10 @@
+pr: 17249
+entries:
+  - category: performance
+    text: Enabled optional local-argmax MTP sampling for Qwen3.8-Flash-Next with standard tensor parallelism, avoiding full-vocabulary draft-logit gathers. Reduced QSA draft graph metadata preparation and unused indexer query work.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]
+  - category: performance
+    text: Reduced temporary allocations in fused QSA indexer normalization and RoPE by consuming the persistent rotary cache and runtime positions directly.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

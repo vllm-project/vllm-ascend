@@ -16,8 +16,11 @@
 
 import torch
 from vllm.distributed import get_pp_group
+from vllm.model_executor.models.interfaces import LocalArgmaxMixin
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -89,8 +92,20 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 upstream_mtp.Qwen4ExpMultiTokenPredictor = AscendQwen4ExpMultiTokenPredictor
 
 
-class AscendQwen4ExpMTP(upstream_mtp.Qwen4ExpMTP):
+class AscendQwen4ExpMTP(LocalArgmaxMixin, upstream_mtp.Qwen4ExpMTP):
     """Qwen4Exp MTP model bound to the Ascend-patched decoder."""
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # The upstream reduction exchanges candidates over the standard TP
+        # group. Other head layouts require different groups and, for fine-
+        # grained LM-head TP, exchanging token rows before the projection.
+        if self.lm_head.parallel_mode in (VocabParallelMode.FINE_GRAINED, VocabParallelMode.PCP_X_TP):
+            raise NotImplementedError(
+                "Qwen4Exp MTP local argmax reduction requires a standard TP or "
+                "replicated LM head; disable use_local_argmax_reduction for "
+                "fine-grained LM-head TP or PCP vocabulary sharding."
+            )
+        return super().get_top_tokens(hidden_states)
 
     def embed_input_ids(
         self,

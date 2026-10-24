@@ -220,12 +220,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> torch.Tensor:
         logger.info_once("QSA indexer is using fused RMSNorm + MRoPE.")
         cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
-        return torch.ops.vllm.triton_qsa_rmsnorm_mrope(
+        # Resolve positions inside the fused kernel. In particular, compressed
+        # keys pass a transposed position view, which does not need a separate
+        # clamp/contiguous/gather allocation on every draft step.
+        return torch.ops.vllm.triton_qsa_rmsnorm_mrope_from_cache(
             tensor=tensor,
             weight=norm.weight,
-            cos_sin=cos_sin,
+            cos_sin_cache=cache,
+            positions=positions,
             eps=norm.variance_epsilon,
             mrope_section=list(self.rotary_emb.mrope_section),
             rope_dim=self.rotary_emb.rotary_dim,
@@ -277,7 +279,15 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         num_tokens = raw_metadata.num_actual_tokens
         hidden_states = hidden_states[:num_tokens]
         positions = positions[..., :num_tokens]
-        query, token_k = self.project_qk(hidden_states, positions)
+        if self.skip_topk:
+            if out is None:
+                raise RuntimeError("QSA top-k reuse requires an output buffer")
+            # Later MTP steps reuse step-0 selections, but must still advance
+            # raw/compressed K caches. Only query normalization/RoPE is dead.
+            _, token_k = self._project_qk_unrotated(hidden_states)
+            query = None
+        else:
+            query, token_k = self.project_qk(hidden_states, positions)
         self._update_and_compress(
             token_k,
             positions,
@@ -286,15 +296,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
 
         if self.skip_topk:
-            if out is None:
-                raise RuntimeError("QSA top-k reuse requires an output buffer")
+            assert out is not None
             return out
+        assert query is not None
         return self._select(query, compressed_metadata, out)
 
-    def project_qk(
+    def _project_qk_unrotated(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         qk, _ = self.index_qk_proj(hidden_states)
         q_raw, token_k = qk.split(
@@ -305,10 +314,19 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
+        return q, token_k.reshape(-1, 1, self.index_head_dim)
+
+    def project_qk(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Keep the upstream projection ABI, including the normalized query."""
+        q, token_k = self._project_qk_unrotated(hidden_states)
         if not self._fused_norm_rope_eligible(q, positions):
             raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
-        return q, token_k.reshape(-1, 1, self.index_head_dim)
+        return q, token_k
 
     def _update_and_compress(
         self,

@@ -82,6 +82,32 @@ def test_init_draft_decode_graph():
     set_prefill.assert_not_called()
 
 
+@pytest.mark.parametrize("is_draft_model_prefill", [False, True])
+def test_qsa_run_fullgraph_skips_host_metadata_updates(is_draft_model_prefill):
+    """QSA still delegates replay to the parent without preparing FIA tasks."""
+    manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
+    manager.update_stream = None
+    manager.is_draft_model_prefill = is_draft_model_prefill
+    manager.speculator = SimpleNamespace(
+        attn_architecture="QSA",
+        build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("QSA needs no FIA metadata")),
+    )
+    manager._updatable_graph_replay = MagicMock()
+    manager._graph_replay = MagicMock()
+    desc = SimpleNamespace(num_tokens=8, num_reqs=2)
+    expected = object()
+    with (
+        patch.object(SpeculatorCudaGraphManager, "run_fullgraph", return_value=expected) as replay,
+        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph") as use_updatable_graph,
+    ):
+        assert manager.run_fullgraph(desc) is expected
+    replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()
+    use_updatable_graph.assert_not_called()
+    manager._updatable_graph_replay.assert_not_called()
+    manager._graph_replay.assert_not_called()
+
+
 def test_run_fullgraph_uses_updatable_graph():
     """Verify full-graph replay uses the updatable graph path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
@@ -112,7 +138,8 @@ def test_run_fullgraph_uses_updatable_graph():
     manager._graph_replay.assert_not_called()
 
 
-def test_run_fullgraph_uses_legacy_graph():
+@pytest.mark.parametrize("attn_architecture,replicated_pcp", [("GQA", False), ("QSA", True)])
+def test_run_fullgraph_uses_legacy_graph(attn_architecture, replicated_pcp):
     """Verify full-graph replay falls back to the legacy graph path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.update_stream = MagicMock()
@@ -121,6 +148,8 @@ def test_run_fullgraph_uses_legacy_graph():
     draft_vllm_config = object()
     draft_attn_metadatas = [{"draft": object()}]
     manager.speculator = SimpleNamespace(
+        attn_architecture=attn_architecture,
+        replicated_pcp=replicated_pcp,
         attn_backend=backend,
         draft_vllm_config=draft_vllm_config,
         build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),

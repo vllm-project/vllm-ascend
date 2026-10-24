@@ -100,7 +100,7 @@ def test_qsa_uses_only_fused_runtime_backends() -> None:
     qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
     assert "return qsa_select_paged_tokens_lightning(" in qsa
     assert "return qsa_gbsa_attention(" in qsa
-    assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope(" in qsa
+    assert "torch.ops.vllm.triton_qsa_rmsnorm_mrope_from_cache(" in qsa
     assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(" in qsa
     for fallback in (
         "qsa_select_paged_tokens_reference",

@@ -359,6 +359,98 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
+### 9.3 Model Runner V2 MTP tuning
+
+For the V2 runner, enable `VLLM_USE_V2_MODEL_RUNNER=1`. With a standard TP8
+LM head, greedy MTP drafting can avoid gathering the complete vocabulary on
+every draft step:
+
+```text
+--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"use_local_argmax_reduction":true}'
+```
+
+The existing local-argmax option exchanges each rank's best logit and token ID
+instead of the complete logits tensor. It preserves the vocabulary argmax,
+including ties and padded vocabulary entries, and uses the existing quantized
+LM-head implementation. It does not remove MoE communication, projection
+reductions, or time spent waiting for other ranks. It is incompatible with
+probabilistic draft sampling, fine-grained LM-head TP, and PCP vocabulary
+sharding. Leave it disabled for those configurations.
+
+To compare draft eager execution, add `"enforce_eager":true` to the same
+speculative config. This disables only draft graphs; the target model can
+continue to use `FULL_DECODE_ONLY` graphs. Compare graph and eager mean
+acceptance length under the same prompts, output lengths, and sampling
+settings before selecting the faster configuration. A lower acceptance length
+can outweigh a faster individual graph replay.
+
+Capture sizes count tokens, not requests. For three speculative tokens, a
+uniform target verification batch needs four tokens per request. The Section
+5.1 list covers eight requests; for 32 requests, extend the capture sizes to
+128, preferably including the intermediate multiples of four. Check actual
+graph dispatch during steady decode rather than assuming that a startup
+capture message covers every runtime shape.
+
+The QSA path reads the indexer's persistent rotary cache directly inside the
+fused normalization/RoPE kernel. This removes the temporary rotary-cache
+gather and its intermediate allocations. Later MTP steps that reuse top-k
+indices also skip unused query normalization/RoPE while continuing to update
+the key caches. QSA draft graph replay skips the FIA metadata/update-stream
+path because QSA has no graph parameter updates there.
+
+These changes require hardware validation. Run the focused NPU rotary-cache
+replay and distributed LM-head tests, then compare the unmodified PR baseline
+and optimized branch with the same GSM8K workload. Record output token IDs,
+mean acceptance length, output throughput, TPOT, and NPU memory use. Capture
+profiling during the same stable concurrency as the benchmark; a separate
+single-request trace cannot establish the cause of a C8 regression. Compare
+the union of Free and Communication intervals per generated token and retain
+the corresponding host/runtime timeline: a long communication interval can
+include rank-arrival imbalance as well as data transfer.
+
+For a focused acceptance/output comparison on the NPU host, save the following
+LLM arguments as `engine_args.json` (adjust capacity for the available memory):
+
+```json
+{
+  "trust_remote_code": true,
+  "quantization": "ascend",
+  "tensor_parallel_size": 8,
+  "enable_expert_parallel": true,
+  "max_model_len": 141312,
+  "max_num_seqs": 32,
+  "max_num_batched_tokens": 4096,
+  "gpu_memory_utilization": 0.90,
+  "enable_prefix_caching": false,
+  "async_scheduling": true,
+  "additional_config": {
+    "enable_cpu_binding": true,
+    "ascend_compilation_config": {"fuse_norm_quant": false}
+  }
+}
+```
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 python tools/validate_qwen4_exp_mtp.py \
+    --model "$MODEL_PATH" \
+    --engine-args engine_args.json \
+    --batch-sizes 1,2,8,3,8,2 \
+    --max-tokens 512 --repeat 2 \
+    --use-local-argmax-reduction \
+    --min-acceptance-ratio 0.9 --check \
+    --output-dir qwen4-exp-mtp-validation
+```
+
+The tool creates separate offline engines for the base, draft-eager, and
+draft-graph modes, leaving existing serving processes untouched. It varies
+output limits within each batch to exercise shrinking batches and repeats
+graph bucket transitions. It saves token IDs, timing, and actual batch-level
+speculative counter deltas. `--check` fails on output differences, unavailable
+acceptance counters, or a graph/eager acceptance-length ratio below the chosen
+threshold. `--dry-run` writes the effective configurations without loading a
+model. This small correctness/acceptance comparison does not replace the
+fixed-length, sustained C8 GSM8K throughput benchmark.
+
 ## 10 FAQ
 
 For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md).

@@ -152,6 +152,15 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
             "prefill" if self.is_draft_model_prefill else "decode",
         )
+        if getattr(self.speculator, "attn_architecture", None) == "QSA" and not getattr(
+            self.speculator, "replicated_pcp", False
+        ):
+            # QSA consumes persistent target metadata for prefill and rebuilds
+            # its device metadata inside the captured multi-step decode graph.
+            # Its update_graph_params is a no-op, so rebuilding FIA metadata
+            # and synchronizing an update stream adds no replay work. Replicated
+            # PCP still needs its prefill block-table/slot preparation below.
+            return super().run_fullgraph(desc)
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
