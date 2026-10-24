@@ -1,0 +1,7 @@
+pr: 19383
+entries:
+  - category: bugfix
+    text: >-
+      Reduced avoidable recomputation at Attention/Mamba block transitions
+      in RecomputeScheduler by preserving forward allocation capacity for
+      running requests with aligned Mamba caching and speculative decoding.
