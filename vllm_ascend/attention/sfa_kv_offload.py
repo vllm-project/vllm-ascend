@@ -649,11 +649,13 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             reasons.append(f"q_lora_rank={self.q_lora_rank}")
         if self.qk_nope_head_dim != 192:
             reasons.append(f"qk_nope_head_dim={self.qk_nope_head_dim}")
-        if not reasons and tuple(self.fused_qkv_a_proj.weight.shape) != (
-            6144,
-            self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
-        ):
-            reasons.append(f"fused_qkv_a_proj_weight_shape={tuple(self.fused_qkv_a_proj.weight.shape)}")
+        if not reasons:
+            assert self.fused_qkv_a_proj is not None
+            if tuple(self.fused_qkv_a_proj.weight.shape) != (
+                6144,
+                self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
+            ):
+                reasons.append(f"fused_qkv_a_proj_weight_shape={tuple(self.fused_qkv_a_proj.weight.shape)}")
         if not reasons and (
             self.num_heads <= 0
             or tuple(self.q_proj.weight.shape)
@@ -705,7 +707,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         slot_mapping: torch.Tensor,
         *,
         num_input_tokens: int = 0,
-        attn_metadata: M | None = None,
+        attn_metadata: AscendSFAMetadata | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,

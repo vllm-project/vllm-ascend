@@ -106,6 +106,7 @@ def test_reload_refreshes_fixed_scale_backing_and_logs_once(initialization, head
         ("copy_sfa", "use_fused_overlap=False"),
         ("disabled", "enable_mlapo=False"),
         ("activation", "activation_dtype=torch.float32"),
+        ("missing_down_proj", "fused_qkv_a_proj_quant=None"),
         ("down_quant", "fused_qkv_a_proj_quant="),
         ("up_quant", "q_proj_quant="),
         ("num_kv_heads", "num_kv_heads=2"),
@@ -134,6 +135,8 @@ def test_native_fallback_records_real_reason(initialization, condition, reason):
         impl.enable_mlapo = False
     elif condition == "activation":
         dtype = torch.float32
+    elif condition == "missing_down_proj":
+        impl.fused_qkv_a_proj = None
     elif condition == "down_quant":
         impl.fused_qkv_a_proj.quant_method.quant_method = object()
     elif condition == "up_quant":
