@@ -133,6 +133,10 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.offload_capability import (
+    get_dsa_offload_backends,
+    is_dsa_offload_backend,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
@@ -156,10 +160,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     get_layerwise_reuse_config,
-)
-from vllm_ascend.attention.offload_capability import (
-    get_dsa_offload_backends,
-    is_dsa_offload_backend,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
     CopySfaRequestStates,
@@ -228,7 +228,6 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.dcp_utils import (
     DCPAsyncSpecDecodeRebuildResult,
     DCPDummyRunMetadata,
@@ -583,7 +582,9 @@ class NPUModelRunner(GPUModelRunner):
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
-        self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None) or eplb_config.enable_omni_eplb
+        self.eplb_enable = (
+            self.dynamic_eplb or (eplb_config.expert_map_path is not None) or eplb_config.enable_omni_eplb
+        )
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
@@ -1756,6 +1757,17 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         num_forward_tokens: int,
     ) -> None:
+        # Preserve placeholder barriers before replacing IDs for embedding.
+        # This persistent mask is staged as data, including on FULL replays.
+        if (
+            getattr(getattr(getattr(self, "ascend_config", None), "engram_config", None), "enabled", False)
+            and self.ascend_config.engram_config.backend == "elastic"
+        ):
+            if getattr(self, "_engram_dead_input_mask", None) is None:
+                self._engram_dead_input_mask = torch.zeros_like(self.input_ids.gpu, dtype=torch.bool)
+            self._engram_dead_input_mask.zero_()
+            self._engram_dead_input_mask[:num_forward_tokens].copy_(
+                self.input_ids.gpu[:num_forward_tokens] == PLACEHOLDER_TOKEN_ID)
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         if not scheduled_spec_tokens:
             return
@@ -3240,7 +3252,7 @@ class NPUModelRunner(GPUModelRunner):
         }
         # Routing runs before replay on every DP, never inside capture.
         prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
-        if prepare_engram is not None:
+        if prepare_engram is not None and getattr(self.model, "has_engram", True):
             if (
                 getattr(self, "_engram_capture_active", False)
                 or getattr(forward_context, "capturing", False)
@@ -3263,10 +3275,18 @@ class NPUModelRunner(GPUModelRunner):
                         num_tokens_padded,
                         model_kwargs.get("lookback_token_ids"),
                         **self._get_engram_device_inputs(),
+                        **({"multimodal_spans": [
+                            [(feature.mm_position.offset, feature.mm_position.length)
+                             for feature in (getattr(self.requests[req_id], "mm_features", None) or ())]
+                            for req_id in self.input_batch.req_ids[:self.input_batch.num_reqs]
+                        ]} if getattr(self.model, "uses_elastic_engram", False) else {}),
+                        **({"current_dead_mask": self._engram_dead_input_mask[:num_tokens_padded]}
+                           if getattr(self, "_engram_dead_input_mask", None) is not None else {}),
                     )
                 )
         run_model = partial(self.model, **model_inputs)
 
+        forward_failed = True
         try:
             if self.enable_enpu:
                 # The soft segmentation scenario requires event.record first, then event.wait
@@ -3275,13 +3295,17 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+            forward_failed = False
         finally:
-            # A forward that raises must still retire the device-metadata
-            # submission: otherwise the next submit() refuses to start and a
-            # single request error wedges every DP rank of the instance.
-            executor = getattr(forward_context, "device_metadata_executor", None)
-            if executor is not None and executor.submission_in_flight:
-                executor.release()
+            try:
+                retire_engram = getattr(self.model, "retire_engram_lookups", None)
+                if retire_engram is not None and getattr(self.model, "has_engram", True):
+                    retire_engram(reset_events=forward_failed)
+            finally:
+                # Metadata must retire even if an Engram stream drain fails.
+                executor = getattr(forward_context, "device_metadata_executor", None)
+                if executor is not None and executor.submission_in_flight:
+                    executor.release()
 
         return hidden_states
 
@@ -4391,6 +4415,7 @@ class NPUModelRunner(GPUModelRunner):
             if eplb_config.enable_omni_eplb:
                 try:
                     from omni_placement.omni_planner import OmniPlanner
+
                     from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor as _VllmEplbAdaptor
                     num_moe_layers = len(_VllmEplbAdaptor._registered_moe_layers)
                     omni_planner = OmniPlanner()  # get singleton
@@ -4424,6 +4449,9 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
+        previous_model = getattr(self, "model", None)
+        if previous_model is not None and getattr(previous_model, "uses_elastic_engram", False):
+            previous_model.destroy_engram()
         from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
             join_early_kernel_warmup,
             start_early_kernel_warmup,
@@ -4457,6 +4485,9 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            initialize_engram = getattr(self.model, "initialize_engram", None)
+            if initialize_engram is not None and getattr(self.model, "has_engram", True):
+                initialize_engram()
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name

@@ -590,7 +590,6 @@ class NPUPlatform(Platform):
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
-        _validate_engram_config(vllm_config)
 
         # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
@@ -602,11 +601,14 @@ class NPUPlatform(Platform):
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
+        # Native Engram validation reads use_ubatching. Normalize Ascend's
+        # ignored DBO/microbatch options before invoking the upstream resolver.
+        engram_config = _validate_engram_config(vllm_config)
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
-        ascend_config = init_ascend_config(vllm_config)
+        ascend_config = init_ascend_config(vllm_config, engram_config=engram_config)
         _check_ascend_config(vllm_config, ascend_config)
 
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
@@ -1683,41 +1685,10 @@ def _get_dyntra_lb_scheduler_cls(*, async_scheduling: bool) -> str:
     return "vllm_ascend.core.dyntra_lb_scheduler.DyntraLBScheduler"
 
 
-def _validate_engram_config(vllm_config: VllmConfig) -> None:
-    engram_config = getattr(vllm_config, "engram_config", None)
-    model_config = vllm_config.model_config
-    spec = vllm_config.speculative_config
-    if spec is not None and model_config is spec.draft_model_config:
-        model_config = spec.target_model_config
-    if engram_config is None:
-        if (
-            model_config is None
-            or model_config.architecture != "DeepseekV41ForCausalLM"
-            or not getattr(model_config.hf_text_config, "engram_layer_ids", None)
-        ):
-            return
-        # Upstream skips automatic Engram defaults on non-CUDA platforms.
-        # Supply its native config here and reuse its resolver and validation.
-        from vllm.config import EngramConfig, VllmConfig
+def _validate_engram_config(vllm_config: VllmConfig):
+    from vllm_ascend.engram_config import resolve_engram_config
 
-        vllm_config.engram_config = engram_config = EngramConfig()
-        VllmConfig._resolve_and_verify_engram_config(vllm_config)
-
-    if model_config is None or model_config.architecture != "DeepseekV41ForCausalLM":
-        raise ValueError("Ascend Engram requires DeepSeek V4.1.")
-    if engram_config.embedding_across_dp:
-        raise ValueError("Ascend Engram does not support embedding_across_dp")
-    parallel_config = vllm_config.parallel_config
-    if (
-        parallel_config.enable_elastic_ep
-        or parallel_config.tensor_parallel_size not in (1, 2, 4, 8)
-        or parallel_config.pipeline_parallel_size != 1
-        or parallel_config.decode_context_parallel_size != 1
-    ):
-        raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=DCP=1.")
-    load_format = vllm_config.load_config.load_format
-    if load_format not in ("auto", "safetensors", "dummy"):
-        raise ValueError("Ascend Engram requires indexed safetensors (auto/safetensors), or dummy weights.")
+    return resolve_engram_config(vllm_config)
 
 
 def _validate_routing_replay_config(vllm_config: VllmConfig) -> None:

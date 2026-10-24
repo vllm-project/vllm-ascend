@@ -150,6 +150,12 @@ class EngramModelState(AscendModelState):
             "force_dummy": dummy,
             "token_indices": token_indices,
         }
+        if getattr(self.model, "uses_elastic_engram", False) and not dummy:
+            features = getattr(self.encoder_cache, "mm_features", {})
+            self._engram_inputs["multimodal_spans"] = [
+                [(feature.mm_position.offset, feature.mm_position.length) for feature in features.get(req_id, ())]
+                for req_id in batch.req_ids[: batch.num_reqs]
+            ]
         model_inputs.update(self.model.prepare_engram_graph_inputs(input_batch.num_tokens_after_padding))
         return model_inputs
 
