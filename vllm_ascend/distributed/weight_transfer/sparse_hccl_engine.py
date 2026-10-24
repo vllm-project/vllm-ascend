@@ -125,14 +125,17 @@ class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngin
             world_size=init_info.world_size,
         )
 
-        # Trainer and workers must enter HCCL initialization concurrently.
-        with ThreadPoolExecutor(max_workers=1) as exe:
-            future = exe.submit(
-                engine.client.init_weight_transfer_engine,
-                asdict(worker_init_info),
-            )
-            engine.model_update_group = HCCLWeightTransferEngine.trainer_init(asdict(init_info))
-            future.result()
+        with ExitStack() as cleanup:
+            cleanup.callback(engine.shutdown)
+            # Trainer and workers must enter HCCL initialization concurrently.
+            with ThreadPoolExecutor(max_workers=1) as exe:
+                future = exe.submit(
+                    engine.client.init_weight_transfer_engine,
+                    asdict(worker_init_info),
+                )
+                engine.model_update_group = HCCLWeightTransferEngine.trainer_init(asdict(init_info))
+                future.result()
+            cleanup.pop_all()
 
         return engine
 
