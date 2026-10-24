@@ -61,6 +61,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        replicate_across_dp: bool = False,
     ) -> None:
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
@@ -69,6 +70,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.cpu_offload = cpu_offload
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
+        self._replicate_across_dp = replicate_across_dp
+        if replicate_across_dp and cpu_offload:
+            raise ValueError("HBM Engram replicas cannot use host offload")
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
             raise ValueError("Ascend Engram requires the TP ranks of one replica to stay on a single node")
         group = get_engram_dp_group()
@@ -82,6 +86,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self._shared_group = group
             # DP x PCP peers map the same TP shard and look up their own
             # tokens without per-step DP lookup collectives.
+            self.dp_size = 1
+        elif replicate_across_dp:
             self.dp_size = 1
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
@@ -372,7 +378,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         EDP0's ids instead of its own window.
         """
         num_tokens = indices.shape[0]
-        gathered = gather_engram_hashes(indices, dp_shared_memory=self._shared_group is not None)
+        gathered = gather_engram_hashes(
+            indices, dp_shared_memory=self._shared_group is not None or self._replicate_across_dp
+        )
         return self.embed_gathered(gathered, num_tokens)
 
     def lookup(self, indices: torch.Tensor, out: torch.Tensor, background: bool = False) -> None:

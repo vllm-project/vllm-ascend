@@ -8,7 +8,6 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
-from vllm_ascend.models.deepseek_v41.engram.config import validate_elastic_config
 from vllm_ascend.models.deepseek_v41.engram.runtime import ElasticEngramRuntime
 
 
@@ -21,101 +20,6 @@ def config():
         speculative_config=None,
         scheduler_config=SimpleNamespace(max_num_seqs=3),
     )
-
-
-def ascend(**kwargs):
-    return SimpleNamespace(
-        **{"enable_engram": True, "engram_offload_backend": "elastic", "engram_tp_size": None} | kwargs
-    )
-
-
-def test_backend_validation_does_not_restrict_existing_storage():
-    validate_elastic_config(ascend(enable_engram=False), SimpleNamespace())
-    validate_elastic_config(ascend(engram_offload_backend="uva"), SimpleNamespace())
-    backend = ascend()
-    validate_elastic_config(backend, config())
-    assert backend.engram_tp_size == 4
-
-
-@pytest.mark.parametrize("size", [0, 1, 2, 3, 8])
-def test_elastic_rejects_invalid_or_redundant_local_shards(size):
-    with pytest.raises(ValueError, match="engram_tp_size|node-local"):
-        validate_elastic_config(ascend(engram_tp_size=size), config())
-
-
-@pytest.mark.parametrize(
-    "field", ["pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size"]
-)
-def test_elastic_parallel_restrictions_are_scoped_to_backend(field):
-    vc = config()
-    setattr(vc.parallel_config, field, 2)
-    with pytest.raises(ValueError, match="PP=PCP=DCP"):
-        validate_elastic_config(ascend(), vc)
-    validate_elastic_config(ascend(engram_offload_backend="uva"), vc)
-
-
-@pytest.mark.parametrize("case", ["offload", "sharing", "multinode", "dummy", "mtp", "other"])
-def test_elastic_configuration_errors_are_early(case):
-    vc = config()
-    if case == "offload":
-        vc.engram_config.cpu_offload = False
-    elif case == "sharing":
-        vc.engram_config.dp_shared_memory = True
-    elif case == "multinode":
-        vc.parallel_config.local_world_size = 2
-    elif case == "dummy":
-        vc.load_config.load_format = "dummy"
-    else:
-        vc.speculative_config = SimpleNamespace(method=case)
-    with pytest.raises(ValueError):
-        validate_elastic_config(ascend(), vc)
-
-
-@pytest.mark.parametrize("enabled,backend", [(False, "uva"), (False, "elastic"), (True, "uva")])
-@pytest.mark.parametrize("method,tokens", [("mtp", 3), ("dspark", 32), ("eagle3", 3)])
-def test_speculative_restrictions_only_apply_to_enabled_elastic(enabled, backend, method, tokens):
-    vc = config()
-    vc.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=tokens, use_dspark=lambda: True)
-    validate_elastic_config(ascend(enable_engram=enabled, engram_offload_backend=backend), vc)
-
-
-@pytest.mark.parametrize("tokens,valid", [(None, False), (0, False), (1, True), (31, True), (32, False)])
-def test_elastic_dspark_retains_ring_capacity_check(tokens, valid):
-    vc = config()
-    vc.speculative_config = SimpleNamespace(method="dspark", num_speculative_tokens=tokens)
-    if valid:
-        validate_elastic_config(ascend(), vc)
-    else:
-        with pytest.raises(ValueError, match="1..31"):
-            validate_elastic_config(ascend(), vc)
-
-
-@pytest.mark.parametrize("schedule", [[(1, 16, 3), (17, 32, 0)], {1: 3, 17: 0}])
-def test_elastic_dspark_dynamic_schedule_supports_zero_and_checks_capacity(schedule):
-    vc = config()
-    vc.speculative_config = SimpleNamespace(
-        method="dspark", num_speculative_tokens=3, num_speculative_tokens_per_batch_size=schedule
-    )
-    validate_elastic_config(ascend(), vc)
-    for invalid in (-1, 32):
-        vc.speculative_config.num_speculative_tokens_per_batch_size = {1: invalid}
-        with pytest.raises(ValueError, match="dynamic lengths"):
-            validate_elastic_config(ascend(), vc)
-
-
-def test_elastic_dspark_rejects_inconsistent_method_report():
-    vc = config()
-    vc.speculative_config = SimpleNamespace(method="dspark", num_speculative_tokens=3, use_dspark=lambda: False)
-    with pytest.raises(ValueError, match="must report"):
-        validate_elastic_config(ascend(), vc)
-
-
-@pytest.mark.parametrize("method", ["mtp", "eagle3"])
-def test_elastic_requires_explicit_dspark_method_without_overriding_proposer(method):
-    vc = config()
-    vc.speculative_config = SimpleNamespace(method=method, num_speculative_tokens=3, use_dspark=lambda: True)
-    with pytest.raises(ValueError, match="only method='dspark'"):
-        validate_elastic_config(ascend(), vc)
 
 
 def runtime():

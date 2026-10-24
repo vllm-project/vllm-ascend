@@ -60,7 +60,7 @@ def test_runtime_requires_master_switch_layers_and_resolved_config(enabled, laye
         MODEL,
         "_engram_enabled_for_runtime",
         {
-            "get_ascend_config": lambda: SimpleNamespace(enable_engram=enabled),
+            "get_ascend_config": lambda: SimpleNamespace(engram_config=SimpleNamespace(enabled=enabled)),
             "engram_enabled": lambda config: bool(config.engram_layer_ids),
         },
     )
@@ -103,7 +103,11 @@ def test_disabled_model_builds_and_runs_without_engram_resources(backend, compil
         "nn": torch.nn,
         "_DS41_WHEEL_OPS": False,
         "normalize_deepseek_v41_config": lambda config: config,
-        "get_ascend_config": lambda: SimpleNamespace(enable_engram=False, engram_offload_backend=backend),
+        "get_ascend_config": lambda: SimpleNamespace(
+            engram_config=SimpleNamespace(
+                enabled=False, backend=backend, dp_shared_memory=False, replicate_across_dp=False
+            )
+        ),
         "engram_enabled": lambda config: bool(config.engram_layer_ids),
         "current_platform": SimpleNamespace(device_type="cpu"),
         "get_pp_group": lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
@@ -223,7 +227,7 @@ def test_v1_disabled_elastic_does_not_allocate_placeholder_mask():
         {"torch": torch, "PLACEHOLDER_TOKEN_ID": -1},
     )
     runner = SimpleNamespace(
-        ascend_config=SimpleNamespace(enable_engram=False, engram_offload_backend="elastic"),
+        ascend_config=SimpleNamespace(engram_config=SimpleNamespace(enabled=False, backend="elastic")),
         input_ids=SimpleNamespace(gpu=torch.tensor([7, 8])),
     )
     sanitize(runner, SimpleNamespace(scheduled_spec_decode_tokens={}), 2)

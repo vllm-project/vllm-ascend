@@ -82,7 +82,9 @@ def test_native_engram_resolution_on_npu(engram_config, draft, shared, dp, pcp):
     _validate_engram_config(config)
     assert type(config.engram_config) is EngramConfig
     if original is not None:
-        assert config.engram_config is original
+        assert config.engram_config is not original
+        assert config.engram_config.cpu_offload == original.cpu_offload
+        assert original.dp_shared_memory == shared
     assert config.engram_config.dp_shared_memory == bool(shared)
 
 

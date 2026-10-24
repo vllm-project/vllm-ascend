@@ -1760,8 +1760,8 @@ class NPUModelRunner(GPUModelRunner):
         # Preserve placeholder barriers before replacing IDs for embedding.
         # This persistent mask is staged as data, including on FULL replays.
         if (
-            getattr(getattr(self, "ascend_config", None), "enable_engram", False)
-            and self.ascend_config.engram_offload_backend == "elastic"
+            getattr(getattr(getattr(self, "ascend_config", None), "engram_config", None), "enabled", False)
+            and self.ascend_config.engram_config.backend == "elastic"
         ):
             if getattr(self, "_engram_dead_input_mask", None) is None:
                 self._engram_dead_input_mask = torch.zeros_like(self.input_ids.gpu, dtype=torch.bool)

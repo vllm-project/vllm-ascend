@@ -110,7 +110,9 @@ from .indexer import DeepseekV41Indexer
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Require the master opt-in and resolved upstream config for both backends."""
-    return get_ascend_config().enable_engram and engram_enabled(config) and vllm_config.engram_config is not None
+    return (
+        get_ascend_config().engram_config.enabled and engram_enabled(config) and vllm_config.engram_config is not None
+    )
 
 
 class DeepseekV41MLP(nn.Module):
@@ -1062,14 +1064,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_weight_root = self.engram_root
         # Detect each table's checkpoint dtype independently of dense weights.
         # Host placement remains controlled by vLLM's EngramConfig.
+        engram_config = get_ascend_config().engram_config
         cpu_offload = self.has_engram and engram_cpu_offload(vllm_config)
         self.engram_dp_shared_memory = self.has_engram and resolve_dp_shared_memory(
-            bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
+            engram_config.dp_shared_memory or engram_config.replicate_across_dp
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
-        self._engram_elastic = (
-            self.has_engram and getattr(get_ascend_config(), "engram_offload_backend", "uva") == "elastic"
-        )
+        self._engram_elastic = self.has_engram and get_ascend_config().engram_config.backend == "elastic"
         self._engram_elastic_runtime = None
         if self.engram_layout is not None and not self._engram_elastic:
             # Head buckets use TP x DP x PCP when sharded, or TP alone when host
@@ -1099,7 +1100,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     slot,
                     storage_dtype=storage_dtype,
                     cpu_offload=cpu_offload,
-                    dp_shared_memory=self.engram_dp_shared_memory,
+                    dp_shared_memory=self.engram_dp_shared_memory and cpu_offload,
+                    replicate_across_dp=self.engram_dp_shared_memory and not cpu_offload,
                 )
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
@@ -1112,7 +1114,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self._engram_prepare_stream = None
         self._engram_capture_stream = None
         self._engram_capture_events = None
-        self._engram_overlap_enabled = self.has_engram and get_ascend_config().multistream_engram_overlap
+        self._engram_overlap_enabled = self.has_engram and get_ascend_config().engram_config.overlap
         self._engram_max_tokens = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,

@@ -32,7 +32,7 @@ class ElasticEngramRuntime:
             return
         from vllm_ascend.ascend_config import get_ascend_config
 
-        size = get_ascend_config().engram_tp_size
+        size = get_ascend_config().engram_config.group_size
         parallel = self.vllm_config.parallel_config
         expected_world = getattr(parallel, "world_size_across_dp", getattr(parallel, "world_size", 1))
         try:
