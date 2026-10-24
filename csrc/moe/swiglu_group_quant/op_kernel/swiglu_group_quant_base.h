@@ -596,9 +596,11 @@ __aicore__ inline void VFProcessGroupIndex(const LocalTensor<T>& yLocal, const L
     __local_mem__ T* xLocalAddr = (__local_mem__ T*)xLocal.GetPhyAddr();
     uint16_t vlLen = REPEAT_SIZE / sizeof(T);
     uint16_t loopCount = CeilDiv(curColNum, vlLen);
-    uint16_t fourLoopCount = loopCount / FOUR_UNFOLD;
-    uint16_t tailLoopNum = loopCount % FOUR_UNFOLD;
+    // Only complete vectors belong in the unrolled groups. A partial
+    // final vector must be handled by the masked tail loop.
+    uint16_t fourLoopCount = curColNum / (vlLen * FOUR_UNFOLD);
     uint32_t tailReminder = curColNum - fourLoopCount * vlLen * FOUR_UNFOLD;
+    uint16_t tailLoopNum = CeilDiv(tailReminder, vlLen);
     if (loopCount < FOUR_UNFOLD) {
         __VEC_SCOPE__
         {
