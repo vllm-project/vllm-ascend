@@ -1846,6 +1846,7 @@ class TestNPUWorker(TestBase):
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = False
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1912,6 +1913,7 @@ class TestNPUWorker(TestBase):
             patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
         ):
             worker = NPUWorker()
+            worker.use_v2_model_runner = False
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
             worker.model_config = MagicMock()
@@ -1972,6 +1974,7 @@ class TestNPUWorker(TestBase):
             mock_get_hardware_profile.return_value.supports.return_value = False
 
             worker = NPUWorker()
+            worker.use_v2_model_runner = False
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = model_memory
             worker.model_runner.capture_model.return_value = npugraph_memory
