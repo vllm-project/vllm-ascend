@@ -53,6 +53,43 @@ Select an image based on your machine type and start the docker image on your no
 
 **Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
 
+=== "950PR&950DT Products"
+
+    Start the docker image on each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export NAME=vllm-ascend
+
+    docker run --rm \
+        --name $NAME \
+        --net=host \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/hisi_hdc \
+        --device /dev/ummu \
+        --device /dev/uburma \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+        -v /etc/hixlep/:/etc/hixlep/ \
+        -v /root/.cache:/root/.cache \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+        -v /usr/lib64:/usr/lib64 \
+        -it $IMAGE bash
+    ```
+
 === "A3 series"
 
     Start the docker image on each node.
