@@ -29,6 +29,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -520,6 +521,25 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
+    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+        # HiSparse owns the source/resident/hot manager roles. Its common Core
+        # coordinator also owns their prefix and residency semantics; the Ascend
+        # hybrid overrides below target other cache layouts.
+        return _orig_get_kv_cache_coordinator(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            max_in_flight_tokens=token_budget,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=1,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
+            allow_partial_hash_hits=allow_partial_hash_hits,
+        )
     hybrid_kwargs = dict(
         kv_cache_config=kv_cache_config,
         max_model_len=max_model_len,

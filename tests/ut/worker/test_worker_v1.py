@@ -326,6 +326,14 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(memory_info, (3, 3, 1.0))
 
+    def test_hisparse_shared_slab_preserves_builder_memory_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
+        worker.get_kv_cache_spec = MagicMock(side_effect=AssertionError("HiSparse uses the common planner"))
+        self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
+
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 

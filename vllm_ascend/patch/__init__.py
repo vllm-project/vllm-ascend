@@ -265,6 +265,18 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
+#    Why:
+#       The Ascend hybrid constructor predates HiSparse source/indexer roles
+#       and would put host source pages into the ordinary device block pool.
+#    How:
+#       Delegate HiSparse configurations to the original upstream factory,
+#       preserving its host pool, specialized managers and prefix semantics.
+#    Related PR (if no, explain why):
+#       No upstream PR; this is an Ascend factory integration for HiSparse.
+#    Future Plan:
+#       Remove this bypass with the Ascend hybrid coordinator patch once its
+#       PD behavior is covered by the upstream coordinator.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

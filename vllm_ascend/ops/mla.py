@@ -181,6 +181,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # both layernorms as extra args, so this flag has no effect here and is
         # accepted for signature compatibility only.
         fuse_qkv_rmsnorm: bool = False,
+        index_group_builder=None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -224,6 +225,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             prefix=f"{prefix}.attn",
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
+            index_group_builder=index_group_builder,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
