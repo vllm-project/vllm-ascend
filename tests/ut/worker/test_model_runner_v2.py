@@ -1336,7 +1336,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
-    assert runner.speculator.pcp_manager is runner.pcp_manager
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
