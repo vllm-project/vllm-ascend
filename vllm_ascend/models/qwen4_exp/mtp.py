@@ -134,7 +134,14 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
-        if layer.use_sequence_parallel:
+        # The local MTP drafter is constructed with PP=1 even when the target
+        # model runs with PP>1. Depending on the runner path, its target hidden
+        # state is either full-token or already SP-local. Shard only the former;
+        # global PP rank is not a valid indicator for this local model.
+        if (
+            layer.use_sequence_parallel
+            and hidden_states.shape[0] == positions.shape[-1]
+        ):
             hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -146,7 +153,9 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
             ngram_context=None,
         )
         if not get_pp_group().is_last_rank:
-            hidden_states = layer.mlp_hyper_connection.combine(hidden_states, block_output, injection)
+            hidden_states = layer.mlp_hyper_connection.combine(
+                hidden_states, block_output, injection
+            )
             return IntermediateTensors({"hidden_states": hidden_states})
 
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(

@@ -28,6 +28,9 @@ def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
 def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     model = _source("vllm_ascend/models/qwen4_exp/model.py")
     mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
+    pp_compat = _source("vllm_ascend/patch/platform/patch_qwen4_exp_pp.py")
+    model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
 
     assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
     assert "class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer)" in model
@@ -39,17 +42,33 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     assert "already_sequence_parallel=self.use_sequence_parallel" in model
     assert "block_input = sp_all_gather(block_input)" in model
     assert "attn_out = sp_reduce_scatter(attn_out)" in model
-    assert "conv_input = sp_all_gather(conv_input)" in model
-    assert "gated_output.add_(sp_shard(conv_output))" in model
+    assert "gathered_ple = sp_all_gather(" in model
+    assert "torch.cat((gated_output, conv_input), dim=-1)" in model
+    assert "gated_output.add_(conv_output)" in model
+    assert "ple_output_is_full_tokens = self.use_sequence_parallel" in model
+    assert "injection = sp_shard(injection)" in model
     assert "local_ngram_ids = sp_shard(ngram_ids)" in model
     assert "qwen4_exp_amd_ple_ngram_embedding_pinned(" in model
     assert "return ple_metadata.num_prefills > 0" in model
     assert "embeddings = sp_shard(embeddings)" in model
     assert "forward_context.is_padding = sp_padding_mask(" in model
     assert "hidden_states = sp_shard(hidden_states)" in model
+    assert "pp_group = get_pp_group()" in model
+    assert "if pp_group.is_first_rank:" in model
+    assert "if not pp_group.is_last_rank:" in model
+    assert "and hidden_states.shape[0] == positions.shape[-1]" in model
+    assert "hidden_states = sp_all_gather(hidden_states)" in model
+    assert "pp_intermediate_tensors_are_full_tokens = True" in model
+    assert "_uses_local_sp_pp_intermediates" in runner
+    assert "pipeline_parallel_size=1" not in model
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in model
-    assert "hidden_states = sp_shard(hidden_states)" in mtp
+    assert "and hidden_states.shape[0] == positions.shape[-1]" in mtp
+    assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
+    assert "text_config.ple_layer_ids = []" in pp_compat
+    assert "Qwen4ExpModelState.__init__" not in pp_compat
+    assert "class AscendQwen4ExpModelState" in model_state
+    assert "get_pp_group().is_first_rank" in model_state
 
 
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
@@ -94,6 +113,9 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     )
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
+    assert qsa_sources.count(
+        "positions.clamp(0, cache.shape[0] - 1).contiguous()"
+    ) >= 3
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
