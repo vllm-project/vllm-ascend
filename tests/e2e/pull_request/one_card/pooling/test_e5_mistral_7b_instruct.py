@@ -26,10 +26,11 @@ prefix while passages stay bare text (model card).
 
 Assertion set (issue #10679):
   1. output shape (n, 4096);
-  2. element-wise |delta| <= 5e-2 after both sides are L2-normalized
+  2. element-wise |delta| <= 2e-2 after both sides are L2-normalized
      (cosine alone cannot catch normalization bugs);
-  3. cosine >= 1 - 1e-2 (via check_embeddings_close);
-  4. top-1 ranking over a fixed query x passage set matches the HF reference;
+  3. cosine >= 1 - 1e-3 (via check_embeddings_close);
+  4. top-1 ranking over a fixed query x passage set matches the HF reference,
+     and every query retrieves its intended passage (40/40);
   5. token-id alignment between vLLM and the HF tokenizer (BOS and the
      last real token; neither side appends </s>);
   6. > max_model_len raises ValueError (no silent truncation); empty /
@@ -37,7 +38,12 @@ Assertion set (issue #10679):
      a single BOS token and pools from it instead of raising).
 """
 
+import contextlib
 import hashlib
+import os
+import tempfile
+import time
+from queue import Empty
 from typing import Any
 
 import numpy as np
@@ -46,7 +52,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
-from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
 MODEL = "intfloat/e5-mistral-7b-instruct"
@@ -59,9 +65,20 @@ HIDDEN_SIZE = 4096
 MAX_MODEL_LEN = 4096
 
 # Element-wise tolerance after both sides are L2-normalized (bf16 vs fp32).
-ELEMENTWISE_TOL = 5e-2
-# Cosine tolerance (same order as the existing pooling precedents).
-COSINE_TOL = 1e-2
+ELEMENTWISE_TOL = 2e-2
+# Cosine tolerance used by check_embeddings_close (cosine >= 1 - COSINE_TOL).
+COSINE_TOL = 1e-3
+# Single-input (n=1) embedding vs the same text's row in the batched run: same
+# weights and dtype, but the n=1 and n=80 kernels reduce in a different order,
+# so a small bf16 difference is expected (measured ~1.5e-3 on this corpus).
+SINGLE_INPUT_TOL = 5e-3
+
+# Wall-clock budget for the spawned HF reference worker (7B fp32 load + forward).
+HF_REFERENCE_TIMEOUT_S = 600
+
+# Config fingerprint of the vLLM engine, folded into every _CACHE key: a
+# dtype/pooler/max_model_len change must not reuse stale cached embeddings.
+ENGINE_FINGERPRINT = f"dtype=bfloat16,pooler=LAST,max_model_len={MAX_MODEL_LEN}"
 
 # Long English input, guaranteed to exceed MAX_MODEL_LEN tokens.
 OVERSIZE_TEXT = "retrieval passage about renewable energy sources and storage. " * 1200
@@ -261,13 +278,17 @@ CORPUS: list[tuple[str, str]] = [
 # NOTE: "vllm_tokenizer" holds the tokenizer of an engine that has already
 # been destroyed by VllmRunner.__exit__; only its CPU-side tokenizer methods
 # (encode/decode) are safe to reuse in later tests.
+# NOTE: the cache lives in process memory and therefore assumes this file runs
+# in a single process, serially. Under pytest-xdist every worker is a separate
+# interpreter with its own empty cache, so the engines would be started once
+# per worker for the same texts -- do not rely on _CACHE for cross-worker reuse.
 _CACHE: dict[str, Any] = {}
 
 
 def _cache_key(prefix: str, texts: list[str]) -> str:
-    """Collision-resistant cache key: full-content sha256, not a prefix slice."""
+    """Collision-resistant cache key: engine fingerprint + full-content sha256."""
     digest = hashlib.sha256("\x1e".join(texts).encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}::{len(texts)}::{digest}"
+    return f"{prefix}::{ENGINE_FINGERPRINT}::{len(texts)}::{digest}"
 
 
 def instruct_query(query: str) -> str:
@@ -293,8 +314,25 @@ def _model_path() -> str:
     return snapshot_download(MODEL, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE)
 
 
-def _hf_reference_worker(texts: list[str], model_name: str, queue: Any) -> None:
+def _worker_stderr(log_path: str) -> str:
+    """Return the tail of a spawn worker's stderr log (best effort)."""
+    try:
+        with open(log_path, errors="replace") as handle:
+            tail = handle.read()[-4000:]
+    except OSError:
+        return "<stderr unavailable>"
+    return tail.strip() or "<empty>"
+
+
+def _hf_reference_worker(texts: list[str], model_name: str, queue: Any, log_path: str) -> None:
     """Worker body for the spawned HF reference process (see _hf_reference_embeddings)."""
+    # Send the OS-level stderr (Python tracebacks as well as torch/CANN
+    # messages) to log_path, so the parent can attach it when the worker dies
+    # without putting a result on the queue.
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.dup2(log_fd, 2)
+    os.close(log_fd)
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name, torch_dtype=torch.float32)
     device = "npu" if hasattr(torch, "npu") and torch.npu.is_available() else "cpu"
@@ -308,8 +346,9 @@ def _hf_reference_worker(texts: list[str], model_name: str, queue: Any) -> None:
             encoded = tokenizer(
                 batch,
                 padding=True,
-                truncation=True,
-                max_length=MAX_MODEL_LEN,
+                # No truncation: the reference must see the same tokens as vLLM
+                # (vLLM raises on oversize input instead of truncating).
+                truncation=False,
                 return_tensors="pt",
             ).to(device)
             hidden = model(**encoded).last_hidden_state
@@ -335,23 +374,51 @@ def _hf_reference_embeddings(texts: list[str]) -> np.ndarray:
 
     ctx = multiprocessing.get_context("spawn")
     queue = ctx.Queue()
-    proc = ctx.Process(target=_hf_reference_worker, args=(texts, _model_path(), queue))
+    log_fd, log_path = tempfile.mkstemp(prefix="e5_mistral_hf_ref_", suffix=".log")
+    os.close(log_fd)
+    proc = ctx.Process(target=_hf_reference_worker, args=(texts, _model_path(), queue, log_path))
     proc.start()
+
+    embeddings: np.ndarray | None = None
     try:
-        embeddings = queue.get(timeout=600)
-    except Exception as exc:
+        # Poll with a short timeout instead of one long blocking get(): if the
+        # worker dies (OOM, CANN abort) the test must fail right away, with the
+        # worker's stderr attached.
+        deadline = time.monotonic() + HF_REFERENCE_TIMEOUT_S
+        while embeddings is None:
+            try:
+                embeddings = queue.get(timeout=1)
+            except Empty:
+                if not proc.is_alive():
+                    proc.join()
+                    raise RuntimeError(
+                        f"HF reference worker died (exitcode={proc.exitcode}) before "
+                        f"delivering embeddings. stderr:\n{_worker_stderr(log_path)}"
+                    ) from None
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"HF reference worker returned no embeddings within "
+                        f"{HF_REFERENCE_TIMEOUT_S}s (still alive). stderr:\n{_worker_stderr(log_path)}"
+                    ) from None
+
+        proc.join(timeout=HF_REFERENCE_TIMEOUT_S)
+        if proc.is_alive():
+            raise RuntimeError("HF reference worker did not exit after delivering embeddings")
+        if proc.exitcode != 0:
+            raise RuntimeError(
+                f"HF reference worker exited abnormally: exitcode={proc.exitcode}. stderr:\n{_worker_stderr(log_path)}"
+            )
+    except BaseException:
         proc.terminate()
         proc.join(timeout=30)
-        raise RuntimeError(
-            f"HF reference worker failed to deliver embeddings within 600s (exitcode={proc.exitcode})"
-        ) from exc
-    proc.join(timeout=600)
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(timeout=30)
-        raise RuntimeError("HF reference worker did not exit after delivering embeddings")
-    if proc.exitcode != 0:
-        raise RuntimeError(f"HF reference worker exited abnormally: exitcode={proc.exitcode}")
+        raise
+    finally:
+        queue.close()
+        queue.join_thread()
+        proc.close()
+        with contextlib.suppress(OSError):
+            os.unlink(log_path)
+
     assert embeddings.shape == (len(texts), HIDDEN_SIZE)
     _CACHE[key] = embeddings
     return embeddings
@@ -471,11 +538,12 @@ def test_e5_mistral_embedding_close():
     graph_mode="eager",
 )
 def test_e5_mistral_single_input_consistency():
-    """Embedding a text alone must match its row in the batched result.
+    """Each text embedded alone must match its row in the batched result.
 
-    Covers the single-input code path (batch size 1): a query and a passage
-    embedded on their own must agree with the corresponding rows of the
-    batched run (padding in the batch must not change the pooled vector).
+    Covers the single-input code path: every solo call below passes exactly one
+    prompt, so the engine runs the n=1 path, and the returned vector must agree
+    with the corresponding row of the batched run (batching and padding must
+    not change the pooled vector).
     """
     queries = [instruct_query(q) for q, _ in CORPUS]
     passages = [p for _, p in CORPUS]
@@ -483,22 +551,24 @@ def test_e5_mistral_single_input_consistency():
 
     # One English query, its passage, and one Chinese query (last corpus row).
     solo_texts = [queries[0], passages[0], queries[-1]]
-    solo = np.asarray(_vllm_embeddings(solo_texts), dtype=np.float32)
-
-    solo_norms = np.linalg.norm(solo, axis=1)
-    assert np.allclose(solo_norms, 1.0, atol=1e-3), (
-        f"single-input outputs are not L2-normalized: norms in [{solo_norms.min()}, {solo_norms.max()}]"
-    )
-
     # Corresponding rows in the batched run: queries[0] -> 0,
     # passages[0] -> len(queries), queries[-1] -> len(queries) - 1.
     ref_rows = [0, len(queries), len(queries) - 1]
-    for text, solo_vec, ref_row in zip(solo_texts, solo, ref_rows):
-        batch_vec = batch[ref_row]
-        delta = float(np.abs(solo_vec - batch_vec).max())
-        assert delta <= ELEMENTWISE_TOL, (
-            f"single-input embedding diverges from batched row for {text[:40]!r}: "
-            f"max |delta| = {delta:.4f} > {ELEMENTWISE_TOL}"
+
+    for text, ref_row in zip(solo_texts, ref_rows):
+        solo = np.asarray(_vllm_embeddings([text]), dtype=np.float32)
+        assert solo.shape == (1, HIDDEN_SIZE), (
+            f"single-input embedding for {text[:40]!r} has shape {solo.shape}, expected (1, {HIDDEN_SIZE})"
+        )
+        solo_vec = solo[0]
+
+        norm = float(np.linalg.norm(solo_vec))
+        assert abs(norm - 1.0) <= 1e-3, f"single-input output for {text[:40]!r} is not L2-normalized: norm={norm}"
+
+        delta = float(np.abs(solo_vec - batch[ref_row]).max())
+        assert delta <= SINGLE_INPUT_TOL, (
+            f"single-input embedding diverges from batched row {ref_row} for {text[:40]!r}: "
+            f"max |delta| = {delta:.4f} > {SINGLE_INPUT_TOL}"
         )
 
 
@@ -513,7 +583,7 @@ def test_e5_mistral_single_input_consistency():
     graph_mode="eager",
 )
 def test_e5_mistral_top1_ranking():
-    """Top-1 ranking over a fixed query x passage set must match the HF reference."""
+    """Top-1 over a fixed query x passage set: HF agreement and 40/40 intended pairs."""
     queries = [instruct_query(q) for q, _ in CORPUS]
     passages = [p for _, p in CORPUS]
 
@@ -532,6 +602,15 @@ def test_e5_mistral_top1_ranking():
     hf_top1 = hf_scores.argmax(axis=1)
     mismatches = [(i, int(hf_top1[i]), int(vllm_top1[i])) for i in range(len(queries)) if hf_top1[i] != vllm_top1[i]]
     assert not mismatches, f"top-1 ranking mismatches (query_idx, hf_top1, vllm_top1): {mismatches}"
+
+    # The corpus is 40 one-to-one (query, relevant passage) pairs, so the
+    # intended top-1 of query i is passage i: vLLM must hit 40/40 intended pairs.
+    intended = np.arange(len(queries))
+    off_intended = np.flatnonzero(vllm_top1 != intended)
+    assert not len(off_intended), (
+        f"vLLM top-1 missed the intended pair for {len(off_intended)}/{len(queries)} queries: "
+        f"[(query_idx, got)] = {[(int(i), int(vllm_top1[i])) for i in off_intended]}"
+    )
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -600,4 +679,3 @@ def test_e5_mistral_invalid_inputs():
             outputs = runner.embed([empty_text])
             assert len(outputs) == 1
             assert len(outputs[0]) == HIDDEN_SIZE
-    cleanup_dist_env_and_memory()
