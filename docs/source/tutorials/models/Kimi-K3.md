@@ -68,13 +68,10 @@ Select an image based on your host operating system and start it on every node. 
             --device /dev/davinci6 \
             --device /dev/davinci7 \
             --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
             --device /dev/hisi_hdc \
             -v /usr/local/dcmi:/usr/local/dcmi \
-            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
@@ -98,13 +95,10 @@ Select an image based on your host operating system and start it on every node. 
             --device /dev/davinci6 \
             --device /dev/davinci7 \
             --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
             --device /dev/hisi_hdc \
             -v /usr/local/dcmi:/usr/local/dcmi \
-            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
             -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it $IMAGE bash
