@@ -424,6 +424,29 @@ def test_eagle_later_ar_uses_current_device_exact_with_frozen_anchor(setup, monk
     torch.testing.assert_close(canonical, full, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("all_continuing", [False, True])
+def test_eagle_continuing_prefill_later_ar_preserves_full_read(setup, all_continuing):
+    _, spec, _, _ = setup
+    spec.input_buffers.positions = torch.tensor([9, 10, 11, 24, 25, 26])
+    spec.last_token_indices = torch.tensor([2, 5])
+    runtime = DraftWindowRuntime(spec, resolve_draft_window_policy(requested_window_size=8, method="eagle3"))
+    runtime._dense_device_reads = True
+    state = batch(computed=(8, 24), prompt=(100, 100 if all_continuing else 16))
+    state.idx_mapping = torch.from_numpy(state.idx_mapping_np).long()
+    with runtime.proposal_context(spec, state):
+        for step, ends in enumerate(((12, 27), (13, 28), (14, 29))):
+            metadata = common(exact=ends, upper=(16, 31))
+            width = 3 if step == 0 else 1
+            metadata.query_start_loc_cpu = torch.tensor([0, width, 2 * width, 2 * width])
+            metadata.causal = True
+            runtime.metadata_callback(step, 2)(0, metadata)
+            # Every AR read for an unfinished prompt is Full. The second
+            # row also verifies the frozen decode anchor in a mixed batch.
+            expected = [ends[0], ends[1] if all_continuing else ends[1] - 20]
+            assert metadata.seq_lens[:2].tolist() == expected
+            assert not hasattr(metadata, "_draft_window_device_read")
+
+
 def test_multiple_groups_project_same_logical_start_with_independent_backing(setup, monkeypatch):
     _, spec, canonical, _ = setup
     other_table = torch.arange(96, dtype=torch.int32).reshape(6, 16) + 100

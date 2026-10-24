@@ -223,7 +223,13 @@ class DraftWindowRuntime:
             prepared_exact_device=prepared_exact_device,
         )
         if self.method == "eagle3":
-            if legacy is not None and self._dense_device_reads:
+            # An unfinished prompt retains Full reads at every AR step.
+            # A window-sized device read cannot represent S=0 when E>W.
+            if (
+                legacy is not None
+                and self._dense_device_reads
+                and not continuing_prefill_rows(self._input_batch, num_reqs).any()
+            ):
                 if step > 0 and self._eagle_frozen_starts is None:
                     raise RuntimeError("Eagle3 AR read has no current proposal anchor")
                 return self._dense_metadata_callback(num_reqs, legacy, eagle_step=step)
