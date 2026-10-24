@@ -6,7 +6,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 PLAN_BLOCK_SIZE = 256
-GATHER_BLOCK_SIZE = 1024
+GATHER_TOKEN_BLOCK_SIZE = 8
 
 
 @triton.jit
@@ -20,18 +20,24 @@ def _gather_draft_kv_fp32(
     VALUE_PAGE_STRIDE: tl.constexpr,
     BLOCK_SPAN: tl.constexpr,
     TOKEN_SIZE: tl.constexpr,
-    TOTAL: tl.constexpr,
-    BLOCK: tl.constexpr,
+    TOTAL_TOKENS: tl.constexpr,
+    TOKEN_BLOCK: tl.constexpr,
+    CHANNEL_BLOCK: tl.constexpr,
 ):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = index < TOTAL
-    slot = tl.load(slots + index // TOKEN_SIZE, mask=valid, other=0).to(tl.int64)
+    token = tl.program_id(0) * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
+    channel = tl.arange(0, CHANNEL_BLOCK)
+    slot = tl.load(slots + token, mask=token < TOTAL_TOKENS, other=0).to(tl.int64)
     page, offset = slot // BLOCK_SPAN, slot % BLOCK_SPAN
-    token_offset = offset * TOKEN_SIZE + index % TOKEN_SIZE
-    key = tl.load(keys + page * KEY_PAGE_STRIDE + token_offset, mask=valid, other=0)
-    value = tl.load(values + page * VALUE_PAGE_STRIDE + token_offset, mask=valid, other=0)
-    tl.store(out_keys + index, key.to(tl.float32), mask=valid)
-    tl.store(out_values + index, value.to(tl.float32), mask=valid)
+    # Compute each physical token address once, then broadcast its channels.
+    # The flat version repeated the slot load and page arithmetic per channel.
+    valid = (token[:, None] < TOTAL_TOKENS) & (channel[None, :] < TOKEN_SIZE)
+    output_offset = token[:, None] * TOKEN_SIZE + channel[None, :]
+    key_offset = (page * KEY_PAGE_STRIDE + offset * TOKEN_SIZE)[:, None] + channel[None, :]
+    key = tl.load(keys + key_offset, mask=valid, other=0)
+    tl.store(out_keys + output_offset, key.to(tl.float32), mask=valid)
+    value_offset = (page * VALUE_PAGE_STRIDE + offset * TOKEN_SIZE)[:, None] + channel[None, :]
+    value = tl.load(values + value_offset, mask=valid, other=0)
+    tl.store(out_values + output_offset, value.to(tl.float32), mask=valid)
 
 
 def gather_draft_kv_fp32(
@@ -48,8 +54,8 @@ def gather_draft_kv_fp32(
     shape = (*slots.shape, *keys.shape[2:])
     gathered_keys = torch.empty(shape, dtype=torch.float32, device=keys.device)
     gathered_values = torch.empty_like(gathered_keys)
-    total = gathered_keys.numel()
-    _gather_draft_kv_fp32[(triton.cdiv(total, GATHER_BLOCK_SIZE),)](
+    token_size = keys.shape[2] * keys.shape[3]
+    _gather_draft_kv_fp32[(triton.cdiv(slots.numel(), GATHER_TOKEN_BLOCK_SIZE),)](
         slots,
         keys,
         values,
@@ -58,9 +64,10 @@ def gather_draft_kv_fp32(
         keys.stride(0),
         values.stride(0),
         keys.shape[1],
-        keys.shape[2] * keys.shape[3],
-        total,
-        GATHER_BLOCK_SIZE,
+        token_size,
+        slots.numel(),
+        GATHER_TOKEN_BLOCK_SIZE,
+        triton.next_power_of_2(token_size),
     )
     return gathered_keys, gathered_values
 
