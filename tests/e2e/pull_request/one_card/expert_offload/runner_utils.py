@@ -1,15 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """Worker-local observation for checkpoint integration tests."""
 
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+
+class _ExpertOffloadAudit(TypedDict):
+    steps: list[dict[str, bool | int | str]]
+    replays: int
+
 
 class ExpertOffloadAuditWorker:
+    # vLLM installs extension methods on its worker instance.
+    model_runner: "NPUModelRunner"
+
     def expert_offload_test_audit(self, action):
         """Inspect a real worker, and observe dispatch without changing its decisions."""
         runner = self.model_runner
         manager = runner.expert_offload_manager
         if action == "install":
             assert manager.state.name == "READY"
-            audit = {"steps": [], "replays": 0}
+            audit: _ExpertOffloadAudit = {"steps": [], "replays": 0}
             runner._expert_offload_test_audit = audit
             prepare = runner._prepare_inputs_impl
 
