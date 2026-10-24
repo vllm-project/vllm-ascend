@@ -3299,5 +3299,63 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         )
 
 
+class TestKVPoolWorkerWaitForLayerLoadReady(unittest.TestCase):
+    """``wait_for_layer_load_ready`` observes completion without consuming it."""
+
+    @staticmethod
+    def _make_worker(*, owned_layer=None, ready=False, aborted=False):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.num_layers = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=2)
+        worker._global_to_local_layer = {}
+        worker.layer_load_tasks = [[] for _ in range(2)]
+        if owned_layer is not None:
+            worker.layer_load_tasks[owned_layer] = [MagicMock()]
+        worker.prefetch_layer_map = {}
+        worker.layer_load_finished_events = [threading.Event() for _ in range(2)]
+        if ready and owned_layer is not None:
+            worker.layer_load_finished_events[owned_layer].set()
+        worker.kv_recv_thread = MagicMock()
+        worker._layer_load_aborted = threading.Event()
+        if aborted:
+            worker._layer_load_aborted.set()
+        worker.current_layer = 0
+        return worker
+
+    def test_returns_immediately_when_this_rank_has_no_load(self):
+        worker = self._make_worker(owned_layer=None)
+        worker.wait_for_layer_load_ready("model.layers.1.attn")
+        self.assertFalse(worker.layer_load_finished_events[1].is_set())
+
+    def test_waits_for_owned_layer_without_consuming_the_event(self):
+        worker = self._make_worker(owned_layer=1, ready=True)
+        worker.wait_for_layer_load_ready("model.layers.1.attn")
+        self.assertTrue(worker.layer_load_finished_events[1].is_set())
+        self.assertEqual(worker.current_layer, 0)
+
+    def test_blocks_until_the_load_lands(self):
+        worker = self._make_worker(owned_layer=1)
+        timer = threading.Timer(0.05, worker.layer_load_finished_events[1].set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        worker.wait_for_layer_load_ready("model.layers.1.attn")
+        self.assertTrue(worker.layer_load_finished_events[1].is_set())
+
+    def test_raises_when_the_load_is_aborted(self):
+        worker = self._make_worker(owned_layer=1, aborted=True)
+        worker.layer_load_finished_events[1] = MagicMock()
+        worker.layer_load_finished_events[1].wait.return_value = False
+        with self.assertRaisesRegex(RuntimeError, "aborted before KVPP broadcast"):
+            worker.wait_for_layer_load_ready("model.layers.1.attn")
+
+    def test_propagates_a_failed_receive_thread(self):
+        worker = self._make_worker(owned_layer=1)
+        worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("receive thread failed")
+        with self.assertRaisesRegex(RuntimeError, "receive thread failed"):
+            worker.wait_for_layer_load_ready("model.layers.1.attn")
+
+
 if __name__ == "__main__":
     unittest.main()
