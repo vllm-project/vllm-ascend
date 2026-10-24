@@ -1,0 +1,4 @@
+pr: 19274
+entries:
+  - category: feature
+    text: MooncakeConnectorV1 now logs per-request KV transfers as structured KV_XFER_METRIC records (elapsed time, bytes, block count) and emits KV_XFER_FAIL on transfer failure, so log pipelines can parse transfer latency and bandwidth without free-form text matching.
