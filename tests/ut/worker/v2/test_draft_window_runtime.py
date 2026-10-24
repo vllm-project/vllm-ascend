@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+
 from vllm_ascend.worker.v2.spec_decode.draft_window_lifetime import DraftWindowOwnerState
 from vllm_ascend.worker.v2.spec_decode.draft_window_policy import resolve_draft_window_policy
 from vllm_ascend.worker.v2.spec_decode.draft_window_runtime import DraftWindowRuntime, continuing_prefill_rows
