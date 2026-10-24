@@ -101,7 +101,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Molmo                         | 🔵        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |         A2/A3        | 🟡 |      |
     | XLM-RoBERTa-based             | 🔵        |                                                                      |         A2/A3        | 🟡 |      |
     | Bert                          | 🔵        |                                                                      |         A2/A3        | 🟡 |      |
-    | Qwen2.5-Math-RM-72B           | 🔵        | Reward Model, gsm8k_correctness accuracy=0.80 | A2 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
+    | Qwen2.5-Math-RM-72B           | 🔵        | Reward Model, gsm8k_correctness accuracy=0.80                        |          A2          | ✅ | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md)|
 
 === "Ascend 950DT&950PR Products"
 
