@@ -23,11 +23,11 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
+    get_a3_draft_sparse_kv_plan,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
@@ -244,14 +244,24 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _draft_sparse_flash_mla_kwargs() -> dict[str, int]:
-    # DSpark supplies visibility through ori_sparse_indices. On A5 the explicit
-    # sparse mode disables both window bounds with -1.
-    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=-1, ori_win_right=-1)
+def _draft_sparse_flash_mla_kwargs(vllm_config: VllmConfig) -> dict[str, int]:
+    # DSpark supplies visibility through ori_sparse_indices. The CANN toolkit
+    # op (A5) disables both window bounds with -1 and requires a legal
+    # compression ratio for the inactive branch; the compiled binding (A3,
+    # the v41 integration) requires non-negative window values and
+    # cmp_ratio=0 when has_cmp_kv is false (EZ0026).
+    a5 = is_a5_bf16_kv_enabled(vllm_config)
+    window = -1 if a5 else 0
+    cmp_ratio = 1 if a5 else 0
+    return dict(cmp_ratio=cmp_ratio, ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=window, ori_win_right=window)
 
 
 def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
-    return get_dsa_attn_kv_plan(vllm_config).uses_sparse_flash_mla
+    # The per-step plan keeps the target routing (FIA on A3, byte-identical to
+    # the pre-A3 planner); the draft-only plan decides whether the DSpark
+    # draft switches kernels. On A5 it degenerates to the target plan, so the
+    # pre-existing A5 draft behavior is unchanged.
+    return get_a3_draft_sparse_kv_plan(vllm_config).uses_draft_sparse_flash_mla
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
@@ -619,8 +629,32 @@ def build_dspark_swa_indices(
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+    if num_decode_tokens is None:
+        per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0).unsqueeze(1)
+        per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0)
+    else:
+        # repeat_interleave only writes sum(query_lens) rows. Cudagraph
+        # padding makes num_decode_tokens larger than that sum, and the
+        # unwritten tail of the output_size-sized allocation stays
+        # uninitialized; the compiled SparseFlashMla binding reads those
+        # rows and fails (the CANN toolkit ops happen to ignore them).
+        # Expand through a deterministic request map instead so padded
+        # rows keep the documented contract: length 0 and -1 slots.
+        num_reqs = seq_lens.shape[0]
+        token_req = (
+            torch.searchsorted(
+                query_start_loc,
+                torch.arange(num_decode_tokens, device=query_start_loc.device, dtype=query_start_loc.dtype),
+                right=True,
+            )
+            - 1
+        )
+        pad_rows = token_req >= num_reqs
+        safe_req = token_req.clamp(max=num_reqs - 1)
+        per_token_slots = slot_ids.index_select(0, safe_req)
+        per_token_slots.masked_fill_(pad_rows.unsqueeze(-1), -1)
+        per_token_slots = per_token_slots.unsqueeze(1)
+        per_token_lens = visible_lens.index_select(0, safe_req).masked_fill(pad_rows, 0)
 
     if indices_output is not None:
         if indices_output.shape != per_token_slots.shape:
@@ -1164,7 +1198,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_topk_length: torch.Tensor,
         ori_topk: int,
     ) -> torch.Tensor:
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        kv_plan = get_a3_draft_sparse_kv_plan(self.vllm_config)
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         call_kwargs = dict(
             num_heads_q=self.model_config.hf_config.num_attention_heads
@@ -1185,8 +1219,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_cmp_kv=False,
         )
         call_kwargs.update(metadata_kwargs)
-        call_kwargs.update(_draft_sparse_flash_mla_kwargs())
-        return kv_plan.get_dsa_sparse_attn_metadata_op()(**call_kwargs)
+        call_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
+        return kv_plan.get_draft_sparse_attn_metadata_op()(**call_kwargs)
 
     def _build_qli_metadata(
         self,
@@ -1971,6 +2005,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     _oproj_send_buf: torch.Tensor
     turboquant: TurboQuantLatent | None = None
     _tq_kv_plan: DsaAttnKvPlan | None = None
+    _draft_kv_plan: DsaAttnKvPlan | None = None
 
     def get_kv_plan(self) -> DsaAttnKvPlan:
         # Only TQ modules cache their fixed execution plan. Other cache modes
@@ -1980,6 +2015,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self._tq_kv_plan is None:
             self._tq_kv_plan = get_dsa_attn_kv_plan(self.vllm_config, self.compress_ratio)
         return self._tq_kv_plan
+
+    def get_draft_kv_plan(self) -> DsaAttnKvPlan:
+        # The draft routing (hardware, cache dtype, CP topology) is fixed for
+        # the process lifetime, so cache it like the TQ plan instead of
+        # re-running the gate on every draft step.
+        if self._draft_kv_plan is None:
+            self._draft_kv_plan = get_a3_draft_sparse_kv_plan(self.vllm_config)
+        return self._draft_kv_plan
 
     def __init__(
         self,
@@ -2786,8 +2829,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             if common_metadata.use_sparse_flash_mla_for_draft:
                 assert common_metadata.dspark_swa_indices is not None
                 assert common_metadata.dspark_swa_topk_lengths is not None
-                attn_op = sparse_flash_mla
-                attn_kwargs.update(_draft_sparse_flash_mla_kwargs())
+                attn_op = self.get_draft_kv_plan().get_draft_sparse_attn_op()
+                attn_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
                 attn_kwargs.update(
                     ori_sparse_indices=common_metadata.dspark_swa_indices,
                     ori_topk_length=common_metadata.dspark_swa_topk_lengths,

@@ -36,6 +36,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAMetadata as AscendDSACPMetadata,
 )
+from vllm_ascend.attention.dsa_attn_kv_plan import get_a3_draft_sparse_kv_plan, get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSABackend,
@@ -45,12 +46,20 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     OProjBufferPool,
+    _draft_sparse_flash_mla_kwargs,
     build_compressor_metadata_out,
     build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
+from vllm_ascend.attention.sparse_flash_mla import (
+    a3_sparse_flash_mla,
+    a3_sparse_flash_mla_metadata,
+    sparse_flash_mla,
+    sparse_flash_mla_metadata,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
@@ -129,9 +138,10 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
     plan = MagicMock()
     plan.layout_kv = "PA_ND"
-    # A bare MagicMock attribute is truthy; default the sparse-flash gate off
+    # A bare MagicMock attribute is truthy; default the sparse-flash gates off
     # so plain FIA tests do not wander into the draft sparse branch.
     plan.uses_sparse_flash_mla = False
+    plan.uses_draft_sparse_flash_mla = False
     for name, value in method_returns.items():
         getattr(plan, name).return_value = value
     return plan
@@ -297,6 +307,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_kwargs={},
         get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_draft_sparse_attn_metadata_op=metadata_op,
     )
     plan.layout_kv = "PA_BBND"
 
@@ -312,6 +323,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
         ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
     ):
         metadata = _build_draft_req_metadata(
             builder,
@@ -385,13 +397,15 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
     metadata_op = MagicMock(return_value=sas_result)
     plan = _mock_dsa_kv_plan(
         get_dsa_sparse_attn_metadata_kwargs={},
-        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_op=MagicMock(),
+        get_draft_sparse_attn_metadata_op=metadata_op,
     )
     plan.layout_kv = "PA_BBND"
 
     with (
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as get_cmp_offsets,
     ):
@@ -3214,7 +3228,12 @@ def test_dspark_compressed_tq_metadata_keeps_full_context(use_tq, ratio, deferre
         get_dsa_sparse_attn_metadata_op=metadata_op,
         get_dsa_sparse_attn_metadata_kwargs={},
     )
+    # The compressed/TQ draft flow runs on the FIA plan; pin the draft gate off
+    # so the auto-dtype parametrizations stay on the SAS metadata path instead
+    # of the A3 compiled-binding draft (the UT build profile is A2/STANDARD,
+    # which the gate treats as draft-sparse-capable hardware).
     with (
+        patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size", return_value=1),
         patch("vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa", return_value=(None, None)),
@@ -3291,6 +3310,38 @@ def test_dspark_indices_preserve_physical_fallback(logical_indices):
     assert lengths.flatten().tolist() == [6] * 3
 
 
+def test_dspark_indices_fill_padded_rows_with_contract_values():
+    """Cudagraph padding leaves token rows beyond the last request boundary.
+
+    The fallback expansion must give those rows the documented contract
+    values (length 0, -1 slots): repeat_interleave with output_size leaves
+    them uninitialized, and the compiled SparseFlashMla binding crashes on
+    the garbage (aicpu exception in SparseFlashMlaMetadata) while the CANN
+    toolkit ops happen to ignore them.
+    """
+    lengths_output = torch.zeros((10, 1), dtype=torch.int32)
+    buffer = torch.zeros((10, 1, 8), dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 5, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([10, 0], dtype=torch.int32),
+        num_decode_tokens=10,
+        index_width=8,
+        use_logical_indices=True,
+        lengths_output=lengths_output,
+        buffer=buffer,
+    )
+    assert indices.data_ptr() == buffer.data_ptr()
+    assert lengths is lengths_output
+    # Request 0 keeps its five real draft rows (window 4 over a ten-token
+    # sequence sees positions 1..8); the padded tail is all invalid.
+    assert indices[:, 0, :].tolist() == [[1, 2, 3, 4, 5, 6, 7, 8]] * 5 + [[-1] * 8] * 5
+    assert lengths.flatten().tolist() == [9] * 5 + [0] * 5
+
+
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     impl = _make_impl()
@@ -3309,10 +3360,14 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     output = torch.ones(2, 1, 2)
     original_op = MagicMock(return_value=(output,))
     draft_op = MagicMock(return_value=(output,))
-    plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_op=original_op, get_dsa_sparse_attn_base_kwargs={})
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=original_op,
+        get_dsa_sparse_attn_base_kwargs={},
+        get_draft_sparse_attn_op=draft_op,
+    )
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
-        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
+        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=is_draft),
         patch.object(
             DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
@@ -3335,3 +3390,140 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
         assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
     else:
         assert "ori_topk_length" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# DSpark draft sparse-flash plan routing (A5 toolkit vs A3 compiled binding)
+# ---------------------------------------------------------------------------
+
+
+def _plan_hardware_profile(supports_compressed_cache: bool, family: DeviceAdaptorFamily):
+    return SimpleNamespace(
+        supports=lambda capability: supports_compressed_cache
+        if capability == HardwareCapability.DSV4_COMPRESSED_CACHE
+        else False,
+        device_adaptor_family=family,
+    )
+
+
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "bf16"])
+def test_a3_kv_plan_routes_draft_to_compiled_binding(cache_dtype):
+    """A3 keeps the FIA target plan while the DSpark draft goes sparse."""
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
+    with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
+        plan = get_a3_draft_sparse_kv_plan(config)
+    # The target attention is untouched: FIA plan, shared-kv operator.
+    assert not plan.uses_sparse_flash_mla
+    assert plan.sparse_attn_op is torch.ops._C_ascend.npu_sparse_attn_sharedkv
+    assert plan.sparse_attn_metadata_op is torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+    # The draft switches kernels through the compiled binding (v41 style).
+    assert plan.uses_draft_sparse_flash_mla
+    assert plan.draft_sparse_attn_op is a3_sparse_flash_mla
+    assert plan.draft_sparse_attn_metadata_op is a3_sparse_flash_mla_metadata
+
+
+@pytest.mark.parametrize("cache_dtype", ["int8", "turboquant_4bit_nc"])
+def test_a3_kv_plan_keeps_draft_fia_for_non_bf16_kv(cache_dtype):
+    """Quantized KV caches cannot feed the BF16 sparse-flash kernel."""
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
+    with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
+        plan = get_a3_draft_sparse_kv_plan(config)
+    assert not plan.uses_draft_sparse_flash_mla
+    assert plan.draft_sparse_attn_op is None
+    assert plan.draft_sparse_attn_metadata_op is None
+
+
+def test_a5_kv_plan_routes_draft_to_toolkit_adapter():
+    """A5 keeps using the CANN toolkit namespace for both target and draft."""
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16"))
+    profile = _plan_hardware_profile(supports_compressed_cache=True, family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+    with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
+        plan = get_dsa_attn_kv_plan(config)
+    assert plan.uses_sparse_flash_mla
+    assert plan.sparse_attn_op is sparse_flash_mla
+    assert plan.uses_draft_sparse_flash_mla
+    assert plan.draft_sparse_attn_op is sparse_flash_mla
+    assert plan.draft_sparse_attn_metadata_op is sparse_flash_mla_metadata
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_a3_kv_plan_keeps_draft_fia_under_pcp(pcp_size):
+    """The compiled-binding draft path is only validated without PCP."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+    )
+    profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
+    with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
+        plan = get_a3_draft_sparse_kv_plan(config)
+    if pcp_size > 1:
+        assert not plan.uses_draft_sparse_flash_mla
+        assert plan.draft_sparse_attn_op is None
+    else:
+        assert plan.uses_draft_sparse_flash_mla
+        assert plan.draft_sparse_attn_op is a3_sparse_flash_mla
+
+
+def test_a3_draft_gate_disables_under_replicated_pcp_process():
+    """A replicated PCP draft carries a PCP=1 config; the gate must still
+    disable the compiled-binding path through the process's PCP group.
+
+    ``prepare_replicated_pcp_config`` hands the draft a
+    ``prefill_context_parallel_size=1`` replica config while the process
+    stays inside the PCP world, so the config-only check cannot see the CP
+    run and the draft would otherwise take the unvalidated binding kernel
+    (aicpu exception in the dsa_pcp_dspark e2e).
+    """
+    from vllm_ascend.attention.dsa_attn_kv_plan import is_a3_bf16_kv_enabled
+
+    replica_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+    )
+    profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
+    pcp_group = MagicMock()
+    pcp_group.world_size = 2
+    with (
+        patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile),
+        patch("vllm.distributed.get_pcp_group", return_value=pcp_group),
+    ):
+        assert not is_a3_bf16_kv_enabled(replica_config)
+        plan = get_a3_draft_sparse_kv_plan(replica_config)
+    assert not plan.uses_draft_sparse_flash_mla
+    assert plan.draft_sparse_attn_op is None
+
+
+def test_draft_sparse_plan_rejects_non_standard_families():
+    """Only the STANDARD (A2/A3) family takes the compiled-binding draft.
+
+    The FIA plan branch uses a config-only gate (the branch condition already
+    guarantees A3-class hardware), so the family check lives in the full
+    is_a3_bf16_kv_enabled; test it directly.
+    """
+    from vllm_ascend.attention.dsa_attn_kv_plan import is_a3_bf16_kv_enabled
+
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.FP8_OPTIMIZED)
+    with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
+        assert not is_a3_bf16_kv_enabled(config)
+
+
+@pytest.mark.parametrize(
+    ("a5_bf16", "window", "cmp_ratio"),
+    [(True, -1, 1), (False, 0, 0)],
+)
+def test_draft_sparse_kwargs_follow_the_op_wrapper(a5_bf16, window, cmp_ratio):
+    """The toolkit op wants window -1 and a legal cmp_ratio; the compiled
+    binding wants non-negative windows and cmp_ratio=0 without a compressed
+    stream (EZ0026)."""
+    with patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=a5_bf16):
+        kwargs = _draft_sparse_flash_mla_kwargs(object())
+    assert kwargs == dict(
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=0,
+        cmp_mask_mode=0,
+        ori_win_left=window,
+        ori_win_right=window,
+    )
