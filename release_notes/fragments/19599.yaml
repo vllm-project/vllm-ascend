@@ -1,0 +1,5 @@
+pr: 19599
+entries:
+  - category: bugfix
+    text: Fixed a ModelSlim MoE weight-loader reference cycle that kept discarded expert layers and their weights alive through reload metadata.
+    model: deepseek-v4.1
