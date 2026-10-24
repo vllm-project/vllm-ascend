@@ -8,7 +8,7 @@ from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, FullAttentionSpec
 
 from tests.e2e.pull_request.one_card.attention_utils import (
     BatchSpec,
@@ -204,6 +204,7 @@ def _test_npu_attention_correctness(
     block_size: int = 128,
     atol: float = 1e-2,
     rtol: float = 1e-2,
+    common_causal: bool = False,
     tensor_parallel_size: int = 1,
 ):
     """Test attention backend correctness with SDPA as reference."""
@@ -234,6 +235,14 @@ def _test_npu_attention_correctness(
     device = torch.device("npu")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    if attn_type == AttentionType.ENCODER_ONLY:
+        kv_cache_spec = EncoderOnlyAttentionSpec(
+            block_size=kv_cache_spec.block_size,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+            head_size=kv_cache_spec.head_size,
+            dtype=kv_cache_spec.dtype,
+        )
+        vllm_config.model_config.runner_type = "pooling"
 
     batch_size = batch_spec.batch_size
     num_q_heads = vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config)
@@ -268,7 +277,7 @@ def _test_npu_attention_correctness(
 
     common_attn_metadata = create_common_attn_metadata(batch_spec, vllm_config.cache_config.block_size, device)
     if attn_type == AttentionType.ENCODER_ONLY:
-        common_attn_metadata.causal = False
+        common_attn_metadata.causal = common_causal
 
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
@@ -391,7 +400,8 @@ def test_causal_backend_correctness(default_vllm_config, batch_spec_name: str, m
     ],
 )
 @pytest.mark.parametrize("model", ["Qwen/Qwen3-8B"])
-def test_encoder_only_backend_correctness(default_vllm_config, batch_spec_name: str, model: str):
+@pytest.mark.parametrize("common_causal", [False, True])
+def test_encoder_only_backend_correctness(default_vllm_config, batch_spec_name: str, model: str, common_causal: bool):
     """Test backend's correctness with encoder-only attention."""
     batch_spec = BATCH_SPECS[batch_spec_name]
 
@@ -399,4 +409,5 @@ def test_encoder_only_backend_correctness(default_vllm_config, batch_spec_name: 
         batch_spec,
         model,
         attn_type=AttentionType.ENCODER_ONLY,
+        common_causal=common_causal,
     )
