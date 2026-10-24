@@ -23,6 +23,14 @@ import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
+    # Older vLLM releases do not expose the pluggable ViT setup layer.
+    try:
+        from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import VitMropeSetup  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        import vllm_ascend.ops.mrope_vit_setup  # noqa
+
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
