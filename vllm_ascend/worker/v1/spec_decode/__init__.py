@@ -23,6 +23,7 @@ from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Prop
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.worker.v1.spec_decode.dspine_proposer import AscendDSpineProposer, is_dspine_draft
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
@@ -68,6 +69,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
+        if is_dspine_draft(vllm_config.speculative_config):
+            return AscendDSpineProposer(vllm_config, device, runner)
         if is_dflash2_draft(vllm_config.speculative_config):
             return AscendDflash2Proposer(vllm_config, device, runner)
         return AscendDflashProposer(vllm_config, device, runner)
