@@ -24,6 +24,7 @@ from vllm_ascend.model_loader.rfork.manifest import (
     validate_weight_manifest,
 )
 from vllm_ascend.model_loader.rfork.tensor_layout import (
+    build_structural_digest,
     collect_transferable_tensors,
     find_non_npu_state_tensors,
     is_transferable_tensor,
@@ -209,6 +210,7 @@ class RForkTransferBackend:
         self.transfer_session_id: str | None = None
         self.weight_manifest: dict[str, Any] | None = None
         self.weight_formats: dict[str, int] | None = None
+        self.registered_structural_digest: str | None = None
         self.registered_weight_blocks: list[tuple[int, int]] = []
         self.registered_memory_addresses: list[int] = []
         self.excluded_weight_blocks: list[tuple[int, int]] = []
@@ -281,6 +283,7 @@ class RForkTransferBackend:
     def _clear_registration_state(self) -> None:
         self.weight_manifest = None
         self.weight_formats = None
+        self.registered_structural_digest = None
         self.registered_weight_blocks = []
         self.registered_memory_addresses = []
         self._registered_transferable_tensors = None
@@ -299,11 +302,14 @@ class RForkTransferBackend:
         *,
         stage: str,
         peer_session_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Observe a live model layout without changing transfer acceptance."""
         try:
             with self._lifecycle_lock:
                 tensors = list(collect_transferable_tensors(model, processed_layout))
+                # Read each NPU format once and share it with the digest and the log summary.
+                formats = {name: fmt for name, tensor in tensors if (fmt := read_npu_format(tensor)) is not None}
+                structural_digest = build_structural_digest(tensors, known_formats=formats)
                 tensors, _ = _split_tensors_by_excluded_blocks(tensors, self.excluded_weight_blocks)
                 log_tensor_layout_summary(
                     tensors,
@@ -311,7 +317,9 @@ class RForkTransferBackend:
                     session_id=self.transfer_session_id,
                     peer_session_id=peer_session_id,
                     processed_layout=processed_layout,
+                    known_formats=formats,
                 )
+                return structural_digest
         except Exception as exc:
             # Diagnostics must not turn an otherwise usable transferred model into a fallback.
             error_excerpt = " ".join(str(exc).split())[:TENSOR_LAYOUT_ERROR_EXCERPT_CHARS]
@@ -324,6 +332,7 @@ class RForkTransferBackend:
                 type(exc).__name__,
                 error_excerpt,
             )
+            return None
 
     def register_memory_region(
         self,
@@ -428,6 +437,9 @@ class RForkTransferBackend:
             weight_format_dict[name] = weight_format
             tensor_ranges.append((weight_ptr, weight_ptr + weight_numel * weight_size))
 
+        # Digest the full inventory; only excluded target-shared tensors still need a format read.
+        structural_digest = build_structural_digest(all_transferable_tensors, known_formats=weight_format_dict)
+
         try:
             memory_snapshot = torch.npu.memory.memory_snapshot()
         except Exception as exc:
@@ -522,6 +534,7 @@ class RForkTransferBackend:
 
         # Publish confirmed addresses while retaining the manifest and owners for active transfers.
         self.registered_memory_addresses = list(registered_memory_addresses)
+        self.registered_structural_digest = structural_digest
         logger.debug(
             "register_memory_region time: %.4fs, weights: %d",
             time.perf_counter() - start_reg_mr_time,
