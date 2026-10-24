@@ -123,7 +123,7 @@ def runner_method(name, namespace):
 def test_runner_snapshots_placeholder_barriers_before_sanitizing():
     method = runner_method("_sanitize_placeholder_input_ids_for_forward", {"torch": torch, "PLACEHOLDER_TOKEN_ID": -1})
     runner = SimpleNamespace(
-        ascend_config=SimpleNamespace(enable_engram=True, engram_offload_backend="elastic"),
+        ascend_config=SimpleNamespace(engram_config=SimpleNamespace(enabled=True, backend="elastic")),
         input_ids=SimpleNamespace(gpu=torch.tensor([7, -1, 8, -1])),
     )
     method(runner, SimpleNamespace(scheduled_spec_decode_tokens={"req": [-1]}), 4)
