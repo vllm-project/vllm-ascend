@@ -1,0 +1,4 @@
+pr: 19685
+entries:
+  - category: performance
+    text: Reduced input-preparation kernel launches for DCP FlashMLA decode by fusing query packing with current KV cache writes and reusing local query components.
