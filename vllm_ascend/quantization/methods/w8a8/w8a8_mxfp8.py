@@ -291,6 +291,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        # Snapshot like AscendW8A8MXFP8DynamicLinearMethod does, so apply_act_quant
+        # does not re-derive the (static) scale algorithm on every forward call.
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
     @staticmethod
     def get_weight(
@@ -573,7 +576,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
         hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
-            hidden_states, dst_type=self.act_quant_type, scale_alg=get_dynamic_mx_quant_scale_alg()
+            hidden_states, dst_type=self.act_quant_type, scale_alg=self.dynamic_mx_quant_scale_alg
         )
         return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
