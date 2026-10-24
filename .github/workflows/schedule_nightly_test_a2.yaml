@@ -295,9 +295,88 @@ jobs:
         run: |
           kubectl taint nodes ${{ vars.A2_TAINT_NODES }} dedicated- || true
 
+  wait-multi-node-pods-ready:
+    name: Wait multi-node pods launched
+    # A2-only gate: does NOT wait for multi-node-tests to finish. It polls the
+    # HK001 cluster until the enabled leader pod(s) are Ready, then releases
+    # single-node / accuracy jobs while multi-node Stream logs keep running.
+    # No shared reusable workflow or jinja2 is modified by this job.
+    needs: [setup-vars, parse-trigger, build-image]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+        NAMESPACE: vllm-project
+    steps:
+      - name: Decode kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}" | base64 -d > "$KUBECONFIG"
+
+      - name: Count enabled multi-node cases and wait for leader pods ready
+        id: gate
+        env:
+          MATRIX_JSON: ${{ needs.setup-vars.outputs.multi_node }}
+          FILTER: ${{ needs.parse-trigger.outputs.filter }}
+        run: |
+          set -euo pipefail
+
+          MATRIX_JSON="${MATRIX_JSON:-[]}"
+          FILTER="${FILTER:-}"
+
+          # Is any multi-node case enabled by the active filter? Pure shell, no
+          # JSON parser: pull each `name` out of the matrix and match the
+          # comma-wrapped filter.
+          MULTI_HIT=0
+          if [ "$FILTER" = "all" ]; then
+            MULTI_HIT=1
+          else
+            while IFS= read -r name; do
+              [ -z "$name" ] && continue
+              case "$FILTER" in
+                *",${name},"*) MULTI_HIT=1 ;;
+              esac
+            done < <(printf '%s' "$MATRIX_JSON" \
+              | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+              | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+          fi
+
+          # No enabled multi-node case: release single-node immediately.
+          if [ "$MULTI_HIT" -eq 0 ]; then
+            echo "No enabled multi-node case; proceeding to single-node without waiting."
+            exit 0
+          fi
+
+          # Poll role=leader pods until at least one is Ready. Lenient by design:
+          # a failed/slow launch must not block the independent single-node jobs;
+          # worker readiness follows once the leader joins the LWS.
+          TIMEOUT=1200
+          INTERVAL=10
+          ELAPSED=0
+          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+            READY_RAW=$(kubectl get pods -n "$NAMESPACE" -l role=leader \
+              -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null || true)
+            READY=$(printf '%s' "$READY_RAW" | tr ' ' '\n' | grep -c '^true$' || true)
+            READY=${READY:-0}
+            echo "[$(date -u +%FT%TZ)] ready leaders=${READY} (${ELAPSED}s)"
+            if [ "$READY" -ge 1 ]; then
+              echo "Multi-node leader Ready; releasing single-node."
+              exit 0
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          # Lenient fallback: do not fail the whole pipeline if a multi-node
+          # launch does not become Ready in time; single-node runs independently.
+          echo "::warning::Timed out after ${TIMEOUT}s waiting for a ready leader pod; releasing single-node anyway."
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -438,7 +517,7 @@ jobs:
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -470,7 +549,7 @@ jobs:
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&

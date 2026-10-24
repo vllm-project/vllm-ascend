@@ -181,19 +181,19 @@ If you prefer not to use the Docker image, you can build from source. Install vL
 
 1. Clone and install vLLM:
 
-   ```bash
-   git clone https://github.com/vllm-project/vllm.git
-   cd vllm
-   pip install -e .
-   ```
+    ```bash
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    pip install -e .
+    ```
 
 2. Clone and install the vLLM-Ascend repository:
 
-   ```bash
-   git clone https://github.com/vllm-project/vllm-ascend.git
-   cd vllm-ascend
-   pip install -e .
-   ```
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    pip install -e .
+    ```
 
 !!! note
 

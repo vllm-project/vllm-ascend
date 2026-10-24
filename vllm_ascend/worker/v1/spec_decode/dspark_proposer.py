@@ -16,8 +16,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
-from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
+from vllm_ascend.worker.v1.spec_decode.utils import DynamicSpecScheduler
 
 
 class AscendDSparkProposer(AscendDflashProposer):

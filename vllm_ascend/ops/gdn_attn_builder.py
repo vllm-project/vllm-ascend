@@ -38,6 +38,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -705,11 +706,24 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
+        mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        mamba_block_table = m.block_table_tensor
+        # vLLM #58737 derives num_reqs from the block table and asserts that
+        # seq_lens has the same number of rows. Ascend's unpadded() intentionally
+        # keeps the padded block-table rows, so on vLLM main pass only the real
+        # request rows. v0.31.0's align path already derives its output rows from
+        # seq_lens, so the result is unchanged there.
+        if (
+            not vllm_version_is("0.31.0")
+            and mamba_cache_mode != "none"
+            and mamba_block_table.shape[0] != m.seq_lens.shape[0]
+        ):
+            mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
         block_table_tensor = mamba_get_block_table_tensor(
-            m.block_table_tensor,
+            mamba_block_table,
             m.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            mamba_cache_mode,
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None

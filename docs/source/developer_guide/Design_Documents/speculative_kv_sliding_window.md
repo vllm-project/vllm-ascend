@@ -68,10 +68,10 @@ Two invariants hold throughout:
 
 ## MRV1 implementation
 
-`SlidingWindowAdapter` (`vllm_ascend/spec_decode/utils.py`) owns the math
+`SlidingWindowAdapter` (`vllm_ascend/worker/v1/spec_decode/utils.py`) owns the math
 above and a persistent `[max_num_reqs, max_window_blocks]` clone buffer. It is
 constructed in `AscendSpecDecodeBaseProposer.__init__`
-(`vllm_ascend/spec_decode/llm_base_proposer.py`) when `draft_window_size` is
+(`vllm_ascend/worker/v1/spec_decode/llm_base_proposer.py`) when `draft_window_size` is
 set, then applied to the draft's `common_attn_metadata` **before** the
 per-layer metadata is built.
 
@@ -114,5 +114,5 @@ and the two invariants above carry over unchanged.
 
 ## Related Files
 
-- Shared window adapter: `vllm_ascend/spec_decode/utils.py`
-- MRV1 proposer (apply points, config validation): `vllm_ascend/spec_decode/llm_base_proposer.py`
+- Shared window adapter: `vllm_ascend/worker/v1/spec_decode/utils.py`
+- MRV1 proposer (apply points, config validation): `vllm_ascend/worker/v1/spec_decode/llm_base_proposer.py`

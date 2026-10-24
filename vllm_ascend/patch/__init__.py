@@ -241,7 +241,9 @@
 #       vLLM #44243 has landed in the supported upstream version, so this
 #       override is kept only for the drop exemption of entry 2; remove it
 #       together with entry 2 once upstream exposes the PD role.
-#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#   2. `get_kv_cache_config_from_groups` (in `vllm.v1.core.kv_cache_utils` on
+#      v0.31.0; moved to `vllm.v1.core.kv_cache_planning` on main by vLLM
+#      #61183),
 #      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
@@ -1003,7 +1005,7 @@
 #    How:
 #       Replace upstream FLA chunk index helper functions with 310P implementations.
 #
-#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#   2. `vllm_ascend.worker.v1.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
 #    Why:
 #       310P needs to protect the tail slot during MTP input_ids shift to avoid
 #       GatherV2 corruption from persistent drafter input buffers.
