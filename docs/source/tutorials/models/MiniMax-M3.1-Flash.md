@@ -86,8 +86,8 @@ Run the following on each A5 host. Set the model path to the W8A8-MXFP8 checkpoi
 ```bash
 export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a5-openeuler"
 export CONTAINER_NAME=minimax_m31_flash
-export MODEL_DIR="<MINIMAX_M31_FLASH_A5_WEIGHT_PATH>"
-export WORK_DIR="<PREPARED_A5_DEPLOYMENT_DIRECTORY>"
+export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
+export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
 
 docker run -it --name "$CONTAINER_NAME" \
     --network host --ipc host --privileged --shm-size=100g \
