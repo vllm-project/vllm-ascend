@@ -40,22 +40,13 @@ _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
-    """Whether the EAGLE last-block drop must be suppressed on this process.
+    """Preserve the existing exemption only for pure PD prefill producers.
 
-    Suppressed for a pure PD prefill producer (``is_kv_producer`` and not
-    ``is_kv_consumer``; ``getattr`` fallbacks keep the check working with
-    partial config doubles in unit tests and across vLLM revisions) and for
-    a standalone instance (``kv_transfer_config is None``). A standalone
-    instance has no connector: ``num_external_computed_tokens`` is always
-    zero and every content-hash match comes from verified local prompt
-    blocks, so the drop only erases hit length - on hybrid mamba-align
-    models with a fine ``prefix_match_unit`` it trims the full-attention
-    hit below the mamba partial-tail entry and collapses the reconciled
-    hybrid hit to 0 (the single-instance counterpart of the P-side kill
-    band). Consumers and ``kv_both`` instances keep upstream behavior: they
-    receive external loads whose verifier window the drop protects.
+    Standalone instances execute speculative decode too. Their draft cache
+    can depend on the token after the matched prefix, so a local hash match
+    alone does not justify skipping the upstream EAGLE/MTP lookahead drop.
     """
-    return kv_transfer_config is None or (
+    return kv_transfer_config is not None and (
         getattr(kv_transfer_config, "is_kv_producer", False)
         and not getattr(kv_transfer_config, "is_kv_consumer", False)
     )
@@ -189,9 +180,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
-        if use_eagle:
-            for group_id, manager in enumerate(self.single_type_managers):
-                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
+        if use_eagle and not _skips_eagle_block_drop(getattr(kv_cache_config, "kv_transfer_config", None)):
+            for manager in self.single_type_managers:
+                if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
 
         # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved
@@ -476,7 +467,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
-        # producer and on standalone instances (see
+        # producer (see
         # ``self.skips_eagle_block_drop``): matched content blocks are
         # always verified prompt blocks there.
         num_groups = len(self.kv_cache_config.kv_cache_groups)
