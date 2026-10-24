@@ -234,15 +234,43 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
     assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
 
 
-def test_mamba_tp_groups_follow_non_replicated_tp_ratio() -> None:
-    local_smaller = make_thread(tp_size=2, tp_rank=1)
-    assert local_smaller._get_mamba_remote_tp_rank_groups(1, 4) == [[2], [3]]
+@pytest.mark.parametrize("local_pcp", [False, True])
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_tp_groups_follow_non_replicated_tp_ratio(local_pcp: bool, remote_pcp: bool) -> None:
+    local_smaller = make_thread(
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
+    )
+    assert local_smaller._get_mamba_remote_tp_rank_groups(4 if remote_pcp else 1, 1 if remote_pcp else 4) == [[2], [3]]
 
-    local_larger = make_thread(tp_size=4, tp_rank=3)
-    assert local_larger._get_mamba_remote_tp_rank_groups(1, 2) == [[1]]
+    local_larger = make_thread(
+        tp_size=1 if local_pcp else 4,
+        tp_rank=0 if local_pcp else 3,
+        pcp_size=4 if local_pcp else 1,
+        pcp_rank=3 if local_pcp else 0,
+    )
+    assert local_larger._get_mamba_remote_tp_rank_groups(2 if remote_pcp else 1, 1 if remote_pcp else 2) == [[1]]
 
     with pytest.raises(ValueError, match="integer ratio"):
-        local_larger._get_mamba_remote_tp_rank_groups(1, 3)
+        local_larger._get_mamba_remote_tp_rank_groups(3 if remote_pcp else 1, 1 if remote_pcp else 3)
+
+
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 8), (8, 1), (4, 2), (2, 2), (1, 1)])
+def test_mamba_head_groups_follow_worker_rank(local_tp, local_pcp, remote_tp, remote_pcp) -> None:
+    local_size, remote_size = local_tp * local_pcp, remote_tp * remote_pcp
+    for local_rank in range(local_size):
+        tp_rank, pcp_rank = divmod(local_rank, local_pcp)
+        thread = make_thread(tp_size=local_tp, tp_rank=tp_rank, pcp_size=local_pcp, pcp_rank=pcp_rank)
+        # Select every producer whose global head interval overlaps this consumer.
+        expected = [
+            [rank]
+            for rank in range(remote_size)
+            if rank * local_size < (local_rank + 1) * remote_size and local_rank * remote_size < (rank + 1) * local_size
+        ]
+        assert thread._get_mamba_remote_tp_rank_groups(remote_pcp, remote_tp) == expected
 
 
 def test_build_remote_layout_matches_layers_across_pp_ranks() -> None:
@@ -897,8 +925,19 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
     assert lengths == [64]
 
 
-def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
+@pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
+@pytest.mark.parametrize("worker_rank", [1, 2, 3])
+def test_mamba_equal_tp_address_generation_transfers_each_cache(
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank
+) -> None:
+    tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
+    remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
     thread = make_thread(
+        tp_size=local_tp,
+        tp_rank=tp_rank,
+        pcp_size=local_pcp,
+        pcp_rank=pcp_rank,
         kv_caches_base_addr=[[1000, 2000]],
         block_shapes=[[(3, 16), (2, 4, 4)]],
         block_strides=[[128, 256]],
@@ -908,7 +947,13 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
         block_shapes=[[(3, 16), (2, 4, 4)]],
         block_strides=[[128, 256]],
         block_lens=[[96, 128]],
-        tp_base_addrs={0: [[5000, 6000]]},
+        pcp_tp_base_addrs={
+            pcp: {
+                tp: [[5000, 6000]] if tp * remote_pcp + pcp == worker_rank else [[7000, 8000]]
+                for tp in range(remote_tp)
+            }
+            for pcp in range(remote_pcp)
+        },
     )
     src: list[int] = []
     dst: list[int] = []
@@ -916,9 +961,9 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
 
     thread._append_mamba_transfer_addresses(
         make_mamba_spec(),
-        0,
-        0,
-        1,
+        remote_pcp_rank,
+        remote_tp_rank,
+        remote_tp,
         {(0, 0): [("request", [1], [2])]},
         remote,
         src,
@@ -1354,7 +1399,8 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     assert lengths == [256, 128, 128, 256, 128, 128]
 
 
-def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
+@pytest.mark.parametrize("remote_pcp", [False, True])
+def test_mamba_unequal_tp_slices_conv_projections_and_state(remote_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
@@ -1371,7 +1417,11 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
         block_lens=[[48, 32]],
-        tp_base_addrs={0: [[5000, 6000]], 1: [[7000, 8000]]},
+        pcp_tp_base_addrs=(
+            {0: {0: [[5000, 6000]]}, 1: {0: [[7000, 8000]]}}
+            if remote_pcp
+            else {0: {0: [[5000, 6000]], 1: [[7000, 8000]]}}
+        ),
     )
     src: list[int] = []
     dst: list[int] = []
@@ -1379,9 +1429,9 @@ def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:
 
     thread._append_mamba_transfer_addresses(
         spec,  # type: ignore[arg-type]
-        remote_pcp_rank=0,
-        remote_tp_rank=1,
-        remote_tp_size=2,
+        remote_pcp_rank=1 if remote_pcp else 0,
+        remote_tp_rank=0 if remote_pcp else 1,
+        remote_tp_size=1 if remote_pcp else 2,
         transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
         remote_metadata=remote,
         src_list=src,
@@ -1556,14 +1606,17 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         assert worker._recving_thread is None
 
 
-def test_mamba_unequal_tp_slices_into_wider_remote_cache() -> None:
+@pytest.mark.parametrize("local_pcp", [False, True])
+def test_mamba_unequal_tp_slices_into_wider_remote_cache(local_pcp: bool) -> None:
     spec = SimpleNamespace(
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
     )
     thread = make_thread(
-        tp_size=2,
-        tp_rank=1,
+        tp_size=1 if local_pcp else 2,
+        tp_rank=0 if local_pcp else 1,
+        pcp_size=2 if local_pcp else 1,
+        pcp_rank=1 if local_pcp else 0,
         kv_caches_base_addr=[[1000, 2000]],
         block_shapes=[[(3, 8), (1, 4, 4)]],
         block_strides=[[48, 32]],
