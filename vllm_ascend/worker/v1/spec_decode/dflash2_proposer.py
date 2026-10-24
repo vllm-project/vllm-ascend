@@ -7,7 +7,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ops.triton.spec_decode.utils import dflash2_greedy_selector_walk_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 
 
 def is_dflash2_draft(speculative_config: Any) -> bool:

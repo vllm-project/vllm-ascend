@@ -24,6 +24,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -58,6 +59,9 @@ def _make_runner(need_timing: bool = True):
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
+    # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
+    # attribute must exist on every runner built here.
+    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -1001,7 +1005,8 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
     # execute_model stages dummy inputs before preparing attention metadata.
-    staged = manager.prepare_inputs_to_capture(dummy)
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
+    staged = getattr(manager, stage_name)(dummy)
     block_tables, slots = runner.prepare_dummy_attn(staged)
 
     for name, value in captured.items():

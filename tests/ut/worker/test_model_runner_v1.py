@@ -56,9 +56,9 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
