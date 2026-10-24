@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import torch
 import torch_npu
-from memfabric_hybrid import offload
+from memfabric_hybrid import offload  # type: ignore[import-untyped]
 
 import vllm_ascend
 import vllm_ascend.ops  # noqa: F401 - initialize the registry before attention backends
@@ -76,8 +76,8 @@ def weights_for_heads(root, layer, heads, device):
         "qk_rope_head_dim": 64,
         "num_attention_heads": 64,
     }
-    for key, value in expected.items():
-        assert cfg.get(key) == value, (key, cfg.get(key), value)
+    for key, expected_value in expected.items():
+        assert cfg.get(key) == expected_value, (key, cfg.get(key), expected_value)
     assert heads in (16, 32)
     d = {
         "hidden": 6144,
@@ -313,7 +313,7 @@ def shape_case(n, d, w, device):
     count = torch.tensor(2 * n, dtype=torch.int32, device=device)
     consumer = torch.npu.Stream()
     producer_done = torch.npu.Event()
-    slot_ids = []
+    slot_ids: list[int] = []
 
     def update(iteration):
         # Change activations, RoPE AND business slots between graph replays.
