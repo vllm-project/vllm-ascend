@@ -35,7 +35,14 @@ Assertion set (issue #10679):
      last real token; neither side appends </s>);
   6. > max_model_len raises ValueError (no silent truncation); empty /
      whitespace-only input behavior is documented (vLLM 0.26 tokenizes it to
-     a single BOS token and pools from it instead of raising).
+     a single BOS token and pools from it instead of raising);
+  7. non-string inputs (scalar, bytes, dict, mixed list) are rejected with
+     TypeError / ValueError instead of returning an embedding.
+
+Corpus licensing: the 40 query-passage pairs below are written for this test
+and are the only text sent to the model. No MS MARCO (or any other
+third-party) corpus is downloaded or redistributed; the file itself stays
+under the repository's Apache-2.0 license.
 """
 
 import contextlib
@@ -56,6 +63,9 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
 MODEL = "intfloat/e5-mistral-7b-instruct"
+# Point this at a local copy of the weight to skip the hub lookup entirely
+# (CI pre-downloads the model and may export it; air-gapped hosts can too).
+MODEL_PATH_ENV = "E5_MISTRAL_MODEL_PATH"
 
 # Official instruction template (model card): queries only, passages bare.
 DEFAULT_TASK = "Given a web search query, retrieve relevant passages that answer the query"
@@ -307,11 +317,26 @@ def _hf_last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.
 
 
 def _model_path() -> str:
-    """Resolve the model path, following the pooling-test repo convention (ModelScope)."""
-    import huggingface_hub
+    """Resolve the model directory.
+
+    E5_MISTRAL_MODEL_PATH wins when it is set, so CI (or an air-gapped host)
+    can point at a pre-downloaded copy. Otherwise the weight is resolved
+    through ModelScope, going offline only when the environment asks for it:
+    CI exports HF_HUB_OFFLINE=1 and relies on the model cache populated from
+    .github/workflows/misc/model_dataset_list.json, so a model missing from
+    that list fails here instead of silently reaching out to the network.
+    """
+    override = os.environ.get(MODEL_PATH_ENV)
+    if override:
+        path = os.path.expanduser(override)
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"{MODEL_PATH_ENV}={path!r} is not a directory")
+        return path
+
     from modelscope import snapshot_download  # type: ignore[import-untyped]
 
-    return snapshot_download(MODEL, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE)
+    offline = os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}
+    return snapshot_download(MODEL, local_files_only=offline)
 
 
 def _worker_stderr(log_path: str) -> str:
@@ -679,3 +704,36 @@ def test_e5_mistral_invalid_inputs():
             outputs = runner.embed([empty_text])
             assert len(outputs) == 1
             assert len(outputs[0]) == HIDDEN_SIZE
+
+
+@pytest.mark.e2e_model(MODEL)
+@pytest.mark.e2e_coverage(
+    arch="embedding",
+    feature="pooling",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="eager",
+)
+def test_e5_mistral_non_string_inputs():
+    """Non-string inputs must be rejected, never silently embedded.
+
+    Measured on vLLM 0.26 + Ascend (offline LLM.embed): a scalar or a mixed
+    prompt list fails while the prompt is tokenized (TypeError: object of type
+    'int' has no len()), while bytes / dict inputs are mistaken for prompt
+    embeddings and rejected because --enable-prompt-embeds is not set. Both
+    are input-validation errors, so the assertion only pins the error class,
+    not the wording.
+    """
+    with VllmRunner(
+        _model_path(),
+        runner="pooling",
+        dtype="bfloat16",
+        max_model_len=MAX_MODEL_LEN,
+        enforce_eager=True,
+        pooler_config={"pooling_type": "LAST"},  # v0.26+: embed head L2-normalizes by default
+    ) as runner:
+        for bad_input in (123, None, b"hello", {"input": "hello"}, ["valid text", 123]):
+            with pytest.raises((TypeError, ValueError)):
+                runner.embed([bad_input])
