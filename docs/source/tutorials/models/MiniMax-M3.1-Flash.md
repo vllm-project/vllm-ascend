@@ -533,6 +533,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Both platforms use 
             "method":"dspark",
             "num_speculative_tokens":7,
             "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16",
             "draft_sample_method":"probabilistic"
         }' \
         --additional-config '{
@@ -628,6 +629,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Both platforms use 
             "method":"dspark",
             "num_speculative_tokens":7,
             "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16",
             "draft_sample_method":"probabilistic"
         }' \
         --additional-config '{
