@@ -16,6 +16,8 @@
 #
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -111,6 +113,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_scaling_factor,
         )
         self._gate = gate
+        self._engram_wkv_window: Callable[[], None] | None = None
         self.hidden_size = moe_config.hidden_dim
 
         self.quant_type = routed_experts.quant_type
@@ -401,9 +404,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Gates without pre-cast FP32 weights keep their registered forward
         # path and its dtype semantics.
         if hasattr(gate, "weight_fp32"):
-            return F.linear(router_input, gate.weight_fp32)
+            return self._notify_router_ready(F.linear(router_input, gate.weight_fp32))
         gate_out = gate(router_input)
-        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        return self._notify_router_ready(gate_out[0] if isinstance(gate_out, tuple) else gate_out)
+
+    def _notify_router_ready(self, router_logits: torch.Tensor) -> torch.Tensor:
+        callback = getattr(self, "_engram_wkv_window", None)
+        if callback is not None:
+            callback()
+        return router_logits
 
     def _compute_router_logits(
         self,
@@ -421,12 +430,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         assert gate is not None
         if not hasattr(gate, "weight_fp32"):
             gate_out = gate(hidden_states)
-            return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+            return self._notify_router_ready(gate_out[0] if isinstance(gate_out, tuple) else gate_out)
 
         # AscendUnquantizedLinearMethod normally pre-casts the weight so the
         # hot path only needs to materialize the FP32 activation when required.
         router_input = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
-        return F.linear(router_input, gate.weight_fp32)
+        return self._notify_router_ready(F.linear(router_input, gate.weight_fp32))
 
     def _prepare_shared_for_router_overlap(
         self,
