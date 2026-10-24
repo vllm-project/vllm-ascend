@@ -151,8 +151,8 @@ class HostUvaBuffer:
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
-        # Small malloc-host suballocations can map from a rounded-down base on
-        # A3. Register an aligned payload, retaining the allocation for free.
+        # Align the payload to avoid incorrect device reads observed on A3/CANN 9.2;
+        # retain the original allocation for free.
         alignment = 64 * 1024
         self._allocation_pointer = ctypes.c_void_p()
         rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
