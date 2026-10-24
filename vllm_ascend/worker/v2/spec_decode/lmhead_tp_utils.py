@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -29,6 +30,23 @@ class LmheadTPDraftSamplingMixin:
 
     def _lmhead_tp_max_num_logits(self) -> int:
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
+
+    @contextmanager
+    def _lmhead_pad_size_context(self, dp_sync=None, capture_tokens: int | None = None):
+        previous = getattr(self, "_lmhead_pad_size", None)
+        if previous is None and lmhead_tp_enable() and self.method == "mtp":
+            pad_size = self._lmhead_tp_max_num_logits()
+            if self.vllm_config.parallel_config.decode_context_parallel_size == 1:
+                synced_tokens = (
+                    int(dp_sync.num_tokens_across_dp.max().item()) if dp_sync is not None else capture_tokens
+                )
+                if synced_tokens is not None:
+                    pad_size = min(pad_size, synced_tokens)
+            self._lmhead_pad_size = pad_size
+        try:
+            yield
+        finally:
+            self._lmhead_pad_size = previous
 
     def _lmhead_tp_validate_draft_sampling(self) -> None:
         """Fail unsupported draft sampling at construction, not first use."""
@@ -88,7 +106,7 @@ class LmheadTPDraftSamplingMixin:
             # same way); zero rows carry no draft token and are trimmed back off.
             padded = lmhead_tp_pad_rows(
                 hidden_states,
-                self._lmhead_tp_max_num_logits(),
+                getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits(),
                 "max_num_reqs * (num_speculative_steps + 1)",
             )
             out = super().sample_draft(  # type: ignore[misc]
@@ -132,7 +150,7 @@ class LmheadTPDraftSamplingMixin:
             # same way); zero rows carry no draft token and are trimmed back off.
             padded = lmhead_tp_pad_rows(
                 hidden_states,
-                self._lmhead_tp_max_num_logits(),
+                getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits(),
                 "max_num_reqs * (num_speculative_steps + 1)",
             )
             out = super().sample_draft(  # type: ignore[misc]

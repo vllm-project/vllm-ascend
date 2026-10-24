@@ -349,6 +349,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 disable_target_pcp_for_replicated_draft(self),
                 build_attn_metadata_wrapper(),
                 torch_gather_wrapper(),
+                self._lmhead_pad_size_context(
+                    sync_state,
+                    input_batch.num_tokens_after_padding if self.dp_size == 1 else None,
+                ),
             ):
                 return super().propose(
                     input_batch,
@@ -406,6 +410,10 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 disable_target_pcp_for_replicated_draft(self),
                 build_attn_metadata_wrapper(),
                 torch_gather_wrapper(),
+                self._lmhead_pad_size_context(
+                    sync_state,
+                    input_batch.num_tokens_after_padding if self.dp_size == 1 else None,
+                ),
             ):
                 return super().propose(
                     input_batch,
@@ -550,26 +558,27 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         """Thin override: delegate to upstream single-step ``_generate_draft``,
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
-        if vllm_version_is("0.31.0"):
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-            )
-        else:
-            # vLLM #60335 added `num_speculative_steps` on main.
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                num_speculative_steps,
-            )
+        with self._lmhead_pad_size_context(capture_tokens=num_tokens_padded):
+            if vllm_version_is("0.31.0"):
+                super()._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                )
+            else:
+                # vLLM #60335 added `num_speculative_steps` on main.
+                super()._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
@@ -631,15 +640,16 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        super()._prefill(
-            num_reqs,
-            num_tokens,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-            mm_inputs,
-        )
+        with self._lmhead_pad_size_context(capture_tokens=num_tokens):
+            super()._prefill(
+                num_reqs,
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+                mm_inputs,
+            )
 
     def _build_attn_metadata(  # type: ignore[misc]
         self,

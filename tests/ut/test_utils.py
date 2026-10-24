@@ -969,3 +969,21 @@ def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert utils.oproj_tp_enable() is enabled
+
+
+@pytest.mark.parametrize("is_draft_model", [False, True])
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+@pytest.mark.parametrize("hierarchy", [False, True])
+def test_should_skip_allreduce_respects_lmhead_tp(is_draft_model, lmhead_tp, hierarchy):
+    ascend_config = mock.Mock()
+    ascend_config.get_mc2_comm_alg.return_value = "hierarchy" if hierarchy else "default"
+    with (
+        mock.patch.object(utils, "lmhead_tp_enable", return_value=lmhead_tp),
+        mock.patch.object(utils, "get_ascend_config", return_value=ascend_config),
+        mock.patch.object(utils, "is_mega_moe_supported", return_value=False),
+        mock.patch.object(utils, "is_moe_model", return_value=False),
+        mock.patch.object(utils, "is_drafter_moe_model", return_value=False),
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model) == (
+            not lmhead_tp and not hierarchy
+        )

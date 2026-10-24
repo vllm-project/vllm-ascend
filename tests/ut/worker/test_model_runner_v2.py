@@ -2071,3 +2071,19 @@ def test_dflash_rejection_reorder_and_padding_keep_device_lengths_without_d2h(re
     runner.num_computed_tokens_event.record.assert_not_called()
     runner.num_computed_tokens_event.synchronize.assert_not_called()
     assert runner.num_computed_tokens_cpu.tolist() == [-99] * 4
+
+
+@pytest.mark.parametrize("release_lane", [False, True])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("tokens,expected", [(None, 16), ([4, 8], 8), ([32, 64], 16)])
+def test_lmhead_padding_reads_versioned_dp_sync_state(release_lane, dcp_size, tokens, expected):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.max_num_reqs = 16
+    runner.decode_query_len = 1
+    runner.dcp_size = dcp_size
+    dp_sync = None if tokens is None else SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens))
+    field = "dp_sync" if release_lane else "dp_sync_state"
+    state = SimpleNamespace(**{field: dp_sync})
+    with patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=release_lane):
+        assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
+        assert runner._get_lmhead_pad_size(None) == 16
