@@ -73,8 +73,8 @@ def test_upstream_broadcast_filters_empty_patches_and_syncs_npu(empty_only):
         patch("vllm_ascend.worker.v2.utils.torch_cuda_wrapper", return_value=nullcontext()) as wrapper,
         patch("torch.cuda.current_stream", return_value=stream),
         patch("torch.cuda.is_available", return_value=False),
-        patch("torch.npu.is_available", return_value=True),
-        patch("torch.npu.current_stream", return_value=stream),
+        patch.object(torch.npu, "is_available", return_value=True),
+        patch.object(torch.npu, "current_stream", return_value=stream),
     ):
         engine._broadcast_chunk([empty] if empty_only else [empty, full])
     if empty_only:
