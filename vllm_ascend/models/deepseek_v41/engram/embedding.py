@@ -61,7 +61,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        shared_pool_dir: str | None = None,
+        shared_pool_identity: str | None = None,
+        shared_pool_key: str | None = None,
     ) -> None:
+        self._shared_pool_spec = (shared_pool_dir, shared_pool_identity, shared_pool_key)
+        self._shared_pool_client = None
+        if shared_pool_dir and (
+            not cpu_offload or storage_dtype != torch.int8 or not shared_pool_identity or not shared_pool_key
+        ):
+            raise ValueError("Shared Engram requires INT8 host storage and an explicit pool identity/key")
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
@@ -142,6 +151,33 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        pool_dir, identity, key = self._shared_pool_spec
+        if pool_dir:
+            from .shared_pool import SharedPoolClient
+
+            client = SharedPoolClient(pool_dir, identity, device=device)
+            self._shared_pool_client = client
+            try:
+                self._codes_uva = client.view(
+                    key + ".weight",
+                    self.vocab_start_idx,
+                    self.vocab_end_idx,
+                    rows=self.num_embeddings,
+                    width=self.dim,
+                    dtype=torch.int8,
+                )
+                self._scales_uva = client.view(
+                    key + ".scale",
+                    self.vocab_start_idx,
+                    self.vocab_end_idx,
+                    rows=self.num_embeddings,
+                    width=self.dim // self.block_size,
+                    dtype=torch.float32,
+                )
+                return self._codes_uva.tensor, self._scales_uva.tensor
+            except BaseException:
+                client.close()
+                raise
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
@@ -178,6 +214,15 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         stays retryable and a half-finished release never leaves a live
         parameter pointing at memory the other buffer has already freed.
         """
+        if getattr(self, "_shared_pool_client", None) is not None:
+            self._shared_pool_client.close()
+            self._shared_pool_client = None
+            self._codes_uva = self._scales_uva = None
+            self.weight = nn.Parameter(torch.empty(0, dtype=self.storage_dtype, device="meta"), requires_grad=False)
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(0, dtype=self.scale_dtype, device="meta"), requires_grad=False
+            )
+            return
         aliases = {
             "_codes_uva": "weight",
             "_scales_uva": "weight_scale_inv",
@@ -218,6 +263,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_shared_pool_client", None) is not None:
+            expected = self._shared_pool_spec[2] + ".weight"
+            if key != expected:
+                raise ValueError("Shared Engram checkpoint key mismatch")
+            return  # The external owner has already loaded and published these rows.
         if self._shared_group is None:
             self._load_into_storage(model_path, key, chunk_rows)
             return
