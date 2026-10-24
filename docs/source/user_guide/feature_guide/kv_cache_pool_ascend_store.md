@@ -1678,6 +1678,24 @@ Note the following when enabling KV Pool for DSv4. Other historical known issues
 - You must add `--no-disable-hybrid-kv-cache-manager` at startup; otherwise the service runs into an OOM problem during startup.
 - DSv4 stores the states of all compression ratio families in full, and fully storing a sequence of 1M tokens takes about 300GB of space. This is expected and is the same behavior as upstream vLLM; further optimization depends on the vLLM community.
 
+#### Memcache non-layerwise transfer compaction
+
+Memcache GET/PUT omit byte ranges fully contained in another range of the same
+object. For example, separate data and scale views are redundant when an
+enclosing view already covers both. Detection uses addresses and lengths;
+it does not depend on model names, cache groups, or block sizes. Surviving
+ranges keep their original order. Disjoint ranges, partial overlaps, gaps,
+and the layerwise GVA path are unchanged.
+
+**Cache compatibility:** this changes the packed object size and layout without
+changing its lookup key. Use a fresh, isolated Memcache cache namespace and
+deploy the same revision on all readers and writers, including P and D nodes.
+Readers and writers must also describe the same logical views and overlap layout.
+Do not reuse objects written before this change or mix old and new workers.
+For rollback, stop the new workers and restore the previous revision against
+its original isolated cache or another fresh cache. Do not delete shared cache
+data as part of rollout or rollback.
+
 ### Issue 7: AscendStore KV Pool Known Issues (v0.23.0)
 
 For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390](https://github.com/vllm-project/vllm-ascend/issues/12390).

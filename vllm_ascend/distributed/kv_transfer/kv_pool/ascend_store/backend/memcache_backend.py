@@ -40,6 +40,44 @@ MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
 
 
+def _compact_transfer_args(
+    keys: list[str], addrs: list[list[int]], sizes: list[list[int]]
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Drop fully contained byte ranges within each packed object.
+
+    Keep surviving ranges in caller order, independent of allocation addresses.
+    GET and PUT require the same overlap layout and a fresh cache namespace;
+    objects written without compaction are incompatible. Layerwise GVA copies
+    do not use this path.
+    """
+    if len(keys) != len(addrs) or len(keys) != len(sizes):
+        raise ValueError("Memcache key/address/size batch lengths must match")
+    compact_addrs, compact_sizes = list(addrs), list(sizes)
+    for index, (row, counts) in enumerate(zip(addrs, sizes, strict=True)):
+        if len(row) != len(counts):
+            raise ValueError("Memcache address/size segment lengths must match")
+        # Sort indices only: packed bytes must retain caller order even when
+        # source and destination allocations have different address orders.
+        keep = [False] * len(row)
+        covered_end, enclosing = -1, None
+        for segment in sorted(range(len(row)), key=row.__getitem__):
+            addr, size = row[segment], counts[segment]
+            if addr < 0 or size <= 0:
+                raise ValueError("Memcache segments require non-negative addresses and positive sizes")
+            end = addr + size
+            if end > covered_end:
+                # A larger range at the same start replaces the smaller one.
+                # Partially overlapping ranges remain separate.
+                if enclosing is not None and addr == row[enclosing]:
+                    keep[enclosing] = False
+                keep[segment] = True
+                covered_end, enclosing = end, segment
+        if not all(keep):
+            compact_addrs[index] = [addr for addr, retained in zip(row, keep) if retained]
+            compact_sizes[index] = [size for size, retained in zip(counts, keep) if retained]
+    return compact_addrs, compact_sizes
+
+
 def _validate_device_ub_qos() -> None:
     """Validate MF_DEVICE_UB_QOS used by the MemCache store transfers.
 
@@ -475,6 +513,7 @@ class MemcacheBackend(Backend):
             return
         assert self.store is not None
         try:
+            addr, size = _compact_transfer_args(key, addr, size)
             res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
@@ -508,6 +547,7 @@ class MemcacheBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         try:
+            addr, size = _compact_transfer_args(key, addr, size)
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
