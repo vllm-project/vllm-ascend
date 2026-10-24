@@ -237,7 +237,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
 PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
-=== "A3"
+=== "A3 series (W8A8)"
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
@@ -444,7 +444,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --decoder-ports 19200 19201 19202 19203
     ```
 
-=== "A5"
+=== "950DT products"
 
     Use one Prefill node and one Decode node, each with all eight NPUs and DP2 × TP4 × PP1 / EP8. Each node starts one vLLM API service, which manages both local DP ranks. Speculative decoding is disabled in this configuration.
 
@@ -462,7 +462,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
     **Prefill Node**
 
-    Save the following as `/workspace/prefill/start.sh`. Configure the model path, host IP address, and network interface at the beginning of the script.
+    Save the following as `run_prefill.sh` on the Prefill node. Configure the model path, host IP address, and network interface at the beginning of the script.
 
     ```bash
     #!/usr/bin/env bash
@@ -494,8 +494,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    mkdir -p /workspace/logs
-    exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size 2 \
@@ -525,24 +524,18 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":true,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/prefill-rank0.log 2>&1
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
-    Start it on the Prefill host:
+    Start the Prefill engine inside the Prefill container:
 
     ```bash
-    docker exec -d minimax_m31_flash bash /workspace/prefill/start.sh
-    ```
-
-    Check health after model loading completes:
-
-    ```bash
-    curl --noproxy '*' -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:31050/health
+    nohup bash run_prefill.sh > prefill.log 2>&1 &
     ```
 
     **Decode Node**
 
-    Save the following as `/workspace/decode/start.sh`. Configure the model path, host IP address, and network interface at the beginning of the script.
+    Save the following as `run_decode.sh` on the Decode node. Configure the model path, host IP address, and network interface at the beginning of the script.
 
     ```bash
     #!/usr/bin/env bash
@@ -574,8 +567,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    mkdir -p /workspace/logs
-    exec /workspace/.venv/bin/vllm serve "$MODEL_PATH" \
+    vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
         --data-parallel-size 2 \
@@ -604,81 +596,203 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
         --seed 1024 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"fuse_qknorm_rope":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}' > /workspace/logs/decode-rank0.log 2>&1
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"'"$KV_PORT"'","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
-    Start it on the Decode host:
+    Start the Decode engine inside the Decode container:
 
     ```bash
-    docker exec -d minimax_m31_flash bash /workspace/decode/start.sh
-    ```
-
-    Check health after model loading completes:
-
-    ```bash
-    curl --noproxy '*' -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:31060/health
+    nohup bash run_decode.sh > decode.log 2>&1 &
     ```
 
     **Load-balance Proxy**
 
     Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
 
-    After both health checks return `200`, save the following as `/workspace/start_proxy.sh` in the Prefill container and set the two compute-network IPs. Configure one API endpoint per role.
+    After both engines print `Application startup complete`, run the following
+    inside the Prefill container:
 
     ```bash
-    #!/usr/bin/env bash
-    set -e
     PREFILL_IP="<PREFILL_NODE_IP>"
     DECODE_IP="<DECODE_NODE_IP>"
 
-    mkdir -p /workspace/logs
-    exec /workspace/.venv/bin/python /workspace/load_balance_proxy_server_example.py \
+    python3 /workspace/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8009 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
-        --decoder-hosts "$DECODE_IP" --decoder-ports 31060 \
-        > /workspace/logs/proxy.log 2>&1
+        --decoder-hosts "$DECODE_IP" --decoder-ports 31060
     ```
 
-    Start the proxy on the Prefill host:
+## 6 Functional Verification
 
-    ```bash
-    docker exec -d minimax_m31_flash bash /workspace/start_proxy.sh
-    ```
+Replace `{ip}` and `{port}` with the service endpoint. Replace `minimax-m3` in the requests below with the configured `--served-model-name`: `minimax-m3.1-flash` for single-node deployment, `minimax-m31-flash` for A3 PD disaggregation, or `minimax-m3` for 950DT PD disaggregation.
 
-    Service logs are `/workspace/logs/prefill-rank0.log`, `/workspace/logs/decode-rank0.log`, and `/workspace/logs/proxy.log`.
+### 6.1 Text
 
-    **Send a Request**
+  ```bash
+  curl http://{ip}:{port}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d @- <<EOF
+  {
+    "model": "minimax-m3",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …oxidant in basic solutions. Kinetically, oxygen reacts …in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker —faster\nB) stronger —faster\nC) weaker - slower\nD) stronger —slower"
+      }
+    ],
+    "max_tokens": 8000,
+    "temperature": 1.0
+  }
+  EOF
+  ```
 
-    The A5 proxy listens on port `8009`; the model name is `minimax-m3`.
+  Expected result: the answer is C.
 
-    ```bash
-    curl --noproxy '*' "http://<PREFILL_NODE_IP>:8009/v1/chat/completions" \
-        -H 'Content-Type: application/json' \
-        -d '{
-            "model": "minimax-m3",
-            "messages": [{"role": "user", "content": "Explain sparse attention."}],
-            "temperature": 0,
-            "max_tokens": 2048,
-            "stream": false
-        }'
-    ```
+### 6.2 Single Image
 
-    This section adapts the [original A5 launch scripts](https://github.com/CXY-Katrina/workspace/tree/main/minimax_m3/minimax_m3.1_flash) with speculative decoding removed.
+  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
-## 6 Send a Request
+  ```bash
+  IMAGE_PATH=/path/to/image.jpg
+  IMAGE_BASE64="$(base64 -w 0 "${IMAGE_PATH}")"
 
-For single-node deployment, send requests directly to port `11223` using the model name from the matching platform tab in [Single-Node Deployment](#51-single-node-deployment). The following example uses the A3 PD proxy on port `19080`. For the A5 PD proxy on port `8009`, use the request example in the A5 tab of [PD Disaggregation](#52-pd-disaggregation).
+  curl http://{ip}:{port}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d @- <<EOF
+  {
+    "model": "minimax-m3",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+          {"type": "text", "text": "Briefly describe this image."}
+        ]
+      }
+    ],
+    "max_tokens": 512,
+    "temperature": 0
+  }
+  EOF
+  ```
+
+  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
+
+### 6.3 Single Video
+
+  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
+
+  ```bash
+  curl http://{ip}:{port}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "minimax-m3",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "video_url",
+              "video_url": {
+                "url": "file:///path/to/video.mp4"
+              }
+            },
+            {
+              "type": "text",
+              "text": "Briefly describe the main content of this video."
+            }
+          ]
+        }
+      ],
+      "max_tokens": 512,
+      "temperature": 0
+    }'
+  ```
+
+  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
+
+### 6.4 Mixed Image and Video Request
+
+  Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
+
+  ```bash
+  IMAGE_BASE64="$(base64 -w 0 /path/to/image.jpg)"
+
+  curl http://{ip}:{port}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d @- <<EOF
+  {
+    "model": "minimax-m3",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${IMAGE_BASE64}"}},
+          {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}},
+          {"type": "text", "text": "Describe the image and video separately, and explain whether they are related."}
+        ]
+      }
+    ],
+    "max_tokens": 512,
+    "temperature": 0
+  }
+  EOF
+  ```
+
+  Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
+
+## 7 Accuracy Evaluation
+
+The evaluation results below are copied from the [MiniMax-M3 accuracy evaluation](MiniMax-M3.md#8-accuracy-evaluation) as reference results for MiniMax-M3. They have not been measured for MiniMax-M3.1-Flash.
+
+The context-limit entries below use the unified serving setting `max-model-len=133000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
+
+### 7.1 Using AISBench
+
+For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
+
+### 7.2 Text Evaluation
+
+| Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
+|---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
+| GSM8K   | 8 H20 (96G × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
+| AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
+| GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=1.0, top_p=0.95 |
+| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
+| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
+
+### 7.3 Multimodal Evaluation
+
+MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
+
+The Video-MME results below are measured on chunk1 and chunk2, not the full dataset.
+
+For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the recommended MiniMax-M3 settings are:
+
+- serve with `--limit-mm-per-prompt '{"image":0,"video":1}'`;
+- do not set `media_io_kwargs.video.num_frames`, so vLLM uses the default 32 sampled frames;
+- use `max-model-len=133000` and `max_out_len=8192`;
+- evaluate Video-MME chunk1 and chunk2, not the full dataset.
+
+The AISBench command used for the Video-MME chunk1+chunk2 evaluation is:
 
 ```bash
-curl --noproxy '*' http://127.0.0.1:19080/v1/models
-
-curl --noproxy '*' http://127.0.0.1:19080/v1/chat/completions \
-    -H 'Content-Type: application/json' \
-    -d '{
-        "model": "minimax-m31-flash",
-        "messages": [{"role": "user", "content": "Explain sparse attention."}],
-        "temperature": 0,
-        "max_tokens": 2048,
-        "stream": false
-    }'
+ais_bench \
+  --models vllm_api_general_chat \
+  --datasets videomme_subset_1_2.py \
+  --mode all \
+  --dump-eval-details \
+  --merge-ds
 ```
+
+`videomme_subset_1_2.py` is a local AISBench dataset config derived from the original Video-MME config, such as `videomme_gen.py`. It points `path` to the parquet file filtered from the full Video-MME metadata by the locally available chunk1/chunk2 videos, and points `video_path` to the extracted chunk1/chunk2 `.mp4` directory. This keeps the evaluation lightweight while preserving the standard Video-MME request and scoring flow.
+
+| Dataset | Modality | Tool | Hardware | ViT DP | max-model-len | max_out_len | Input Config | generation_kwargs | Score |
+|---------|----------|------|----------|--------|---------------|-------------|--------------|-------------------|-------|
+| TextVQA | Image | AISBench | GPU | disabled | 133000 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 70.82 |
+| TextVQA | Image | AISBench | NPU | disabled | 133000 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 72.75 |
+| Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
+| Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
