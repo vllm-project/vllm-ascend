@@ -12,7 +12,6 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 
@@ -190,73 +189,18 @@ def test_load_preserves_parent_contract_and_accounts_pool_memory():
     runner, events = make_runner(manager=manager)
     runner.load_model(False, "extra", reload=False)
     assert events == [("parent_load", False, ("extra",), {"reload": False})]
-    manager.finalize_loading.assert_called_once_with(runner.model, None)
+    manager.finalize_loading.assert_called_once_with(runner.model)
     assert runner.model_memory_usage == 1064
     assert runner.pd_dspark_aux_layer_ids == [9]
 
 
-def test_load_adopts_draft_layers_and_shares_runner_owned_manager():
+def test_load_only_adopts_target_and_preserves_native_draft():
     manager = Mock()
     runner, _ = make_runner(manager=manager)
     runner.speculator = SimpleNamespace(model=object())
     runner.load_model()
-    manager.finalize_loading.assert_called_once_with(runner.model, runner.speculator.model)
-    assert runner.speculator.expert_offload_manager is manager
-
-
-@pytest.mark.parametrize("release", [False, True])
-@pytest.mark.parametrize("profile,failed", [(False, False), (True, False), (False, True)])
-def test_dspark_propose_owns_draft_lifecycle_and_preserves_parent_arguments(profile, failed, release):
-    manager = ExpertOffloadManager()
-    manager.state = OffloadState.READY
-
-    class Parent:
-        def propose(self, *args, **kwargs):
-            assert manager.executing and not manager.has_prefill
-            assert manager.is_profile is profile
-            assert kwargs["is_profile"] is profile
-            if not release:
-                assert kwargs["num_speculative_tokens"] == 5
-            if failed:
-                raise RuntimeError("draft failed")
-            return args
-
-    cls = load_hook_class(
-        "vllm_ascend/worker/v2/spec_decode/dspark/speculator.py",
-        "AscendDSparkSpeculator",
-        {"propose"},
-        Parent,
-        {
-            "torch": torch,
-            "nullcontext": nullcontext,
-            "build_attn_metadata_wrapper": nullcontext,
-            "build_attn_metadata_factory": lambda *_a, **_k: nullcontext(),
-            "vllm_version_is": lambda _version: release,
-        },
-    )
-    draft = cls()
-    draft.expert_offload_manager = manager
-    draft.replicated_pcp = False
-    draft.enable_adaptive_verification = False
-    draft.use_dcp = False
-    draft.input_buffers = SimpleNamespace(positions=object())
-    draft.max_num_tokens = 16
-    draft.attn_vllm_config = SimpleNamespace(parallel_config=object())
-    batch = SimpleNamespace(is_prefilling_np=np.array([True]))
-    args = (batch, {}, {}, *[object() for _ in range(8)])
-    sync = object()
-    kwargs = {"dp_sync" if release else "dp_sync_state": sync, "is_profile": profile}
-    if not release:
-        kwargs["num_speculative_tokens"] = 5
-    if failed:
-        with pytest.raises(RuntimeError, match="draft failed"):
-            draft.propose(*args, **kwargs)
-    else:
-        result = draft.propose(*args, **kwargs)
-        assert result[:11] == args
-        assert result[11] is sync
-    assert not manager.executing and manager.has_prefill
-    assert manager.state is (OffloadState.FAILED if failed else OffloadState.READY)
+    manager.finalize_loading.assert_called_once_with(runner.model)
+    assert not hasattr(runner.speculator, "expert_offload_manager")
 
 
 def test_disabled_load_does_not_allocate_or_finalize_offload():
@@ -357,7 +301,8 @@ def test_shutdown_preserves_c8_cleanup_without_an_initialized_offload_manager():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_quant_wrapper_preserves_disabled_allocation_and_bounds_enabled_loading(enabled):
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_quant_wrapper_only_offloads_target_and_preserves_native_draft(enabled, is_draft):
     class Parent:
         requires_device_loading = True
 
@@ -401,26 +346,40 @@ def test_quant_wrapper_preserves_disabled_allocation_and_bounds_enabled_loading(
         },
     )
     method = cls(scheme, object())
-    method.configure_expert_offload(config)
-    layer = torch.nn.Module()
+    owner_cls = load_hook_class(
+        "vllm_ascend/ops/fused_moe/routed_experts.py",
+        "AscendRoutedExperts",
+        {"_get_quant_method"},
+        torch.nn.Module,
+        {"get_ascend_config": lambda: SimpleNamespace(expert_offload_config=config)},
+    )
+    layer = owner_cls()
+    layer.tid2eid = None
+    layer._expert_offload_enabled = not is_draft
+    quant_config = SimpleNamespace(get_quant_method=lambda *_a, **_kw: method)
+    assert layer._get_quant_method("experts", quant_config, object()) is method
+    offloaded = enabled and not is_draft
     layer.top_k = 2
     with torch.device("meta"):
         method.create_weights(layer, 6, 3, 2, torch.float32, weight_loader=object())
-    assert layer.w13_weight.device.type == ("cpu" if enabled else "meta")
-    assert method.requires_device_loading is not enabled
-    if enabled:
+    assert layer.w13_weight.device.type == ("cpu" if offloaded else "meta")
+    assert method.requires_device_loading is not offloaded
+    assert layer.w13_weight.shape[0] == 6
+    if offloaded:
         binding_factory.assert_called_once_with(layer, scheme, config)
         method.process_weights_after_loading(layer)
         binding_factory.return_value.process_weights_after_loading.assert_called_once_with(layer)
         scheme.process_weights_after_loading.assert_not_called()
     else:
         binding_factory.assert_not_called()
+        assert not hasattr(layer, "_expert_offload_binding")
         method.process_weights_after_loading(layer)
         scheme.process_weights_after_loading.assert_called_once_with(layer)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_routed_owner_injects_offload_before_weight_creation(enabled):
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_routed_owner_injects_offload_before_weight_creation(enabled, is_draft):
     offload_config = ExpertOffloadConfig(enabled=enabled, num_device_experts=2 if enabled else None)
     method = Mock()
     quant_config = SimpleNamespace(get_quant_method=Mock(return_value=method))
@@ -433,9 +392,10 @@ def test_routed_owner_injects_offload_before_weight_creation(enabled):
     )
     layer = cls()
     layer.tid2eid = None
+    layer._expert_offload_enabled = not is_draft
     assert layer._get_quant_method("model.layers.0.mlp.experts", quant_config, "moe_config") is method
     quant_config.get_quant_method.assert_called_once_with(layer, "model.layers.0.mlp.experts", tid2eid=None)
-    if enabled:
+    if enabled and not is_draft:
         method.configure_expert_offload.assert_called_once_with(offload_config)
     else:
         method.configure_expert_offload.assert_not_called()
@@ -452,11 +412,14 @@ def test_routed_owner_rejects_unquantized_or_unsupported_adapter():
     )
     layer = cls()
     layer.tid2eid = None
+    layer._expert_offload_enabled = True
     with pytest.raises(ValueError, match="quantized"):
         layer._get_quant_method("experts", None, object())
     quant_config = SimpleNamespace(get_quant_method=lambda *_args, **_kwargs: object())
     with pytest.raises(ValueError, match="does not support"):
         layer._get_quant_method("experts", quant_config, object())
+    layer._expert_offload_enabled = False
+    assert layer._get_quant_method("experts", quant_config, object()) is not None
 
 
 @pytest.mark.parametrize("offload,fail", [(False, False), (True, False), (True, True)])

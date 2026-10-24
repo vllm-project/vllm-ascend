@@ -3,6 +3,9 @@
 
 from typing import TYPE_CHECKING, TypedDict
 
+from vllm_ascend.expert_offload.quantization import MXFP4ExpertAdapter
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -20,6 +23,7 @@ class ExpertOffloadAuditWorker:
         """Inspect a real worker, and observe dispatch without changing its decisions."""
         runner = self.model_runner
         manager = runner.expert_offload_manager
+        assert manager is not None
         if action == "install":
             assert manager.state.name == "READY"
             audit: _ExpertOffloadAudit = {"steps": [], "replays": 0}
@@ -61,6 +65,9 @@ class ExpertOffloadAuditWorker:
             if draft is not None
             else []
         )
+        draft_experts = (
+            [layer for layer in draft.modules() if isinstance(layer, AscendRoutedExperts)] if draft is not None else []
+        )
         snapshot = {
             "state": manager.state.name,
             "steps": list(audit["steps"]),
@@ -69,9 +76,20 @@ class ExpertOffloadAuditWorker:
             "layer_names": [binding.layer_name for binding in bindings],
             "loaded": all(binding.host_store.finalized and binding.host_store.prepared for binding in bindings),
             "target_layers": len(target_bindings),
-            "draft_layers": len(draft_bindings),
-            "shared_manager": all(binding.manager is manager for binding in (*target_bindings, *draft_bindings))
-            and (draft is None or runner.speculator.expert_offload_manager is manager),
+            "draft_layers": len(draft_experts),
+            "draft_offload_layers": len(draft_bindings),
+            "target_manager": len(bindings) == len(target_bindings)
+            and all(binding.manager is manager for binding in target_bindings),
+            "draft_resident_on_npu": all(
+                getattr(layer, name).device.type == "npu"
+                and getattr(layer, name).shape[0] == layer.moe_config.num_experts
+                for layer in draft_experts
+                for name in MXFP4ExpertAdapter.tensor_names
+            ),
+            "draft_addresses": {
+                layer.layer_name: {name: getattr(layer, name).data_ptr() for name in MXFP4ExpertAdapter.tensor_names}
+                for layer in draft_experts
+            },
             "addresses": {
                 binding.layer_name: {name: tensor.data_ptr() for name, tensor in binding.resident.items()}
                 for binding in bindings

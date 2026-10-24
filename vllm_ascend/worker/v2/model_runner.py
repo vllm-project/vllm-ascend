@@ -322,10 +322,7 @@ class NPUModelRunner(GPUModelRunner):
                     join_early_kernel_warmup("load_model")
             if manager is not None:
                 allocated_before = torch.npu.memory_allocated(self.device)
-                draft_model = getattr(self.speculator, "model", None)
-                manager.finalize_loading(self.model, draft_model)
-                if self.speculator is not None:
-                    self.speculator.expert_offload_manager = manager
+                manager.finalize_loading(self.model)
                 # Include the shared pool allocated after the parent profiler.
                 self.model_memory_usage += torch.npu.memory_allocated(self.device) - allocated_before
             self.pd_dspark_aux_layer_ids = aux_layers

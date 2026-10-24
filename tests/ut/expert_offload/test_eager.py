@@ -102,36 +102,6 @@ def test_complete_host_bundle_and_owned_lifetime():
     assert set(binding.resident) == set(MXFP4ExpertAdapter.tensor_names)
 
 
-def test_target_and_draft_share_pool_but_keep_separate_residency():
-    target, draft = ExpertLayer(), ExpertLayer("mtp.0.mlp.experts")
-    for layer in (target, draft):
-        layer.load()
-        layer._expert_offload_binding.process_weights_after_loading(layer)
-    manager = ExpertOffloadManager()
-    manager.finalize_loading(torch.nn.ModuleList([target]), torch.nn.ModuleList([draft]))
-    assert set(manager.bindings) == {target.layer_name, draft.layer_name}
-    target_binding, draft_binding = target._expert_offload_binding, draft._expert_offload_binding
-    before = target_binding.residency.logical_to_physical()
-    with manager.execution(has_prefill=False), patch.object(manager, "get_comm", return_value=None):
-        ids = torch.tensor([[4, 5]])
-        view, physical, _ = draft_binding.prepare(draft, ids)
-        assert_selected_bundles(draft_binding, view, physical, ids)
-    assert target_binding.residency.logical_to_physical() == before
-    assert not manager.executing and manager.has_prefill
-    manager.close()
-    assert not target_binding.resident and not draft_binding.resident
-
-
-def test_draft_execution_failure_invalidates_shared_manager():
-    manager = ready_model(ExpertLayer())
-    with pytest.raises(RuntimeError, match="draft failed"), manager.execution(has_prefill=False):
-        assert manager.executing and not manager.has_prefill
-        raise RuntimeError("draft failed")
-    assert not manager.executing and manager.state is OffloadState.FAILED
-    with pytest.raises(RuntimeError, match="ready"):
-        manager.begin_execution()
-
-
 def test_incomplete_loading_is_rejected_before_slot_allocation():
     layer = ExpertLayer()
     binding = layer._expert_offload_binding

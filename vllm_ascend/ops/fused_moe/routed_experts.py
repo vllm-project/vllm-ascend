@@ -413,9 +413,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *args,
         tid2eid=None,
         n_shared_experts: int = 0,
+        expert_offload_enabled: bool = True,
         **kwargs,
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
+        # Quant-method selection happens inside the upstream constructor.
+        object.__setattr__(self, "_expert_offload_enabled", expert_offload_enabled)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
@@ -430,7 +433,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         ascend_config = get_ascend_config()
         vllm_config = get_current_vllm_config()
         self.n_shared_experts = n_shared_experts
-        if ascend_config.expert_offload_config.enabled and getattr(self, "_expert_offload_binding", None) is None:
+        if (
+            ascend_config.expert_offload_config.enabled
+            and self._expert_offload_enabled
+            and getattr(self, "_expert_offload_binding", None) is None
+        ):
             raise ValueError("expert offload requires a W4A8 MXFP offload binding for every routed expert layer")
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
@@ -589,14 +596,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         offload_config = get_ascend_config().expert_offload_config
+        offload_enabled = offload_config.enabled and self._expert_offload_enabled
         if quant_config is None:
-            if offload_config.enabled:
+            if offload_enabled:
                 raise ValueError(
                     "expert offload requires W4A8 MXFP quantized routed experts; unquantized experts have no adapter"
                 )
             return super()._get_quant_method(prefix, quant_config, moe_config)
         method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
-        if offload_config.enabled:
+        if offload_enabled:
             configure_offload = getattr(method, "configure_expert_offload", None)
             if configure_offload is None:
                 raise ValueError("selected quantization method does not support expert offload")

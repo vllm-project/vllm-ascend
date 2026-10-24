@@ -171,7 +171,7 @@ def test_checkpoint_native_dspark_target_draft_lifecycle(request):
         max_num_seqs=1,
         max_num_batched_tokens=256,
         block_size=32,
-        kv_cache_dtype="fp8",
+        kv_cache_dtype="bfloat16",
         kv_cache_memory_bytes=1024 * 1024 * 1024,
         additional_config={"expert_offload_config": {"enabled": True, "num_device_experts": 48}},
         speculative_config={"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": True},
@@ -179,12 +179,15 @@ def test_checkpoint_native_dspark_target_draft_lifecycle(request):
     )
     try:
         before = llm.collective_rpc("expert_offload_test_audit", args=("install",))[0]
-        assert before["loaded"] and before["shared_manager"]
+        assert before["loaded"] and before["target_manager"]
         assert before["target_layers"] > 0 and before["draft_layers"] > 0
+        assert before["draft_offload_layers"] == 0 and before["draft_resident_on_npu"]
         _generate_batches(llm, [[list(range(2, 130))], [list(range(3, 67))]])
         after = llm.collective_rpc("expert_offload_test_audit", args=("snapshot",))[0]
         assert after["state"] == "READY" and after["replays"] > 0
         assert after["addresses"] == before["addresses"]
+        assert after["draft_addresses"] == before["draft_addresses"]
+        assert after["draft_offload_layers"] == 0 and after["draft_resident_on_npu"]
         closed = llm.collective_rpc("expert_offload_test_audit", args=("close",))[0]
         assert closed["closed_state"] == "CLOSED" and closed["released"]
     finally:

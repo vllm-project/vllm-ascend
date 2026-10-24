@@ -17,7 +17,7 @@ The implementation was written from the committed feature behavior and the pinne
 
 ## Configuration and restrictions
 
-Expert offload is disabled by default. Enable the draft using the existing Ascend additional configuration:
+Expert offload is disabled by default. Enable target expert offload using the existing Ascend additional configuration:
 
 ```json
 {
@@ -28,12 +28,12 @@ Expert offload is disabled by default. Enable the draft using the existing Ascen
 }
 ```
 
-The slot count must satisfy `top_k <= num_device_experts < num_experts` for every target and enabled draft routed expert layer. Unknown keys, string booleans, non-integral slot counts, and invalid capacities fail early.
+The slot count must satisfy `top_k <= num_device_experts < num_experts` for every target routed expert layer. Unknown keys, string booleans, non-integral slot counts, and invalid capacities fail early.
 
 Model compatibility is checked per routed-expert layer, not by a target model-name
 allowlist. The current adapter requires W4A8 MXFP with group size 32, packed gate/up
 and down weights, complete E8M0 scales, an expert/shard checkpoint loader, native
-post-processing and gated SiLU or SITU activation. All routed layers must be
+post-processing and gated SiLU or SITU activation. All target routed layers must be
 offloaded, and their layouts must be compatible with the single shared pool.
 Raw tensor shapes and dtypes are checked before allocating owned host storage;
 native physical NZ storage is checked during preparation and transfer. Shared and
@@ -61,19 +61,19 @@ implementation constraint; a missing hardware result is a validation boundary.
 | Generic CPU offload and PD | Parameter ownership and split-worker lifecycle are not integrated | Define one ownership and cleanup protocol |
 | LoRA, expert bias and sequence parallel | Their slot/weight-view integration is not implemented | Add composition, numerical and lifecycle coverage before enabling |
 | Checkpoint loader | `auto`, `safetensors` or `pt` must report every expert/shard | Adapt completeness tracking for other loaders |
-| Shared full-expert pool | All adopted target/draft layers require homogeneous specifications | Introduce bounded pools for distinct layout families |
+| Shared full-expert pool | All adopted target layers require homogeneous specifications | Introduce bounded pools for distinct layout families |
 | DSpark | Same checkpoint, DeepSeek V4 draft architecture, eager draft, fixed verification, one request | Validate other draft architectures and concurrent drafting separately |
 | Other target model names | Accepted only when every layer satisfies the adapter contract | Run matching checkpoint, eager/graph and offload-disabled acceptance |
 
 DSpark KV-cache input preparation follows the main implementation unchanged.
-Expert offload only adds target/draft expert bindings, serialized draft
-execution and runner-owned cleanup; it does not change KV block sizing or
-slot-mapping semantics.
+Expert offload only manages target expert bindings and runner-owned cleanup.
+Draft experts remain fully resident on the NPU and use the existing DSpark
+loading and execution paths, without offload bindings or offload-owned pinned storage.
 
 ### Manager lifecycle
 
 `REGISTERING` collects loaded layer bindings. Successful `finalize_loading` adopts
-target/draft layers and initializes the shared pool, then enters `READY`.
+target layers and initializes the shared pool, then enters `READY`.
 The separate `executing` flag prevents overlapping execution in `READY`.
 Loading, transfer or forward failure enters `FAILED`; execution cannot resume on
 that manager. `close()` drains owned work, releases bindings, staging and the pool,
@@ -98,7 +98,16 @@ The supported speculative configuration is the DeepSeek V4 checkpoint's own DSpa
 --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6]}'
 ```
 
-The runner adopts both target and draft expert layers after the parent loader finishes. Each layer keeps its own residency map and prepared host bundle; compatible layers reuse the same full-expert pool. The DSpark proposer owns a separate serialized execution scope because drafting occurs after the target forward. Its query block uses resident slots even when prompt auxiliary states initialize draft KV; profiling and route capacity overflow still use the full pool. Failures invalidate the shared manager, and shutdown releases both sets of layers. Draft KV input preparation retains the main path.
+The existing `is_draft_layer` role is forwarded through the upstream routed-expert
+constructor arguments. Draft layers skip offload configuration before weight
+creation: all their experts load on the NPU and use native quantization
+post-processing. They create neither `HostExpertStore` nor raw/prepared pinned
+expert buffers. The runner adopts only target bindings after loading; DSpark
+requires no offload manager or extra execution scope. The resident-slot setting
+therefore applies only to target layers. Keeping all draft experts resident
+increases NPU memory demand compared with the historical draft-offload policy.
+The current policy still requires full-checkpoint acceptance under the selected
+NPU memory budget; historical results below used the previous policy.
 
 Uniform verification descriptors can contain several tokens per request. Capture and dispatch include every verification and padding row in the existing capacity bound. Five draft tokens plus the new target token require at least 36 slots at top-k six for a six-token target graph. Adding the draft also increases model and KV memory; a slot count that fits ordinary decode is not guaranteed to fit DSpark. This integration does not enable LRC, expert prefetch or hot-expert preload.
 
@@ -188,9 +197,9 @@ pytest -q tests/e2e/pull_request/one_card/expert_offload/test_runner_integration
     --expert-offload-model /models/DeepSeek-V4-Flash-0731
 ```
 
-It verifies adopted target/draft bindings, one shared runner-owned manager,
-target graph replay, stable addresses and release of both models' resources.
-The case explicitly skips without a supplied checkpoint. It requires sufficient
+It verifies target-only bindings, fully resident NPU draft experts without offload bindings,
+target graph replay, stable addresses and release of offload resources.
+The case uses BF16 KV and explicitly skips without a supplied checkpoint. It requires sufficient
 HBM and pinned host memory for the original prepared-pinned implementation;
 reducing resident slots does not reduce the full prepared host-weight allocation.
 No bounded staging or allocator workaround is installed by these tests. Report

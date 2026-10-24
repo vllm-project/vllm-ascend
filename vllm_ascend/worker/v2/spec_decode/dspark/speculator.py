@@ -16,7 +16,6 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
 from typing import Any, cast
 
 import numpy as np
@@ -463,10 +462,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
                 )
             with (
-                # Context KV consumes prompt states; the draft MoE consumes its query block.
-                self.expert_offload_manager.execution(has_prefill=False, is_profile=is_profile)
-                if getattr(self, "expert_offload_manager", None) is not None
-                else nullcontext(),
                 build_attn_metadata_wrapper(),
                 build_attn_metadata_factory(
                     self.input_buffers.positions,
@@ -545,10 +540,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
                 )
             with (
-                # Context KV consumes prompt states; the draft MoE consumes its query block.
-                self.expert_offload_manager.execution(has_prefill=False, is_profile=is_profile)
-                if getattr(self, "expert_offload_manager", None) is not None
-                else nullcontext(),
                 build_attn_metadata_wrapper(),
                 build_attn_metadata_factory(
                     self.input_buffers.positions,
