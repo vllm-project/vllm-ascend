@@ -41,6 +41,8 @@ Download the weight variant used by the serving commands to the same model direc
 Prepare the business network and the NPU interconnect by following
 [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
 
+On each host, use `ip addr` or `ifconfig` to identify the host communication IP and the interface that owns it. Set `LOCAL_IP` to that IP and `NIC_NAME` to the interface name; for example, if the IP is assigned to `eth0`, set `NIC_NAME="eth0"`. The scripts use this interface for both `HCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`. See [multi-node host configuration](../../developer_guide/contribution/multi_node_test.md#2-test-without-kubernetes) for selecting mutually reachable host IPs.
+
 ## 4 Installation
 
 ### 4.1 A3 Docker Container
@@ -242,14 +244,10 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
     | DP × TP × PP | 1 × 4 × 4 | 4 × 4 × 1 |
-    | Visible NPU IDs | 0–15 | 0–3, 4–7, 8–11, 12–15 |
     | PP layer partition | 15,15,15,15 | — |
-    | API ports | 19100 | 19200–19203 |
-    | DP RPC port | — | 16920 |
-    | KV base ports | 24000 | 25000 + 32 × DP rank |
     | max-num-seqs | 32 | 128 per replica |
     | Execution mode | Eager | FULL_DECODE_ONLY |
-    | HCCL_BUFFSIZE (MB) | 1024 | 2048 |
+    | HCCL_BUFFSIZE (MB) | 512 | 2048 |
 
     **Prefill Node**
 
@@ -271,20 +269,14 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    source /usr/local/Ascend/nnal/atb/set_env.sh
-    export VLLM_BATCH_INVARIANT=0
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export VLLM_PP_LAYER_PARTITION=15,15,15,15
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=1024
+    export HCCL_BUFFSIZE=512
     export HCCL_IF_IP="$LOCAL_IP"
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-    export LD_LIBRARY_PATH="/opt/m31flash/code/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH:-}"
-    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -321,7 +313,6 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
             "multistream_overlap_shared_expert":true,
             "enable_shared_expert_dp":true,
             "weight_nz_mode":2,
-            "ascend_compilation_config":{"fuse_norm_quant":false,"enable_static_kernel":false},
             "enable_flashcomm1":true
         }' \
         --kv-transfer-config '{
@@ -366,11 +357,6 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    source /usr/local/Ascend/nnal/atb/set_env.sh
-    export VLLM_BATCH_INVARIANT=0
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    unset VLLM_PP_LAYER_PARTITION
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP="$LOCAL_IP"
@@ -378,8 +364,6 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export ASCEND_RT_VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
-    export LD_LIBRARY_PATH="/opt/m31flash/code/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH:-}"
-    export LD_PRELOAD="/usr/lib64/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -419,8 +403,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
             "multistream_overlap_shared_expert":true,
             "enable_shared_expert_dp":true,
             "enable_flashcomm1":true,
-            "weight_nz_mode":2,
-            "ascend_compilation_config":{"fuse_norm_quant":false,"enable_static_kernel":false}
+            "weight_nz_mode":2
         }' \
         --kv-transfer-config '{
             "kv_connector":"MooncakeConnectorV1",
@@ -445,6 +428,8 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
     **Load-balance Proxy**
 
+    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
+
     After the five engines print `Application startup complete`, run the following
     inside the Prefill container:
 
@@ -452,7 +437,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     PREFILL_IP="<PREFILL_NODE_IP>"
     DECODE_IP="<DECODE_NODE_IP>"
 
-    python3 "/opt/m31flash/code/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py" \
+    python3 /workspace/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 19080 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 19100 \
         --decoder-hosts "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" \
@@ -471,7 +456,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     | DP RPC port | 6884 | 6885 |
     | KV transfer port | 30000 | 26900 |
     | max-num-seqs | 128 | 256 |
-    | HCCL_BUFFSIZE (MB) | 1024 | 2048 |
+    | HCCL_BUFFSIZE (MB) | 512 | 2048 |
     | Main-model execution | Eager | FULL_DECODE_ONLY |
     | fuse_norm_quant | true | false |
 
@@ -496,15 +481,11 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
     if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
         source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
     fi
-    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
-    fi
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=1024
+    export HCCL_BUFFSIZE=512
     export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -580,12 +561,8 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     GPU_MEMORY_UTILIZATION=0.92
 
     # Fixed runtime configuration.
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
     if [ -f /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh ]; then
         source /usr/local/Ascend/cann-9.2.0/share/info/ascendnpu-ir/bin/set_env.sh
-    fi
-    if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
-        source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
     fi
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=2048
@@ -644,6 +621,8 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
 
     **Load-balance Proxy**
 
+    Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
+
     After both health checks return `200`, save the following as `/workspace/start_proxy.sh` in the Prefill container and set the two compute-network IPs. Configure one API endpoint per role.
 
     ```bash
@@ -653,7 +632,7 @@ PD disaggregation runs Prefill and Decode on separate hosts. Configure the host-
     DECODE_IP="<DECODE_NODE_IP>"
 
     mkdir -p /workspace/logs
-    exec /workspace/.venv/bin/python /workspace/src/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+    exec /workspace/.venv/bin/python /workspace/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8009 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
         --decoder-hosts "$DECODE_IP" --decoder-ports 31060 \
