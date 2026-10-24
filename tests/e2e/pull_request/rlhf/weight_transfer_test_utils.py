@@ -146,6 +146,20 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
     return name
 
 
+def kimi_k3_checkpoint_name(name: str) -> str:
+    """Translate an HF Kimi-K3 parameter name into its served-model form.
+
+    The published checkpoint addresses the text tower as
+    ``language_model.model.layers.*`` and keeps the head *outside* the tower's
+    inner ``model.`` namespace as ``language_model.lm_head.weight``. The case
+    prefix covers the former; this map covers the latter, which the prefix rule
+    cannot reach because it only rewrites names starting with ``model.``.
+    """
+    if name.startswith("lm_head."):
+        return "language_model." + name
+    return name
+
+
 MODEL_CASES = (
     WeightUpdateModelCase(
         id="qwen3.5-35b-a3b-moe-layout",
@@ -207,6 +221,66 @@ MODEL_CASES = (
         # by owning SFA/MLA runtime state as non-persistent buffers: the LI C8
         # Hadamard matrices, the DCP remap order/sentinel, the DeepSeek-V4 DSA RoPE
         # tables and the interleaved RoPE tables the MLA/SFA rope lookups read.
+    ),
+    WeightUpdateModelCase(
+        id="kimi-k3-kda-moe-layout",
+        model="moonshotai/Kimi-K3",
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 4,
+                # Top-16 routing is unsatisfiable once the expert count drops, so
+                # the activation count has to move with it.
+                "num_experts": 16,
+                "num_experts_per_token": 4,
+                # Kimi-Linear marks its full-attention layers *by layer number*, so
+                # the published 93-layer lists cannot survive the reduction: layer 4
+                # keeps the single MLA layer and layers 1-3 stay KDA. The remaining
+                # keys are repeated because the override replaces the whole block.
+                "linear_attn_config": {
+                    "full_attn_layers": [4],
+                    "gate_lower_bound": -5.0,
+                    "head_dim": 128,
+                    "kda_layers": [1, 2, 3],
+                    "num_heads": 96,
+                    "short_conv_kernel_size": 4,
+                    "use_full_rank_gate": True,
+                },
+            },
+        },
+        # Enumerate the text tower from ``text_config`` so the vision tower and the
+        # projector are neither skipped nor sent by mistake.
+        meta_config_attribute="text_config",
+        # The published checkpoint nests the text layers under
+        # ``language_model.model.``; vLLM's ``hf_to_vllm_mapper`` only re-prefixes an
+        # incoming ``language_model.layers.`` from the older layout.
+        checkpoint_model_prefix="language_model.model.",
+        checkpoint_name_map=kimi_k3_checkpoint_name,
+        # The pair above is verified, not guessed: replayed over the published
+        # ``model.safetensors.index.json`` it round-trips all 497,052 text-tower
+        # names, and ``language_model.lm_head.weight`` is the only published name
+        # outside ``language_model.model.`` - exactly what the map restores.  The case
+        # still cannot run: ``FixedRandomWeightSource`` enumerates names and shapes
+        # via ``AutoModelForCausalLM.from_config(..., trust_remote_code)``, which for
+        # Kimi-K3 loads the Hub's stale ``modeling_kimi_linear.py``.  Reaching that
+        # point was attempted and stopped one step short of a green transaction, at
+        # ``load_weights``; what is left is outside this file, so the case is kept
+        # only to record the reduction recipe and the namespace mapping.
+        skip_reason=(
+            "Kimi-K3 cannot be enumerated yet. The meta model needs the "
+            "checkpoint's remote modeling_kimi_linear.py, which still imports "
+            "OutputRecorder from transformers.utils.generic (the symbol now lives "
+            "in transformers.utils.output_capturing) and requires fla-core "
+            "unconditionally, a package vLLM does not depend on; its text_config "
+            "also has an empty _name_or_path and an mxfp4 quantization_config that "
+            "the NPU backend rejects. Two further gaps sit on this side of the "
+            "boundary: the checkpoint is multimodal, so the served model has to be "
+            "pointed at the text tower with hf_overrides['architectures'] = "
+            "['KimiLinearForCausalLM'], as the Qwen3.5 case does, or load_weights "
+            "reports vision_tower.* and mm_projector.* as uninitialised; and "
+            "Ascend's KDA fuses its short conv into self_attn.ascend_conv1d_weight, "
+            "which a rename map cannot synthesise from the meta model's separate "
+            "q/k/v_conv1d.weight. Enable once all of those land."
+        ),
     ),
 )
 
