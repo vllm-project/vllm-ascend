@@ -1,5 +1,6 @@
 # Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/moonshotai/Kimi-K3.yaml
 # Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+# A5 profile: https://github.com/vllm-project/vllm/pull/62668
 variants:
   ascend_w4a8:
     model_id: Eco-Tech/Kimi-K3-w4a8
@@ -8,6 +9,7 @@ variants:
     vram_minimum_gb: 1711
     supported_hardware:
       - ascend_910c
+      - ascend_950dt
     extra_args:
       - '--quantization'
       - ascend
@@ -43,25 +45,40 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:kimi-k3-a3
+      ascend_950dt:
+        docker_image: quay.io/ascend/vllm-ascend:kimi-k3-a5
     description: ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D.
 meta:
   hardware:
     ascend_910c: verified
+    ascend_950dt: verified
 strategy_hardware:
+  single_node_tp:
+    ascend_950dt: unsupported
   multi_node_tp_dp:
     ascend_910c: supported
+    # A5 mixed serving: 4 nodes, DP4 / TP8 / EP32.
+    ascend_950dt: supported
   multi_node_dep:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tep:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp_pp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   pd_cluster:
     ascend_910c: unsupported
+    # A5 target: P DP1/TP8/PP4/EP8; D DP4/TP8/EP32 (4 nodes per role).
+    # Role-specific PD command generation will be adapted separately.
+    ascend_950dt: supported
 strategy_min_gpus:
   ascend_910c: 64
+  ascend_950dt: 32
 features:
   spec_decoding:
     hardware_overrides:
@@ -69,3 +86,7 @@ features:
         args:
           - '--speculative-config'
           - '{"method":"dspark","model":"RedHatAI/Kimi-K3-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
+      ascend_950dt:
+        args:
+          - '--speculative-config'
+          - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","enforce_eager":true}'
