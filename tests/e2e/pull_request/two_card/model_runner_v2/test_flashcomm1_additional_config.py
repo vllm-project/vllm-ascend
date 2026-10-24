@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import os
+from math import isfinite
+
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
@@ -44,6 +47,26 @@ def test_flashcomm1_additional_config_tp2_eager(monkeypatch) -> None:
         additional_config={"enable_flashcomm1": True},
     ) as runner:
         outputs = runner.generate_greedy(PROMPTS, max_tokens=8)
+        single_request_outputs = runner.model.generate(
+            prompts=["用三句话解释张量并行。"],
+            sampling_params=SamplingParams(
+                max_tokens=8,
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                logprobs=20,
+                seed=1234,
+            ),
+        )
 
     assert outputs
     assert all(text for _, text in outputs)
+    # A one-token decode step on TP2 is rank-local size 1 as well as full batch
+    # size 1. The decoder must track the SP layout explicitly instead of
+    # inferring it from that ambiguous row count.
+    sequence = single_request_outputs[0].outputs[0]
+    assert sequence.token_ids
+    assert sequence.logprobs is not None
+    logprobs = [value.logprob for topk in sequence.logprobs for value in topk.values()]
+    assert logprobs
+    assert all(isfinite(value) for value in logprobs)
