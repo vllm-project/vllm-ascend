@@ -1157,7 +1157,7 @@ Common Issues Tip: If you encounter issues with PD separation deployment, please
 
 ### 5.3 Multi-Node PD Separation Deployment with Memcache KV Cache Pool
 
-This configuration extends the Atlas 800I A3 deployment in Section 5.2.1 with a
+This configuration extends the Atlas 800I A3 deployment in [Section 5.2.1](#521-a3-series-pd-separation-deployment) with a
 Memcache KV Cache Pool. `MooncakeConnectorV2` transfers KV cache from Prefill to
 Decode and supports the pipeline parallelism used on Prefill.
 `AscendStoreConnector` stores reusable KV cache in Memcache. Both connectors
@@ -1284,7 +1284,7 @@ python3 memcache_standalone.py
 For additional parameters and capacity constraints, refer to
 [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-Reuse `launch_online_dp.py` from Section 5.2.1. Set `MEMCACHE_INSTALL_PATH` to
+Reuse `launch_online_dp.py` from [Section 5.2.1](#521-a3-series-pd-separation-deployment). Set `MEMCACHE_INSTALL_PATH` to
 the `Location` reported by `pip show memcache_hybrid`, and set
 `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
 files above on all nodes.
