@@ -369,9 +369,27 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         num_replicated_tokens = get_pcp_num_replicated_tokens(
             attn_metadata.num_decode_tokens or 0, self.is_pcp_decode_sharded
         )
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-            (kv_no_split, cos, sin), slots, num_replicated_tokens
-        )
+        restore_indices = getattr(attn_metadata, "pcp_hidden_restore_indices", None)
+        if self.qk_rope_head_dim == 0 and restore_indices is not None:
+            # NoPE projects only the actual local tokens, while PCP slots keep
+            # the padded rank stride. Gather equal-width KV and restore the
+            # same global token order for both KV and its cache addresses.
+            pad_tokens = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad_tokens < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad_tokens:
+                kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, pad_tokens))
+            gathered_kv = get_pcp_group().all_gather(kv_no_split.contiguous(), dim=0)
+            kv_no_split = torch.index_select(gathered_kv, 0, restore_indices)
+            slots = torch.index_select(slots, 0, restore_indices)
+            if self.uses_packed_sfa_main_cache:
+                attn_metadata.pcp_cache_write_slots = slots
+        elif self.qk_rope_head_dim == 0:
+            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_replicated_tokens)
+        else:
+            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+                (kv_no_split, cos, sin), slots, num_replicated_tokens
+            )
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
