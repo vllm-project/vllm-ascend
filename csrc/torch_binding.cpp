@@ -34,6 +34,7 @@
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+#include "moe/moe_counts_cumsum/moe_counts_cumsum_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
@@ -2881,6 +2882,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &ascend_kernel::gmm_situ_quant_v2_nz_list);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+    ops.def("moe_counts_cumsum(Tensor counts) -> Tensor");
+    ops.impl("moe_counts_cumsum", torch::kPrivateUse1, &vllm_ascend::moe_counts_cumsum);
+    ops.impl("moe_counts_cumsum", torch::kMeta, &vllm_ascend::moe_counts_cumsum_meta);
+
     // Direct kernel custom ops
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);

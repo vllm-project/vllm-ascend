@@ -312,6 +312,9 @@ def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
     return fusion and dynamic_eplb and activation_name not in ("situ", "swigluoai_uninterleave") and enable_custom_op()
 
 
+_MOE_COUNTS_CUMSUM_MAX_EXPERTS = 4096
+
+
 def cumsum_group_list(
     group_list: torch.Tensor, src_list_type: int, dst_list_type: int, active_num: int = 0, expert_num: int = 0
 ) -> torch.Tensor:
@@ -321,6 +324,18 @@ def cumsum_group_list(
     if src_list_type == dst_list_type:
         return group_list
     if src_list_type == 1 and dst_list_type == 0:
+        # Counts are nonnegative and their prefix fits INT64. Avoid narrowing
+        # and keep the scan in the NPU stream alongside the grouped matmuls.
+        if (
+            group_list.device.type == "npu"
+            and group_list.dtype == torch.int64
+            and group_list.ndim == 1
+            and group_list.is_contiguous()
+            and 0 < group_list.numel() <= _MOE_COUNTS_CUMSUM_MAX_EXPERTS
+            and enable_custom_op()
+            and hasattr(torch.ops._C_ascend, "moe_counts_cumsum")
+        ):
+            return torch.ops._C_ascend.moe_counts_cumsum(group_list)
         return group_list.cumsum(dim=0)
     if src_list_type == 0 and dst_list_type == 1:
         group_diff = torch.diff(group_list)
