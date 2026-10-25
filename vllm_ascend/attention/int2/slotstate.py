@@ -54,6 +54,10 @@ class Int2SlotStateMixin:
     _r164_tdbuf: Any
     _r166_alloc: Any
     _r170_hp_mirror: Any
+    _r170_hpk: Any
+    _r170_hpv: Any
+    _r170_mseq: Any
+    _r171_hp_reg: Any
     _r196_idfill_memo: Any
     _r198_idx_cache: Any
     _r200_srcfree: Any
@@ -289,7 +293,7 @@ class Int2SlotStateMixin:
                         # rolling dump segment (one sync per 2048 writes —
                         # covers the FINAL leg's slot window too)
                         try:
-                            import torch.npu as _npr
+                            _npr = torch.npu  # torch_npu at module top registers the submodule
 
                             _npr.synchronize()
                             import json as _jr

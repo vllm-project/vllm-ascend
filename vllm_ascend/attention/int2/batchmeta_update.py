@@ -9,6 +9,7 @@ import os as _r144_ovl_os
 from typing import Any
 
 import torch
+import torch_npu  # noqa: F401 - registers torch.npu
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.int2.ctx import (  # noqa: F401
@@ -843,7 +844,7 @@ class Int2BatchMetaUpdateMixin:
             _tbN[0] += 1
             if _tb is not None and _tbN[0] % 128 == 24:
                 try:
-                    import torch.npu as _np166
+                    _np166 = torch.npu  # torch_npu at module top registers the submodule
 
                     _np166.synchronize()
                     _cpu = _tb.detach().to("cpu")
@@ -865,7 +866,7 @@ class Int2BatchMetaUpdateMixin:
             # S/R over the last window of steps.
             if _scb is not None and _tbN[0] % 8 == 4:
                 try:
-                    import torch.npu as _np199
+                    _np199 = torch.npu  # torch_npu at module top registers the submodule
 
                     _np199.synchronize()
                     import json as _j199
@@ -1137,7 +1138,7 @@ class Int2BatchMetaUpdateMixin:
                     # Restage events are rare (request-set / page-set
                     # changes; ~2 + row-page-crossings per generation), so
                     # the sync stall amortizes to <0.5ms/step.
-                    import torch.npu as _np198
+                    _np198 = torch.npu  # torch_npu at module top registers the submodule
 
                     _np198.synchronize()
                     _rs198 = True
@@ -1151,7 +1152,7 @@ class Int2BatchMetaUpdateMixin:
                         # stream-FIFO/event covers. The pre-restage sync only
                         # protects the PREVIOUS replay. This sync makes the
                         # carrier writes visible before the next launch.
-                        import torch.npu as _npPS
+                        _npPS = torch.npu  # torch_npu at module top registers the submodule
 
                         _npPS.synchronize()
                     if _os.environ.get("R198_DBG", "0") == "2" and globals().setdefault("_R198_POISON", [0])[0] == 1:
@@ -1547,7 +1548,7 @@ class Int2BatchMetaUpdateMixin:
                 _rids_changed = _rk != _raS["prev_rids"]
                 _raS["prev_rids"] = _rk
                 if _raS["n"] <= _firstk or _rids_changed or (_raS["n"] % 32) == 1:
-                    import torch.npu as _np167
+                    _np167 = torch.npu  # torch_npu at module top registers the submodule
 
                     _np167.synchronize()
                     _rec167 = {
@@ -1618,7 +1619,7 @@ class Int2BatchMetaUpdateMixin:
             try:
                 import json as _jtd
 
-                import torch.npu as _npu_td
+                _npu_td = torch.npu  # torch_npu at module top registers the submodule
 
                 _npu_td.synchronize()
                 _td = getattr(type(impl), "_r164_tdbuf", None)
@@ -1645,7 +1646,7 @@ class Int2BatchMetaUpdateMixin:
             try:
                 import json as _jpd
 
-                import torch.npu as _npd
+                _npd = torch.npu  # torch_npu at module top registers the submodule
 
                 _npd.synchronize()
                 _n = min(_R2XX_G["_R164_PASSN"][0], 4096)
@@ -1663,7 +1664,7 @@ class Int2BatchMetaUpdateMixin:
             try:
                 import json as _jw
 
-                import torch.npu as _npw
+                _npw = torch.npu  # torch_npu at module top registers the submodule
 
                 _npw.synchronize()
                 _n = min(_R2XX_G["_R164_WCHKN"][0], 8192)
