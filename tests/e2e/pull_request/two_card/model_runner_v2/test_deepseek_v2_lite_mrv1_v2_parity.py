@@ -138,7 +138,6 @@ def _measure(
         mp.setenv("VLLM_USE_V2_MODEL_RUNNER", model_runner)
         mp.setenv("OMP_NUM_THREADS", "1")
         mp.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        started = time.perf_counter()
         with (
             _NpuMemoryMonitor() as memory_monitor,
             VllmRunner(
@@ -151,6 +150,8 @@ def _measure(
                 gpu_memory_utilization=gpu_memory_utilization,
             ) as runner,
         ):
+            runner.generate(prompts[:1], SamplingParams(max_tokens=1, temperature=0.0))
+            started = time.perf_counter()
             greedy_outputs = runner.generate_w_logprobs(prompts, greedy)
             sampled_outputs = runner.generate(prompts, sampled)
             elapsed = time.perf_counter() - started
@@ -172,6 +173,7 @@ def _measure(
         "tensor_parallel_size": tensor_parallel_size,
         "expert_parallel": enable_expert_parallel,
         "gpu_memory_utilization": gpu_memory_utilization,
+        "timing_scope": "generation_after_warmup",
     }
 
 
