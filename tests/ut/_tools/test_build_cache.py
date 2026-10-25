@@ -435,6 +435,21 @@ def test_normalize_text_preserves_non_path_backslashes():
     assert engine._normalize_text(escaped_newline, []) != engine._normalize_text(slash_n, [])
 
 
+@pytest.mark.parametrize(
+    ("separator", "is_delimiter"),
+    [(chr(value), False) for value in range(0x1C, 0x20)]
+    + [(character, True) for character in " \t\n\r\v\f\u0085\u00a0\u1680\u2028\u2029\u202f\u205f\u3000"]
+    + [(chr(value), True) for value in range(0x2000, 0x200B)],
+)
+def test_normalize_text_preserves_unicode_whitespace_contract(tmp_path: Path, separator: str, is_delimiter: bool):
+    engine = _load_engine("build_cache_engine_unicode_whitespace_test")
+    root = tmp_path / "repo"
+    replacement = "<PATH_0>" if is_delimiter else str(root)
+
+    assert engine._normalize_text(f"{root}{separator}tail", [root]) == f"{replacement}{separator}tail"
+    assert engine._normalize_text(f"{separator}-I{root}/include", [root]) == f"{separator}-I{replacement}/include"
+
+
 def test_normalize_text_requires_a_path_component_boundary(tmp_path: Path):
     engine = _load_engine("build_cache_engine_path_boundary_test")
     root_a = tmp_path / "repo-a"

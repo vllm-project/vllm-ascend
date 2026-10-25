@@ -5,12 +5,14 @@ from unittest.mock import MagicMock, call
 
 import pytest
 import torch
+import torch_npu
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
     TorchDistGlooStagedEplbCommunicator,
 )
 
-from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.eplb_communicator import AscendGlooEplbCommunicator
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
 @pytest.fixture
@@ -36,9 +38,9 @@ def test_execute_uses_group_local_peer_ranks(communicator, monkeypatch):
         MagicMock(side_effect=staging_tensors),
     )
     p2p_op = MagicMock(side_effect=lambda *args, **kwargs: (args, kwargs))
-    monkeypatch.setattr("vllm_ascend.distributed.eplb.communicator.P2POp", p2p_op)
+    monkeypatch.setattr("vllm_ascend.distributed.eplb.eplb_communicator.P2POp", p2p_op)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        "vllm_ascend.distributed.eplb.eplb_communicator.batch_isend_irecv",
         lambda _ops: [],
     )
     current_stream = MagicMock()
@@ -73,11 +75,11 @@ def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, m
     communicator._ops.append(("send", tensor, 0))
     monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: tensor)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.P2POp",
+        "vllm_ascend.distributed.eplb.eplb_communicator.P2POp",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.eplb.communicator.batch_isend_irecv",
+        "vllm_ascend.distributed.eplb.eplb_communicator.batch_isend_irecv",
         lambda _ops: [],
     )
     current_stream = MagicMock()
@@ -86,3 +88,42 @@ def test_execute_uses_current_device_stream_when_stream_is_unset(communicator, m
     communicator.execute()
 
     current_stream.synchronize.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "device_type,npu_format",
+    [("cpu", ACL_FORMAT_FRACTAL_ND), ("npu", ACL_FORMAT_FRACTAL_ND), ("npu", ACL_FORMAT_FRACTAL_NZ)],
+)
+def test_execute_converts_nz_receives_on_device(communicator, monkeypatch, device_type, npu_format):
+    recv_tensor = MagicMock()
+    recv_tensor.device.type = device_type
+    staging_tensor = MagicMock()
+    nz_tensor = MagicMock()
+    communicator._ops.append(("recv", recv_tensor, 0))
+    monkeypatch.setattr(communicator, "_acquire_staging_buffer", lambda *_args: staging_tensor)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.eplb_communicator.P2POp",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.eplb.eplb_communicator.batch_isend_irecv",
+        lambda _ops: [],
+    )
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock())
+    get_format = MagicMock(return_value=npu_format)
+    format_cast = MagicMock(return_value=nz_tensor)
+    monkeypatch.setattr(torch_npu, "get_npu_format", get_format, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_format_cast", format_cast)
+
+    communicator.execute()
+
+    if device_type == "npu" and npu_format == ACL_FORMAT_FRACTAL_NZ:
+        staging_tensor.to.assert_called_once_with(recv_tensor.device, non_blocking=True)
+        format_cast.assert_called_once_with(staging_tensor.to.return_value, ACL_FORMAT_FRACTAL_NZ)
+        recv_tensor.copy_.assert_called_once_with(nz_tensor, non_blocking=True)
+    else:
+        staging_tensor.to.assert_not_called()
+        format_cast.assert_not_called()
+        recv_tensor.copy_.assert_called_once_with(staging_tensor, non_blocking=True)
+    if device_type == "cpu":
+        get_format.assert_not_called()

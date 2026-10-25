@@ -1796,7 +1796,7 @@ ge::graphStatus TilingForQuantLightningIndexerV2(gert::TilingContext *context)
 }
 
 // --------------------------Tiling及函数TilingPrepare函数注册--------
-IMPL_OP_OPTILING(QuantLightningIndexerV2)
+IMPL_OP_OPTILING(VllmAscendQuantLightningIndexerV2)
     .Tiling(TilingForQuantLightningIndexerV2)
     .TilingParse<QLIV2CompileInfo>(TilingPrepareForQuantLightningIndexerV2);
 

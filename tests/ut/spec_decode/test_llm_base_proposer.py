@@ -26,7 +26,7 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import (
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
 )
@@ -130,7 +130,7 @@ def test_eager_propose_aligns_block_table_to_draft_batch(target_use_mla, draft_u
 
     proposer.build_draft_attn_metadata = check_metadata
     with (
-        patch("vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES", (object,)),
         pytest.raises(MetadataChecked),
     ):
         proposer._propose(
@@ -290,14 +290,14 @@ def test_load_model_reads_validated_draft_window_size():
     draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
 
     with (
-        patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
         patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
+            "vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
             side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
-        patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
-        patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
-        patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
+        patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
     ):
         mock_pp_group.return_value.is_last_rank = True
         mock_get_ascend_config.return_value.draft_window_size = 4096
@@ -345,7 +345,7 @@ def test_load_model_aligns_draft_after_sharing_before_precomputing_hidden_states
     draft_layer = MagicMock()
     draft_layer.get_kv_cache_spec.return_value = object()
     draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
-    module = "vllm_ascend.spec_decode.llm_base_proposer"
+    module = "vllm_ascend.worker.v1.spec_decode.llm_base_proposer"
     with (
         patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
         patch(
@@ -544,7 +544,94 @@ class TestDraftEmbedMmSupport:
         def embed_input_ids(input_ids, multimodal_embeddings=None):
             return input_ids
 
-        with patch("vllm_ascend.spec_decode.llm_base_proposer._inspect") as fake_inspect:
+        with patch("vllm_ascend.worker.v1.spec_decode.llm_base_proposer._inspect") as fake_inspect:
             fake_inspect.signature.side_effect = error
 
             assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+
+@pytest.mark.parametrize(
+    "dcp_size,draft_index,parallel_drafting,normalize",
+    [
+        (1, 1, False, False),
+        (2, 0, False, False),
+        (2, 1, False, True),
+        (2, 2, False, True),
+        (2, 1, True, False),
+    ],
+)
+def test_dcp_draft_capture_query_layout(dcp_size, draft_index, parallel_drafting, normalize):
+    from vllm_ascend.attention.context_parallel.common_cp import use_history_current_split_decode
+
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.dcp_size = dcp_size
+    proposer.parallel_drafting = parallel_drafting
+    proposer.draft_model_config = SimpleNamespace(use_mla=False)
+    proposer.query_start_loc_group = [torch.zeros(9, dtype=torch.int32) for _ in range(3)]
+    proposer.seq_lens_group = [torch.tensor([32, 48, 0, 0, 0, 0, 0, 0], dtype=torch.int32) for _ in range(3)]
+    device_buffer = proposer.query_start_loc_group[draft_index][:3]
+    device_buffer.copy_(torch.tensor([0, 4, 8], dtype=torch.int32))
+    cpu_buffer = device_buffer.clone()
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        num_input_tokens=8,
+        max_query_len=4,
+        query_start_loc_cpu=cpu_buffer,
+        query_start_loc=device_buffer,
+        seq_lens_cpu=torch.tensor([32, 48]),
+        _seq_lens_cpu=torch.tensor([32, 48]),
+    )
+    proposer._prepare_dcp_draft_dummy_metadata(common, draft_index)
+
+    assert common.query_start_loc.data_ptr() == device_buffer.data_ptr()
+    assert cpu_buffer.tolist() == [0, 4, 8]
+    expected = list(range(9)) if normalize else [0, 4, 8]
+    assert common.num_reqs == (8 if normalize else 2)
+    if normalize:
+        assert common.seq_lens.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+        assert common.seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+        assert common._seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+    assert common.query_start_loc.tolist() == expected
+    assert common.query_start_loc_cpu.tolist() == expected
+    assert common.num_actual_tokens == (2 if normalize else 8)
+    assert common.num_input_tokens == 8
+    assert common.max_query_len == (1 if normalize else 4)
+    if normalize:
+        proposer._prepare_dcp_draft_dummy_metadata(common, 2)
+        assert common.num_reqs == 8
+        assert common.num_actual_tokens == 2
+        assert common.query_start_loc.tolist() == list(range(9))
+        assert common.seq_lens_cpu.tolist() == [32, 48, 0, 0, 0, 0, 0, 0]
+    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=expected[1:]))
+    assert use_history_current_split_decode(metadata, is_draft_model=True) == (not normalize)
+
+
+@pytest.mark.parametrize("draft_index", [1, 2])
+def test_mla_dcp_draft_dummy_metadata_preserves_existing_layout(draft_index):
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.dcp_size = 2
+    proposer.parallel_drafting = False
+    proposer.draft_model_config = SimpleNamespace(use_mla=True)
+    query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
+    seq_lens = torch.tensor([32, 48], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        num_input_tokens=8,
+        max_query_len=4,
+        query_start_loc_cpu=query_start_loc.clone(),
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.clone(),
+        _seq_lens_cpu=seq_lens.clone(),
+        seq_lens_cpu_upper_bound=seq_lens.clone(),
+        num_computed_tokens_cpu=torch.tensor([28, 44], dtype=torch.int32),
+    )
+    before = vars(common).copy()
+    tensor_values = {key: value.clone() for key, value in before.items() if isinstance(value, torch.Tensor)}
+    proposer._prepare_dcp_draft_dummy_metadata(common, draft_index)
+    for key, value in before.items():
+        assert getattr(common, key) is value
+    for key, value in tensor_values.items():
+        torch.testing.assert_close(getattr(common, key), value)

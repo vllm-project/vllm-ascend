@@ -26,6 +26,7 @@ from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
+from vllm.forward_context import is_forward_context_available
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -180,6 +181,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         nn.Module.__init__(self)
         self.disable_tp = disable_tp
         self.embedding_tp_capacity: int | None = None
+        self._embedding_num_tokens_padded: int | None = None
 
         plan = _resolve_vocab_parallel_plan(
             prefix=prefix,
@@ -263,6 +265,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         self.update_param_tp_status()
 
+    def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
+        """Publish the padded batch length for lookup outside model forward."""
+        # Empty batches still use a nonzero collective size; output rows are
+        # cropped to the caller's actual input length after communication.
+        self._embedding_num_tokens_padded = max(1, num_tokens_padded)
+
     def _mask_input_for_vocab_range(
         self,
         input_: torch.Tensor,
@@ -324,50 +332,36 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         num_tokens = input_.shape[0]
         exchange_group = self.token_exchange_group
         assert exchange_group is not None
-        exchange_group_size = exchange_group.world_size
 
         # The scheduler's token limit covers the static buffers for both
         # prefill and decode.
         capacity = self.embedding_tp_capacity
         assert capacity is not None
-        if num_tokens > capacity:
-            raise ValueError(
-                f"embedding_tp static capacity {capacity} < num_tokens {num_tokens}; increase max_num_batched_tokens."
-            )
-
-        # Lazy init on first call (profiling run, which precedes ACL graph
-        # capture). Static buffers keep a stable device address across all
-        # later capture/replay cycles — graph replay requires the same
-        # address that was recorded at capture (the group helpers allocate new
-        # collective outputs per call, which would desync the HCCL operator
-        # recorded at capture).
-        # Mirrors the OTP v13 fix in dsa_v1.py:_forward_o_proj.
-        if not hasattr(self, "_embed_ag_in_buf"):
-            device = input_.device
-            # all_gather buffers carry token IDs (int64).
-            self._embed_ag_in_buf = torch.zeros((capacity,), dtype=input_.dtype, device=device)
-            self._embed_ag_out_buf = torch.empty((exchange_group_size * capacity,), dtype=input_.dtype, device=device)
-            # reduce_scatter buffers carry bf16 embeddings.
-            self._embed_rs_in_buf = torch.empty(
-                (exchange_group_size * capacity, self.embedding_dim), dtype=self.params_dtype, device=device
-            )
-            self._embed_rs_out_buf = torch.empty((capacity, self.embedding_dim), dtype=self.params_dtype, device=device)
-
-        # PCP ranks have the same local token count. Fine-grained Embedding TP
-        # keeps the fixed capacity so all DP ranks exchange the same span.
         exchange_tokens = capacity
+        # PCP ranks share one batch's padded length. Fine-grained embedding
+        # TP spans DP ranks with independent batches, so it uses the capacity.
         if self.parallel_mode == VocabParallelMode.PCP_X_TP:
-            exchange_tokens = num_tokens
-        all_gather_input = self._embed_ag_in_buf[:exchange_tokens]
-        if exchange_tokens > num_tokens:
-            all_gather_input.zero_()
-        all_gather_input[:num_tokens].copy_(input_)
-        all_gather_output = self._embed_ag_out_buf[: exchange_group_size * exchange_tokens]
-        dist.all_gather_into_tensor(
-            all_gather_output,
-            all_gather_input,
-            group=exchange_group.device_group,
-        )
+            if is_forward_context_available():
+                # Text forward and dummy/profile/capture inputs already include
+                # the common PCP padding or graph bucket. Their shape gives the
+                # current communication length without reading saved MM state.
+                exchange_tokens = num_tokens
+            else:
+                # MRV2 MM preparation runs before ForwardContext and passes only
+                # valid local rows. For example, ranks with 98 and 130 rows must
+                # both exchange 130 rows, using the length published by the runner.
+                # Without a published length, keep the common capacity fallback.
+                num_tokens_padded = self._embedding_num_tokens_padded
+                if num_tokens_padded is not None:
+                    exchange_tokens = num_tokens_padded
+        if num_tokens > exchange_tokens or exchange_tokens > capacity:
+            raise ValueError(
+                f"embedding exchange span {exchange_tokens} must cover {num_tokens} tokens "
+                f"and fit the static capacity {capacity}."
+            )
+
+        all_gather_input = torch.nn.functional.pad(input_, (0, exchange_tokens - num_tokens))
+        all_gather_output = exchange_group.all_gather(all_gather_input, dim=0)
 
         # Out-of-vocabulary rows are masked below. The DP exchange padding and
         # PCP rank-local padding both use token ID 0, which is a valid token.
@@ -379,22 +373,13 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_start_index,
             self.shard_indices.added_vocab_end_index,
         )
-        # Embedding lookup is a local op (F.embedding); its fresh allocation
-        # does not affect ACL graph replay. Copy into the static reduce_scatter input
-        # buffer so reduce_scatter reads from a stable address.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
-        reduce_scatter_input = self._embed_rs_in_buf[: exchange_group_size * exchange_tokens]
-        reduce_scatter_input.copy_(output_parallel)
-        reduce_scatter_input.masked_fill_(input_mask.unsqueeze(-1), 0)
-        reduce_scatter_output = self._embed_rs_out_buf[:exchange_tokens]
-        dist.reduce_scatter_tensor(
-            reduce_scatter_output,
-            reduce_scatter_input,
-            group=exchange_group.device_group,
-        )
+        output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        reduce_scatter_output = exchange_group.reduce_scatter(output_parallel, dim=0)
 
-        # Strip exchange padding and preserve the original return shape.
-        output = reduce_scatter_output[:num_tokens].view(num_tokens, -1)
+        # Preserve the caller's row count. In MM preparation this removes
+        # exchange padding so embeddings match the unpadded is_multimodal mask.
+        output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
             # PCP reduce-scatter reconstructs the TP-local contribution. This

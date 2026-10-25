@@ -46,10 +46,11 @@ from vllm.config.cache import CacheConfig
 from vllm.logger import logger
 
 # The upstream Literal that gates ``cache_dtype``. We widen it to also accept
-# ``"int8"`` (DeepSeek V4 Ascend MLA KV cache dtype). Keep the existing
-# members verbatim so non-int8 behavior is unchanged.
+# ``"int8"`` (DeepSeek V4 Ascend MLA KV cache dtype) and ``"mxfp8"`` (C8-MXFP
+# KV cache on the QFA path). Keep the existing members verbatim so other
+# behavior is unchanged.
 _ORIG_CACHE_DTYPE = _cache_mod.CacheDType
-_CACHE_DTYPE_WITH_INT8 = typing.Literal[
+_CACHE_DTYPE_WITH_ASCEND = typing.Literal[
     "auto",
     "float16",
     "bfloat16",
@@ -68,11 +69,12 @@ _CACHE_DTYPE_WITH_INT8 = typing.Literal[
     "nvfp4",
     "nvfp4_4over6",
     "int8",
+    "mxfp8",
 ]
 
 
 def _apply_kv_cache_dtype_int8_patch() -> None:
-    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"``.
+    """Widen ``CacheConfig.cache_dtype`` to accept ``"int8"`` and ``"mxfp8"``.
 
     A pydantic dataclass caches its core schema / validator at class-build
     time from the field annotations. Mutating the annotation alone is not
@@ -96,12 +98,12 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     """
     # Idempotency: if int8 is already accepted, nothing to do.
     existing_args = getattr(_ORIG_CACHE_DTYPE, "__args__", ())
-    if "int8" in existing_args:
+    if "int8" in existing_args and "mxfp8" in existing_args:
         return
 
-    _cache_mod.CacheDType = _CACHE_DTYPE_WITH_INT8
-    CacheConfig.__annotations__["cache_dtype"] = _CACHE_DTYPE_WITH_INT8
-    CacheConfig.__dataclass_fields__["cache_dtype"].type = _CACHE_DTYPE_WITH_INT8
+    _cache_mod.CacheDType = _CACHE_DTYPE_WITH_ASCEND
+    CacheConfig.__annotations__["cache_dtype"] = _CACHE_DTYPE_WITH_ASCEND
+    CacheConfig.__dataclass_fields__["cache_dtype"].type = _CACHE_DTYPE_WITH_ASCEND
 
     # Rebuild the pydantic dataclass schema so the new Literal is enforced.
     # ``_parent_namespace_depth=1`` makes pydantic resolve types against this
@@ -112,7 +114,7 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
         raise_errors=True,
         _parent_namespace_depth=1,
     )
-    logger.info("Patched CacheConfig.cache_dtype to accept 'int8' (DeepSeek V4 Ascend MLA KV cache dtype).")
+    logger.info("Patched CacheConfig.cache_dtype to accept 'int8' and 'mxfp8' (Ascend KV cache dtypes).")
 
 
 _apply_kv_cache_dtype_int8_patch()

@@ -85,7 +85,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
         "chunk_fwd_o_vllm"
-        "chunk_gated_delta_rule_fwd_h"
+        "chunk_gated_delta_rule_fwd_h_vllm"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
@@ -96,17 +96,17 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"
-        "kv_quant_sparse_flash_attention"
+        "kv_quant_sparse_flash_attention_vllm"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
-        "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
@@ -124,16 +124,14 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
         "chunk_fwd_o_vllm"
-        "kda_gate_cumsum"
+        "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
+        "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
     )
 
@@ -146,10 +144,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"
-        "kv_quant_sparse_flash_attention"
+        "kv_quant_sparse_flash_attention_vllm"
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
@@ -159,7 +158,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
-        "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
@@ -176,17 +174,16 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
+        "attn_res_fwd"
         "chunk_fwd_o_vllm"
-        "kda_gate_cumsum"
+        "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "sparse_attention_score"
         "k2q_csr"
-        "msa_index_score"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
+        "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -198,17 +195,19 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "sparse_flash_attention"
+        "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
-        "kv_compress_epilog"
+        "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
         "kv_quant_sparse_attn_sharedkv"
-        "kv_quant_sparse_flash_attention"
+        "kv_quant_sparse_flash_attention_vllm"
         "kv_quant_sparse_attn_sharedkv_metadata"
         "hc_post"
         "hc_pre"
@@ -216,15 +215,12 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "situ_mx_quant"
         "grouped_matmul_situ_quant"
         "indexer_compress_epilog_v2"
+        "attn_res_fwd"
         "chunk_fwd_o_vllm"
-        "kda_gate_cumsum"
+        "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "store_kv_block"
-        "store_kv_block_metadata"
         "k2q_csr"
         "sparse_attention_score"
-        "mla_prolog_v3_k3"
-        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

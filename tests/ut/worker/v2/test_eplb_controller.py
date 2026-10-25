@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
@@ -17,9 +18,12 @@ class TestAscendEPLBController(unittest.TestCase):
     def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=enable_eplb,
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
                 policy=policy,
+                communicator="torch_gloo",
             ),
         )
         controller = AscendEPLBController(
@@ -67,6 +71,50 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.set_batch_phase(batch_has_prefill=False)
         self.assertFalse(controller._load_collection_phase_matched)
+
+    def test_draft_eplb_controls_registration_without_disabling_target(self):
+        for enabled in (True, False):
+            with self.subTest(draft_eplb=enabled):
+                controller = self._make_controller()
+                controller.parallel_config.enable_elastic_ep = False
+                controller._has_registered_models = False
+                controller.state = MagicMock()
+                speculator = SimpleNamespace(
+                    vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=enabled)),
+                    model=nn.Linear(2, 2),
+                    set_eplb_state=MagicMock(),
+                )
+                draft_config = SimpleNamespace(model="draft")
+                with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=speculator.model):
+                    added = controller.maybe_register_speculator(
+                        speculator, SimpleNamespace(draft_model_config=draft_config), False
+                    )
+                self.assertEqual(added, enabled)
+                self.assertEqual(controller._has_registered_models, enabled)
+                if enabled:
+                    if vllm_version_is("0.31.0"):
+                        controller.state.add_model.assert_called_once_with(speculator.model, draft_config)
+                    else:
+                        # vLLM main names the draft entry for the EPLB step log.
+                        controller.state.add_model.assert_called_once_with(
+                            speculator.model, draft_config, model_name="draft (draft)"
+                        )
+                    speculator.set_eplb_state.assert_called_once_with(controller.state)
+                else:
+                    controller.state.add_model.assert_not_called()
+                    speculator.set_eplb_state.assert_not_called()
+
+                    target = nn.Linear(2, 2)
+                    model_config = SimpleNamespace(model="target")
+                    with patch("vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model", return_value=target):
+                        if vllm_version_is("0.31.0"):
+                            added = controller.maybe_register_model(target, model_config, False)
+                        else:
+                            added = controller.maybe_register_model(target, model_config)
+                    controller.state.add_model.assert_called_once_with(target, model_config)
+                    self.assertTrue(added)
+                    controller.maybe_start_async_loop(added)
+                    controller.state.start_async_loop.assert_called_once()
 
     def test_step_early_return_conditions(self):
         for condition in (
@@ -165,6 +213,7 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertFalse(state.should_record_tensor.item())
         self.assertFalse(state._has_fresh_recorded_load)
 
+    @unittest.skipUnless(vllm_version_is("0.31.0"), "release constructs the mapping state")
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
         controller = self._make_controller()
         model = nn.Linear(2, 2)
@@ -206,6 +255,7 @@ class TestAscendEPLBController(unittest.TestCase):
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
+    @unittest.skipUnless(vllm_version_is("0.31.0"), "release constructs the mapping state")
     def test_setup_from_mapping_rejects_non_moe_model(self):
         controller = self._make_controller()
         model = nn.Linear(2, 2)
@@ -227,6 +277,19 @@ class TestAscendEPLBController(unittest.TestCase):
                 expanded_physical_to_logical=torch.tensor([0]),
                 old_num_physical_experts=1,
             )
+
+    @unittest.skipIf(vllm_version_is("0.31.0"), "verified main updates the live state")
+    def test_setup_from_mapping_preserves_live_state_and_communicator(self):
+        controller = self._make_controller()
+        state = MagicMock()
+        controller.state = state
+        model_config = SimpleNamespace()
+        mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
+        self.assertIs(controller.state, state)
 
 
 class TestUnwrapMoe(unittest.TestCase):

@@ -228,30 +228,20 @@ def test_prepare_legacy_dcp_metadata_uses_full_query_kv_length(prefill_flags) ->
 
 
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-def test_generate_mtp_attention_mask_for_decode(dcp_rank: int) -> None:
-    manager = _make_dcp_manager(
-        dcp_world_size=2,
-        dcp_rank=dcp_rank,
-        interleave_size=1,
+def test_generate_dcp_metadata_does_not_allocate_heterogeneous_mask(dcp_rank: int) -> None:
+    manager = _make_dcp_manager(2, dcp_rank, 1)
+    manager.num_reqs = 2
+    manager.num_decode_reqs = 2
+    manager.query_lens_full = SimpleNamespace(cpu=torch.tensor([4, 2], dtype=torch.int32))
+    batch = SimpleNamespace(num_computed_tokens_cpu=np.array([5, 10], dtype=np.int32))
+    block_table = torch.zeros((2, 1), dtype=torch.int32)
+    metadata, actual_table = manager.generate_dcp_metadata(
+        6, torch.tensor([4, 2]), batch, np.array([4, 2], dtype=np.int32), block_table, 2, 2
     )
-    history_len = 5
-    num_scheduled = 4
-
-    actual = manager.generate_mtp_attention_mask_for_decode(
-        decode_num_computed_tokens=[history_len],
-        decode_num_scheduled_tokens=np.array([num_scheduled], dtype=np.int32),
-    )
-
-    total_len = history_len + num_scheduled
-    local_k_len = (total_len + 1 - dcp_rank) // 2
-    positions = torch.arange(history_len, history_len + num_scheduled)
-    local_visible = (positions + 1 + 1 - dcp_rank) // 2
-    expected = torch.arange(local_k_len)[None, :] >= local_visible[:, None]
-
-    assert torch.equal(
-        actual[0, :num_scheduled, :local_k_len],
-        expected,
-    )
+    assert metadata.dcp_mtp_attn_mask is None
+    manager.dcp_mtp_attn_mask.copy_to_gpu.assert_not_called()
+    np.testing.assert_array_equal(metadata.num_computed_tokens_of_dcp, [[5, 4], [6, 6]])
+    assert actual_table is block_table
 
 
 def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
@@ -280,25 +270,21 @@ def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
     manager.query_start_loc_full.copy_to_gpu.assert_called_once_with()
 
 
-def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
+def test_update_spec_decode_drafting_metadata_requires_gqa_decode() -> None:
     manager = object.__new__(DCPManager)
-    manager.dcp_world_rank = 0
-    manager._get_dcp_local_seq_lens = MagicMock(return_value=torch.tensor([[4, 3]], dtype=torch.int32))
-    attn_metadata = MagicMock()
-    attn_metadata.decode_meta = None
+    attn_metadata = SimpleNamespace(decode=None)
 
     with (
         patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
         patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
+        pytest.raises(AssertionError, match="must be classified as decode"),
     ):
         manager.update_spec_decode_drafting_cp_metadata(
             attn_metadata=attn_metadata,
             kv_cache_spec=object(),
             seq_lens=torch.tensor([3]),
-            draft_index=0,
+            draft_index=1,
         )
-
-    assert attn_metadata.decode_meta is None
 
 
 def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
@@ -323,9 +309,6 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
         manager.prepare_spec_decode_drafting_cp_metadata(
             common_attn_metadata=common_attn_metadata,
             kv_cache_spec=object(),
-            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
-            seq_lens_cpu=torch.tensor([6, 10], dtype=torch.int32),
-            draft_index=1,
         )
 
     # The common global lengths have already advanced; do not add another step.
@@ -362,8 +345,6 @@ def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
     attn_metadata = SimpleNamespace(
         dcp_context=SimpleNamespace(seq_lens=dcp_seq_lens),
     )
-    seq_lens_cpu = torch.tensor([6, 10], dtype=torch.int32)
-
     with (
         patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
         patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=True),
@@ -372,7 +353,6 @@ def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
             attn_metadata=attn_metadata,
             kv_cache_spec=object(),
             seq_lens=torch.tensor([7, 11], dtype=torch.int32),
-            seq_lens_cpu=seq_lens_cpu,
             draft_index=1,
             attn_metadata_builder=object(),
         )

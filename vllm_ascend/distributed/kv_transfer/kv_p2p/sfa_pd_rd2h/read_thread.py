@@ -17,7 +17,18 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
+    DSparkContextDescriptor,
+    DSparkContextReceiver,
+    DSparkContextSubmission,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
+    DraftKVCacheMetadata,
+    build_draft_kv_read_batches,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+    DSPARK_DRAFT_KV,
+    DSPARK_DRAFT_KV_ACK,
     MF_META,
     MF_META_ACK,
     READ_DONE,
@@ -25,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     READ_READY_BATCH,
     SFAPD_PROTOCOL_VERSION,
     CopySfaTailDest,
+    DSparkDraftKVStatus,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -52,6 +64,9 @@ class ConsumerReadState:
     topk_row_tokens: int = 0
     topk_hot_tokens: int = 0
     block_size: int = 128
+    dspark_context_receiver: DSparkContextReceiver | None = None
+    dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = field(default_factory=dict)
+    dspark_draft_blocks_by_req: dict[str, dict[int, tuple[int, ...]]] = field(default_factory=dict)
 
 
 def _coalesce_desc(
@@ -121,6 +136,9 @@ class MembPullReadThread(threading.Thread):
         self._host = get_ip()
         self._stop_event = threading.Event()
         self.startup_error: BaseException | None = None
+
+    def bind_dspark_context_receiver(self, receiver: DSparkContextReceiver) -> None:
+        self._state.dspark_context_receiver = receiver
 
     def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
         """Accumulate a contributor's last-layer arrival."""
@@ -239,6 +257,9 @@ class MembPullReadThread(threading.Thread):
                         else:
                             sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))))
 
+                    elif msg_type == DSPARK_DRAFT_KV:
+                        self._handle_dspark_draft_kv(identity, msg, sock, encoder)
+
                     elif msg_type == READ_READY_BATCH:
                         layer_idx = msg[1]
                         layer_name = msg[2]
@@ -332,6 +353,146 @@ class MembPullReadThread(threading.Thread):
             if sock is not None:
                 sock.close(linger=0)
             ctx.destroy(linger=0)
+
+    def _handle_dspark_draft_kv(self, identity, msg, sock, encoder) -> None:
+        """Pull P-computed draft cache pages directly into D's resident pages."""
+        request_id = generation = ""
+        receiver = self._state.dspark_context_receiver
+        descriptor = None
+        reserved = False
+        status = DSparkDraftKVStatus.FAILED
+        try:
+            if len(msg) != 8:
+                raise ValueError(f"DSpark draft-KV message must contain 7 fields, got {len(msg) - 1}")
+            (
+                _,
+                request_id,
+                generation,
+                prompt_tokens,
+                aux_layer_ids,
+                hidden_size,
+                remote_metadata,
+                source_blocks_by_group,
+            ) = msg
+            request_id = str(request_id)
+            generation = str(generation)
+            descriptor = DSparkContextDescriptor(
+                request_id=request_id,
+                generation=generation,
+                prompt_tokens=int(prompt_tokens),
+                aux_layer_ids=tuple(int(layer_id) for layer_id in aux_layer_ids),
+                hidden_size=int(hidden_size),
+            )
+            p_session = self._p_sessions.get(identity)
+            if p_session is None:
+                raise RuntimeError("DSpark draft KV arrived before this P connection completed MF_META")
+            pp_rank, pp_size = self._p_pp_topology[identity]
+            if pp_rank != pp_size - 1:
+                raise RuntimeError("DSpark draft KV must come from the final Prefill PP stage")
+            if receiver is None:
+                status = DSparkDraftKVStatus.BACKPRESSURE
+            else:
+                admission, reserved = receiver.begin_direct_transfer(descriptor)
+                if admission is DSparkContextSubmission.BACKPRESSURE:
+                    status = DSparkDraftKVStatus.BACKPRESSURE
+                elif admission is DSparkContextSubmission.STALE:
+                    status = DSparkDraftKVStatus.STALE
+                elif not reserved:
+                    # A previous acknowledgement may have been lost; the full
+                    # copy already completed, so the retry is safe to accept.
+                    status = DSparkDraftKVStatus.ACCEPTED
+                else:
+                    remote = self._decode_draft_kv_metadata(remote_metadata)
+                    local = self._state.dspark_draft_kv_metadata
+                    if not local or set(remote) != set(local):
+                        raise ValueError("P/D DSpark draft KV layer names do not match")
+                    source_by_group = {
+                        int(group): tuple(map(int, blocks)) for group, blocks in source_blocks_by_group.items()
+                    }
+                    dest_by_group = self._state.dspark_draft_blocks_by_req.get(request_id)
+                    if dest_by_group is None:
+                        raise RuntimeError("D draft block table was missing after DSpark admission")
+                    expected_source_groups = {item.group_id for item in remote.values()}
+                    expected_dest_groups = {item.group_id for item in local.values()}
+                    if set(source_by_group) != expected_source_groups:
+                        raise ValueError("P DSpark draft block tables do not cover its source cache groups")
+                    if set(dest_by_group) != expected_dest_groups:
+                        raise ValueError("D DSpark draft block tables do not cover its destination cache groups")
+                    source_by_layer = {name: source_by_group[item.group_id] for name, item in remote.items()}
+                    for peer_ptrs, local_ptrs, lengths in build_draft_kv_read_batches(
+                        remote,
+                        local,
+                        source_by_layer,
+                        dest_by_group,
+                        descriptor.prompt_tokens,
+                    ):
+                        ret = self.engine.batch_transfer_sync_read(
+                            p_session,
+                            local_ptrs,
+                            peer_ptrs,
+                            lengths,
+                        )
+                        if ret != 0:
+                            raise RuntimeError(f"MemFabric DSpark draft KV read failed, ret={ret}")
+                    receiver.finish_direct_transfer(descriptor, success=True)
+                    reserved = False
+                    status = DSparkDraftKVStatus.ACCEPTED
+        except Exception as error:
+            status = DSparkDraftKVStatus.FAILED
+            if descriptor is not None and reserved and receiver is not None:
+                try:
+                    receiver.finish_direct_transfer(descriptor, success=False)
+                except Exception:
+                    logger.exception("Could not quarantine failed DSpark draft KV allocation")
+            if request_id:
+                with self._lock:
+                    self._failed_requests.add(request_id)
+            logger.error(
+                "MembPull DSpark draft KV read failed: req=%s generation=%s: %s",
+                request_id,
+                generation,
+                error,
+            )
+        if request_id and generation:
+            sock.send_multipart(
+                (
+                    identity,
+                    b"",
+                    encoder.encode((DSPARK_DRAFT_KV_ACK, request_id, generation, status.value)),
+                )
+            )
+
+    @staticmethod
+    def _decode_draft_kv_metadata(raw: Any) -> dict[str, DraftKVCacheMetadata]:
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError("P did not provide DSpark draft KV component metadata")
+        result = {}
+        required = {
+            "group_id",
+            "block_size",
+            "num_blocks",
+            "base_addrs",
+            "block_strides",
+            "block_lens",
+            "block_scales",
+            "shapes",
+            "dtypes",
+        }
+        for name, fields in raw.items():
+            if not isinstance(name, str) or not isinstance(fields, dict) or set(fields) != required:
+                raise ValueError("P DSpark draft KV component metadata has an invalid schema")
+            result[name] = DraftKVCacheMetadata(
+                group_id=int(fields["group_id"]),
+                block_size=int(fields["block_size"]),
+                num_blocks=int(fields["num_blocks"]),
+                base_addrs=tuple(map(int, fields["base_addrs"])),
+                block_strides=tuple(map(int, fields["block_strides"])),
+                block_lens=tuple(map(int, fields["block_lens"])),
+                block_scales=tuple(map(int, fields["block_scales"])),
+                shapes=tuple(tuple(map(int, shape)) for shape in fields["shapes"]),
+                dtypes=tuple(map(str, fields["dtypes"])),
+            )
+        return result
 
     def stop(self, timeout: float = THREAD_SHUTDOWN_TIMEOUT_SECONDS) -> None:
         self._stop_event.set()

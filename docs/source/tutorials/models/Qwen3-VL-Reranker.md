@@ -41,7 +41,6 @@ Select an image based on your machine type and start the docker image on your no
         --shm-size=1g \
         --device /dev/davinci0 \
         --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
         -v /usr/local/dcmi:/usr/local/dcmi \
         -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \

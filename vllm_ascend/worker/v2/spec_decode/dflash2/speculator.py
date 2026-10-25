@@ -118,6 +118,10 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     aclgraph capture, which captures ``self._generate_draft``.
     """
 
+    # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
+    # outside sample_draft; reject lmhead TP at construction (as DSpark).
+    _lmhead_tp_sample_draft_supported = False
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # V2 passes the runner's cudagraph mode to the draft speculator
         # without consulting the spec-level enforce_eager. Honor it here:

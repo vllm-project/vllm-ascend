@@ -19,6 +19,7 @@ from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore
 if TYPE_CHECKING:
     from vllm_ascend.attention.indexer_kpool import (
         AscendIndexerKPoolMetadata,
+        AscendIndexerKPoolQueryMetadata,
         AscendIndexerKPoolTailMetadata,
     )
 
@@ -81,6 +82,7 @@ class SparseAttnIndexerKpool(nn.Module):
         compute_topk: bool,
         output_buffer: torch.Tensor | None = None,
         allow_cache_packing: bool = True,
+        query_metadata: AscendIndexerKPoolQueryMetadata | None = None,
     ) -> torch.Tensor | None:
         num_tokens = k.shape[0]
         if index_kpool <= 0 or self.topk_tokens % index_kpool:
@@ -129,14 +131,16 @@ class SparseAttnIndexerKpool(nn.Module):
             return None
         if q_values is None or weights is None:
             raise ValueError("GLM KPool top-k requires query and head weights.")
+        query_positions = positions if query_metadata is None else query_metadata.positions
+        query_lens = indexer_metadata.cum_query_lens if query_metadata is None else query_metadata.cum_query_lens
         indices = glm5_next_lightning_indexer_triton(
             q_values,
             indexer_cache,
             weights.to(q_values.dtype),
-            indexer_metadata.cum_query_lens,
+            query_lens,
             indexer_metadata.seq_lens,
             indexer_metadata.block_table,
-            positions,
+            query_positions,
             index_topk=self.topk_tokens,
             index_kpool=index_kpool,
             max_pool_seq_len=max_pool_seq_len,
@@ -145,4 +149,7 @@ class SparseAttnIndexerKpool(nn.Module):
             allow_cache_packing=allow_cache_packing,
         )
         # Expansion also packs the causal tail and clears every padded row.
+        if query_metadata is not None:
+            valid = torch.arange(q_values.shape[0], device=k.device) < query_metadata.num_actual_tokens
+            indices.masked_fill_(~valid[:, None, None], -1)
         return indices

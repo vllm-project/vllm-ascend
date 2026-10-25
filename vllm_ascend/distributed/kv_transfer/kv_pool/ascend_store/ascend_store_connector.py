@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -40,9 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
     validate_layerwise_topology,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -114,6 +115,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
+        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_decode_cache", False
+        )
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
+        if (
+            self.kv_role == "kv_consumer"
+            and self.save_decode_cache
+            and not self.consumer_is_to_put
+            and self.use_layerwise
+        ):
+            raise ValueError(
+                "save_decode_cache on a kv_consumer does not support use_layerwise "
+                "unless consumer_is_to_put is enabled. "
+                "Decode-only saving is not implemented in the layerwise transfer path. "
+                "Set use_layerwise=False for Decode KV offload."
+            )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -130,9 +147,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        # Opt in only for synchronous bulk loads, not background retrieval.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
+        self.dspark_prefix_cache_enabled = False
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -147,6 +167,59 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
+        """Opt the SFA DSpark producer into joint external prefix reuse.
+
+        MultiConnector passes the parent config because a store child's config
+        alone does not identify its SFA PD sibling. Other serving paths do not
+        change their keys or layerwise hook layout.
+        """
+        if not self.use_layerwise or self.layerwise_data_plane != "gva" or self.kv_role != "kv_producer":
+            return False
+        keys = DSparkPrefixKeys.from_config(vllm_config)
+        if keys is None:
+            return False
+        self.dspark_prefix_cache_enabled = True
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.dspark_prefix_keys = keys
+            # Retain a final prompt block for safe target/auxiliary recompute.
+            self.connector_scheduler.use_eagle = True
+        if self.connector_worker is not None:
+            self.connector_worker.configure_dspark_prefix_cache(keys)
+        return True
+
+    def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
+        assert self.connector_worker is not None
+        cache = self.connector_worker.dspark_prefix_cache
+        request = next((request for request in metadata.requests if request.req_id == request_id), None)
+        if cache is None or request is None:
+            raise RuntimeError("DSpark prefix hit has no registered draft cache or load metadata")
+        return cache.restore(request, offset, block_ids)
+
+    def save_dspark_prefix(self, metadata: Any, request_id: str, through_tokens: int, block_ids: Any) -> None:
+        assert self.connector_worker is not None
+        cache = self.connector_worker.dspark_prefix_cache
+        request = next((request for request in metadata.requests if request.req_id == request_id), None)
+        if cache is not None and request is not None:
+            cache.save(request, through_tokens, block_ids)
+
+    def shutdown(self):
+        """Stop store users before closing the backend's native resources."""
+        try:
+            if self.connector_scheduler is not None:
+                client = self.connector_scheduler.client
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
+                    self.connector_scheduler.store_scheduler.close()
+        finally:
+            if hasattr(self, "lookup_server"):
+                self.lookup_server.close()
+            if self.connector_worker is not None:
+                self.connector_worker.shutdown()
+            super().shutdown()
 
     ############################################################
     # Scheduler Side Methods
@@ -248,13 +321,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Fence the previous save before this step can reuse KV blocks.
+        """Fence only the saves of requests whose blocks this step may reuse.
 
-        This hook is temporarily reused for deferred KV cache save
-        synchronization and will be replaced by a dedicated mechanism.
+        Blocks are freed immediately when a request finishes or is preempted.
+        Before this step's forward can reallocate them, the in-flight puts of
+        exactly those requests are awaited (released_req_ids carried in the
+        connector metadata), instead of the whole previous save batch.
         """
         assert self.connector_worker is not None
-        self.connector_worker.wait_for_previous_save()
+        released_req_ids = getattr(kv_connector_metadata, "released_req_ids", None)
+        self.connector_worker.handle_released_saves(released_req_ids)
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
@@ -339,15 +415,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+        if not self.can_put:
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
-            # Don't do save if the role is kv_consumer
+        if not self.can_put:
+            # A load-only consumer has no store thread to wait for.
             return
 
         if self.use_layerwise:
@@ -367,6 +443,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._current_step_has_real_forward = False
         done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished(finished_req_ids)
+        assert self.connector_worker is not None
+        failed = self.connector_worker.get_failed_requests()
+        if self.connector_worker.load_async and not self.use_layerwise:
+            done_recving |= failed
+        return KVConnectorTransferResults(
+            finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return KV block IDs that failed to load on the worker."""
@@ -420,6 +506,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             per_engine_labelvalues,
         )
 
+    def has_pending_push_work(self) -> bool:
+        return bool(self.connector_scheduler and self.connector_scheduler.has_pending_push_work())
+
 
 class LookupKeyServer:
     def __init__(
@@ -439,32 +528,64 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
+        self._closed = False
 
         def process_request():
-            while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(all_frames[0], byteorder="big")
-                kv_group_ids = self.decoder.decode([all_frames[1]])
-                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                hashes_str = self.decoder.decode(all_frames[3:])
-                result = self.pool_worker.lookup_scheduler(
-                    token_len,
-                    hashes_str,
-                    kv_group_ids,
-                    use_layerwise=False,
-                    hbm_hit_tokens=hbm_hit_tokens,
-                )
-                logger.debug(
-                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                    token_len,
-                    kv_group_ids,
-                    result,
-                )
-                response = result.to_bytes(4, "big")
-                self.socket.send(response)
+            poller = zmq.Poller()  # type: ignore[attr-defined]
+            poller.register(self.socket, zmq.POLLIN)  # type: ignore[attr-defined]
+            try:
+                while self.running:
+                    if not poller.poll(timeout=100):
+                        continue
+
+                    # A failed receive leaves a REP socket in an unknown
+                    # protocol state. Do not try to send a synthetic reply.
+                    try:
+                        all_frames = self.socket.recv_multipart(copy=False)
+                    except zmq.ZMQError:  # type: ignore[attr-defined]
+                        if self.running:
+                            logger.exception("Failed to receive KV pool lookup request")
+                        break
+
+                    try:
+                        token_len = int.from_bytes(all_frames[0], byteorder="big")
+                        kv_group_ids = self.decoder.decode([all_frames[1]])
+                        hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
+                        hashes_str = self.decoder.decode(all_frames[3:])
+                        result = self.pool_worker.lookup_scheduler(
+                            token_len,
+                            hashes_str,
+                            kv_group_ids,
+                            use_layerwise=False,
+                            hbm_hit_tokens=hbm_hit_tokens,
+                        )
+                        logger.debug(
+                            "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                            token_len,
+                            kv_group_ids,
+                            result,
+                        )
+                        response = result.to_bytes(4, "big")
+                    except Exception:
+                        logger.exception("KV pool lookup handler failed; reporting 0 hit tokens")
+                        response = (0).to_bytes(4, "big")
+
+                    try:
+                        self.socket.send(response)
+                    except zmq.ZMQError:  # type: ignore[attr-defined]
+                        if self.running:
+                            logger.exception("Failed to send KV pool lookup response")
+                        break
+            finally:
+                self.socket.close(linger=0)
+                self.ctx.term()
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
     def close(self):
-        self.socket.close(linger=0)
+        if self._closed:
+            return
+        self._closed = True
+        self.running = False
+        self.thread.join()

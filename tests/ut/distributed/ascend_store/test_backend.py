@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -383,7 +384,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         backend._contribute_memory = contribute_memory
         return backend
 
-    def _setup_store(self, backend: MooncakeBackend, store: MagicMock):
+    def _setup_store(self, backend: MooncakeBackend, store: MagicMock, global_rank: int = 3):
         transfer_engine = MagicMock()
         transfer_engine.get_rpc_port.return_value = 50052
         fake_store_module = sys.modules["mooncake.store"]
@@ -396,7 +397,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
             ),
             patch(f"{self._MODULE_PATH}.get_ip", return_value="10.0.0.7"),
             patch(f"{self._MODULE_PATH}.global_te") as mock_global_te,
-            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=3),
+            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=global_rank),
             patch(
                 f"{self._MODULE_PATH}._mooncake_setup_supports_ssd_offload",
                 return_value=True,
@@ -404,6 +405,70 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         ):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
+
+    def test_dp_clients_use_distinct_ssd_paths_and_log_actual_directories(self):
+        for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+            with (
+                self.subTest(use_fabric_mem=use_fabric_mem, use_store_independent_te=use_store_independent_te),
+                tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path,
+                patch(f"{self._MODULE_PATH}.logger") as mock_logger,
+            ):
+                config = _make_mooncake_store_config(
+                    tenant_id="tenant-a",
+                    enable_ssd_offload=True,
+                    ssd_offload_path=ssd_path,
+                )
+                setup_calls: list[dict[str, Any]] = []
+                owned_paths: set[str] = set()
+
+                def setup(setup_calls=setup_calls, owned_paths=owned_paths, **kwargs):
+                    setup_calls.append(kwargs)
+                    if kwargs.get("enable_ssd_offload", False):
+                        path = kwargs["ssd_offload_path"]
+                        if path in owned_paths:
+                            return -1  # Mooncake rejects a second live owner.
+                        owned_paths.add(path)
+                    return 0
+
+                for dp_rank in range(2):
+                    for contribute_memory in (False, True):
+                        backend = self._make_backend(
+                            config=config,
+                            use_fabric_mem=use_fabric_mem,
+                            contribute_memory=contribute_memory,
+                        )
+                        backend._use_store_independent_te = use_store_independent_te
+                        store = MagicMock()
+                        store.setup.side_effect = setup
+                        self.assertIs(self._setup_store(backend, store, global_rank=dp_rank), store)
+
+                self.assertEqual(len(setup_calls), 4)
+                for scheduler_setup in setup_calls[::2]:
+                    self.assertEqual(scheduler_setup["global_segment_size"], 0)
+                    self.assertEqual(scheduler_setup["local_buffer_size"], 0)
+                    self.assertNotIn("enable_ssd_offload", scheduler_setup)
+                    self.assertNotIn("ssd_offload_path", scheduler_setup)
+                for rank, worker_setup in enumerate(setup_calls[1::2]):
+                    rank_path = os.path.join(ssd_path, f"rank_{rank}")
+                    self.assertTrue(worker_setup["enable_ssd_offload"])
+                    self.assertEqual(worker_setup["ssd_offload_path"], rank_path)
+                    self.assertGreater(worker_setup["global_segment_size"], 0)
+                    self.assertTrue(os.path.isdir(rank_path))
+                self.assertTrue(all(kwargs["tenant_id"] == "tenant-a" for kwargs in setup_calls))
+                self.assertEqual(owned_paths, {os.path.join(ssd_path, f"rank_{rank}") for rank in range(2)})
+                self.assertEqual(config.ssd_offload_path, ssd_path)
+                ssd_logs = [
+                    _format_log_call(log_call)
+                    for log_call in mock_logger.info.call_args_list
+                    if log_call.args[0] == "Mooncake SSD offload enabled (Mode A): path=%s"
+                ]
+                self.assertEqual(
+                    ssd_logs,
+                    [
+                        f"Mooncake SSD offload enabled (Mode A): path={os.path.join(ssd_path, f'rank_{rank}')}"
+                        for rank in range(2)
+                    ],
+                )
 
     def test_setup_omits_default_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
@@ -479,6 +544,36 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertEqual(setup_kwargs["global_segment_size"], 0)
                 self.assertEqual(setup_kwargs["local_buffer_size"], 0)
 
+    def test_scheduler_client_skips_ssd_offload(self):
+        for use_fabric_mem, use_store_independent_te in ((False, False), (True, False), (False, True)):
+            with (
+                self.subTest(use_fabric_mem=use_fabric_mem, use_store_independent_te=use_store_independent_te),
+                tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path,
+            ):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(
+                        tenant_id="tenant-a",
+                        enable_ssd_offload=True,
+                        ssd_offload_path=ssd_path,
+                    ),
+                    use_fabric_mem=use_fabric_mem,
+                    contribute_memory=False,
+                )
+                backend._use_store_independent_te = use_store_independent_te
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                self.assertIs(self._setup_store(backend, store), store)
+
+                store.setup.assert_called_once()
+                setup_kwargs = store.setup.call_args.kwargs
+                self.assertNotIn("enable_ssd_offload", setup_kwargs)
+                self.assertNotIn("ssd_offload_path", setup_kwargs)
+                self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
+                self.assertEqual(setup_kwargs["global_segment_size"], 0)
+                self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+                self.assertEqual(os.listdir(ssd_path), [])
+
     def test_non_default_tenant_preserves_setup_type_error(self):
         setup_error = TypeError("setup(): incompatible function arguments")
         backend = self._make_backend(
@@ -547,10 +642,13 @@ class TestMooncakeBackendMethods(unittest.TestCase):
                     else:
                         method.return_value = result
                     with patch(module) as logger:
-                        getattr(backend, operation)(["k1"], [[100]], [[10]])
+                        transfer_result = getattr(backend, operation)(["k1"], [[100]], [[10]])
                     method.assert_called_once()
                     if result != [0]:
                         logger.error.assert_called()
+                    if operation == "put":
+                        expected = [True] if result == [0] else [False] if result == [-1] else False
+                        self.assertEqual(transfer_result, expected)
 
     def test_register_buffer(self):
         b = self._make_backend()
@@ -975,7 +1073,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 
     def test_put(self):
         b = self._make_backend()
-        b.put(["k1"], [[100]], [[10]])
+        self.assertTrue(b.put(["k1"], [[100]], [[10]]))
         b.store.mset_d2h_from_multi_buffers.assert_called_once_with(["k1"], [[100]], [[10]], b._ds_set_param)
 
     def test_put_exception(self):
@@ -984,7 +1082,8 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend.logger"
         ) as mock_logger:
-            b.put(["k1"], [[100]], [[10]])
+            result = b.put(["k1"], [[100]], [[10]])
+        self.assertFalse(result)
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
@@ -1309,6 +1408,48 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend._pending_buffers = None
             return backend
 
+    def test_ssd_load_rewarms_via_registered_full_sized_npu_read(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        resident = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.side_effect = [[ssd], [resident]]
+        b.store.batch_get_into.return_value = [0]
+        b.store.register_buffer.return_value = 0
+        scratch = SimpleNamespace(data_ptr=lambda: 8192)
+        with patch.object(memcache_module.torch, "empty", return_value=scratch):
+            self.assertEqual(b.batch_get_key_info(["ssd-key"], for_load=True), [resident])
+        keys, addresses, sizes, direction = b.store.batch_get_into.call_args.args
+        self.assertEqual(keys, ["ssd-key"])
+        self.assertEqual(sizes, [64])
+        self.assertGreater(addresses[0], 0)
+        self.assertEqual(direction, memcache_module.MmcDirect.COPY_G2L.value)
+        b.store.register_buffer.assert_called_once_with(8192, 64)
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
+
+    def test_scheduler_query_does_not_rewarm_ssd(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        self.assertEqual(b.batch_get_key_info(["ssd-key"]), [ssd])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_with_resident_replica_does_not_copy_to_host(self):
+        b = self._make_backend()
+        info = SimpleNamespace(size=lambda: 64, type_list=lambda: [2, 1], gva_list=lambda: [0, 4096])
+        b.store.batch_get_key_info.return_value = [info]
+        self.assertEqual(b.batch_get_key_info(["resident-key"], for_load=True), [info])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_ssd_rewarm_failure_is_not_a_successful_load(self):
+        b = self._make_backend()
+        ssd = SimpleNamespace(size=lambda: 64, type_list=lambda: [2], gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [ssd]
+        b.store.batch_get_into.return_value = [-1]
+        b.store.register_buffer.return_value = 0
+        with patch.object(memcache_module.torch, "empty", return_value=SimpleNamespace(data_ptr=lambda: 8192)):
+            self.assertEqual(b.batch_get_key_info(["ssd-key"], for_load=True), [None])
+        b.store.unregister_buffer.assert_called_once_with(8192, 64)
+
     def test_exists(self):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1]
@@ -1329,12 +1470,36 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_is_readable(["k1", "k2", "k3"]), [True, False, False])
 
-    def test_batch_is_readable_rejects_misaligned_metadata(self):
+    def test_batch_is_readable_treats_absent_key_as_miss(self):
         b = self._make_backend()
-        b.store.batch_get_key_info.return_value = []
+        readable = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0x1000])
+        writing = SimpleNamespace(size=lambda: 64, gva_list=lambda: [0])
+        b.store.batch_get_key_info.return_value = [readable, None, writing]
 
-        with self.assertRaises(backend_base.BatchResultShapeError):
-            b.batch_is_readable(["k1"])
+        self.assertEqual(b.batch_is_readable(["hit", "missing", "writing"]), [True, False, False])
+        b.store.batch_get_key_info.assert_called_once_with(["hit", "missing", "writing"])
+        b.store.batch_get_into.assert_not_called()
+
+    def test_batch_is_readable_rejects_malformed_non_null_metadata(self):
+        for info in (
+            object(),
+            SimpleNamespace(size=lambda: "invalid", gva_list=lambda: [0x1000]),
+            SimpleNamespace(size=lambda: 64, gva_list=lambda: ["invalid"]),
+        ):
+            with self.subTest(info=info):
+                b = self._make_backend()
+                b.store.batch_get_key_info.return_value = [None, info]
+
+                with self.assertRaises(backend_base.BatchResultShapeError):
+                    b.batch_is_readable(["missing", "malformed"])
+
+    def test_batch_is_readable_query_failure_is_miss(self):
+        b = self._make_backend()
+        keys = [f"k{i}" for i in range(495)]
+        for key_infos in ([], None, [None]):
+            with self.subTest(key_infos=key_infos):
+                b.store.batch_get_key_info.return_value = key_infos
+                self.assertEqual(b.batch_is_readable(keys), [False] * len(keys))
 
     def test_setup_uses_captured_device(self):
         b = self._make_backend()
@@ -1420,12 +1585,6 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
         b.store.batch_write_finish.assert_called_once_with(["k1"], [0])
 
-    def test_batch_write_finish_supports_legacy_store(self):
-        b = self._make_backend()
-        b.store = object()
-
-        self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
-
     def test_get(self):
         b = self._make_backend()
         b.store.batch_get_into_layers.return_value = [0]
@@ -1477,13 +1636,13 @@ class TestMemcacheBackendMethods(unittest.TestCase):
     def test_put(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [0]
-        b.put(["k1"], [[100]], [[10]])
+        self.assertEqual(b.put(["k1"], [[100]], [[10]]), [True])
         b.store.batch_put_from_layers.assert_called_once()
 
     def test_put_error(self):
         b = self._make_backend()
         b.store.batch_put_from_layers.return_value = [1]
-        b.put(["k1"], [[100]], [[10]])
+        self.assertEqual(b.put(["k1"], [[100]], [[10]]), [False])
 
     def test_put_exception(self):
         b = self._make_backend()
@@ -1491,7 +1650,8 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.logger"
         ) as mock_logger:
-            b.put(["k1"], [[100]], [[10]])
+            result = b.put(["k1"], [[100]], [[10]])
+        self.assertFalse(result)
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)

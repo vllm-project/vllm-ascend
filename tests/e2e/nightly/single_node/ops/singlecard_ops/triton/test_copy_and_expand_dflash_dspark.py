@@ -8,7 +8,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     prepare_inputs_padded_kernel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.spec_decode.dflash_proposer import (
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import (
     _COPY_EXPAND_TILE_SIZE,
     _compute_num_programs,
 )

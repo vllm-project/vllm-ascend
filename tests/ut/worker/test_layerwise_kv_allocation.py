@@ -11,7 +11,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize("reuse", [False, True])
@@ -58,6 +58,7 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
         else None
     )
     vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=connector,
         model_config=SimpleNamespace(get_num_layers=lambda _: 4),
         parallel_config=None,
@@ -65,6 +66,8 @@ def test_standardized_sfa_allocation_preserves_layerwise_aliases(reuse, indexer_
     apply_layerwise_kv_cache_plan(config, vllm_config)
     runner = object.__new__(NPUModelRunner)
     runner.vllm_config = vllm_config
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
+    runner.dcp_size = 1
     runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     runner.use_sparse = True
     runner.use_compress = False

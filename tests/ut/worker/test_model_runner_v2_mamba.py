@@ -23,6 +23,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
     _align_hybrid_attention_page_sizes,
@@ -204,7 +205,12 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
     ctx = MagicMock()
-    state._ensure_align_ctx = MagicMock(return_value=ctx)
+    if vllm_version_is("0.31.0"):
+        state._ensure_align_ctx = MagicMock(return_value=ctx)
+    else:
+        # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
+        # Ascend override must resolve the context built in initialize_kv_cache.
+        state._mamba_ctx = ctx
     input_batch = SimpleNamespace(
         num_reqs=2,
         idx_mapping=torch.arange(2, dtype=torch.int32),
@@ -226,6 +232,56 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
         state.do_mamba_copy_for_layer("linear_attn")
     state.preprocess_state(input_batch, (), kv_cache_config, num_computed)
     connector.finish_mamba_state_copy.assert_called_once()
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only regression: _ensure_align_ctx moved")
+def test_ensure_align_ctx_falls_back_to_mamba_ctx():
+    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
+    # override must return the context built in initialize_kv_cache instead of
+    # calling the (now absent) inherited helper.
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    ctx = MagicMock()
+    state._mamba_ctx = ctx
+    assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only regression: _ensure_align_ctx moved")
+def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
+    # The align context can be absent when preprocess_state runs (e.g. it was
+    # torn down by the CUDA-graph memory profiler), so the main-lane override
+    # must lazily (re)create it like the v0.31.0 base helper did.
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    state._mamba_state_copy_funcs = None
+    state.max_num_reqs = 4
+    state.device = torch.device("cpu")
+    state.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    copy_funcs = {"mamba": [MagicMock()]}
+    state.model = SimpleNamespace(get_mamba_state_copy_funcs=MagicMock(return_value=copy_funcs))
+
+    ctx = MagicMock()
+    ctx.is_initialized = False
+    with (
+        patch(
+            "vllm_ascend.worker.v2.model_states.mamba_hybrid.get_mamba_groups",
+            return_value={spec: [0]},
+        ),
+        patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.validate_mamba_state_copy_funcs"),
+        patch(
+            "vllm_ascend.worker.v2.model_states.mamba_hybrid.MambaSpecDecodeGPUContext.create",
+            return_value=ctx,
+        ) as mock_create,
+    ):
+        result = state._ensure_align_ctx(kv_cache_config, [0], (torch.zeros(3, dtype=torch.int32),))
+
+    assert result is ctx
+    assert state._mamba_ctx is ctx
+    assert state._mamba_state_copy_funcs is copy_funcs
+    mock_create.assert_called_once()
+    ctx.initialize_from_forward_context.assert_called_once()
 
 
 @patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel")
@@ -281,7 +337,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
     prepare_inputs = next(
-        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "prepare_inputs"
+        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "_prepare_inputs_impl"
     )
 
     assignments = {
@@ -337,6 +393,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
         num_tokens=2 * (num_spec + 1),
         num_tokens_after_padding=4 * (num_spec + 1),
         is_prefilling_np=np.array([False, False]),
+        prefill_runs_as_decode_np=None,
         idx_mapping=torch.tensor([0, 1]),
         num_draft_tokens_per_req=np.full(2, num_spec, dtype=np.int32),
         num_scheduled_tokens=np.full(2, num_spec + 1, dtype=np.int32),
@@ -373,6 +430,52 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     else:
         assert model_metadata.num_decode_draft_tokens_cpu is None
         assert model_metadata.num_accepted_tokens is None
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
+@pytest.mark.parametrize("num_draft_tokens", [0, 3])
+def test_prepare_attn_classifies_one_token_prompt_tails(mock_build_attn_metadata, graph_mode, num_draft_tokens):
+    """vLLM #58400 requires prompt-tail drafts to use rollback-capable decode metadata."""
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=3, parallel_config=SimpleNamespace()),
+        num_accepted_tokens_gpu=torch.tensor([1, 2, 3], dtype=torch.int32),
+        max_model_len=1024,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        num_reqs_after_padding=3,
+        num_tokens=6 + 2 * num_draft_tokens,
+        num_tokens_after_padding=6 + 2 * num_draft_tokens,
+        is_prefilling_np=np.array([True, True, False]),
+        prefill_runs_as_decode_np=np.array([True, False, False]),
+        idx_mapping=torch.arange(3),
+        num_draft_tokens_per_req=np.array([num_draft_tokens, 0, num_draft_tokens]),
+        num_scheduled_tokens=np.array([num_draft_tokens + 1, 4, num_draft_tokens + 1]),
+        query_start_loc=torch.tensor([0, 1, 5, 6], dtype=torch.int32)
+        + torch.tensor([0, 1, 1, 2], dtype=torch.int32) * num_draft_tokens,
+        query_start_loc_np=np.array([0, 1, 5, 6], dtype=np.int32)
+        + np.array([0, 1, 1, 2], dtype=np.int32) * num_draft_tokens,
+        seq_lens=None,
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.array([128, 4, 64]),
+        positions=None,
+        attn_state=None,
+    )
+    AscendMambaHybridModelState.prepare_attn(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=graph_mode,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+    )
+    metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    assert metadata.is_prefilling.tolist() == [False, True, False]
+    expected_drafts = num_draft_tokens if num_draft_tokens else -1
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [expected_drafts, -1, expected_drafts]
+    np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 
 
 def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
@@ -557,11 +660,16 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     return_value=(4, 4),
 )
 @patch(
+    "vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config",
+    return_value={},
+)
+@patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     _mock_config,
+    _mock_layers,
     _mock_cache_dims,
 ):
     spec = AscendMLAAttentionSpec(
@@ -618,8 +726,11 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     num_kernel_blocks = num_blocks * spec.block_size // 4
     assert key_cache.shape == (num_kernel_blocks, 4, 1, 4)
     assert value_cache.shape == key_cache.shape
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
+    # A bare MLA raw cache represents a hybrid shared pool. Each manager
+    # page holds interleaved kernel slots of [K | V | padding].
+    assert key_cache.stride() == (32, 4, 4, 1)
+    assert value_cache.stride() == (32, 4, 4, 1)
+    assert value_cache.storage_offset() - key_cache.storage_offset() == 16
     assert backend.get_kv_cache_shape.call_args.args[0] == num_kernel_blocks
 
 
@@ -889,7 +1000,7 @@ def test_init_model_state_uses_override_then_default():
     ):
         state = init_asecnd_model_state(
             vllm_config,
-            MagicMock(spec=["forward"]),
+            MagicMock(spec=["forward", "modules"]),
             encoder_cache,
             device,
         )

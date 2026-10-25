@@ -28,7 +28,6 @@ from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -64,6 +63,19 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
         utils.register_ascend_customop()
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
+
+
+def test_cp_decode_stream_is_cached_and_separate_from_chunked_prefill():
+    decode_stream, prefill_stream = object(), object()
+    with (
+        mock.patch.object(utils, "_CP_DECODE_COMM_STREAM", None),
+        mock.patch.object(utils, "_CP_CHUNKEDPREFILL_COMM_STREAM", None),
+        mock.patch.object(utils.torch_npu.npu, "Stream", side_effect=[decode_stream, prefill_stream]),
+    ):
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_decode_comm_stream() is decode_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
+        assert utils.cp_chunkedprefill_comm_stream() is prefill_stream
 
 
 class TestUtils(TestBase):
@@ -399,12 +411,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
@@ -741,6 +753,13 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
 
 
+def test_should_reuse_topk_keeps_frequency_logic():
+    config = SimpleNamespace(index_topk_freq=4, index_skip_topk_offset=3)
+
+    assert not utils.should_reuse_topk(config, 2)
+    assert utils.should_reuse_topk(config, 3)
+
+
 def test_check_gdn_layer_supports_kimi_linear_config_property():
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -861,6 +880,41 @@ class TestIsRlWeightUpdateEnabled(TestBase):
             self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))
 
 
+class TestRefreshBlockSizeC8MXFP(TestBase):
+    def _config(self, block_size, *, is_hybrid=False, user_specified=False):
+        return SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=block_size,
+                cache_dtype="mxfp8",
+                user_specified_block_size=user_specified,
+                mamba_page_size_padded=123456,
+                mamba_block_size=32768,
+            ),
+            model_config=SimpleNamespace(is_hybrid=is_hybrid),
+            scheduler_config=SimpleNamespace(),
+            speculative_config=None,
+        )
+
+    def test_default_block_size_becomes_kernel_size(self):
+        for hybrid in (False, True):
+            config = self._config(128, is_hybrid=hybrid)
+            utils.refresh_block_size(config)
+            self.assertEqual(config.cache_config.block_size, 512)
+
+    def test_scheduler_block_can_contain_multiple_kernel_blocks(self):
+        for size in (512, 1024, 4096):
+            config = self._config(size, is_hybrid=True, user_specified=True)
+            utils.refresh_block_size(config)
+            self.assertEqual(config.cache_config.block_size, size)
+            self.assertEqual(config.cache_config.mamba_page_size_padded, 123456)
+            self.assertEqual(config.cache_config.mamba_block_size, 32768)
+
+    def test_invalid_explicit_block_size_is_rejected(self):
+        config = self._config(768, user_specified=True)
+        with self.assertRaisesRegex(ValueError, "multiple of 512"):
+            utils.refresh_block_size(config)
+
+
 @pytest.fixture
 def physical_device_lookup():
     with mock.patch("vllm.platforms.current_platform") as platform:
@@ -908,3 +962,10 @@ def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, phys
 def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
     utils.setup_ascend_local_comm_res(0, config)
     physical_device_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert utils.oproj_tp_enable() is enabled
