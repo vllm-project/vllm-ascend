@@ -1465,6 +1465,67 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
         self.assertEqual(hit, 32)
 
+    def test_hbm_prefix_is_not_queried_and_pool_tail_can_extend_hit(self):
+        for local in (16, 24, 32, 64):
+            with self.subTest(local=local):
+                scheduler = self._make_scheduler()
+                scheduler.store_scheduler.reset_mock()
+                self._stub_pool(scheduler, 4, {0: [1, 2, 3], 1: [1, 3]})
+
+                self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(4), 64, local), 64)
+                for call in scheduler.store_scheduler.batch_is_readable.call_args_list:
+                    for key in call.args[0]:
+                        block_idx = int(key.split("@")[2][:2], 16)
+                        self.assertGreaterEqual(block_idx, local // 16)
+                if local == 64:
+                    scheduler.store_scheduler.batch_is_readable.assert_not_called()
+
+    def test_missing_pool_tail_preserves_hbm_prefix(self):
+        scheduler = self._make_scheduler()
+        self._stub_pool(scheduler, 4, {})
+
+        self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(4), 64, 32), 32)
+
+    def test_layer_reuse_still_queries_locally_computed_prefix(self):
+        scheduler = self._make_scheduler()
+        scheduler.layerwise_offload = True
+        self._stub_pool(scheduler, 4, {})
+
+        self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(4), 64, 64), 0)
+        self.assertEqual(scheduler.store_scheduler.batch_is_readable.call_count, 2)
+
+    def test_partial_group_block_is_still_queried(self):
+        scheduler = self._make_scheduler()
+        scheduler.grouped_block_size = [16, 32]
+        scheduler.cache_coordinator = MagicMock()
+
+        def find_hits(hashes, token_len, query, **kwargs):
+            self.assertEqual(kwargs["hbm_hit_tokens"], 24)
+            query(0, hashes, None)
+            query(1, [hashes[1], hashes[3]], None)
+            return 0
+
+        scheduler.cache_coordinator.find_reachable_hit_tokens.side_effect = find_hits
+        self._stub_pool(scheduler, 4, {})
+        scheduler._get_layerwise_hit_tokens(self._request(4), 64, 24)
+        calls = scheduler.store_scheduler.batch_is_readable.call_args_list
+        self.assertEqual([len(call.args[0]) for call in calls], [3, 2])
+
+    def test_contiguous_lookup_skips_hbm_prefix_without_layer_reuse(self):
+        for local, pooled, expected in ((32, [], 32), (16, [1], 32), (24, [1], 32)):
+            with self.subTest(local=local):
+                scheduler = self._make_scheduler()
+                scheduler.store_scheduler.reset_mock()
+                scheduler.cache_coordinator = None
+                scheduler.grouped_block_size = [16]
+                self._stub_pool(scheduler, 2, {0: pooled})
+
+                self.assertEqual(scheduler._get_layerwise_hit_tokens(self._request(2), 32, local), expected)
+                for call in scheduler.store_scheduler.batch_is_readable.call_args_list:
+                    self.assertTrue(all(int(key.split("@")[2][:2], 16) >= local // 16 for key in call.args[0]))
+                if local == 32:
+                    scheduler.store_scheduler.batch_is_readable.assert_not_called()
+
     def test_no_pooled_blocks_returns_zero(self):
         scheduler = self._make_scheduler()
         self._stub_pool(scheduler, 2, {})
