@@ -167,13 +167,12 @@ class OscarGraphAdapter:
                         type(_impl)._r147_shared[("r146", _cap, _BcapT)] = _carr
                     _impl._r145_carriers[("r146", _cap)] = _carr  # instance alias
                     try:
+                        # hoist: a newline inside f-string braces is a
+                        # SyntaxError on Python <= 3.11
+                        _mbC = sum(v.numel() * v.element_size() for v in _carr.values() if torch.is_tensor(v)) / 1e6
                         with open("/tmp/r146_probe.log", "a") as _pf:
                             _pf.write(
-                                f"[R146-CARR] cap={_cap} BcapT={_BcapT} nbC={_nbC} "
-                                f"stride={_R146S} "
-                                f"MB={
-                                    sum(v.numel() * v.element_size() for v in _carr.values() if torch.is_tensor(v))
-                                    / 1e6:.1f}\n"
+                                f"[R146-CARR] cap={_cap} BcapT={_BcapT} nbC={_nbC} stride={_R146S} MB={_mbC:.1f}\n"
                             )
                     except Exception:
                         pass
