@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 import unittest
 from pathlib import Path
 
 import regex as re
+from packaging.requirements import Requirement
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_DEPENDENCIES = ("torch", "torch-npu", "triton-ascend")
@@ -40,11 +47,10 @@ def _requirements_versions() -> dict[str, str]:
 
 def _pyproject_versions() -> dict[str, str]:
     versions = {}
-    for name, version in re.findall(
-        r'"(torch|torch-npu|triton-ascend)==([^";]+)"',
-        _read("pyproject.toml"),
-    ):
-        versions[name] = version
+    for declaration in tomllib.loads(_read("pyproject.toml"))["build-system"]["requires"]:
+        requirement = Requirement(declaration)
+        if requirement.name in CORE_DEPENDENCIES:
+            versions[requirement.name] = str(requirement.specifier).removeprefix("==")
     return versions
 
 

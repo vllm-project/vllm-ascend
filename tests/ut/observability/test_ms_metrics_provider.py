@@ -12,6 +12,11 @@ from unittest.mock import Mock
 
 import yaml
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 _REPOSITORY_ROOT = Path(__file__).parents[3]
 _PACKAGE_ROOT = _REPOSITORY_ROOT / "vllm_ascend" / "observability"
 
@@ -92,12 +97,15 @@ def test_setup_registers_provider_entry_point_and_yaml_package_data():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setup"
     )
     keywords = {keyword.arg: keyword.value for keyword in setup_call.keywords}
-    entry_points = ast.literal_eval(keywords["entry_points"])
     package_data = ast.literal_eval(keywords["package_data"])
 
-    assert entry_points["ms_service_metric.providers"] == [
-        "vllm-ascend = vllm_ascend.observability:get_metric_provider"
-    ]
+    pyproject_path = _REPOSITORY_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as file:
+        entry_points = tomllib.load(file)["project"]["entry-points"]
+
+    assert entry_points["ms_service_metric.providers"] == {
+        "vllm-ascend": "vllm_ascend.observability:get_metric_provider"
+    }
     assert package_data["vllm_ascend.observability"] == ["config/*.yaml"]
 
 
