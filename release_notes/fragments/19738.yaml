@@ -1,0 +1,8 @@
+pr: 19738
+entries:
+  - category: config
+    text: >-
+      Added the default-off VLLM_ASCEND_SYNCHRONIZE_GRAMMAR_BITMASK setting
+      to synchronize the submission stream around the V2 grammar bitmask kernel
+      as a temporary mitigation for suspected lock-workspace reuse. Enabling it
+      may reduce throughput and is incompatible with graph capture.
