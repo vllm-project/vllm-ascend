@@ -2575,7 +2575,7 @@ Key pooling parameters:
 For capacity tuning, optional SSD configuration, and troubleshooting, refer to
 [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md).
 
-### 5.4 950DT Single-Node PD Separation Deployment
+### 5.4 950DT Single-Node PD Separation Deployment with Memcache KV Cache Pool {: #54-950dt-single-node-pd-separation-deployment }
 
 This section extends [Section 5.2.4](#524-950dt-series-pd-separation-deployment) with a Memcache-backed KV Cache Pool on a single 950DT products node. Prefill uses NPUs `0,1,2,3`, while Decode uses NPUs `4,5,6,7`. The existing external DP load balancing, API ports, DP RPC ports, and proxy configuration remain unchanged.
 
