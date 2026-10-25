@@ -68,7 +68,10 @@ def preload(device=None):
     import importlib
 
     V = _vendor_dir()
-    ctypes.CDLL("/usr/local/Ascend/cann-9.0.0/lib64/libopapi.so", mode=ctypes.RTLD_GLOBAL)
+    # resolve the CANN root from the standard env (falls back to the toolkit
+    # symlink); the versioned hard-code broke on other CANN installs
+    cann = os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest")
+    ctypes.CDLL(os.path.join(cann, "lib64", "libopapi.so"), mode=ctypes.RTLD_GLOBAL)
     ctypes.CDLL(V + "/op_api/lib/libcust_opapi.so", mode=ctypes.RTLD_GLOBAL)
     import torch  # noqa
 
@@ -80,13 +83,13 @@ def preload(device=None):
         sources=[os.environ.get("R116_BINDING_SRC") or _binding_source()],
         extra_include_paths=[
             os.path.join(_tn, "include"),
-            "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
+            os.path.join(cann, "aarch64-linux/include"),
             V + "/op_api/include",
         ],
         extra_ldflags=[
             "-L" + V + "/op_api/lib",
             "-lcust_opapi",
-            "-L/usr/local/Ascend/cann-9.0.0/lib64",
+            "-L" + os.path.join(cann, "lib64"),
             "-lascendcl",
             "-L" + os.path.join(_tn, "lib"),
             "-ltorch_npu",
