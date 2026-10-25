@@ -98,7 +98,10 @@ class OscarRotationLoader:
             logger.warning("[OSCAR] Rotation files not found: k=%s, v=%s", k_path, v_path)
             return None
 
-        requested = (num_layers, head_dim, device, dtype)
+        # normalize device: callers pass either "npu" or torch.device("npu"),
+        # and torch.device("npu") == "npu" is False — the guard would reject a
+        # semantically identical reconfiguration
+        requested = (num_layers, head_dim, str(device), str(dtype))
         if cls._instance is None:
             cls._instance = cls(
                 k_rotation_path=k_path,
