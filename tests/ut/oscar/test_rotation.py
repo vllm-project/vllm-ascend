@@ -119,3 +119,32 @@ class TestRotationLoaderContract:
         monkeypatch.delenv("VLLM_OSCAR_K_ROTATION_PATH", raising=False)
         monkeypatch.delenv("VLLM_OSCAR_V_ROTATION_PATH", raising=False)
         assert OscarRotationLoader.from_env(num_layers=3, head_dim=8, device="cpu") is None
+
+
+class TestFromEnvDeviceSignature:
+    def _env(self, monkeypatch, tmp_path):
+        kp, _ = _ckpt(tmp_path, "k.t", 2, 8)
+        vp, _ = _ckpt(tmp_path, "v.t", 2, 8)
+        monkeypatch.setenv("VLLM_OSCAR_K_ROTATION_PATH", kp)
+        monkeypatch.setenv("VLLM_OSCAR_V_ROTATION_PATH", vp)
+        OscarRotationLoader._instance = None
+
+    def test_equivalent_device_inputs_share_the_singleton(self, tmp_path, monkeypatch):
+        # "cpu" (str) and torch.device("cpu") are the same device; the
+        # singleton guard must not treat them as conflicting requests
+        self._env(monkeypatch, tmp_path)
+        try:
+            first = OscarRotationLoader.from_env(2, 8, "cpu", torch.float32)
+            second = OscarRotationLoader.from_env(2, 8, torch.device("cpu"), torch.float32)
+            assert first is not None and first is second
+        finally:
+            OscarRotationLoader._instance = None
+
+    def test_conflicting_device_still_fails_closed(self, tmp_path, monkeypatch):
+        self._env(monkeypatch, tmp_path)
+        try:
+            assert OscarRotationLoader.from_env(2, 8, "cpu", torch.float32) is not None
+            with pytest.raises(RuntimeError, match="refusing conflicting"):
+                OscarRotationLoader.from_env(2, 8, torch.device("npu"), torch.float32)
+        finally:
+            OscarRotationLoader._instance = None
