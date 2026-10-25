@@ -1,4 +1,6 @@
+from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -135,8 +137,11 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
     target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, uniform, capture_size)
     draft = _make_graph_manager(buffers, draft_mode, uniform, capture_size)
 
+    cpu_group = object()
+
     def other_rank_votes(votes, group):
-        assert group is cpu_group
+        # v0.31.0 passes ``group=cpu_group``; main's ``cpu_all_reduce_`` does not.
+        assert group is None or group is cpu_group
         # The other ranks decode real requests with the same query width.
         votes[0, 1:] = torch.tensor([2 * uniform, 3 * uniform, uniform])
         votes[1, 1:] = CUDAGraphMode.PIECEWISE.value
@@ -165,13 +170,24 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         assert reused_sync is sync
         return None, None
 
-    cpu_group = object()
+    extra_collective_patch: AbstractContextManager[Any]
+    if vllm_version_is("0.31.0"):
+        # v0.31.0 collects through ``dist.all_reduce(votes, group=cpu_group)``.
+        dp_group = SimpleNamespace(cpu_group=cpu_group)
+        collective = Mock(side_effect=other_rank_votes)
+        extra_collective_patch = patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", collective)
+    else:
+        # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
+        collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
+        dp_group = SimpleNamespace(cpu_all_reduce_=collective)
+        extra_collective_patch = nullcontext()
+
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
-        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
-        patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", side_effect=other_rank_votes) as collective,
+        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
+        extra_collective_patch,
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1

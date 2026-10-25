@@ -1251,11 +1251,13 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
     dummy.is_cpp_profile = True
     local_batch = _make_local_pcp_batch()
 
+    # vLLM main renamed the upstream staging hook; patch and call the live name.
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
     with (
-        patch.object(PCPManager, "prepare_inputs_to_capture") as stage,
+        patch.object(PCPManager, stage_name) as stage,
         patch.object(manager, "partition_batch", return_value=local_batch) as partition,
     ):
-        result = manager.prepare_inputs_to_capture(dummy)
+        result = getattr(manager, stage_name)(dummy)
 
     assert result is local_batch
     stage.assert_not_called()
@@ -1272,11 +1274,12 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
     legacy_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
     with (
-        patch.object(PCPManager, "prepare_inputs_to_capture", return_value=staged_batch) as stage,
+        patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,
     ):
-        result = manager.prepare_inputs_to_capture(legacy_batch)
+        result = getattr(manager, stage_name)(legacy_batch)
 
     assert result is staged_batch
     stage.assert_called_once_with(legacy_batch)

@@ -6,7 +6,6 @@ from dataclasses import replace
 
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -25,6 +24,13 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved `may_override_num_blocks` to `kv_cache_planning` on main;
+# the v0.31.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
+else:
+    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 STATE_RING_ROWS = 32
 
