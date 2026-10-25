@@ -4654,7 +4654,7 @@ Select the tab that matches your deployment hardware.
         --decoder-ports 8000 8001 8002 8003 8000 8001 8002 8003
     ```
 
-    Send requests to `http://<PROXY_IP>:8000` using the served model name `glm`.
+    Send requests to `<PROXY_IP>:8000` using the served model name `glm`.
 
     **Key Parameter Descriptions**
 
