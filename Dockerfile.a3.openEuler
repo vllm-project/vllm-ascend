@@ -129,7 +129,7 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
 # Install flash-linear-attention-npu
     wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
     echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
-    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
+    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL}
 # Install torch-npu
 #     mkdir -p /tmp/torch_npu && \
 #     wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
