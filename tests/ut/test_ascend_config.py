@@ -1480,7 +1480,7 @@ class TestUpstreamConfigCompatibility(TestBase):
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
-    def test_a5_megamoe_deepseek_v4_dspark_uses_target_topology(self, _mock_profile):
+    def test_a5_megamoe_deepseek_v4_uses_target_topology(self, _mock_profile):
         text_config = SimpleNamespace(
             model_type="deepseek_v4",
             hidden_size=7168,
@@ -1491,7 +1491,8 @@ class TestUpstreamConfigCompatibility(TestBase):
         target_parallel_config = SimpleNamespace(world_size_across_dp=4, pipeline_parallel_size=2)
         vc = SimpleNamespace(
             model_config=SimpleNamespace(
-                architectures=["DSparkDraftModel"],
+                # Draft config reconstruction retains the target model architecture.
+                architectures=["DeepseekV4ForCausalLM"],
                 hf_text_config=text_config,
                 get_num_experts=lambda: 256,
             ),

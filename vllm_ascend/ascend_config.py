@@ -1109,8 +1109,6 @@ class AscendConfig:
         is_deepseek_v4 = any(
             architecture in ("DeepseekV4ForCausalLM", "DeepseekV4ForConditionalGeneration")
             for architecture in model_architectures
-        ) or (
-            getattr(hf_text_config, "model_type", None) == "deepseek_v4" and "DSparkDraftModel" in model_architectures
         )
         # K3 projects the residual stream before the routed FFN. Other models
         # retain the existing hidden-size lookup and supported dimensions.
