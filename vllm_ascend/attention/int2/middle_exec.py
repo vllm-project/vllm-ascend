@@ -2115,7 +2115,7 @@ class Int2MiddleExecMixin:
                                             f"L={_lord146 if '_lord146' in dir() else '?'} Bp={_Bp} "
                                             f"nbC={_nbC201} cap={_cap} rcT={int(_rT[0])}/{int(_rT[2])} "
                                             f"rcF={int(_rF[0])}/{int(_rF[2])} "
-                                            f"max|dout|={_do201:.3e} max|dlse|={_dl201:.3e}\n"
+                                            f"max|d_out|={_do201:.3e} max|dlse|={_dl201:.3e}\n"
                                         )
                                 except Exception:
                                     pass
