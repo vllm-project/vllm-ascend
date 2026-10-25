@@ -82,3 +82,7 @@ vllm serve <moe-model> \
 `additional_config.enable_flashcomm1` is absent. If both are set and disagree,
 the explicit `additional_config` value wins and the configuration layer logs the
 override. New deployments should use `additional_config.enable_flashcomm1`.
+
+FlashComm2 has been removed from the current vLLM-Ascend mainline and no longer
+has a separate runtime selector. The FlashComm1 configuration migration does
+not therefore retain a FlashComm2 linkage branch.
