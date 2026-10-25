@@ -126,7 +126,7 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     case "${SOC_VERSION:-}" in \
         ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
-    esac &&
+    esac && \
 # Install flash-linear-attention-npu
     wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
     echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
