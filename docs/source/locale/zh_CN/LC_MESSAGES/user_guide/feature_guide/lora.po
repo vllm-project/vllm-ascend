@@ -18,10 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid ""
-"| MoE mode | Tensor parallel (AllGather) | Expert parallel (All-to-All) |"
-msgstr "| MoE 模式 | 张量并行（AllGather） | 专家并行（All-to-All） |"
-
 msgid "| Non-quantized | Supported | Supported |"
 msgstr "| 非量化 | 支持 | 支持 |"
 
@@ -254,3 +250,7 @@ msgstr ""
 "成功加载返回 `Success: LoRA adapter 'mix-lora' added successfully.` 成功卸载返回 "
 "`Success: LoRA adapter 'mix-lora' removed successfully.` 卸载后，带有 `\"model\": "
 "\"mix-lora\"` 的请求不再选择该适配器。基础模型仍然可用。"
+
+msgid ""
+"| MoE mode | Tensor parallel (AllGather) | Expert parallelism (All-to-All) |"
+msgstr "| MoE 模式 | 张量并行（AllGather） | 专家并行（All-to-All） |"
