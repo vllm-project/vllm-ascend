@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import torch
 import torch_npu
@@ -101,7 +102,7 @@ _OSCAR_CFG = get_oscar_config()
 # cross-module handoffs silently no-op. Modules access them through THIS dict
 # (same setdefault/get semantics, explicitly shared). Gated diagnostics only;
 # no numerical path reads them.
-_R2XX_G = {}
+_R2XX_G: dict[str, Any] = {}
 
 __all__ = [
     "_EXTRA_CTX",
