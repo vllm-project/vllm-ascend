@@ -16,7 +16,8 @@ Registry invariants (the split-share contract):
 
 import importlib
 import pathlib
-import re
+
+import regex as re
 
 import vllm_ascend.attention.int2 as pkg
 import vllm_ascend.attention.int2.ctx as ctx
