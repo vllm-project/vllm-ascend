@@ -355,9 +355,9 @@ jobs:
             fi
             cfg="${ALL_CFGS[$i]:-}"
             if [ -z "$cfg" ]; then continue; fi
-            # Mirror _e2e_nightly_multi_node: basename, drop .yaml, lower, ./_ -> -, cap 43 chars.
-            base=$(basename "$cfg" .yaml)
-            stem=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+            # Mirror _e2e_nightly_multi_node exactly: drop trailing .yaml, lower,
+            # ./_ -> -, cap 43 chars (no basename, so directory-bearing paths match LWS).
+            stem=$(printf '%s' "${cfg%.yaml}" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
             if [ -z "$stem" ]; then continue; fi
             STEMS+=("$stem")
           done
@@ -389,15 +389,15 @@ jobs:
                 pname=$(printf '%s' "$row" | cut -f1)
                 pphase=$(printf '%s' "$row" | cut -f2)
                 pready=$(printf '%s' "$row" | cut -f3)
-                case "$pname" in
-                  "vllm-${stem}-"*)
-                    if [ "$pphase" = "Running" ] && printf '%s' "$pready" | grep -q 'true'; then
-                      READY=$((READY + 1))
-                      echo "  matched leader [$pname] ready for stem [$stem]"
-                      break
-                    fi
-                    ;;
-                esac
+                # Match the exact leader pod name vllm-<stem>-<6-hex-rand>-0, not a
+                # loose prefix, so stems in a parent/child relation cannot double-count.
+                if [[ "$pname" =~ ^vllm-${stem}-[0-9a-f]{6}-0$ ]]; then
+                  if [ "$pphase" = "Running" ] && printf '%s' "$pready" | grep -q 'true'; then
+                    READY=$((READY + 1))
+                    echo "  matched leader [$pname] ready for stem [$stem]"
+                    break
+                  fi
+                fi
               done
             done
 
