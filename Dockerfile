@@ -117,28 +117,28 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
     esac && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Install triton-ascend
-    echo "Install triton-ascend..." && \
-    python3 -m pip install "$TRITON_ASCEND_URL" && \
-# Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
+    # echo "Install triton-ascend..." && \
+    # python3 -m pip install "$TRITON_ASCEND_URL" && \
+# Install mooncake-transfer-engine
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
-    python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
+    python3 -m pip install /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
 # Install memfabric_hybrid kernels (A3/A5)
     case "${SOC_VERSION:-}" in \
         ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
-    esac && \
+    esac &&
 # Install flash-linear-attention-npu
     wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
     echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
     python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL} && \
 # Install torch-npu
-    mkdir -p /tmp/torch_npu && \
-    wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
-        -O /tmp/torch_npu/torch_npu.tar.gz \
-        "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
-    tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
-    python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
-    rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
-    python3 -m pip cache purge
+    # mkdir -p /tmp/torch_npu && \
+    # wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
+    #     -O /tmp/torch_npu/torch_npu.tar.gz \
+    #     "${TORCH_NPU_OBS_BASE}/pta/Daily/v2.10.0-${TORCH_NPU_VERSION}/${TORCH_NPU_DATE}/pytorch_v2.10.0-${TORCH_NPU_VERSION}_py312.tar.gz" && \
+    # tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu && \
+    # python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH_SUFFIX}".whl --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    # rm -rf /tmp/torch_npu /tmp/${MOONCAKE_WHL} /tmp/${FLA_WHL} && \
+    # python3 -m pip cache purge
 
 CMD ["/bin/bash"]
