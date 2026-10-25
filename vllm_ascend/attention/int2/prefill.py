@@ -296,7 +296,7 @@ class Int2PrefillMixin:
             if _capp != "0" and (not _is_decode_in_mixed) and (_rid in self._tt_pref):
                 _tot = int(attn_metadata.seq_lens_list[b])
                 _prev_sll = _tot - sl
-                _prev_own = int(self._tt_plen.get(_rid, 0)) if hasattr(self, "_tt_plen") else -1
+                _prev_own = int(self._tt_pref.get(_rid, 0))
                 if os.environ.get("R144_PF_PROBE", "0") == "2":  # R218 FIX2 detail log
                     try:
                         with _odiag_o("r218_fix2.log") as _f2:
@@ -447,7 +447,6 @@ class Int2PrefillMixin:
                             torch.mul(_dnv_c, 1.0, out=_dhv.narrow(0, _slot, 1).narrow(1, _d_pref, _cap)[0])
                         else:
                             _dhk[_slot, _d_pref : _d_pref + _cap] = _dnk_c
-                        if _r144_ovl_os.environ.get("R166_STREAMFIX", "0") not in ("1", "ring", "both"):
                             _dhv[_slot, _d_pref : _d_pref + _cap] = _dnv_c
                     pass
                 else:
