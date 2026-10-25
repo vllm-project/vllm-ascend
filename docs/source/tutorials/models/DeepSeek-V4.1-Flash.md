@@ -761,12 +761,10 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export VLLM_HOST_IP="$LOCAL_IP"
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=360000
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
@@ -877,9 +875,7 @@ vLLM tag recorded in `.github/vllm-release-tag.commit` at that tag.
     export VLLM_USE_V2_MODEL_RUNNER=0
     export VLLM_ENGINE_READY_TIMEOUT_S=360000
     export HCCL_BUFFSIZE=1800
-    export VLLM_HOST_IP="$LOCAL_IP"
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_INTRA_ROCE_ENABLE=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
       export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
@@ -1444,7 +1440,6 @@ export HCCL_INTRA_ROCE_ENABLE=1
 export VLLM_ENGINE_READY_TIMEOUT_S=360000
 export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -1546,14 +1541,11 @@ export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
 export VLLM_USE_V2_MODEL_RUNNER=0
-export HCCL_INTRA_ROCE_ENABLE=1
 export VLLM_ENGINE_READY_TIMEOUT_S=360000
 export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1800
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
   export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
@@ -1670,7 +1662,6 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export HCCL_IF_IP="$LOCAL_IP"
-    export VLLM_HOST_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
