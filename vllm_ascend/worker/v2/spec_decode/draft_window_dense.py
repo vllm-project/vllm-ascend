@@ -15,6 +15,8 @@ import torch
 
 from vllm_ascend.worker.v2.spec_decode.draft_window_read import DirectPrefixSource
 
+DENSE_KV_ALIGNMENT = 32
+
 
 @dataclass(frozen=True)
 class DenseDraftRead:
@@ -58,7 +60,7 @@ class DenseDraftReadPart:
 
 @dataclass(frozen=True)
 class DenseDraftReadBatch:
-    """Private reads partitioned by known phase and query allocation geometry.
+    """Private reads partitioned by phase, queries and Full allocation geometry.
 
     An unfinished prompt can need Full KV while concurrent decodes need W.
     Separate native operands avoid padding every decode to that Full capacity
@@ -114,7 +116,7 @@ def _copy_owned_read_tensor(
 def _prepare_partitioned_reads(
     source: DirectPrefixSource,
     *,
-    groups: dict[tuple[bool, int], list[int]],
+    groups: dict[tuple[bool, int, int], list[int]],
     exact_device: torch.Tensor,
     row_indices: torch.Tensor,
     upper_cpu: torch.Tensor,
@@ -131,7 +133,7 @@ def _prepare_partitioned_reads(
     visible = torch.empty_like(exact_device[: len(source.request_rows)])
     starts = torch.empty_like(visible)
     retain(visible, starts)
-    for (full, width), rows in groups.items():
+    for (full, width, _capacity), rows in groups.items():
         host_rows = torch.tensor(rows, dtype=torch.int64, device="cpu")
         selected = _copy_owned_read_tensor(host_rows, retain, device=exact_device.device)
         bounds = (
@@ -275,7 +277,15 @@ def prepare_dense_draft_read(
     if full_rows_cpu is not None and full_rows_cpu.any():
         groups = {}
         for row in range(n):
-            key = (bool(full_rows_cpu[row]), query_width if widths is None else int(widths[row]))
+            full = bool(full_rows_cpu[row])
+            # U selects allocation geometry only. Padding every unfinished
+            # prompt to the longest peer can multiply private Full KV memory.
+            # Rows with equal native alignment still share one batched read;
+            # the device E continues to determine every actual read/mask.
+            full_capacity = (
+                (int(upper_cpu[row]) + DENSE_KV_ALIGNMENT - 1) // DENSE_KV_ALIGNMENT * DENSE_KV_ALIGNMENT if full else 0
+            )
+            key = (full, query_width if widths is None else int(widths[row]), full_capacity)
             groups.setdefault(key, []).append(row)
         if len(groups) > 1:
             return _prepare_partitioned_reads(
@@ -317,7 +327,7 @@ def prepare_dense_draft_read(
     capacity_bound = min(window_size + anchor_span - 1, int(upper_cpu.max()))
     if full_rows is not None:
         capacity_bound = max(capacity_bound, int(upper_cpu[full_rows_cpu].max()))
-    capacity = (capacity_bound + 31) // 32 * 32
+    capacity = (capacity_bound + DENSE_KV_ALIGNMENT - 1) // DENSE_KV_ALIGNMENT * DENSE_KV_ALIGNMENT
     if exact.device.type == "npu":
         from vllm_ascend.ops.triton.v2.spec_decode.draft_window import plan_draft_window
 
