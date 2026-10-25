@@ -766,8 +766,10 @@ class Int2MiddleExecMixin:
             _R145T = _os.environ.get("R145_TENSOR", "0") == "1"
             if _os.environ.get("R218_BRANCH", "0") == "1":
                 try:
-                    with open("/tmp/r218_branch_{}.log".format(_os.environ.get("R218_BRANCH_TAG", "x")), "a") as _fb:
-                        _fb.write(
+                    # _fbB: _fb is already bound as a PATH string (r185_makeacl.bin)
+                    # in this method -- reusing the name for the handle trips mypy
+                    with open("/tmp/r218_branch_{}.log".format(_os.environ.get("R218_BRANCH_TAG", "x")), "a") as _fbB:
+                        _fbB.write(
                             f"[BR] pre-dispatch L={self._oscar_layer_ord(layer)} B={batch_size} R145T={_R145T} "
                             f"R146F={_os.environ.get('R146_FILL', '0') == '1'} sl0={int(seq_lens[0])} "
                             f"pr0={self._tt_pref.get(self._tt_rid(0), -1)} "
