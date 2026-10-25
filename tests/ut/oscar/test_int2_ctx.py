@@ -84,7 +84,7 @@ def test_registry_names_never_bare_globals():
 def test_remaining_bare_globals_names_are_module_local():
     # any OTHER name kept in module globals() must be used in exactly one
     # module; a name appearing in two modules is a silent-isolation bug
-    where = {}
+    where: dict[str, set[str]] = {}
     for py in _backend_modules():
         for m in _GLOB.finditer(py.read_text()):
             name = next(g for g in m.groups() if g)
