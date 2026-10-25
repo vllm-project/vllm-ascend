@@ -82,6 +82,7 @@ class Int2QuantCacheMixin:
         layer._int2_v_inv_scale = 1.0 / layer._int2_v_scale
         layer._int2_scales_prepared = True
 
+    @staticmethod
     def _pack_int2_to_uint8(x_int8: torch.Tensor) -> torch.Tensor:
         """Pack int8 tensor with values in [-2, 1] into uint8.
 
@@ -103,6 +104,7 @@ class Int2QuantCacheMixin:
         )
         return packed
 
+    @staticmethod
     def _unpack_uint8_to_int2(packed: torch.Tensor) -> torch.Tensor:
         """Unpack uint8 tensor back to int8 with values in [-2, 1]."""
         packed_shape = packed.shape
@@ -423,8 +425,12 @@ class Int2QuantCacheMixin:
             if not hasattr(type(self), "_r113_stage"):
                 type(self)._r113_stage = {}
             _stg = type(self)._r113_stage
-            if layer_idx not in _stg:
-                _stg[layer_idx] = {
+            _s = _stg.get(layer_idx)
+            # first use, or a longer step than the one that sized the
+            # staging tensors (split-prefill continuation): reallocate —
+            # every field is fully re-copied below, so nothing is lost
+            if _s is None or _s["k"].shape[0] < num_tokens:
+                _stg[layer_idx] = _s = {
                     "k": torch.zeros_like(key_packed[:num_tokens]),
                     "v": torch.zeros_like(value_packed[:num_tokens]),
                     "ks": torch.zeros_like(k_scale[:num_tokens]),
@@ -434,7 +440,6 @@ class Int2QuantCacheMixin:
                     "slot": torch.zeros_like(slots[:num_tokens]),
                     "flushed": False,
                 }
-            _s = _stg[layer_idx]
             _s["k"].copy_(key_packed[:num_tokens])
             _s["v"].copy_(value_packed[:num_tokens])
             _s["ks"].copy_(k_scale[:num_tokens])

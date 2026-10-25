@@ -20,22 +20,25 @@ import torch
 _MOD = None
 _PRELOADED = False
 
-_R116_KNOWN_CPP = "/home/n00928095/OSCAR_PARALLEL_WORK/R116_VALIDROW_BGRAPH_QUIET_GENERIC/TASK_OWNED/r116_cu_aclnn.cpp"
-_R116_KNOWN_VENDOR = (
-    "/home/n00928095/OSCAR_PARALLEL_WORK/R116_VALIDROW_BGRAPH_QUIET_GENERIC/"
-    "TASK_OWNED/custom_opp_r116v2/vendors/oscar_r115_min"
-)  # noqa: E501
+# both artifacts are resolved through env vars / the workdir layout — no
+# machine-specific absolute fallbacks
+_R116_KNOWN_CPP = os.environ.get("R116_BINDING_FALLBACK_SRC", "")
+_R116_KNOWN_VENDOR = os.environ.get("R116_BINDING_FALLBACK_VENDOR", "")
 
 
 def _binding_source():
     W = os.environ.get("R116_WORKDIR", os.environ.get("R116_FALLBACK_WORKDIR", ""))
-    p = W + "/TASK_OWNED/r116_cu_aclnn.cpp"
-    if os.path.exists(p):
-        return p
-    # workdir layout may lack the binding source (observed with the R142
-    # default workdir); fall back to the known-good on-disk copy rather than
-    # returning a nonexistent path (the JIT would fail inside EngineCore).
-    return _R116_KNOWN_CPP
+    cands = [
+        os.environ.get("R116_BINDING_SRC", ""),
+        W + "/TASK_OWNED/r116_cu_aclnn.cpp",
+        _R116_KNOWN_CPP,
+    ]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    raise FileNotFoundError(
+        "r116 binding source not found: set R116_BINDING_SRC or R116_WORKDIR (layout TASK_OWNED/r116_cu_aclnn.cpp)"
+    )
 
 
 def _vendor_dir():
@@ -48,7 +51,10 @@ def _vendor_dir():
     for c in cands:
         if c and os.path.exists(os.path.join(c, "op_api/lib/libcust_opapi.so")):
             return c
-    return cands[-1]
+    raise FileNotFoundError(
+        "r116 vendor dir not found: set R116_VENDOR_DIR or R116_WORKDIR "
+        "(layout TASK_OWNED/custom_opp_r116v2/vendors/oscar_r115_min)"
+    )
 
 
 def preload(device=None):
