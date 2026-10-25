@@ -64,7 +64,10 @@ def _load_images(paths: list[str | None], default_path: str | None = None) -> li
 def _messages_need_preload(mm: dict[str, Any]) -> bool:
     """Return True only when at least one image_url needs base64 preloading."""
     for msg in mm.get("messages") or []:
-        for part in msg.get("content", []):
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            continue
+        for part in content:
             if part.get("type") != "image_url":
                 continue
             url = ((part.get("image_url") or {}).get("url") or "").strip()
@@ -72,7 +75,7 @@ def _messages_need_preload(mm: dict[str, Any]) -> bool:
                 return True
             if re.search(r"\{IMAGE_\d+\}", url):
                 return True
-            if not url.startswith(("http://", "https://")):
+            if not url.startswith(("http://", "https://", "data:image/")):
                 return True
     return bool(mm.get("images"))
 
@@ -88,8 +91,12 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
     image_index = 0
     messages: list[dict[str, Any]] = []
     for msg in raw:
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            messages.append({"role": msg.get("role", "user"), "content": content})
+            continue
         content_parts: list[dict[str, Any]] = []
-        for part in msg.get("content", []):
+        for part in content:
             p = dict(part)
             if p.get("type") == "image_url":
                 img = dict(p.get("image_url") or {})
@@ -98,7 +105,7 @@ def _build_messages(mm: dict[str, Any], image_data_list: list[str]) -> list[dict
                     if re.search(r"\{IMAGE_\d+\}", url):
                         for i, data in enumerate(image_data_list):
                             url = url.replace(f"{{IMAGE_{i}}}", f"data:image/jpeg;base64,{data}")
-                    elif url.startswith(("http://", "https://")):
+                    elif url.startswith(("http://", "https://", "data:image/")):
                         pass
                     else:
                         url = f"data:image/jpeg;base64,{_load_image_data(url)}"
