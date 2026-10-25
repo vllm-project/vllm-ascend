@@ -423,8 +423,14 @@ def _model_uses_w4a4_quant(vllm_config: VllmConfig | None) -> bool:
 
 
 class AddRMSNormQuantFusionPass(VllmInductorPass):
-    """
-    A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
+    """Fuse AddRMSNorm with the INT8 dynamic activation quantize on Ascend.
+
+    Scope: a quantize node is replaced only when its ``dst_type`` is
+    ``torch.int8``, i.e. W8A8 and the int8-activation part of W4A8 - the weight
+    width never appears in the graph, only the activation dtype does.
+    ``_model_uses_w4a4_quant()`` disables the pass for W4A4 models, and other
+    activation dtypes (fp8, int4) do not match the patterns, so those models
+    keep the unfused path instead of being fused incorrectly.
     """
 
     def __init__(self, vllm_config: VllmConfig):
