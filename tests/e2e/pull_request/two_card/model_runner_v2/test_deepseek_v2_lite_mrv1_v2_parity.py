@@ -37,7 +37,7 @@ from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory, wait_until_npu_memory_free
 
-MODEL = os.environ.get("DEEPSEEK_V2_MODEL", "/workspace/DeepSeek-V2-Lite-W8A8")
+MODEL = os.environ.get("DEEPSEEK_V2_MODEL", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
 RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity.json"))
 TP2_RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_TP2_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity_tp2.json"))
 
