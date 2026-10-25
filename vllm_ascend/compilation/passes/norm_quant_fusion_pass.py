@@ -171,7 +171,11 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            # w8a8_dynamic calls npu_dynamic_quant with an explicit dst_type
+            # (see quantization/methods/w8a8/w8a8_dynamic.py). The FX pattern
+            # matcher compares keyword arguments, so the pattern has to pass the
+            # same keyword or it never matches the runtime graph.
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
         return pattern
@@ -183,6 +187,58 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             """
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
                 rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False]
+            )
+            return (
+                output[0],
+                output[3],
+                output[2],
+            )
+
+        return replacement
+
+
+class AddRMSNormDynamicQuantPatternNoBias(BasePattern):
+    """add_rms_norm_bias(x, r, w, None, eps) + npu_dynamic_quant -> fused op.
+
+    Qwen3.5/Qwen3-Next RMSNorm has no beta, so ops/layernorm.py forward_oot takes
+    the ``beta=None`` branch of ``_C_ascend.npu_add_rms_norm_bias``. The existing
+    AddRMSNormDynamicQuantPattern matches ``torch.ops.npu.npu_add_rms_norm``
+    instead, and the WithBias variant requires a tensor bias; neither covers this
+    call, so the fusion never applied to these models.
+    """
+
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        super().__init__(vllm_config, eps)
+
+    def get_inputs(self):
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, residual, rms_norm_weight]
+
+    def get_pattern(self):
+        def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            output = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                rms_norm_input, residual, rms_norm_weight, None, self.eps
+            )
+            out0 = output[0]
+            out1 = output[2]
+            # Keep the keyword identical to the runtime call, otherwise the FX
+            # matcher rejects it on the kwargs comparison.
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
+            return quantized_output[0], quantized_output[1], out1
+
+        return pattern
+
+    def get_replacement(self):
+        def replacement(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
+            output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
+                rms_norm_input,
+                residual,
+                rms_norm_weight,
+                beta=None,
+                epsilon=self.eps,
+                output_mask=[True, False],
             )
             return (
                 output[0],
@@ -222,7 +278,11 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
             )
             out0 = output[0]
             out1 = output[2]
-            quantized_output = torch.ops.npu.npu_dynamic_quant(out0)
+            # w8a8_dynamic calls npu_dynamic_quant with an explicit dst_type
+            # (see quantization/methods/w8a8/w8a8_dynamic.py). The FX pattern
+            # matcher compares keyword arguments, so the pattern has to pass the
+            # same keyword or it never matches the runtime graph.
+            quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
         return pattern
@@ -391,6 +451,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+                AddRMSNormDynamicQuantPatternNoBias(vllm_config, eps=eps).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
