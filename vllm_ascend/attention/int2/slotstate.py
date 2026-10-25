@@ -413,14 +413,21 @@ class Int2SlotStateMixin:
         # 1) explicit release (owner-checked) — absence is NOT finish
         for r in gone:
             A.release(r)
-        # 2) acquire for new rids (zero-on-reuse once per impl)
+        # 2) acquire for new rids; zero-on-reuse runs ONCE PER IMPL: the
+        # allocator is class-level (shared across the per-layer impls), so
+        # only the FIRST impl of a step acquires — every impl must still
+        # stamp-and-zero its OWN ring rows for a reused slot, which is what
+        # the per-(slot, gen, lid) stamp set exists for
         zero_pairs = []  # (lid, slot) whose ring rows must be zeroed now
         for r in rids:
             if r not in A.rid2slot:
-                slot, gen, reused = A.acquire(r)
-                if reused and (slot, gen, lid) not in A.zeroed:
-                    A.zeroed.add((slot, gen, lid))
-                    zero_pairs.append((lid, slot))
+                slot, _gen, _new = A.acquire(r)
+            else:
+                slot = A.rid2slot[r]
+            gen = A.gen[slot]
+            if gen > 0 and (slot, gen, lid) not in A.zeroed:
+                A.zeroed.add((slot, gen, lid))
+                zero_pairs.append((lid, slot))
         # 2b) MIRROR into _r164_slotmap: the graph replay driver resolves
         # slot ids from that dict (empty dict => row-index fallback => the
         # graph reads never-written rings => [261,x,0,0,...] degenerate rows

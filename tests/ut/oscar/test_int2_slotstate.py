@@ -19,6 +19,7 @@ from vllm_ascend.attention.int2.helpers import _R166SlotAlloc
 from vllm_ascend.attention.int2.slotstate import Int2SlotStateMixin
 
 _L0 = SimpleNamespace(layer_name="model.layers.0.self_attn")
+_L1 = SimpleNamespace(layer_name="model.layers.1.self_attn")
 
 
 @pytest.fixture(autouse=True)
@@ -303,3 +304,30 @@ class TestOscarDbg:
         _oscar_dbg("hello", 2)
         out = capsys.readouterr().out
         assert "hello 2" in out
+
+
+class TestSharedAllocatorMultiLayer:
+    def test_every_layer_impl_zeros_its_own_reused_rows(self, monkeypatch):
+        # two per-layer impls share the CLASS-level allocator; the second
+        # impl's bind (request already mapped by the first) must still
+        # stamp-and-zero its own ring rows for the reused slot
+        _clean_env(monkeypatch)
+        s0 = _SlotSelf(mseq=4)
+        s1 = _SlotSelf(mseq=4)
+        md = _md(["a"])
+        s0._r166_bind_slots(md, "cpu", torch.float32, _L0)
+        s1._r166_bind_slots(md, "cpu", torch.float32, _L1)
+        hk0, _ = s0._hp
+        hk1, _ = s1._hp
+        hk0[0].fill_(7.0)  # stale data from the previous owner
+        hk1[0].fill_(9.0)
+        md2 = _md(["b"], finished=["a"])  # slot 0 freed then reused by "b"
+        s0._r166_bind_slots(md2, "cpu", torch.float32, _L0)
+        s1._r166_bind_slots(md2, "cpu", torch.float32, _L1)
+        # both impls acquired no rows this step themselves, but BOTH must
+        # have zeroed the reused slot's rows on their own buffers
+        assert hk0[0].abs().max().item() == 0.0
+        assert hk1[0].abs().max().item() == 0.0
+        A = _SlotSelf._r166_alloc
+        assert (A.rid2slot["b"], A.gen[A.rid2slot["b"]], 0) in A.zeroed
+        assert (A.rid2slot["b"], A.gen[A.rid2slot["b"]], 1) in A.zeroed
