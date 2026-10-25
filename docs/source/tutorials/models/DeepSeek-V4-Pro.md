@@ -38,7 +38,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
-- For Ascend 950DT products, use the original [`DeepSeek-V4-Pro-0813`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the 2P1D example in Section 5.2.3 use Ascend 950DT products (96GB × 8) with this checkpoint.
+- `DeepSeek-V4-Pro-0813`: For Ascend 950DT products, use the original [`DeepSeek-V4-Pro-0813`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the 2P1D example in Section 5.2.3 use Ascend 950DT products (96GB × 8) with this checkpoint.
 
 - `DeepSeek-V4-Pro-0813-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -619,7 +619,7 @@ Key Parameter Descriptions:
 - `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.
 - `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
 - `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.
-- On 950DT products, DeepSeek-V4 does not currently support standalone tensor parallelism (TP-only). TP partitions only the `wq_b`, `wo_a`, and `wo_b` linear layers, so data parallelism is recommended. For long-context prefill, the examples for 950DT products combine `DP2/TP1` with `--prefill-context-parallel-size 8`, which spreads the prompt across the 8 NPUs of each DP rank. Do not combine it with `enable_dsa_cp`, which is mutually exclusive with prefill context parallelism and unsupported by the V2 model runner.
+- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), which spreads a long prompt across multiple NPUs during prefill. Besides speeding up prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1`. Since DeepSeek-V4 does not currently support standalone TP, the 950DT DP mixed-deployment uses `DP2/TP1` with PCP `8`, and the o_proj weight sharding also relieves its memory pressure. Do not combine it with `enable_dsa_cp`, which is mutually exclusive with PCP and unsupported by the V2 model runner.
 - `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
 - `--headless` (used on non-master nodes) disables the API server on the node, since only the master node serves requests.
 - `--max-model-len` specifies the maximum context length. Adjust it according to your actual scenario.
@@ -632,6 +632,9 @@ Key Parameter Descriptions:
 - `--model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}'` selects the multi-thread weight iterator. `enable_multithread_load` must be a JSON boolean and `num_threads` must be a positive integer.
 - `--safetensors-load-strategy prefetch` is an alternative that warms checkpoint files into the OS page cache before the normal iterator loads them. Do not combine it with multi-thread loading: the default loader rejects `prefetch`, `eager`, or `torchao` when `enable_multithread_load` is `true`. The examples in this document use only multi-thread loading.
 - `--speculative-config` configures speculative decoding. Use `mtp` for the preview MTP checkpoint and `dspark` for the `DeepSeek-V4-Pro-0813` checkpoint. For DSpark, use the value declared by the checkpoint; the example uses 5 speculative tokens, and all ranks must use the same value.
+- `--kv-cache-dtype` and `--attention_config.indexer_kv_dtype` set the KV cache data type. The 950DT example uses FP8 KV cache with both options set to `fp8`.
+- `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 deployments require this flag; otherwise, the service may OOM during startup.
+- `--async-scheduling` enables asynchronous scheduling to overlap scheduler overhead with model execution.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput. `enable_fused_mc2: 0` disables the Fused MC2 dispatch/combine path.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`.
@@ -1648,23 +1651,19 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
-- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. The A3 DSpark example uses PCP size `8` on Prefill and `1` on Decode (`1` disables PCP). The Decode launcher passes `--pcp-size` through `$8` / `PCP_SIZE` to this option. Keep `kv_connector_extra_config.prefill.pcp_size` and `decode.pcp_size` consistent with the PCP size of the corresponding pool.
+- `--prefill-context-parallel-size` configures prefill context parallelism (PCP) on Model Runner V2 (MRv2), replacing the DSA-CP configuration used on MRv1. Besides speeding up long-context prefill, enabling PCP also shards the o_proj weights across the PCP group, providing partial tensor parallelism even when `--tensor-parallel-size` is `1` and relieving memory pressure. Here PCP `8` spreads the prompt across the 8 NPUs of each PP stage.
 - `--kv-transfer-config` configures KV cache transfer between the prefill producer and decode consumer in PD separation.
-- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP, TP, PCP and DCP layout on the prefill and decode sides.
-- `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).
+- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `scheduler_config.recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the Decode node is insufficient, requests are sent to Prefill for KV Cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key is deprecated.
 - `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value. Use the value declared by the checkpoint; this example uses `5`. The nested `enforce_eager` applies to DSpark draft execution, while the top-level `--enforce-eager` keeps the Prefill target model in eager mode.
-- `MooncakeConnectorV2`: required for KV cache transfer when pipeline parallelism (PP) is enabled in this deployment. The A3 example enables PP on Prefill (`--pipeline-parallel-size 2`), so it uses `MooncakeConnectorV2` instead of the previously used `MooncakeHybridConnector`.
+- `MooncakeConnectorV2`: required for KV cache transfer when pipeline parallelism (PP) is enabled in this deployment. The 950DT example enables PP on Prefill (`--pipeline-parallel-size 2`), so it uses `MooncakeConnectorV2` instead of the previously used `MooncakeHybridConnector`.
 
-For the Ascend 950DT products in Section 5.2.3, additionally:
-
-- `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank` / `--prefill-context-parallel-size 8`: each Prefill instance is a single `DP1/TP1/PP2` engine distributed over 2 nodes (`--nnodes 2`), with one PP stage per node; prefill context parallel further splits long-context computation across the 8 NPUs of each PP stage. The worker node of each instance (`--node-rank 1`) runs headless. `--master-addr` is the service IP of the instance's master node and is required for the cross-node process group.
-- `VLLM_PP_LAYER_PARTITION="32,29"` partitions the 61 target layers into 32/29 across the 2 PP stages. The same partition must be declared in `kv_connector_extra_config.prefill.pp_layer_partition` so that the Decode side lays out KV cache consistently.
-- `--enforce-eager` forces eager execution for the Prefill target model on 950DT products; graph compilation is only used on Decode (`FULL_DECODE_ONLY`).
-- `--kv-cache-dtype fp8` and `--attention_config.indexer_kv_dtype fp8` use FP8 KV cache on both sides. The P and D sides must use the same KV data types so that the transferred KV cache is directly reusable.
+- `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank` / `--master-addr`: each Prefill instance is a single `DP1/TP1/PP2` engine distributed over 2 nodes, with one PP stage per node. The worker node (`--node-rank 1`) runs headless, and `--master-addr` is the service IP of the instance's master node for the cross-node process group.
+- `--kv-cache-dtype fp8` and `--attention_config.indexer_kv_dtype fp8` use FP8 KV cache. The P and D sides must use the same KV data types so that the transferred KV cache is directly reusable.
 - `enable_fused_mc2: 0` disables the Fused MC2 fusion operator on Prefill; `multistream_overlap_shared_expert: true` overlaps shared-expert computation with MoE communication instead, and `enable_shared_expert_dp: true` places shared experts on DP ranks.
-- `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode; `enable_static_kernel: false` keeps dynamic kernels, which is required for the speculative decode shapes used here.
+- `ascend_compilation_config.enable_npugraph_ex: true` enables the extended NPU graph mode on Decode for graph compilation (Prefill runs eager mode instead); `enable_static_kernel: false` keeps dynamic-shape kernels instead of static-shape kernels for aclgraph execution.
 - `combine_quant_mode: 4` forces the MoE MC2 combine stage on Decode nodes to use FP8 (MXFP float8_e4m3) communication quantization.
+- `VLLM_PP_LAYER_PARTITION="32,29"` partitions the 61 target layers across the 2 PP stages. The same partition must be declared in `kv_connector_extra_config.prefill.pp_layer_partition`.
 
 Deployment Verification:
 
