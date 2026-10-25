@@ -794,6 +794,7 @@ class DraftWindowRuntime:
                 row_indices=(
                     self._input_batch.idx_mapping[:num_reqs] if hasattr(self._input_batch, "idx_mapping") else None
                 ),
+                retain=lambda *objects: self.pool.retain(owner, *objects),
             )
             # Retain before a builder or native reader can receive the view.
             self.pool.retain(owner, view, common_metadata)

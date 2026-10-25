@@ -4,6 +4,7 @@ import ast
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -42,6 +43,56 @@ class TestCanonicalRead(unittest.TestCase):
         self.assertEqual(view.seq_lens_cpu_upper_bound.tolist(), [12, 11, 0])
         self.assertNotEqual(view.block_table.untyped_storage().data_ptr(), self.table.untyped_storage().data_ptr())
         self.assertEqual(self.table.tolist(), torch.arange(24).reshape(3, 8).tolist())
+
+    def test_owned_start_transfer_retains_actual_source_and_destination(self):
+        retained, copied = [], []
+        original_copy = torch.Tensor.copy_
+
+        def copy(destination, source, *args, **kwargs):
+            if kwargs.get("non_blocking"):
+                self.assertTrue(any(value is source for value in retained))
+                self.assertTrue(any(value is destination for value in retained))
+                copied.append((source, destination))
+            return original_copy(destination, source, *args, **kwargs)
+
+        exact = torch.tensor([21, 11], dtype=torch.int32)
+        with patch.object(torch.Tensor, "copy_", copy):
+            view = materialize_direct_prefix(
+                DirectPrefixSource.from_block_tables(self.owner, 0, self.mapping),
+                exact_cpu=exact,
+                exact_device=exact,
+                upper_cpu=exact + 3,
+                starts_cpu=torch.tensor([12, 4], dtype=torch.int32),
+                padded_rows=3,
+                retain=lambda *values: retained.extend(values),
+            )
+        self.assertEqual(len(copied), 1)
+        self.assertEqual(copied[0][0].dtype, torch.int64)
+        self.assertEqual(view.seq_lens.tolist(), [9, 7, 0])
+        self.assertTrue(any(value is view.block_table for value in retained))
+        self.assertTrue(any(value is view.seq_lens for value in retained))
+
+    def test_retention_failure_prevents_owned_start_copy(self):
+        calls = []
+
+        def retain(*values):
+            calls.append(values)
+            if len(calls) == 2:
+                raise RuntimeError("retain destination failed")
+
+        exact = torch.tensor([21, 11], dtype=torch.int32)
+        with patch.object(torch.Tensor, "copy_") as copy:
+            with self.assertRaisesRegex(RuntimeError, "retain destination"):
+                materialize_direct_prefix(
+                    DirectPrefixSource.from_block_tables(self.owner, 0, self.mapping),
+                    exact_cpu=exact,
+                    exact_device=exact,
+                    upper_cpu=exact + 3,
+                    starts_cpu=torch.tensor([12, 4], dtype=torch.int32),
+                    padded_rows=3,
+                    retain=retain,
+                )
+            copy.assert_not_called()
 
     def test_reorder_in_place_and_same_row_replacement(self):
         first = self.read()

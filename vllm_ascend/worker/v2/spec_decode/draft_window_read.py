@@ -8,6 +8,7 @@ Each projection owns its read storage; callers retain it until all native
 readers complete. No request mapping or projected table is cached here.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,6 +84,7 @@ def materialize_direct_prefix(
     starts_cpu: torch.Tensor,
     padded_rows: int,
     row_indices: torch.Tensor | None = None,
+    retain: Callable[..., None] | None = None,
 ) -> DraftReadView:
     """Gather from canonical rows, validating every column that can be read.
 
@@ -92,6 +94,11 @@ def materialize_direct_prefix(
     values separately. This function performs no device-to-host transfer.
     Zero padding is only outside the exact readable extent; missing source
     columns are an error.
+
+    An owned caller can retain the actual converted CPU start buffer and the
+    destination before submitting its asynchronous H2D. Unowned leaf callers
+    retain the original blocking behavior. No completion or later CPU read is
+    introduced here; the existing proposal owner supplies reader completion.
     """
     n = len(source.request_rows)
     cpu_values = (exact_cpu, upper_cpu, starts_cpu)
@@ -126,9 +133,19 @@ def materialize_direct_prefix(
         raise ValueError("Canonical source does not cover the exact readable extent")
     counts = end_columns - starts // source.block_span
     width = max(1, int(counts.max()) if n else 0)
-    starts_device = starts.to(exact_device.device)
+    if retain is None:
+        starts_device = starts.to(exact_device.device)
+    else:
+        # Retain this exact DMA source, not a clone used only for metadata.
+        # Allocate/retain the destination before copy_ can enqueue then fail.
+        retain(source.table, exact_device, starts, row_indices)
+        starts_device = torch.empty_like(starts, device=exact_device.device)
+        retain(starts_device)
+        starts_device.copy_(starts, non_blocking=True)
     # Own only the read projection, never clone query/write/Target metadata.
     table = source.table.new_zeros((padded_rows, width))
+    if retain is not None:
+        retain(table)
     if n and source.table.shape[1]:
         offsets = torch.arange(width, device=source.table.device)
         start_columns = starts_device // source.block_span
@@ -157,6 +174,8 @@ def materialize_direct_prefix(
     upper_out = torch.zeros(padded_rows, dtype=upper_cpu.dtype)
     upper_out[:n] = upper - starts
     lengths = exact_device.new_zeros(padded_rows)
+    if retain is not None:
+        retain(lengths)
     lengths[:n] = exact_device[:n] - starts_device
     return DraftReadView(
         table,
