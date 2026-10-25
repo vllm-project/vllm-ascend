@@ -18,19 +18,25 @@ import os
 import os as _os
 import os as _r144_ovl_os
 import os as _r150_os
+from collections import deque
 from typing import Any
 
 import torch
 
 
 def _r218_diag(msg):
-    """R218 file-based diagnostic (PROVEN to survive the EngineCore child,
-    where this module's stdout/stderr prints vanish -- see the R144-era
-    /tmp/r144_int2_fwd_probe.log workaround; same mechanism)."""
+    """Gated file diagnostic (PROVEN to survive the EngineCore child, where
+    this module's stdout/stderr prints vanish -- see the R144-era
+    /tmp/r144_int2_fwd_probe.log workaround; same mechanism). Off unless
+    OSCAR_DIAG is set; OSCAR_DIAG_LOG redirects the sink (tests point it at
+    a sandbox path to prove both directions without touching /tmp)."""
     try:
+        if not os.environ.get("OSCAR_DIAG"):
+            return
         import time as _r218_t
 
-        with open("/tmp/r218_diag.log", "a") as _r218_f:
+        _r218_path = os.environ.get("OSCAR_DIAG_LOG", "/tmp/r218_diag.log")
+        with open(_r218_path, "a") as _r218_f:
             _r218_f.write(f"{_r218_t.strftime('%m-%d %H:%M:%S')} pid={_r144_ovl_os.getpid()} {msg}\n")
     except Exception:
         pass
@@ -638,7 +644,9 @@ class _R166SlotAlloc:
         self.gen = [0] * self.cap
         self.zeroed = set()
         self.just_acquired = set()
-        self.events = []  # audit trail: (rid, slot, gen, ev)
+        self.events: deque = deque(maxlen=4096)
+        # audit trail (rid, slot, gen, ev); bounded so a long-lived
+        # server cannot grow it without bound
         # R168 P2: acquire runs in the forward path while release runs in the
         # runner _update_states (async-scheduling thread) — the multi-step
         # map/stack mutations are NOT GIL-atomic as a group. One lock guards
@@ -649,6 +657,15 @@ class _R166SlotAlloc:
 
     def acquire(self, rid):
         with self._lk:
+            if rid in self.rid2slot:
+                # duplicate acquire without an intervening release would
+                # overwrite rid2slot and leak the old slot in slot2rid --
+                # a caller lifecycle bug; fail closed on it
+                raise RuntimeError(
+                    f"[R166-SLOT] rid {rid!r} already holds slot "
+                    f"{self.rid2slot[rid]} (duplicate acquire without release; "
+                    f"release requires explicit finished/preempted)"
+                )
             if not self.free:
                 raise RuntimeError(
                     f"[R166-SLOT] capacity exhausted ({self.cap}) with no free slot — "
@@ -661,6 +678,8 @@ class _R166SlotAlloc:
             self.rid2slot[rid] = slot
             self.slot2rid[slot] = rid
             self.just_acquired.add(rid)
+            # gen just moved: every stamp for this slot is obsolete
+            self.zeroed = {t for t in self.zeroed if t[0] != slot}
             self.events.append((rid, slot, self.gen[slot], "reuse" if reused else "new"))
             return slot, self.gen[slot], reused
 
@@ -680,6 +699,8 @@ class _R166SlotAlloc:
                 )
             self.gen[slot] += 1
             self.free.append(slot)
+            # slot freed: its stamps are obsolete (next occupant re-stamps)
+            self.zeroed = {t for t in self.zeroed if t[0] != slot}
             self.events.append((rid, slot, self.gen[slot], "release"))
 
     def gen_of(self, slot):
@@ -785,6 +806,14 @@ def _r114_ts_write():
     import time as _time
 
     _R114_TS_FH.write(_json.dumps({"t": _time.time_ns(), "pid": _os.getpid()}) + "\n")
+
+
+def _oscar_dbg(*args, **kwargs):
+    # gated debug print for INT2 paths; no-op unless SGLANG_OSCAR_DEBUG set
+    import os as _os
+
+    if _os.environ.get("SGLANG_OSCAR_DEBUG"):
+        print(*args, **kwargs)
 
 
 def _oscar_diag_write(relname, text):
