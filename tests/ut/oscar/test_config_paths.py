@@ -154,3 +154,29 @@ class TestGatedDiagnostics:
         monkeypatch.setenv("OSCAR_DIAG_DIR", str(tmp_path))
         diag.write("probe.txt", "lands")
         assert (tmp_path / "probe.txt").read_text() == "lands\n"
+
+
+class TestRepoRootDepth:
+    def test_repo_root_resolves_to_checkout_root(self, monkeypatch):
+        # no env override: the in-repo default must resolve to the actual
+        # checkout root (three dirname calls from vllm_ascend/oscar/), not
+        # its parent
+        monkeypatch.delenv("OSCAR_OPP_PATH", raising=False)
+        monkeypatch.delenv("R144_OPP_PATH", raising=False)
+        import os
+
+        import vllm_ascend.oscar.paths as P
+
+        assert os.path.isfile(os.path.join(P._REPO_ROOT, "pyproject.toml"))
+        assert os.path.isdir(os.path.join(P._REPO_ROOT, "vllm_ascend", "oscar"))
+
+    def test_runner_tmp_default_is_uid_isolated(self, monkeypatch):
+        # /tmp is shared on multi-user hosts: the default scratch dir must
+        # carry the uid so extension builds cannot collide across users
+        import os
+
+        import vllm_ascend.oscar.paths as P
+
+        monkeypatch.delenv("OSCAR_RUNNER_TMP", raising=False)
+        d = P.runner_tmp("ut_probe")
+        assert d.startswith(f"/tmp/oscar_runner-{os.getuid()}/")
