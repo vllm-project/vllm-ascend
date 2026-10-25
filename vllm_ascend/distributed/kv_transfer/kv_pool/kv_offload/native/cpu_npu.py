@@ -8,6 +8,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from vllm.logger import logger
@@ -25,6 +26,8 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
+from .dram_transfer import RegisteredDram, register_dram
+
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
 DIRECTION_D2H = 1
@@ -40,6 +43,7 @@ class Transfer:
     batch_src: torch.Tensor
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
+    sdma_batch: Any = None
 
 
 def _new_descriptor_buffers(
@@ -72,6 +76,7 @@ class SingleDirectionNPUOffloadingHandler:
         blocks_per_chunk: int,
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         npu_to_cpu: bool,
+        dram: RegisteredDram | None = None,
     ) -> None:
         assert len(npu_tensors) == len(cpu_tensors)
         assert npu_tensors
@@ -90,6 +95,7 @@ class SingleDirectionNPUOffloadingHandler:
         self.src_tensors = list(npu_tensors if npu_to_cpu else cpu_tensors)
         self.dst_tensors = list(cpu_tensors if npu_to_cpu else npu_tensors)
         self.npu_to_cpu = npu_to_cpu
+        self._dram = dram
         self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
         self.src_blocks_per_chunk = 1 if npu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if npu_to_cpu else 1
@@ -193,6 +199,8 @@ class SingleDirectionNPUOffloadingHandler:
         assert dst_offset == len(dst_blocks)
         assert op_idx == num_copy_ops
 
+        sdma_batch = self._dram.prepare(src, dst, sizes, self.direction) if self._dram is not None else None
+
         stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
         start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
         end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
@@ -206,7 +214,9 @@ class SingleDirectionNPUOffloadingHandler:
 
         with torch.npu.stream(stream):
             start_event.record(stream)
-            if num_copy_ops > 0:
+            if sdma_batch is not None:
+                sdma_batch.launch()
+            elif num_copy_ops > 0:
                 torch.ops._C_ascend.swap_blocks_batch(
                     src,
                     dst,
@@ -226,6 +236,7 @@ class SingleDirectionNPUOffloadingHandler:
                 batch_src=batch_src,
                 batch_dst=batch_dst,
                 batch_sizes=batch_sizes,
+                sdma_batch=sdma_batch,
             )
         )
         return True
@@ -234,6 +245,8 @@ class SingleDirectionNPUOffloadingHandler:
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
             transfer = self._transfers.popleft()
+            if transfer.sdma_batch is not None:
+                transfer.sdma_batch.release()
             transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
             results.append(
                 TransferResult(
@@ -263,7 +276,11 @@ class SingleDirectionNPUOffloadingHandler:
 
     def shutdown(self) -> None:
         while self._transfers:
-            self._transfers.popleft().end_event.synchronize()
+            transfer = self._transfers[0]
+            transfer.end_event.synchronize()
+            if transfer.sdma_batch is not None:
+                transfer.sdma_batch.release()
+            self._transfers.popleft()
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
@@ -281,8 +298,10 @@ class NPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        dram_transfer_backend: str = "auto",
     ) -> None:
         self._mmap_region = mmap_region
+        self._dram: RegisteredDram | None = None
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
 
@@ -328,12 +347,16 @@ class NPUOffloadingWorker(OffloadingWorker):
                 npu_tensors.append(npu_tensor)
                 cpu_tensors.append(cpu_tensor)
 
+            if mmap_region is not None and num_cpu_blocks > 0:
+                self._dram = register_dram(mmap_region, dram_transfer_backend)
+
             self._store_handler = SingleDirectionNPUOffloadingHandler(
                 npu_tensors=npu_tensors,
                 cpu_tensors=cpu_tensors,
                 blocks_per_chunk=blocks_per_chunk,
                 kv_cache_groups_data_refs=kv_caches.group_data_refs,
                 npu_to_cpu=True,
+                dram=self._dram,
             )
             self._load_handler = SingleDirectionNPUOffloadingHandler(
                 npu_tensors=npu_tensors,
@@ -341,6 +364,7 @@ class NPUOffloadingWorker(OffloadingWorker):
                 blocks_per_chunk=blocks_per_chunk,
                 kv_cache_groups_data_refs=kv_caches.group_data_refs,
                 npu_to_cpu=False,
+                dram=self._dram,
             )
         except Exception:
             # Construction failed before worker ownership became visible to
@@ -351,6 +375,12 @@ class NPUOffloadingWorker(OffloadingWorker):
                 handler = getattr(self, handler_name, None)
                 if handler is not None:
                     handler.shutdown()
+            if self._dram is not None:
+                self._dram.close()
+                self._dram = None
+            cpu_tensors.clear()
+            if "cpu_tensor" in locals():
+                del cpu_tensor
             if mmap_region is not None:
                 mmap_region.cleanup()
                 self._mmap_region = None
@@ -380,13 +410,13 @@ class NPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
-        try:
-            self._store_handler.shutdown()
-        finally:
-            try:
-                self._load_handler.shutdown()
-            finally:
-                # Drop all mmap-backed tensor views before closing the mapping.
-                if self._mmap_region is not None:
-                    self._mmap_region.cleanup()
-                    self._mmap_region = None
+        # Keep the mapping registered and mapped if draining fails.
+        self._store_handler.shutdown()
+        self._load_handler.shutdown()
+        dram = getattr(self, "_dram", None)
+        if dram is not None:
+            dram.close()
+            self._dram = None
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
+            self._mmap_region = None

@@ -46,11 +46,9 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> NPUOffloadingWorker:
-        # Keep the single-tier path on PyTorch's pinned allocator. Unlike CUDA,
-        # Ascend has no public cudaHostRegister-equivalent for an arbitrary
-        # mmap buffer, and the pinned tensor path has the best proven H2D/D2H
-        # performance. Consequently replicated_layout remains safely disabled
-        # for this spec by the upstream _uses_shared_region() gate.
+        # Keep the single-tier path on PyTorch's pinned allocator. The mmap
+        # registration/SDMA backend below is specific to the tiering primary.
+        # This spec does not advertise upstream's shared-region capability.
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
@@ -94,4 +92,5 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_chunks,
             mmap_region=worker_mmap,
+            dram_transfer_backend=self.extra_config.get("dram_transfer_backend", "auto"),
         )
