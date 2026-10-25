@@ -86,10 +86,6 @@ TITLES = {
     "index.md": {"en": "Home", "zh": "首页"},
     "getting_started/installation.md": {"en": "Installation", "zh": "安装指南"},
     "getting_started/quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
-    "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
         "zh": "PD 共置（Mooncake，多实例）",
@@ -112,10 +108,6 @@ TITLES = {
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
     "tutorials/models/DeepSeek-V4-Flash.md": {"en": "DeepSeek-V4-Flash", "zh": "DeepSeek-V4-Flash"},
-    "tutorials/models/DeepSeek-V4-Flash-Vision.md": {
-        "en": "DeepSeek-V4-Flash-Vision-Exp (Experimental)",
-        "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
-    },
     "tutorials/models/DeepSeek-V4.1-Flash.md": {
         "en": "DeepSeek-V4.1-Flash",
         "zh": "DeepSeek-V4.1-Flash",
@@ -125,8 +117,7 @@ TITLES = {
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
     "tutorials/models/Gemma4.md": {"en": "Gemma4", "zh": "Gemma4"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
-    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
-    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3", "zh": "GLM-5.3"},
+    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2 & GLM-5.3", "zh": "GLM-5.2 & GLM-5.3"},
     "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},

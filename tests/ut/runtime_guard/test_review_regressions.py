@@ -461,6 +461,16 @@ def test_v10b_unknown_top_level_key_rejected_on_reload(tmp_path: Path):
 # ---------------------------------------------------------------- V12 (P1-A1)
 
 
+def test_req_index_for_flat_token_short_qsl():
+    import numpy as np
+
+    from vllm_ascend.observability.runtime_guard.detector.logits_finite import req_index_for_flat_token
+
+    qsl = np.asarray([0, 3], dtype=np.int64)  # only one interval, but num_reqs=3
+    assert req_index_for_flat_token(1, qsl, num_reqs=3) == 0
+    assert req_index_for_flat_token(5, qsl, num_reqs=3) is None
+
+
 def test_v12_logits_finite_unattributable_row_warns_not_misattributes():
     from ._helpers import capture_logger_text
 
@@ -818,6 +828,36 @@ def test_v17_spec_acceptance_short_batch_no_index_error():
     ):
         alerts = det.check_all(sampled, [1])  # accepted shorter than req_ids
     assert isinstance(alerts, list)
+
+
+def test_v17_spec_acceptance_none_accepted_token_nums_returns_empty():
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+
+    section = {
+        "enabled": True,
+        "window": 2,
+        "low_threshold": 0.3,
+        "len_low_threshold": 1.4,
+        "high_threshold": 0.96,
+        "len_high_threshold": 2.8,
+    }
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    runner = SimpleNamespace(
+        tp_rank=1,
+        speculative_config=SimpleNamespace(),
+        input_batch=SimpleNamespace(req_ids=["a"], num_draft_tokens_per_req=None),
+        requests=None,
+    )
+    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+    sampled = torch.tensor([[7, 8, 9, 10]])
+    with patch(
+        "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
+        return_value=SimpleNamespace(is_last_rank=True),
+    ):
+        assert det.check_all(sampled, None) == []
 
 
 def test_v17d_spec_acceptance_high_rate_below_len_high_no_alert():
@@ -2185,8 +2225,8 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
         worker.stop()
 
 
-def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
-    """Static-idle clear (dump inactive, no reload) must refund armed arms."""
+def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
+    """dump_only path with dump inactive refunds unclaimed arms (not fully off)."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
@@ -2195,6 +2235,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
+    # Sync enters dump_only branch (detectors off, hot-reload off).
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False
@@ -2205,6 +2246,7 @@ def test_v28e_static_idle_drop_refunds_quota(monkeypatch):
     p._end_of_wave_sync_if_no_sample = MagicMock()
 
     RuntimeGuardProcessor.sync_for_step(p, allow_manual_dump=True)
+    p.wave_tracker.advance.assert_called_once_with(allow_manual_dump=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
 

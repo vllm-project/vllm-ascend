@@ -11,6 +11,7 @@ import vllm_ascend.attention.indexer_kpool as backend_module
 import vllm_ascend.platform as platform
 from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, DeviceAdaptorFamily
+from vllm_ascend.utils import enable_sfa, model_uses_sfa_sparse
 
 
 @pytest.mark.parametrize("kpool", [False, True])
@@ -19,10 +20,11 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
     config = SimpleNamespace(index_topk=2048)
     if kpool:
         config.index_kpool = 4
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config))
     monkeypatch.setattr(
         vllm_config_module,
         "get_current_vllm_config",
-        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config)),
+        lambda: vllm_config,
     )
     monkeypatch.setattr(
         platform,
@@ -33,8 +35,22 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
         ),
     )
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *args: False)
-    selector = SimpleNamespace(use_mla=True, use_sparse=True, use_pcp=False)
+    selector = SimpleNamespace(use_mla=True, use_sparse=enable_sfa(vllm_config), use_pcp=False)
+    assert enable_sfa(vllm_config)
+    assert model_uses_sfa_sparse(vllm_config.model_config) == (not kpool)
     assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
+
+
+@pytest.mark.parametrize("has_index_topk, has_compress_ratios", [(False, False), (True, True)])
+def test_kpool_without_sparse_main_attention_is_not_sfa(has_index_topk, has_compress_ratios):
+    config = SimpleNamespace(index_kpool=4)
+    if has_index_topk:
+        config.index_topk = 2048
+    if has_compress_ratios:
+        config.compress_ratios = [4]
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=config))
+
+    assert not enable_sfa(vllm_config)
 
 
 @pytest.mark.parametrize("mode", ["310p", "pcp", "dcp"])

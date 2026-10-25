@@ -10,15 +10,15 @@
   handler: ms_service_metric.provider_handlers:scheduler_scheduler_hooker
 
 # Model runner metrics.
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:init_data_parallel_worker
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:model_runner_execute_model:duration
 
-- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._prepare_inputs
+- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner._prepare_inputs
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:prepare_inputs:duration

@@ -8,15 +8,22 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_decode_inputs_cpu,
     prepare_prefill_inputs_cpu,
     update_draft_inputs_cpu,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import aclgraph_utils as aclgraph_utils_mod
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
+
+# vLLM #60335 renamed the shared AR speculator module to `target_dependent_ar`
+# on main; the release lane (v0.31.0) still ships `autoregressive`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
+else:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as ar_speculator
 
 ar_speculator.prepare_prefill_inputs = prepare_prefill_inputs_cpu
 ar_speculator.prepare_decode_inputs = prepare_decode_inputs_cpu

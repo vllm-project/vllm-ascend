@@ -27,13 +27,21 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     yarn_get_mscale,
 )
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
     get_kpool_tail_ring_capacity,
 )
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
+# package on main; the release lane (v0.31.0) still ships them under
+# `vllm.transformers_utils.configs.glm5_next`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
+else:
+    from transformers import Glm5NextConfig
 
 
 class Indexer(nn.Module):

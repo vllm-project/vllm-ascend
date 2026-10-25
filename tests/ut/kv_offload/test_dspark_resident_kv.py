@@ -62,6 +62,8 @@ def _prefill_runner(
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.debugger = None
+    runner.model_state = SimpleNamespace()
+    runner.prompt_logprobs_worker = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(

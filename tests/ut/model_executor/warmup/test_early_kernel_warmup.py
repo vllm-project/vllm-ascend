@@ -191,3 +191,45 @@ def test_join_warns_when_the_thread_outlives_the_timeout():
         ek.join_early_kernel_warmup("load_model")
 
     warning.assert_called_once()
+
+
+def _shim(use_v2_model_runner):
+    config = MagicMock(use_v2_model_runner=use_v2_model_runner)
+    return ek._WarmupShim(config, "npu:0")
+
+
+def _run_with_recorded_items(use_v2_model_runner):
+    calls: list[str] = []
+
+    def record(name):
+        return lambda *_args, **_kwargs: calls.append(name)
+
+    with (
+        patch.object(ek.torch.npu, "set_device"),
+        patch(
+            "vllm_ascend.model_executor.warmup.rms_triton_warmup.triton_rms_warmup",
+            record("rms"),
+        ),
+        patch(
+            "vllm_ascend.model_executor.warmup.penalties_triton_warmup.penalties_triton_warmup",
+            record("penalties"),
+        ),
+        patch(
+            "vllm_ascend.model_executor.warmup.rejection_sampler_triton_warmup.rejection_sampler_triton_warmup",
+            record("rejection_sampler"),
+        ),
+    ):
+        ek._run(_shim(use_v2_model_runner), 0)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "expected"),
+    [
+        (False, ["rejection_sampler", "penalties", "rms"]),
+        # MRv2 samples through worker/v2 kernels, so only rms is shared.
+        (True, ["rms"]),
+    ],
+)
+def test_run_warms_only_the_kernels_the_model_runner_uses(use_v2_model_runner, expected):
+    assert _run_with_recorded_items(use_v2_model_runner) == expected

@@ -183,7 +183,7 @@ The following measurements of GLM-5.2 on 950DT Products show the impact on cache
 | Hardware | One node with 8 950DT Products | Two nodes with 8 950DT Products per node |
 | Model | GLM-5.2-W4A8C8 | GLM-5.2-W8A8C8-mxfp8 |
 | Parallelism | TP8 + EP | TP8 + PP2 + EP, 38/40 layer split |
-| Common settings | DSA-CP, chunked prefill, prefix caching, asynchronous scheduling, LI-C8, Model Runner V1, eager mode | Same as single node |
+| Common settings | chunked prefill, prefix caching, asynchronous scheduling, LI-C8, Model Runner V1, eager mode | Same as single node |
 | Scheduling and memory | `max_num_batched_tokens=32768`, `max_num_seqs=12`, `gpu_memory_utilization=0.90` | Same as single node |
 
 MTP and SFA-C8 were not enabled. All measurements below use a 32K scheduling token budget.
