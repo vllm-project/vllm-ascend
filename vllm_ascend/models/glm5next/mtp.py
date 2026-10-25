@@ -40,7 +40,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -107,7 +107,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 class Glm5NextMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
@@ -200,7 +200,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         self.is_rot_weight_used = is_rot_weight_used(vllm_config)

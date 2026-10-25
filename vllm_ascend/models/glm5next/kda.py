@@ -4,7 +4,7 @@
 
 import torch
 from torch import nn
-from transformers import Glm5NextConfig
+from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_pcp_group
@@ -223,7 +223,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
