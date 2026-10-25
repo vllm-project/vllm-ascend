@@ -124,3 +124,18 @@ class TestResolveSlots:
         s = _MetaSelf(mseq=4)
         s._tt_resolve_slots(SimpleNamespace(request_ids=None), 0, "cpu", torch.float32)
         assert s._tt_cur_rids is None and s._tt_cur_slots is None
+
+
+def test_reuse_assignment_is_deterministic(monkeypatch):
+    # two independent resolvers fed the same lifecycle must hand out the
+    # same slot sequence (lowest free slot first), independent of set
+    # iteration order (PYTHONHASHSEED varies per process)
+    _clean_env(monkeypatch)
+    seqs = []
+    for _ in range(2):
+        s = _MetaSelf(mseq=8)
+        s._tt_resolve_slots(_md(["a", "b", "c"]), None, "cpu", torch.float32)
+        s._tt_resolve_slots(_md(["a", "b"], finished=["c"]), None, "cpu", torch.float32)
+        s._tt_resolve_slots(_md(["a", "b", "d"]), None, "cpu", torch.float32)
+        seqs.append(dict(s._tt_slotmap))
+    assert seqs[0] == seqs[1]

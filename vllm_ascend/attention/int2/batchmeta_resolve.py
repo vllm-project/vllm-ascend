@@ -103,7 +103,14 @@ class Int2BatchMetaResolveMixin:
         for r in rids:
             if r not in self._tt_slotmap:
                 if self._tt_free:
-                    _slot = self._tt_free.pop()
+                    # deterministic reuse (lowest slot first): the slot maps
+                    # are rank-local (no collective ever carries them), so
+                    # cross-rank agreement is not required for correctness —
+                    # but set.pop() ordering also varies per process via
+                    # PYTHONHASHSEED, and deterministic assignment removes
+                    # the question entirely
+                    _slot = min(self._tt_free)
+                    self._tt_free.discard(_slot)
                     _ev = "REUSE"
                 elif self._tt_next < self._tt_mseq:
                     _slot = self._tt_next
