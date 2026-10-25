@@ -780,8 +780,8 @@ class Int2MiddleExecMixin:
             _R146S = _os.environ.get("R146_STRIDE", "0") == "1"  # R146 P1: stride=seqInnerSize .o (sentinel-free)
             _r145_handled = False
             if _R145T and not _R146F and _os.environ.get("R146_PERTURB", "0") == "1":
-                _dum = torch.ones(8, 8, dtype=torch.bfloat16, device=query.device)
-                _dum2 = torch.matmul(_dum, _dum)
+                _dummy = torch.ones(8, 8, dtype=torch.bfloat16, device=query.device)
+                _dummy2 = torch.matmul(_dummy, _dummy)
             if _R145T and not _R146F and _os.environ.get("R146_PERTURB", "0") == "2":
                 # allocation-footprint probe: ONCE, allocate a carrier-sized blob (~MBs) and
                 # hold it on the impl; never used. If tokens flip => layout/address sensitivity.
