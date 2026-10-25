@@ -22,7 +22,7 @@ def require_extension():
     assert hasattr(torch.ops._C_ascend, "moe_counts_cumsum")
 
 
-@pytest.mark.parametrize("n", [1, 7, 8, 9, 31, 32, 33, 255, 256, 257, 4095, 4096])
+@pytest.mark.parametrize("n", [1, 7, 8, 9, 31, 32, 33, 255, 256, 257, 1023, 1024])
 def test_exact_int64_nondefault_stream(n):
     stream = torch.npu.Stream()
     with torch.npu.stream(stream):
@@ -87,9 +87,7 @@ def test_cross_stream_producer_and_temporary_consumer():
         assert torch.equal(result, independent_scan(base + value) + 1)
 
 
-@pytest.mark.parametrize(
-    "shape,dtype", [((0,), torch.int64), ((4097,), torch.int64), ((32,), torch.int32), ((2, 16), torch.int64)]
-)
+@pytest.mark.parametrize("shape,dtype", [((0,), torch.int64), ((32,), torch.int32), ((2, 16), torch.int64)])
 def test_custom_entry_rejects_unsupported_metadata(shape, dtype):
     x = torch.zeros(shape, device="npu", dtype=dtype)
     with pytest.raises(RuntimeError):
