@@ -54,10 +54,6 @@ class Int2SlotStateMixin:
     _r164_tdbuf: Any
     _r166_alloc: Any
     _r170_hp_mirror: Any
-    _r170_hpk: Any
-    _r170_hpv: Any
-    _r170_mseq: Any
-    _r171_hp_reg: Any
     _r196_idfill_memo: Any
     _r198_idx_cache: Any
     _r200_srcfree: Any
@@ -161,9 +157,12 @@ class Int2SlotStateMixin:
             import vllm_ascend.attention.attention_v1 as _m170i
 
             for _c170 in dict.fromkeys([type(self), _m170i.AscendAttentionBackendImpl]):
-                _c170._r170_hpk = self._tt_hp_k
-                _c170._r170_hpv = self._tt_hp_v
-                _c170._r170_mseq = int(self._tt_mseq)
+                # deliberately dynamic class-attribute mirrors: the targets
+                # include the foreign base class, so plain attribute syntax
+                # cannot type-check against it
+                setattr(_c170, "_r170_hpk", self._tt_hp_k)  # noqa: B010 - dynamic mirror by design
+                setattr(_c170, "_r170_hpv", self._tt_hp_v)  # noqa: B010 - dynamic mirror by design
+                setattr(_c170, "_r170_mseq", int(self._tt_mseq))  # noqa: B010 - dynamic mirror by design
                 # R171 FIX (defect B): the legacy alias above is OVERWRITTEN by
                 # every layer impl instance (N instances, each with its OWN
                 # dict holding ONLY its own lid) — the class attr ends up
@@ -174,7 +173,8 @@ class Int2SlotStateMixin:
                 # dict pair once; the migrator unions lids across all of them.
                 _reg171 = getattr(_c170, "_r171_hp_reg", None)
                 if _reg171 is None:
-                    _c170._r171_hp_reg = _reg171 = []
+                    setattr(_c170, "_r171_hp_reg", [])  # noqa: B010 - dynamic mirror by design
+                    _reg171 = _c170._r171_hp_reg
                 if not any(k is self._tt_hp_k for k, _v in _reg171):
                     _reg171.append((self._tt_hp_k, self._tt_hp_v))
         # req_ids that currently have an assigned slot (the "live" set). A
