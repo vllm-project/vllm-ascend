@@ -637,8 +637,7 @@ Before you start, please:
                 --quantization ascend \
                 --enforce-eager \
                 --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true}' \
-                --kv-transfer-config \
-                '{"kv_connector": "MooncakeHybridConnector",
+                --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
@@ -705,8 +704,7 @@ Before you start, please:
                 --quantization ascend \
                 --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-                --kv-transfer-config \
-                '{"kv_connector": "MooncakeHybridConnector",
+                --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
                 "kv_role": "kv_consumer",
                 "kv_port": "30100",
                 "kv_connector_extra_config": {
@@ -787,8 +785,7 @@ Before you start, please:
                 --quantization ascend \
                 --enforce-eager \
                 --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1}' \
-                --kv-transfer-config \
-                '{"kv_connector": "MooncakeHybridConnector",
+                --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
                 "kv_role": "kv_producer",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
@@ -858,8 +855,7 @@ Before you start, please:
                 --quantization ascend \
                 --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-                --kv-transfer-config \
-                '{"kv_connector": "MooncakeHybridConnector",
+                --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
                 "kv_role": "kv_consumer",
                 "kv_port": "30100",
                 "kv_connector_extra_config": {
@@ -1048,8 +1044,7 @@ Before you start, please:
             --attention_config.indexer_kv_dtype int8 \
             --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}' \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeHybridConnector",
+            --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "kv_connector_extra_config": {
@@ -1123,8 +1118,7 @@ Before you start, please:
             --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --kv-transfer-config \
-            '{"kv_connector": "MooncakeHybridConnector",
+            --kv-transfer-config '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30400",
             "kv_connector_extra_config": {
@@ -1484,359 +1478,275 @@ Before you start, please:
 
 #### 5.2.5 A2 Series PD Separation Deployment with DSpark (2P2D, 32 cards)
 
-This section shows the validated deployment guide of `DeepSeek-V4-Flash-0731-w8a8` on **Atlas 800I A2 (64GB × 8)** with DSpark, using two external-DP Prefill endpoints and a cross-node Decode instance (2P2D, 32 NPUs in total). KV Cache is transferred from Prefill to Decode with `MooncakeHybridConnector`.
+Use `DeepSeek-V4-Flash-0731-w8a8` on four Atlas 800I A2 servers (8 NPUs per server). Choose the workload settings from the table before starting either role. The settings below retain the configurations selected in completed A2 measurements; they are starting points for the listed workloads, not a universal optimum across workloads or software versions.
 
-| Role | Nodes / NPUs | Parallelism | Endpoints |
+| Role | Nodes / NPUs | Parallelism | HTTP endpoints |
 |---|---|---|---|
-| Prefill | 2 nodes / 16 NPUs | `ExternalDP2 × TP1 × PP1 × PCP8` (one 8-NPU `vllm serve` process per node) | `7100` and `7101` |
-| Decode | 2 nodes / 16 NPUs | cross-node `DP16 × TP1` (8 `vllm serve` processes per node, 1 NPU each) | `7100`–`7107` on each node |
+| Prefill | 2 / 16 | ExternalDP2 × TP1 × PP1 × PCP8 | node A:7100, node B:7101 |
+| Decode | 2 / 16 | DP16 × TP1, eight processes per node | 7100–7107 on each node |
 
-!!! note
-    The A3 1P1D topology (16 cards: 8 for Prefill and 8 for Decode, two dies per card) corresponds to the A2 2P2D topology above (32 cards: 16 for Prefill and 16 for Decode). Use the same workload when comparing A2 and A3 numbers.
+!!! note "Measurement and version scope"
+    The measured setup used the A2 `dev-26.2.0.day20261021` image, MRv2, P eager and D target/draft graph mode. It also included runtime changes for UVA dirty tracking, exact request-hash reuse and RoPE capacity; those changes are not delivered by this documentation update. Pin the image, model and loaded code when reproducing measurements. Revalidate these settings on a different build, including the `nightly-main` A2 image described in Section 4.1.
 
-!!! warning "Keep the published baseline on `PP1 × PCP8` with Hybrid"
-    The current vLLM-Ascend A2 code rejects `pp_size > 1` together with `pcp_size > 1` in `MooncakeHybridConnector`. The `PP2 × PCP8`/`MooncakeConnectorV2` experiment is a separate, version-sensitive topology and is not the validated baseline in this guide. Do not mix the connector families or register a PP2 headless process as an HTTP Prefill endpoint.
+!!! warning "Topology and dispatch limits"
+    Keep `PP1 × PCP8` with `MooncakeHybridConnector`. The validated implementation rejects simultaneous PP>1 and PCP>1. Its A2 dispatch path also requires `D max-num-seqs × (1 + draft tokens) <= 256`: the measured pairs are 5/42, 2/85 and 1/128. A different draft length changes the legal request capacity; 42 is not a universal maximum.
 
-!!! note
-    The scripts below use the placeholders `nic_name`, `local_ip`, `head_ip`, and `model_path`. Replace them with the NIC name, node IPs, and model directory of your own environment.
+**Choose the server settings and client load.** D uses `--max-num-batched-tokens 720` and `--gpu-memory-utilization 0.97` in every configuration. P uses `--max-num-seqs 16`, `--api-server-count 4`, `--gpu-memory-utilization 0.96` and draft5/eager.
 
-1. Start the Docker container on all four nodes.
+| Configuration | Workload / native window | P token budget / prefix cache | D draft / max-num-seqs | Proxy workers |
+|---|---|---|---|---:|
+| `decode-4k-total` | 4K input / 2K output, pure D, total | 4096 / on | 2 / 85 | 4 |
+| `decode-4k-stable` | 4K / 2K, pure D, native stable | 4096 / on | 1 / 128 | 4 |
+| `decode-16k` | 16K / 1K, pure D | 4096 / on | 1 / 128 | 4 |
+| `decode-long` | 64K / 1K or 128K / 1K, pure D | 4096 / on | 5 / 42 | 1 |
+| `cold-pd` | PC0 pure P or full PD | 8192 / off | 1 / 128 | 4 |
+| `pc90` | Distinct-suffix, multiple-prefix pooling; see Section 5.2.6 | 8192 / on | 1 / 128 | 4 |
 
-    Use the A2 image from [Section 4.1](#41-docker-image-installation) on every node (2 Prefill nodes and 2 Decode nodes). For DSpark use the `nightly-main` image of the A2 tab.
+The recorded client loads below are separate from the server profiles. Input counts include the measured client's 84-token template offset for these ordinary-length cases. Keep the payload definition and tokenizer unchanged when comparing them.
 
-2. Start both Prefill endpoints. They are independent External-DP ranks, so register both HTTP endpoints with the proxy and send traffic to both.
+| Profile / window | Measured input / output tokens | Requests / concurrency / rate (req/s) |
+|---|---|---|
+| `decode-4k-total` / total | 4180 / 2048 | 4096 / 1536 / 0 |
+| `decode-4k-stable` / native stable | 4180 / 2048 | 8192 / 2304 / 0; stable subset chosen by AISBench |
+| `decode-16k` / total, TTFT trial | 16468 / 1024 | 8192 / 2048 / 0 |
+| `decode-16k` / recorded native stable | 16468 / 1024 | 8192 / 2304 / 0; do not substitute the CC2048 total result |
+| `decode-long` / 64K total or native stable | 65620 / 1024 | 3840 / 576 / 0 |
+| `decode-long` / 128K total | 131156 / 1024 | 3920 / 960 / 0 |
+| `decode-long` / 128K native stable | 131156 / 1024 | 2960 / 960 / 0 |
+| `cold-pd` / full PD total | 16468 / 1024 | 240 / 60 / 0 |
 
-=== "Prefill node A (`--data-parallel-rank 0`)"
+The complete scripts below use the measured 16K pure-D setting: P token budget4096/APC on, D draft1/mns128/GMU0.97. For other workloads, replace the explicit values listed in the table; for `cold-pd`, replace the P cache switch with `--no-enable-prefix-caching`. No external helper or profile file is required.
 
-    ```shell
-    nic_name="xxxx"                                  # change to your own NIC name
-    local_ip=xx.xx.xx.1                               # change to this node's IP
-    head_ip=xx.xx.xx.1                                # change to the Prefill head node IP
-    model_path=/path/to/DeepSeek-V4-Flash-0731-w8a8  # change to your model directory
+The measured context budgets are intentionally asymmetric: `--max-model-len 150000` on P and `508576` on D. The larger D budget does not extend the prompt length that P can prefill. All ordinary-length workloads listed here fit within the P budget; do not advertise the D value as the end-to-end prompt limit. If a deployment requires equal P/D limits, change both to the chosen service limit and revalidate KV capacity and throughput before reusing these measurements.
 
-    export ASCEND_GLOBAL_RESOURCE_CONFIG="{\"comm_resource_config.protocol_desc\":[\"roce:device\",\"hccs:device\"]}"
-    export ASCEND_LOCAL_COMM_RES="{\"version\":\"1.3\"}"
-    export VLLM_USE_V2_MODEL_RUNNER="1"
-    export HCCL_INTRA_ROCE_ENABLE="1"
-    export HCCL_CONNECT_TIMEOUT="6000"
-    export HCCL_EXEC_TIMEOUT="204"
-    export HCCL_BUFFSIZE="1200"
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="30000"
-    export VLLM_RPC_TIMEOUT="3600000"
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="512"
-    export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-    export HCCL_IF_IP=$local_ip
+Server configuration and client load must be recorded together. For the 16K/1K total-window latency trial, N8192/CC2048/rate0 was tested twice against a current-deployment N8192/CC2304/rate0 control. The last repeat reduced legacy TTFT mean/P90 from 21.30/50.32 seconds to 11.32/42.51 seconds while output throughput changed by -0.54%. TPOT was 93.6 ms, not a 20 ms SLO pass. This is a workload-specific result; lower concurrency does not guarantee lower latency elsewhere. Do not substitute total results for native stable results. The 1M cases require a separately validated long-context deployment, not a larger `--max-model-len` in these scripts.
 
-    vllm \
-      serve \
-      $model_path \
-      --host \
-      0.0.0.0 \
-      --port \
-      7100 \
-      --data-parallel-size \
-      2 \
-      --data-parallel-rank \
-      0 \
-      --data-parallel-address \
-      $head_ip \
-      --data-parallel-rpc-port \
-      12321 \
-      --tensor-parallel-size \
-      1 \
-      --pipeline-parallel-size \
-      1 \
-      --prefill-context-parallel-size \
-      8 \
-      --decode-context-parallel-size \
-      1 \
-      --served-model-name \
-      dsv4 \
-      --enable-expert-parallel \
-      --max-model-len \
-      150000 \
-      --max-num-batched-tokens \
-      4096 \
-      --max-num-seqs \
-      16 \
-      --api-server-count \
-      4 \
-      --block-size \
-      32 \
-      --gpu-memory-utilization \
-      0.96 \
-      --enable-chunked-prefill \
-      --no-disable-hybrid-kv-cache-manager \
-      --enable-prefix-caching \
-      --enforce-eager \
-      --quantization \
-      ascend \
-      --tokenizer-mode \
-      deepseek_v4 \
-      --attention_config.indexer_kv_dtype \
-      int8 \
-      --tool-call-parser \
-      deepseek_v4 \
-      --enable-auto-tool-choice \
-      --reasoning-parser \
-      deepseek_v4 \
-      --trust-remote-code \
-      --seed \
-      1024 \
-      --model-loader-extra-config \
-      '{"enable_multithread_load":true,"num_threads":128}' \
-      --speculative-config \
-      '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --additional-config \
-      '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
-      --kv-transfer-config \
-      '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"song-A2a3aligned-Hybrid-P-v1","kv_load_failure_policy":"fail","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":1,"pp_size":1,"pcp_size":8},"decode":{"dp_size":16,"tp_size":1,"pp_size":1,"pcp_size":1}}}'
-    ```
-
-=== "Prefill node B (`--data-parallel-rank 1`)"
-
-    Use the same environment variables and `vllm serve` command as Prefill node A, with the following three differences only:
-
-    - `local_ip` is this node's IP
-    - `--port 7101`
-    - `--data-parallel-rank 1`
-
-    Keep `--data-parallel-address` pointing to the Prefill head node (`head_ip`). Both endpoints serve HTTP and must be registered with the proxy.
-
-    ```shell
-    nic_name="xxxx"                                  # change to your own NIC name
-    local_ip=xx.xx.xx.2                               # change to this node's IP
-    head_ip=xx.xx.xx.1                                # change to the Prefill head node IP
-    model_path=/path/to/DeepSeek-V4-Flash-0731-w8a8  # change to your model directory
-
-    export ASCEND_GLOBAL_RESOURCE_CONFIG="{\"comm_resource_config.protocol_desc\":[\"roce:device\",\"hccs:device\"]}"
-    export ASCEND_LOCAL_COMM_RES="{\"version\":\"1.3\"}"
-    export VLLM_USE_V2_MODEL_RUNNER="1"
-    export HCCL_INTRA_ROCE_ENABLE="1"
-    export HCCL_CONNECT_TIMEOUT="6000"
-    export HCCL_EXEC_TIMEOUT="204"
-    export HCCL_BUFFSIZE="1200"
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="30000"
-    export VLLM_RPC_TIMEOUT="3600000"
-    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="512"
-    export ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-    export HCCL_IF_IP=$local_ip
-
-    vllm \
-      serve \
-      $model_path \
-      --host \
-      0.0.0.0 \
-      --port \
-      7100 \
-      --data-parallel-size \
-      2 \
-      --data-parallel-rank \
-      1 \
-      --data-parallel-address \
-      $head_ip \
-      --data-parallel-rpc-port \
-      12321 \
-      --tensor-parallel-size \
-      1 \
-      --pipeline-parallel-size \
-      1 \
-      --prefill-context-parallel-size \
-      8 \
-      --decode-context-parallel-size \
-      1 \
-      --served-model-name \
-      dsv4 \
-      --enable-expert-parallel \
-      --max-model-len \
-      150000 \
-      --max-num-batched-tokens \
-      4096 \
-      --max-num-seqs \
-      16 \
-      --api-server-count \
-      4 \
-      --block-size \
-      32 \
-      --gpu-memory-utilization \
-      0.96 \
-      --enable-chunked-prefill \
-      --no-disable-hybrid-kv-cache-manager \
-      --enable-prefix-caching \
-      --enforce-eager \
-      --quantization \
-      ascend \
-      --tokenizer-mode \
-      deepseek_v4 \
-      --attention_config.indexer_kv_dtype \
-      int8 \
-      --tool-call-parser \
-      deepseek_v4 \
-      --enable-auto-tool-choice \
-      --reasoning-parser \
-      deepseek_v4 \
-      --trust-remote-code \
-      --seed \
-      1024 \
-      --model-loader-extra-config \
-      '{"enable_multithread_load":true,"num_threads":128}' \
-      --speculative-config \
-      '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
-      --additional-config \
-      '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
-      --kv-transfer-config \
-      '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"song-A2a3aligned-Hybrid-P-v1","kv_load_failure_policy":"fail","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":1,"pp_size":1,"pcp_size":8},"decode":{"dp_size":16,"tp_size":1,"pp_size":1,"pcp_size":1}}}'
-    ```
-
-3. Start the Decode instance after the Prefill instance is ready. Each Decode node starts **8 processes**, one per NPU, with ports `7100`–`7107`.
-
-=== "Decode node A (ranks 0-7)"
-
-    ```shell
-    nic_name="xxxx"                                  # change to your own NIC name
-    local_ip=xx.xx.xx.3                               # change to this node's IP
-    head_ip=xx.xx.xx.3                                # change to the Decode head node IP
-    model_path=/path/to/DeepSeek-V4-Flash-0731-w8a8  # change to your model directory
-    rank_offset=0                                    # 0 on Decode node A, 8 on Decode node B
-
-    export ASCEND_GLOBAL_RESOURCE_CONFIG="{\"comm_resource_config.protocol_desc\":[\"roce:device\",\"hccs:device\"]}"
-    export VLLM_USE_V2_MODEL_RUNNER="1"
-    export HCCL_INTRA_ROCE_ENABLE="1"
-    export HCCL_CONNECT_TIMEOUT="120"
-    export HCCL_EXEC_TIMEOUT="204"
-    export HCCL_BUFFSIZE="1800"
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="30000"
-    export VLLM_RPC_TIMEOUT="3600000"
-    export OMP_NUM_THREADS="10"
-    export OMP_PROC_BIND="false"
-    export HCCL_IF_IP=$local_ip
-
-    for R in 0 1 2 3 4 5 6 7; do
-      export ASCEND_RT_VISIBLE_DEVICES=$R
-      vllm \
-        serve \
-        $model_path \
-        --host \
-        0.0.0.0 \
-        --port \
-        $((7100 + R)) \
-        --data-parallel-size \
-        16 \
-        --data-parallel-rank \
-        $((R + rank_offset)) \
-        --data-parallel-address \
-        $head_ip \
-        --data-parallel-rpc-port \
-        12321 \
-        --tensor-parallel-size \
-        1 \
-        --enable-expert-parallel \
-        --seed \
-        1024 \
-        --max-model-len \
-        508576 \
-        --max-num-batched-tokens \
-        720 \
-        --max-num-seqs \
-        42 \
-        --async-scheduling \
-        --block-size \
-        32 \
-        --served-model-name \
-        dsv4 \
-        --attention_config.indexer_kv_dtype \
-        int8 \
-        --no-enable-prefix-caching \
-        --no-disable-hybrid-kv-cache-manager \
-        --model-loader-extra-config \
-        '{"enable_multithread_load":true,"num_threads":128}' \
-        --trust-remote-code \
-        --tokenizer-mode \
-        deepseek_v4 \
-        --tool-call-parser \
-        deepseek_v4 \
-        --enable-auto-tool-choice \
-        --reasoning-parser \
-        deepseek_v4 \
-        --gpu-memory-utilization \
-        0.95 \
-        --quantization \
-        ascend \
-        --speculative-config \
-        '{"num_speculative_tokens":5,"method":"dspark"}' \
-        --compilation-config \
-        '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --kv-transfer-config \
-        '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_consumer","kv_port":"30100","engine_id":"1","kv_connector_extra_config":{"prefill":{"pcp_size":8,"dp_size":2,"tp_size":1},"decode":{"dp_size":16,"tp_size":1}}}' \
-        --additional-config \
-        '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
-      sleep 3
-    done
-    ```
-
-=== "Decode node B (ranks 8-15)"
-
-    Use the same environment variables and loop as Decode node A, with the following two differences only:
-
-    - `local_ip` is this node's IP
-    - `rank_offset=8`, so the eight local processes use `--data-parallel-rank 8`–`15`
-
-    Keep `head_ip` pointing to the Decode head node and `model_path` identical to Decode node A; all 16 ranks form one cross-node `DP16 × TP1` instance.
-
-4. Deploy the P-D disaggregation proxy.
-
-    Both roles are registered on the Decode head node; deploy the proxy by referring to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md). In this example the proxy exposes Prefill `node A:7100` and `node B:7101`, plus Decode `node A:7100-7107` and `node B:7100-7107`. Both Prefill endpoints must receive traffic; otherwise half of the P cards are idle.
-
-Key Parameter Descriptions:
-
-- Prefill is `ExternalDP2 × TP1 × PP1 × PCP8`: each endpoint owns an 8-NPU Prefill group. Both P endpoints must be registered and exercised in the same timing window; measuring only node A reports half of the available P cards.
-- `--max-num-seqs` is bounded by the MoE kernel on A2: `MoeDistributeDispatchV2` requires `max-num-seqs × (1 + num_speculative_tokens) <= 256`. With DSpark (`num_speculative_tokens=5`) each sequence processes 6 tokens per step, so the maximum value is **42** (`42 × 6 = 252`). Values above it (for example `60`) fail during engine startup with `Parameter bs (batch size) of MoeDistributeDispatchV2 has incorrect value 360. It should be [1, 256]`. This deployment therefore uses `16` on Prefill and `42` on Decode.
-- `--max-num-batched-tokens` must stay above the Decode concurrency budget, otherwise the per-step token budget saturates before `--max-num-seqs` does. With `--max-num-batched-tokens 360` the Decode engines stayed at `running=36 / waiting=27 (reason=capacity)` even after `--max-num-seqs` was raised to 42; raising it to `720` made `--max-num-seqs 42` effective. Prefill uses `4096`.
-- `--enforce-eager` is set on Prefill only. Decode runs with ACL graph (`--compilation-config` with `cudagraph_mode=FULL_DECODE_ONLY`) and must **not** pass `--enforce-eager`; likewise the Decode `--speculative-config` must not contain `enforce_eager`, so that both the target model and the DSpark draft model are captured as graphs. The Prefill `--speculative-config` keeps `enforce_eager: true`.
-- `--gpu-memory-utilization` is `0.96` on Prefill and `0.95` on Decode in the validated Hybrid baseline. Recheck the KV pool after changing model length or batch budget; do not transfer this value to another model without a memory calculation.
-- `ASCEND_LOCAL_COMM_RES` with `{"version":"1.3"}` must be exported on **all** nodes. CANN selects the HIXL engine variant from `LocalCommRes.version` (`1.3` -> `hixl_cs`). If Prefill omits it, Prefill and Decode end up on different engines, the KV transfer fails (`HixlClient receive header failed`, `Mooncake transfer failed ret=-1`) and Decode keeps retrying.
-- `VLLM_USE_V2_MODEL_RUNNER=1` is required on both roles: context parallelism (`--prefill-context-parallel-size`) needs Model Runner V2, and `enable_dsa_cp` must not be set in `--additional-config` when V2 is used.
-- `--no-enable-prefix-caching` is set on Decode. For pure-Decode scenarios the prefix-cache hit rate comes from the external KV Cache transferred from Prefill rather than from the local cache.
-- `--max-model-len` is `150000` on Prefill and `508576` on Decode in the validated 128K-capable baseline. This is a deployment choice, not a hardware limit; 1M workloads require the separate joint-context deployment described in [Section 5.2.3](#523-ultra-long-sequence-deployment).
-- `--no-disable-hybrid-kv-cache-manager`, `--block-size 32`, `--enable-prefix-caching` (Prefill), `--enable-chunked-prefill` (Prefill), `--async-scheduling` (Decode) and `--attention_config.indexer_kv_dtype int8` are kept aligned with the A3 example.
-- Prefill and Decode must use the **same connector family**. `MooncakeConnectorV2` and `MooncakeHybridConnector` use different tuple protocols; mixing them makes Prefill pin KV blocks until timeout and collapses pure-Decode throughput. Switching roles must always be done in pairs.
-- `kv_connector_extra_config` must describe the real Hybrid layout: P declares `prefill = {dp_size:2, tp_size:1, pp_size:1, pcp_size:8}` and `decode = {dp_size:16, tp_size:1, pp_size:1, pcp_size:1}`; D declares the corresponding `prefill = {dp_size:2, tp_size:1, pcp_size:8}` and `decode = {dp_size:16, tp_size:1}` blocks.
-- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` is retained in the environment for image compatibility, but some A2 images report it as unknown. Verify `cache_config_info` or the resolved CLI/config field before attributing a cache hit-rate change to it; do not treat the environment variable alone as proof that the setting is active.
-
-#### 5.2.6 A2 PC90 / third-level KV pooling variant
-
-Use this as a separate, pooled variant of the same `ExternalDP2 × TP1 × PP1 × PCP8` / `DP16 × TP1` topology. It is not interchangeable with the ordinary Hybrid baseline: the outer connector is `MultiConnector`, and the P/D child lists must stay identical on both roles.
-
-The accepted PC90 reference variant uses Prefill `--max-num-batched-tokens 8192`, `--max-num-seqs 16`, `--gpu-memory-utilization 0.96`, and DSpark 5; Decode uses `--max-num-batched-tokens 720`, `--max-num-seqs 128`, `--gpu-memory-utilization 0.97`, DSpark 1, and `FULL_DECODE_ONLY` graph mode. These values belong to the pooled workload and must be revalidated when the prefix count or backend changes.
-
-Enable the validated Mooncake SSD bucket backend on every P and D process. Replace the paths with local writable paths and provide the matching Mooncake configuration file:
+**Prefill: run this complete script on each P node.** Set `p_rank=0` on node A and `p_rank=1` on node B; keep `head_ip` pointing at P node A. Start both ranks before waiting for readiness.
 
 ```shell
-export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_PREFILL_NODE_IP>"
+head_ip="<PREFILL_NODE_A_IP>"
+p_rank=0  # Set to 1 on Prefill node B.
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+kv_config='{
+  "kv_connector": "MooncakeHybridConnector",
+  "kv_role": "kv_producer",
+  "kv_port": "30000",
+  "kv_connector_extra_config": {
+    "prefill": {
+      "dp_size": 2,
+      "tp_size": 1,
+      "pp_size": 1,
+      "pcp_size": 8
+    },
+    "decode": {
+      "dp_size": 16,
+      "tp_size": 1,
+      "pp_size": 1,
+      "pcp_size": 1
+    }
+  },
+  "kv_load_failure_policy": "fail"
+}'
+
+vllm serve "$model_path" \
+  --host 0.0.0.0 --port "$((7100 + p_rank))" \
+  --data-parallel-size 2 --data-parallel-rank "$p_rank" \
+  --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
+  --served-model-name dsv4 --enable-expert-parallel \
+  --max-model-len 150000 --max-num-batched-tokens 4096 \
+  --max-num-seqs 16 --api-server-count 4 \
+  --block-size 32 --gpu-memory-utilization 0.96 \
+  --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
+  --enable-prefix-caching --enforce-eager \
+  --quantization ascend --tokenizer-mode deepseek_v4 \
+  --attention_config.indexer_kv_dtype int8 \
+  --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+  --kv-transfer-config "$kv_config"
+```
+
+**Decode: run this complete script on each D node.** Set `rank_offset=0` on node A and `rank_offset=8` on node B; keep `head_ip` pointing at D node A. Launch all ranks before waiting for readiness.
+
+```shell
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_DECODE_NODE_IP>"
+head_ip="<DECODE_NODE_A_IP>"
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+rank_offset=0  # Set to 8 on Decode node B.
+
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+
+for local_rank in 0 1 2 3 4 5 6 7; do
+  global_rank=$((local_rank + rank_offset))
+  export ASCEND_RT_VISIBLE_DEVICES="$local_rank"
+  kv_config='{
+    "kv_connector": "MooncakeHybridConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": "30100",
+    "kv_connector_extra_config": {
+      "prefill": {
+        "dp_size": 2,
+        "tp_size": 1,
+        "pp_size": 1,
+        "pcp_size": 8
+      },
+      "decode": {
+        "dp_size": 16,
+        "tp_size": 1,
+        "pp_size": 1,
+        "pcp_size": 1
+      }
+    }
+  }'
+  vllm serve "$model_path" \
+    --host 0.0.0.0 --port "$((7100 + local_rank))" \
+    --data-parallel-size 16 --data-parallel-rank "$global_rank" \
+    --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+    --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
+    --max-model-len 508576 --max-num-batched-tokens 720 \
+    --max-num-seqs 128 --async-scheduling --block-size 32 \
+    --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
+    --no-enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --trust-remote-code --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+    --quantization ascend \
+    --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --kv-transfer-config "$kv_config" \
+    --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+  sleep 3
+done
+wait
+```
+
+**Start the proxy after all endpoints are healthy.** From the repository root, run the following complete command block. Use four workers for the short/medium and pooling configurations, or one for the recorded long-input configuration:
+
+```shell
+set -euo pipefail
+proxy_workers=4
+ulimit -n 65536
+p_a="<PREFILL_NODE_A_IP>"
+p_b="<PREFILL_NODE_B_IP>"
+d_a="<DECODE_NODE_A_IP>"
+d_b="<DECODE_NODE_B_IP>"
+decode_hosts=()
+decode_ports=()
+for node in "$d_a" "$d_b"; do
+  for port in 7100 7101 7102 7103 7104 7105 7106 7107; do
+    decode_hosts+=("$node")
+    decode_ports+=("$port")
+  done
+done
+python3 examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+  --host 0.0.0.0 --port 18590 --workers "$proxy_workers" \
+  --prefiller-hosts "$p_a" "$p_b" --prefiller-ports 7100 7101 \
+  --decoder-hosts "${decode_hosts[@]}" --decoder-ports "${decode_ports[@]}"
+```
+
+Verify `/healthcheck` reports two P and sixteen D endpoints and inspect the proxy/worker file-descriptor limits. Use the same `ulimit -n 65536` on the benchmark client. Both P endpoints must receive requests; their separate APIs do not imply independent compute capacity, because expert/MC2 collectives can span both DP groups. Measure aggregate P throughput in one shared wall-clock window.
+
+P explicitly selects `ASCEND_LOCAL_COMM_RES` version 1.3 in the measured image. Verify the actual transport engine on both roles when changing images; an environment variable alone is not proof of matching engines. The historical `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment variable was not read by that image and is omitted here. Check the resolved `--prefix-cache-retention-interval` before changing retention; zero does not disable all prefix reuse. D stays in graph mode for target and draft. Recheck dispatch capacity, KV residency and throughput together when adjusting budgets; a low KV usage gauge does not exclude other memory or compute bottlenecks.
+
+#### 5.2.6 A2 KV Pooling: Mooncake SSD Profile and Memcache Integration
+
+Pooling adds `AscendStoreConnector` to the Hybrid P-to-D transport through `MultiConnector`. A PC90 or third-level-pooling scenario name does not select a backend or prove that SSD offload is active. Select and prepare one backend, then copy its complete P/D scripts below. They use P token budget8192, P/D prefix caching enabled and D draft1/mns128/GMU0.97.
+
+| Backend | Preparation | Validation scope |
+|---|---|---|
+| `mooncake` | Embedded Store clients, a Mooncake master, DRAM and SSD configuration below | Backend used for the completed A2 PC90/SSD measurements; matching Mooncake client/native-library ABI 0.3.13 |
+| `memcache` | MetaService and embedded LocalServices, using the A2 RoCE protocol below | Integration recipe based on the Memcache backend guide; do not attribute the Mooncake profile's measured throughput to this backend |
+
+**Mooncake: prepare the Store and SSD layer.** Follow the [Mooncake backend prerequisites](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend) and keep the client wheel, native libraries and master compatible. The following is the measured configuration structure, with deployment addresses and paths replaced. Save `mooncake.json` on all four nodes:
+
+```json
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "protocol": "ascend",
+  "device_name": "",
+  "master_server_address": "<MOONCAKE_MASTER_IP>:50088",
+  "global_segment_size": "1GB",
+  "local_buffer_size": "1GB",
+  "preferred_segment": false,
+  "prefer_alloc_in_same_node": true,
+  "enable_ssd_offload": true,
+  "ssd_offload_path": "/nvme/a2_flash_store",
+  "tenant_id": "a2-flash-pc90"
+}
+```
+
+Use the same tenant and master endpoint on P and D. Create the SSD directory on each host and ensure it is writable. Confirm the installed backend assigns distinct worker storage paths; otherwise provide distinct paths per worker. Independent services with overlapping global ranks must not claim the same storage root. DRAM registration, local buffers and SSD capacity are per client/rank budgets, not a total-node memory cap.
+
+Start one master before starting vLLM. These offload-on-eviction settings follow the [SSD backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-5-mooncakestore-ssd-offload-embedded-real-client-mode); verify flag support in the installed master:
+
+```shell
+mooncake_master \
+  --port 50088 --eviction_high_watermark_ratio 0.5 --eviction_ratio 0.1 \
+  --default_kv_lease_ttl 11000 --enable_offload=true \
+  --offload_on_evict=true --offload_force_evict=false --client_ttl=120
+```
+
+After the Store is ready, use these complete P/D scripts. The Mooncake environment and the full `MultiConnector` JSON are included in each block.
+
+**Prefill: run this complete script on each P node.** Set `p_rank=0` on node A and `p_rank=1` on node B; keep `head_ip` pointing at P node A. Start both ranks before waiting for readiness.
+
+```shell
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_PREFILL_NODE_IP>"
+head_ip="<PREFILL_NODE_A_IP>"
+p_rank=0  # Set to 1 on Prefill node B.
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export MOONCAKE_CONFIG_PATH="<CONFIG_DIR>/mooncake.json"
 export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=34359738368
 export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=34359738368
 export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
 export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
-export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/path/to/mooncake_offload
+# Compatibility settings used by the measured client/native-library build.
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/nvme/a2_flash_store
 export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=bucket_storage_backend
-```
-
-On Prefill, use `--enable-prefix-caching` and replace the ordinary `--kv-transfer-config` with:
-
-```json
-{
+export ASCEND_GLOBAL_RESOURCE_CONFIG=""
+kv_config='{
   "kv_connector": "MultiConnector",
   "kv_role": "kv_producer",
   "kv_load_failure_policy": "fail",
@@ -1846,57 +1756,363 @@ On Prefill, use `--enable-prefix-caching` and replace the ordinary `--kv-transfe
         "kv_connector": "MooncakeHybridConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "kv_load_failure_policy": "fail",
         "kv_connector_extra_config": {
-          "prefill": {"dp_size": 2, "tp_size": 1, "pp_size": 1, "pcp_size": 8},
-          "decode": {"dp_size": 16, "tp_size": 1, "pp_size": 1, "pcp_size": 1}
-        }
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 1,
+            "pp_size": 1,
+            "pcp_size": 8
+          },
+          "decode": {
+            "dp_size": 16,
+            "tp_size": 1,
+            "pp_size": 1,
+            "pcp_size": 1
+          }
+        },
+        "kv_load_failure_policy": "fail"
       },
       {
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_producer",
-        "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "0", "use_layerwise": false}
+        "kv_connector_extra_config": {
+          "backend": "mooncake",
+          "lookup_rpc_port": "'"$p_rank"'",
+          "use_layerwise": false
+        }
       }
     ]
   }
-}
+}'
+
+vllm serve "$model_path" \
+  --host 0.0.0.0 --port "$((7100 + p_rank))" \
+  --data-parallel-size 2 --data-parallel-rank "$p_rank" \
+  --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
+  --served-model-name dsv4 --enable-expert-parallel \
+  --max-model-len 150000 --max-num-batched-tokens 8192 \
+  --max-num-seqs 16 --api-server-count 4 \
+  --block-size 32 --gpu-memory-utilization 0.96 \
+  --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
+  --enable-prefix-caching --enforce-eager \
+  --quantization ascend --tokenizer-mode deepseek_v4 \
+  --attention_config.indexer_kv_dtype int8 \
+  --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+  --kv-transfer-config "$kv_config"
 ```
 
-On Decode, keep `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, use the pooled `max-num-seqs`/speculative variant validated for the workload, and use:
+**Decode: run this complete script on each D node.** Set `rank_offset=0` on node A and `rank_offset=8` on node B; keep `head_ip` pointing at D node A. Launch all ranks before waiting for readiness.
 
-```json
-{
+```shell
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_DECODE_NODE_IP>"
+head_ip="<DECODE_NODE_A_IP>"
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+rank_offset=0  # Set to 8 on Decode node B.
+
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+export MOONCAKE_CONFIG_PATH="<CONFIG_DIR>/mooncake.json"
+export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=34359738368
+export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=34359738368
+export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+# Compatibility settings used by the measured client/native-library build.
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/nvme/a2_flash_store
+export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=bucket_storage_backend
+export ASCEND_GLOBAL_RESOURCE_CONFIG=""
+
+for local_rank in 0 1 2 3 4 5 6 7; do
+  global_rank=$((local_rank + rank_offset))
+  export ASCEND_RT_VISIBLE_DEVICES="$local_rank"
+  kv_config='{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+      "connectors": [
+        {
+          "kv_connector": "MooncakeHybridConnector",
+          "kv_role": "kv_consumer",
+          "kv_port": "30100",
+          "kv_connector_extra_config": {
+            "prefill": {
+              "dp_size": 2,
+              "tp_size": 1,
+              "pp_size": 1,
+              "pcp_size": 8
+            },
+            "decode": {
+              "dp_size": 16,
+              "tp_size": 1,
+              "pp_size": 1,
+              "pcp_size": 1
+            }
+          }
+        },
+        {
+          "kv_connector": "AscendStoreConnector",
+          "kv_role": "kv_consumer",
+          "kv_connector_extra_config": {
+            "backend": "mooncake",
+            "lookup_rpc_port": "'"$((global_rank + 2))"'",
+            "use_layerwise": false,
+            "consumer_is_to_load": true
+          }
+        }
+      ]
+    }
+  }'
+  vllm serve "$model_path" \
+    --host 0.0.0.0 --port "$((7100 + local_rank))" \
+    --data-parallel-size 16 --data-parallel-rank "$global_rank" \
+    --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+    --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
+    --max-model-len 508576 --max-num-batched-tokens 720 \
+    --max-num-seqs 128 --async-scheduling --block-size 32 \
+    --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
+    --enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --trust-remote-code --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+    --quantization ascend \
+    --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --kv-transfer-config "$kv_config" \
+    --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+  sleep 3
+done
+wait
+```
+
+The two disk limits are 32 GiB per participating client/rank and the offload buffer is 1 GiB; budget their sum across the node. Clearing `ASCEND_GLOBAL_RESOURCE_CONFIG` belongs to this measured Mooncake Store path, not to pooling in general. The environment variables alone do not enable SSD: the JSON switch and master offload settings are also required. In this profile P **and D** use `--enable-prefix-caching`; the pooled scripts replace the ordinary D `--no-enable-prefix-caching` flag. D's Store child sets `consumer_is_to_load=true`.
+
+**Memcache: prepare the A2 embedded-client alternative.** Install compatible `memfabric-hybrid` and `memcache-hybrid` packages using the [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Use `device_rdma` for A2 RoCE; do not copy the A3 `device_sdma` protocol. The guide currently limits separated Memcache/vLLM deployment to A3, so the A2 template here uses embedded LocalServices.
+
+Save `mmc-meta.conf` on the MetaService host:
+
+```ini
+ock.mmc.log_level = info
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:15000
+ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:16000
+ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:18000
+```
+
+Save `mmc-local.conf` on all four nodes. This example contributes 1 GiB per LocalService and enables DRAM pooling:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:15000
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:16000
+ock.mmc.log_level = info
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_rdma
+ock.mmc.local_service.dram.size = 1GB
+ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.storage.enabled = false
+```
+
+`world_size` is the maximum number of LocalServices, not the model DP size. Size DRAM for the prefix working set and all processes before launching. This template does **not** enable SSD; use the [Memcache SSD instructions](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) with a supported hardware/deployment combination if SSD is required. The A3 separated SSD example is described in Section 5.3.1.
+
+Start MetaService and wait for it to report readiness:
+
+```shell
+export MMC_META_CONFIG_PATH="<CONFIG_DIR>/mmc-meta.conf"
+python3 -c 'from memcache_hybrid import MetaService; MetaService.main()'
+```
+
+After MetaService is ready, use these complete Memcache P/D scripts. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by `pip show memcache_hybrid` and edit the configuration path.
+
+**Prefill: run this complete script on each P node.** Set `p_rank=0` on node A and `p_rank=1` on node B; keep `head_ip` pointing at P node A. Start both ranks before waiting for readiness.
+
+```shell
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_PREFILL_NODE_IP>"
+head_ip="<PREFILL_NODE_A_IP>"
+p_rank=0  # Set to 1 on Prefill node B.
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=6000 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1200
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIR>/mmc-local.conf"
+export PYTHONHASHSEED=0
+kv_config='{
   "kv_connector": "MultiConnector",
-  "kv_role": "kv_consumer",
+  "kv_role": "kv_producer",
   "kv_load_failure_policy": "fail",
   "kv_connector_extra_config": {
     "connectors": [
       {
         "kv_connector": "MooncakeHybridConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": "30100",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
         "kv_connector_extra_config": {
-          "prefill": {"pcp_size": 8, "dp_size": 2, "tp_size": 1},
-          "decode": {"dp_size": 16, "tp_size": 1}
-        }
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 1,
+            "pp_size": 1,
+            "pcp_size": 8
+          },
+          "decode": {
+            "dp_size": 16,
+            "tp_size": 1,
+            "pp_size": 1,
+            "pcp_size": 1
+          }
+        },
+        "kv_load_failure_policy": "fail"
       },
       {
         "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_consumer",
-        "kv_connector_extra_config": {"backend": "mooncake", "lookup_rpc_port": "2", "use_layerwise": false, "consumer_is_to_load": true}
+        "kv_role": "kv_producer",
+        "kv_connector_extra_config": {
+          "backend": "memcache",
+          "lookup_rpc_port": "'"$p_rank"'",
+          "use_layerwise": false
+        }
       }
     ]
   }
-}
+}'
+
+vllm serve "$model_path" \
+  --host 0.0.0.0 --port "$((7100 + p_rank))" \
+  --data-parallel-size 2 --data-parallel-rank "$p_rank" \
+  --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+  --tensor-parallel-size 1 --pipeline-parallel-size 1 \
+  --prefill-context-parallel-size 8 --decode-context-parallel-size 1 \
+  --served-model-name dsv4 --enable-expert-parallel \
+  --max-model-len 150000 --max-num-batched-tokens 8192 \
+  --max-num-seqs 16 --api-server-count 4 \
+  --block-size 32 --gpu-memory-utilization 0.96 \
+  --enable-chunked-prefill --no-disable-hybrid-kv-cache-manager \
+  --enable-prefix-caching --enforce-eager \
+  --quantization ascend --tokenizer-mode deepseek_v4 \
+  --attention_config.indexer_kv_dtype int8 \
+  --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v4 --trust-remote-code --seed 1024 \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
+  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+  --kv-transfer-config "$kv_config"
 ```
 
-For PC90 validation, use multiple distinct prefix groups with a documented cache warmup, then repeat the same suffixes. Verify the target hit rate from service metrics and Store/Mooncake logs; an HTTP 200 response or a repeated filename is not cache evidence. Keep the pooled run's dataset, backend paths, `P/Q/R`, concurrency, and accepted receipt separate from the ordinary PD baseline.
+**Decode: run this complete script on each D node.** Set `rank_offset=0` on node A and `rank_offset=8` on node B; keep `head_ip` pointing at D node A. Launch all ranks before waiting for readiness.
 
-Deployment Verification:
+```shell
+set -euo pipefail
+nic_name="<NETWORK_INTERFACE>"
+local_ip="<THIS_DECODE_NODE_IP>"
+head_ip="<DECODE_NODE_A_IP>"
+model_path="/path/to/DeepSeek-V4-Flash-0731-w8a8"
+rank_offset=0  # Set to 8 on Decode node B.
 
-After the four nodes are up, send a request through the proxy port on the Prefill head node to verify that Prefill and Decode work together. Then check the Decode-side concurrency to confirm the configuration is effective: with DSpark each sequence processes 6 tokens per step, so the concurrency one Decode engine can hold equals `max-num-batched-tokens / 6` (bounded by `--max-num-seqs`). `vllm:num_requests_running`, `vllm:num_requests_waiting_by_reason{reason="capacity"}` and `vllm:kv_cache_usage_perc` should be read together: if `running` is pinned at `--max-num-seqs` while `kv_cache_usage_perc` stays low, the deployment is limited by request concurrency, not by HBM.
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device","hccs:device"]}'
+export VLLM_USE_V2_MODEL_RUNNER=1
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_CONNECT_TIMEOUT=120 HCCL_EXEC_TIMEOUT=204 HCCL_BUFFSIZE=1800
+export GLOO_SOCKET_IFNAME="$nic_name" HCCL_SOCKET_IFNAME="$nic_name" TP_SOCKET_IFNAME="$nic_name"
+export HCCL_IF_IP="$local_ip"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000 VLLM_RPC_TIMEOUT=3600000
+export OMP_NUM_THREADS=10 OMP_PROC_BIND=false
+MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
+export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export MMC_LOCAL_CONFIG_PATH="<CONFIG_DIR>/mmc-local.conf"
+export PYTHONHASHSEED=0
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
+for local_rank in 0 1 2 3 4 5 6 7; do
+  global_rank=$((local_rank + rank_offset))
+  export ASCEND_RT_VISIBLE_DEVICES="$local_rank"
+  kv_config='{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {
+      "connectors": [
+        {
+          "kv_connector": "MooncakeHybridConnector",
+          "kv_role": "kv_consumer",
+          "kv_port": "30100",
+          "kv_connector_extra_config": {
+            "prefill": {
+              "dp_size": 2,
+              "tp_size": 1,
+              "pp_size": 1,
+              "pcp_size": 8
+            },
+            "decode": {
+              "dp_size": 16,
+              "tp_size": 1,
+              "pp_size": 1,
+              "pcp_size": 1
+            }
+          }
+        },
+        {
+          "kv_connector": "AscendStoreConnector",
+          "kv_role": "kv_consumer",
+          "kv_connector_extra_config": {
+            "backend": "memcache",
+            "lookup_rpc_port": "'"$((global_rank + 2))"'",
+            "use_layerwise": false,
+            "consumer_is_to_load": true
+          }
+        }
+      ]
+    }
+  }'
+  vllm serve "$model_path" \
+    --host 0.0.0.0 --port "$((7100 + local_rank))" \
+    --data-parallel-size 16 --data-parallel-rank "$global_rank" \
+    --data-parallel-address "$head_ip" --data-parallel-rpc-port 12321 \
+    --tensor-parallel-size 1 --enable-expert-parallel --seed 1024 \
+    --max-model-len 508576 --max-num-batched-tokens 720 \
+    --max-num-seqs 128 --async-scheduling --block-size 32 \
+    --served-model-name dsv4 --attention_config.indexer_kv_dtype int8 \
+    --enable-prefix-caching --no-disable-hybrid-kv-cache-manager \
+    --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+    --trust-remote-code --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v4 --gpu-memory-utilization 0.97 \
+    --quantization ascend \
+    --speculative-config "{\"num_speculative_tokens\":1,\"method\":\"dspark\"}" \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --kv-transfer-config "$kv_config" \
+    --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}' &
+  sleep 3
+done
+wait
+```
+
+**Start and verify the selected pool.** Bring up the backend first, then all D ranks and both P ranks using the same backend, wait for their readiness, and start the proxy. For the Memcache alternative, revalidate model initialization and capacity before adopting any throughput setting. For Mooncake SSD, verify worker offload activation, actual disk writes and successful same-key restore. For Memcache, inspect lookup/get/put and hit activity. HTTP 200 and an installed SDK do not establish pool reuse.
+
+For PC90, warm multiple distinct prefix groups, then send suffixes not used during warmup. Repeating whole warmed prompts measures near-PC100. Keep the requested prefix ratio separate from observed P local-cache and D external-KV hit rates. Warmup is excluded from formal timing. Run diagnostic probes and formal loads serially, drain all 18 endpoints between rounds, and retain full success/token counts, native timing windows, launch configuration and source identity. Do not claim every request used SSD, or transfer a throughput result from one backend to another.
 
 ### 5.3 A3 1P1D Deployment with Memcache KV Cache Pool
 
@@ -2024,10 +2240,33 @@ files above on both nodes. Use the same checkpoint on both nodes. Keep
 network as described in Section 3.2. The MetaService, config store, DP RPC,
 KV transfer, and HTTP ports must be reachable between the nodes.
 
-The example uses a DRAM-only pool. For optional SSD offload, follow
-[Enable Memcache SSD Cache](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache)
-and configure dedicated storage devices and the standalone process count for
-the actual deployment.
+The configuration above uses a DRAM-only pool. To enable SSD in this A3 separated deployment, keep `storage.enabled=false` in the LocalService configuration embedded in vLLM and use the following alternative `mmc-local-standalone-ssd.conf` for the standalone process on each node:
+
+```ini
+ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:15000
+ock.mmc.local_service.config_store_url = tcp://<META_SERVICE_IP>:16000
+ock.mmc.log_level = info
+ock.mmc.local_service.world_size = 256
+ock.mmc.local_service.protocol = device_sdma
+ock.mmc.local_service.dram.size = 20GB
+ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.storage.enabled = true
+ubsio.disk.path = <DEDICATED_SSD_BLOCK_DEVICE>
+ubsio.mem.size_in_gb = 50
+ubsio.standalone.device_count = 1
+ubsio.standalone.force_new_disk = true
+```
+
+Use a dedicated, unmounted block device without a filesystem signature. `force_new_disk=true` reinitializes the SSD cache layout at startup and invalidates previous cache contents; do not point it at a device containing data to keep. The 20 GiB DRAM contribution and 50 GiB UBS IO allocation are separate per-process host-memory budgets. Size both for the actual prefix working set and available host memory. With one standalone process per host, use `device_count=1`; it is not the number of model ranks.
+
+After MetaService is ready, start one standalone process on each node with the selected SSD configuration, then all Decode ranks, both Prefill ranks and the proxy:
+
+```shell
+export MMC_LOCAL_CONFIG_PATH="<MEMCACHE_CONFIG_DIR>/mmc-local-standalone-ssd.conf"
+python3 memcache_standalone.py
+```
+
+Wait for `Successfully initialized Memcache` before starting vLLM. vLLM processes continue to use `mmc-local.conf`, not the standalone configuration. Follow [Enable Memcache SSD Cache](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) for SDK requirements, storage ownership and capacity constraints. Verify real cache restore and backend hit activity; enabling an SSD flag or seeing HTTP 200 alone does not prove three-level cache reuse.
 
 #### 5.3.2 Start the Prefill Node with Pooling
 
