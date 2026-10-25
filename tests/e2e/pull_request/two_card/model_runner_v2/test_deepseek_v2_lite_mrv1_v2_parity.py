@@ -48,8 +48,6 @@ PROMPTS = [
     "A long-context test: " + "alpha beta gamma delta " * 240 + "\nSummarize the repeated pattern in one sentence.",
 ]
 
-WARMUP_PROMPT = "Warm up the model runner without reusing a parity prompt."
-
 _HBM_USAGE_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
@@ -152,7 +150,6 @@ def _measure(
                 gpu_memory_utilization=gpu_memory_utilization,
             ) as runner,
         ):
-            runner.generate([WARMUP_PROMPT], SamplingParams(max_tokens=1, temperature=0.0))
             started = time.perf_counter()
             greedy_outputs = runner.generate_w_logprobs(prompts, greedy)
             sampled_outputs = runner.generate(prompts, sampled)
@@ -175,7 +172,7 @@ def _measure(
         "tensor_parallel_size": tensor_parallel_size,
         "expert_parallel": enable_expert_parallel,
         "gpu_memory_utilization": gpu_memory_utilization,
-        "timing_scope": "generation_after_warmup",
+        "timing_scope": "generation_after_engine_init",
     }
 
 
