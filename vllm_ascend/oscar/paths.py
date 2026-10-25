@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import os
 
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)  # vllm_ascend/oscar/ -> repo root
+# vllm_ascend/oscar/paths.py is three levels below the repo root
+# (file -> oscar -> vllm_ascend -> root); three dirname calls resolve it.
+# Out-of-tree installs should set the OSCAR_* env overrides instead of
+# relying on this default.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def opp_path() -> str:
@@ -59,7 +61,9 @@ def launcher_name() -> str:
 
 def runner_tmp(kind: str) -> str:
     """Scratch dir for torch extension builds / kernel meta caches."""
-    base = os.environ.get("OSCAR_RUNNER_TMP", "/tmp/oscar_runner")
+    # default suffixes the scratch dir with the uid: /tmp is world-shared on
+    # multi-user hosts and extension-build caches must not collide
+    base = os.environ.get("OSCAR_RUNNER_TMP", f"/tmp/oscar_runner-{os.getuid()}")
     d = os.path.join(base, kind)
     os.makedirs(d, exist_ok=True)
     return d
