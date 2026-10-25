@@ -16,8 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend import envs
 from vllm_ascend.ops.triton.triton_utils import (
     get_vectorcore_num,
     init_device_properties_triton,
@@ -102,10 +104,22 @@ class _ApplyGrammarBitmaskKernelLauncher:
             MASK_STRIDE,
             BLOCK_SIZE,
         ):
+            stream = None
+            if envs.VLLM_ASCEND_SYNCHRONIZE_GRAMMAR_BITMASK:
+                if torch.npu.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "VLLM_ASCEND_SYNCHRONIZE_GRAMMAR_BITMASK does not support graph capture. "
+                        "Use eager execution or disable the workaround."
+                    )
+                stream = torch.npu.current_stream()
+                # Some Triton-Ascend launchers initialize cached lock workspace
+                # on the host without stream ordering. Finish prior work before
+                # allowing this launch to initialize that workspace.
+                stream.synchronize()
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
             # a significant performance improvement on A2/A3. It can be enabled
             # again on A5.
-            return _apply_grammar_bitmask_kernel_impl[(num_programs,)](
+            result = _apply_grammar_bitmask_kernel_impl[(num_programs,)](
                 logits_ptr,
                 logits_stride,
                 logits_indices_ptr,
@@ -120,6 +134,11 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 BLOCK_SIZE=BLOCK_SIZE,
                 multibuffer=False,
             )
+            if stream is not None:
+                # Keep later submissions on this host thread from reinitializing
+                # shared lock workspace while grammar is still using it.
+                stream.synchronize()
+            return result
 
         return launch
 

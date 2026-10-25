@@ -72,6 +72,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Synchronize the submission stream before and after the V2 grammar bitmask
+    # kernel as a temporary lock-workspace reuse workaround. Non-sensitive;
+    # 0 (default): asynchronous, 1: synchronize. Incompatible with graph capture
+    # and may reduce throughput. See the environment variables guide.
+    "VLLM_ASCEND_SYNCHRONIZE_GRAMMAR_BITMASK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_SYNCHRONIZE_GRAMMAR_BITMASK", "0"))
+    ),
 }
 
 # end-env-vars-definition
