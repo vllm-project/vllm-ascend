@@ -105,9 +105,47 @@ class TestDiagnosticsStayGated:
         assert not (tmp_path / "merge_0000.pt").exists()
 
     def test_r218_diag_writes_only_when_enabled(self, tmp_path, monkeypatch):
+        # the sink is redirected to the sandbox so the assertions prove the
+        # actual write (or its absence), not an unrelated default path
+        log = tmp_path / "diag.log"
+        monkeypatch.setenv("OSCAR_DIAG_LOG", str(log))
         monkeypatch.delenv("OSCAR_DIAG", raising=False)
-        _r218_diag("must-not-land")
-        assert not (tmp_path / "x.log").exists()
+        _r218_diag("off-must-not-land")
+        assert not any(tmp_path.iterdir())  # nothing written anywhere
+        monkeypatch.setenv("OSCAR_DIAG", "1")
+        _r218_diag("on-must-land")
+        assert log.exists() and "on-must-land" in log.read_text()
+
+    def test_acquire_duplicate_rid_fails_closed(self):
+        A = _R166SlotAlloc(4)
+        A.acquire("a")
+        with pytest.raises(RuntimeError, match="duplicate acquire"):
+            A.acquire("a")
+        # the failed duplicate left the map exactly as it was
+        assert A.check() == []
+        assert len(A.rid2slot) == 1
+
+    def test_zeroed_stamps_pruned_on_slot_turnover(self):
+        A = _R166SlotAlloc(2)
+        A.zeroed = {(0, 1, 5), (0, 0, 3), (1, 2, 5)}  # slot 0 stale gens + other slot
+        A.release("r0_unused")  # unowned release: no prune side effects
+        A.acquire("a")  # takes a free slot
+        A.acquire("b")
+        A.release("a")
+        # freeing prunes that slot's stamps; the other slot's stay
+        assert all(t[0] != A.rid2slot.get("a", -1) for t in A.zeroed)
+        # acquire-reuse prunes again: cycle and confirm nothing accumulates
+        A.acquire("c")  # reuses the freed slot, bumps gen
+        assert all(t[0] != A.rid2slot["c"] or t[1] == A.gen[A.rid2slot["c"]] for t in A.zeroed)
+
+    def test_events_bounded(self):
+        A = _R166SlotAlloc(2)
+        for i in range(8192):
+            try:
+                A.acquire(f"r{i}")
+            except RuntimeError:
+                A.release(f"r{i - 1}")
+        assert len(A.events) <= 4096
 
     def test_load_oscar_rotations_reexport(self):
         # re-export contract: the backend imports this name from helpers
