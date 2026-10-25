@@ -36,9 +36,10 @@ class AscendRequestState(RequestState):
         device: torch.device,
         use_dense_all_token_ids: bool = False,
     ):
-        # Check the API rather than exact release versions: development builds
-        # and backports can expose different APIs under the same version label.
-        # N-gram requires dense device history from upstream #40704.
+        # TODO: Remove this compatibility check once the minimum supported
+        # vLLM version includes dense request history (vLLM #40704).
+        # Check the API rather than the version because development builds and
+        # backports may expose different APIs under the same version label.
         if use_dense_all_token_ids and "use_dense_all_token_ids" not in signature(RequestState.__init__).parameters:
             raise ValueError("MRV2 n-gram requires vLLM containing PRs #40704 and #60300")
         super().__init__(

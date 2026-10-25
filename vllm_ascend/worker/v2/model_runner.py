@@ -225,10 +225,10 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu")
             ),
         )
-        # Reinitialize with the Ascend factory after replacing req_states:
-        # model-based methods need their Ascend implementations, and n-gram
-        # must read token history from the new state rather than the discarded
-        # upstream state. The factory also supports non-EAGLE speculators.
+        # The upstream speculator was constructed with the discarded upstream
+        # request state. This construction does not use that speculator: it
+        # binds n-gram to the new state and selects Ascend implementations for
+        # model-based methods through the Ascend factory.
         self.speculator: Any = None
         if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
