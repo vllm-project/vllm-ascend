@@ -460,7 +460,7 @@ def _initialized_norm_probe(monkeypatch, enabled):
         pass
 
     monkeypatch.setattr(qwen3_5_vl, "build_mm_input_norm", build_norm)
-    return Model(vllm_config=None)
+    return Model(vllm_config=None, prefix="model")
 
 
 @pytest.mark.parametrize("path", ["image", "video", "raw_image", "graph_image", "graph_video", "graph_raw_image"])
