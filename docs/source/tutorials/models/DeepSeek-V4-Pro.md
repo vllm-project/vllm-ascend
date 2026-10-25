@@ -1672,12 +1672,13 @@ After the PD separation service is fully started, send a request through the pro
 
 Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
-### 5.3 MemCache KV Cache Pool Deployment
+### 5.3 KV Cache Pool Deployment
 
-This section provides PD separation deployments that add a MemCache KV Cache
-Pool for cross-engine KV reuse. Topology, connector roles, and pool settings
-are explained in each hardware tab; apply only the settings for the selected
-platform.
+This section provides PD separation deployments that add a KV Cache Pool for
+cross-engine KV reuse. Each hardware series uses the pool backend that suits its
+interconnect: the A3 series uses the MemCache backend over HCCS, and the A2 series
+uses the Mooncake backend. Topology, connector roles, and pool settings are
+explained in each hardware tab; apply only the settings for the selected platform.
 
 Select the tab that matches the deployment hardware.
 
@@ -2092,6 +2093,323 @@ Select the tab that matches the deployment hardware.
 
     For Memcache configuration, capacity tuning, and troubleshooting, refer to the
     [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+
+=== "A2 series"
+
+    #### A2 series {: #dsv4pro-5-3-a2 }
+
+    This configuration extends the Atlas 800I A2 deployment in [Section 5.2.2](#522-a2-series-pd-separation-deployment) with a
+    KV Cache Pool on the Mooncake backend. `MooncakeHybridConnector` transfers KV cache
+    from Prefill to Decode and controls HBM-to-host-memory tiering through
+    `enable_tiered_storage` and `hbm_to_ram_threshold_ratio`.
+    `AscendStoreConnector` stores reusable KV cache in the Mooncake pool with
+    `tiered_pooling_mode: "async_bypass"`. Both connectors are configured as children
+    of `MultiConnector`.
+
+    Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on all nodes. This example
+    uses MRv2 and DSpark with `num_speculative_tokens: 7`. Unlike the A3 example, the
+    pool runs on the Mooncake backend and both roles keep `use_layerwise: false`.
+
+    ##### Prepare the Mooncake Service
+
+    Follow the [Mooncake backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
+    to install the Mooncake software (`mooncake >= 0.3.11`). Create `mooncake.json` on
+    every Prefill and Decode node; all nodes must point `master_server_address` at the
+    same master:
+
+    ```json
+    {
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "ascend",
+        "device_name": "",
+        "master_server_address": "<MASTER_IP>:50099",
+        "global_segment_size": "24GB",
+        "preferred_segment": false,
+        "prefer_alloc_in_same_node": true
+    }
+    ```
+
+    Start `mooncake_master` on the master node:
+
+    ```shell
+    mooncake_master \
+        --port 50099 \
+        --default_kv_lease_ttl 11000 \
+        --eviction_high_watermark_ratio 0.9 \
+        --eviction_ratio 0.1
+    ```
+
+    On every Prefill and Decode node, set `MOONCAKE_CONFIG_PATH` to the full path of
+    `mooncake.json` and preload jemalloc. The pooled startup scripts below export both
+    from `MOONCAKE_CONFIG_DIR`.
+
+    Reuse `launch_online_dp.py` from [Section 5.2.2](#522-a2-series-pd-separation-deployment).
+
+    ##### Start the Prefill Nodes with Pooling
+
+    Save the following script as `run_dp_template.sh` on the four Prefill nodes (they
+    share the same script). Set `local_ip` and `nic_name` for the current node, and set
+    `MOONCAKE_CONFIG_DIR` to the absolute directory containing `mooncake.json`:
+
+    ```shell
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+
+    local_ip=xx.xx.xx.1/2/3/4 # change to your own ip
+    nic_name="xxxx" # change to your own nic name
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export PYTHONHASHSEED=0
+    export ASCEND_CONNECT_TIMEOUT=16000
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export HCCL_RDMA_TIMEOUT=17
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+
+    vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name dsv4 \
+      --max-model-len 150000 \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 16 \
+      --no-disable-hybrid-kv-cache-manager \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
+      --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --block-size 32 \
+      --enforce-eager \
+      --speculative-config '{"num_speculative_tokens": 7, "method": "dspark","enforce_eager": true}' \
+      --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1":true}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MultiConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+          "connectors": [
+            {
+              "kv_connector": "MooncakeHybridConnector",
+              "kv_role": "kv_producer",
+              "kv_port": "30000",
+              "kv_connector_extra_config": {
+                "prefill": {
+                  "dp_size": 4,
+                  "tp_size": 8
+                },
+                "decode": {
+                  "dp_size": 4,
+                  "tp_size": 8
+                },
+                "enable_tiered_storage": true,
+                "hbm_to_ram_threshold_ratio": 0.85
+              }
+            },
+            {
+              "kv_connector": "AscendStoreConnector",
+              "kv_role": "kv_producer",
+              "kv_connector_extra_config": {
+                "lookup_rpc_port": "0",
+                "backend": "mooncake",
+                "use_layerwise": false,
+                "tiered_pooling_mode": "async_bypass"
+              }
+            }
+          ]
+        }
+      }'
+    ```
+
+    Start the Prefill engines on the corresponding machines:
+
+    ```shell
+    # Prefill node 0
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Prefill node 1
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Prefill node 2
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Prefill node 3
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
+
+    ##### Start the Decode Nodes with Pooling
+
+    Save the following script as `run_dp_template.sh` on the four Decode nodes. Set
+    `local_ip`, `nic_name`, and `MOONCAKE_CONFIG_DIR` for the local environment:
+
+    ```shell
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+
+    local_ip=xx.xx.xx.5/6/7/8 # change to your own ip
+    nic_name="xxxx" # change to your own nic name
+
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export PYTHONHASHSEED=0
+    export ASCEND_CONNECT_TIMEOUT=16000
+    export ASCEND_TRANSFER_TIMEOUT=10000
+    export HCCL_RDMA_TIMEOUT=17
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=10
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+    export HCCL_HOST_SOCKET_PORT_RANGE=auto
+    export HCCL_NPU_SOCKET_PORT_RANGE=auto
+
+    vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv4 \
+        --max-model-len 150000 \
+        --max-num-batched-tokens 256 \
+        --max-num-seqs 32 \
+        --async-scheduling \
+        --block-size 32 \
+        --tokenizer-mode deepseek_v4 \
+        --tool-call-parser deepseek_v4 \
+        --enable-auto-tool-choice \
+        --reasoning-parser deepseek_v4 \
+        --no-disable-hybrid-kv-cache-manager \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
+        --trust-remote-code \
+        --speculative-config '{"num_speculative_tokens": 7,"method": "dspark","enforce_eager": true}' \
+        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --kv-transfer-config \
+        '{"kv_connector": "MultiConnector",
+          "kv_role": "kv_consumer",
+          "kv_port": "30100",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeHybridConnector",
+                "kv_role": "kv_consumer",
+                "kv_port": "30100",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": 8
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": 8
+                  },
+                  "enable_tiered_storage": true,
+                  "hbm_to_ram_threshold_ratio": 0.85
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "0",
+                  "backend": "mooncake",
+                  "use_layerwise": false,
+                  "tiered_pooling_mode": "async_bypass"
+                }
+              }
+            ]
+          }
+        }' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                  "enable_npugraph_ex":true,
+                  "enable_static_kernel":false
+            },
+           "enable_cpu_binding":true,
+           "multistream_overlap_shared_expert":true,
+           "scheduler_config":{"recompute_scheduler_enable":true}
+        }'
+    ```
+
+    Start the Decode engines on the corresponding machines:
+
+    ```shell
+    # Decode node 0
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Decode node 1
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Decode node 2
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+
+    # Decode node 3
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
+
+    ##### Startup and Verification
+
+    Start the components in this order:
+
+    1. `mooncake_master` on the master node. Wait until it is listening on `<MASTER_IP>:50099` before starting the engines.
+    2. The Prefill engines on the four Prefill nodes.
+    3. The Decode engines on the four Decode nodes.
+    4. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+
+    Send the same request twice with a reusable prefix. Confirm that the vLLM logs
+    show Mooncake pool and tiered-storage activity, and that Decode logs still show
+    normal Prefill-to-Decode KV transfer.
+
+    Key pooling parameters:
+
+    - `MultiConnector` combines Prefill-to-Decode transfer through `MooncakeHybridConnector` with KV reuse through `AscendStoreConnector`. Both child connectors use the producer role on Prefill and the consumer role on Decode.
+    - `backend: "mooncake"` selects the Mooncake KV Cache Pool backend. All Prefill and Decode nodes must point `master_server_address` at the same master.
+    - `enable_tiered_storage: true` with `hbm_to_ram_threshold_ratio: 0.85` controls HBM-to-host-memory tiering on the transfer connector.
+    - `AscendStoreConnector` uses `tiered_pooling_mode: "async_bypass"`, and both roles keep `use_layerwise: false` — unlike the A3 example, which enables layerwise Memcache access on Prefill.
+
+    For Mooncake configuration, capacity tuning, and troubleshooting, refer to the
+    [KV Cache Pool guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend).
 
 ## 6 Functional Verification
 
