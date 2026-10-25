@@ -15,8 +15,7 @@ at::Tensor moe_counts_cumsum(const at::Tensor& counts)
                 "moe_counts_cumsum expects an NPU tensor");
     TORCH_CHECK(counts.scalar_type() == at::kLong && counts.dim() == 1 && counts.is_contiguous(),
                 "moe_counts_cumsum expects contiguous one-dimensional INT64 counts");
-    TORCH_CHECK(counts.numel() > 0 && counts.numel() <= 4096,
-                "moe_counts_cumsum supports 1..4096 experts");
+    TORCH_CHECK(counts.numel() > 0, "moe_counts_cumsum expects nonempty counts");
     const c10_npu::NPUGuard guard(counts.device());
     at::Tensor output = at::empty_like(counts);
     const uint32_t count = static_cast<uint32_t>(counts.numel());

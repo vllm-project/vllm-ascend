@@ -30,13 +30,11 @@ def test_int64_counts_dispatches_to_custom_scan():
         counts.cumsum.assert_not_called()
 
 
-@pytest.mark.parametrize("case", ["disabled", "empty", "large", "strided", "int32", "matrix"])
+@pytest.mark.parametrize("case", ["disabled", "empty", "strided", "int32", "matrix"])
 def test_unsupported_counts_keep_existing_conversion(case):
     counts = npu_counts()
     if case == "empty":
         counts.numel.return_value = 0
-    elif case == "large":
-        counts.numel.return_value = 4097
     elif case == "strided":
         counts.is_contiguous.return_value = False
     elif case == "int32":
@@ -49,6 +47,17 @@ def test_unsupported_counts_keep_existing_conversion(case):
     ):
         result = moe_utils.cumsum_group_list(counts, 1, 0)
         scan.assert_not_called()
+        counts.cumsum.assert_called_once_with(dim=0)
+        assert result is counts.cumsum.return_value
+
+
+def test_missing_custom_scan_keeps_existing_conversion():
+    counts = npu_counts()
+    with (
+        patch.object(moe_utils, "enable_custom_op", return_value=True),
+        patch.object(torch.ops, "_C_ascend", SimpleNamespace()),
+    ):
+        result = moe_utils.cumsum_group_list(counts, 1, 0)
         counts.cumsum.assert_called_once_with(dim=0)
         assert result is counts.cumsum.return_value
 

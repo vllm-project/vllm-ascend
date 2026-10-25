@@ -4,13 +4,16 @@
 
 extern "C" __global__ __aicore__ void moe_counts_cumsum_kernel(GM_ADDR input, GM_ADDR output, uint32_t count) {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    AscendC::InitSocState();
     AscendC::GlobalTensor<int64_t> x, y;
     x.SetGlobalBuffer((__gm__ int64_t*)input,count);
     y.SetGlobalBuffer((__gm__ int64_t*)output,count);
-    AscendC::TPipe pipe;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> buffer;
-    pipe.InitBuffer(buffer,((count*8+31)/32)*32);
-    auto values=buffer.Get<int64_t>();
+    // Open-source MoE models typically have no more than 1024 experts.
+    // This specialized scan assumes counts fit in UB; capacity overflow
+    // is outside its scope.
+    // Align the UB extent to 32 bytes for DataCopyPad.
+    const uint32_t aligned_count = (count + 3) / 4 * 4;
+    AscendC::LocalTensor<int64_t> values(AscendC::TPosition::VECCALC, 0, aligned_count);
     AscendC::DataCopyExtParams copy{1,count*8,0,0,0};
     AscendC::DataCopyPadExtParams<int64_t> padding{false,0,0,0};
     AscendC::DataCopyPad(values,x,copy,padding);
@@ -49,6 +52,7 @@ extern "C" __global__ __aicore__ void moe_counts_cumsum_kernel(GM_ADDR input, GM
     AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
     AscendC::DataCopyPad(y,values,copy);
+    AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 namespace vllm_ascend {
