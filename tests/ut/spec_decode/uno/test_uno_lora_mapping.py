@@ -66,3 +66,33 @@ def test_base_prompt_mapping_is_all_base():
 def test_base_prompt_mapping_rejects_negative():
     with pytest.raises(ValueError):
         base_prompt_mapping(-1)
+
+
+def test_draft_hook_sizes_the_prompt_mapping_per_request():
+    # The Punica wrapper stores ``prompt_mapping`` as ``_sampler_indices`` and
+    # derives ``indices_len[1]`` from it, so the draft hook must pass one entry
+    # per request, not one per draft token.
+    from types import SimpleNamespace
+
+    from vllm.lora.request import LoRARequest
+
+    from vllm_ascend.worker.v2.spec_decode.uno.speculator import AscendUnoSpeculator
+
+    speculator = object.__new__(AscendUnoSpeculator)
+    speculator.k = 4
+    speculator.lora_request = LoRARequest("uno", UNO_ID, "/tmp/uno-adapter")
+    speculator._lora_hook = None
+    captured = []
+    manager = SimpleNamespace(set_active_adapters=lambda requests, mapping: captured.append(mapping))
+
+    AscendUnoSpeculator.set_lora_manager(speculator, manager)
+    hook = speculator._lora_hook
+    assert hook is not None
+    hook((3, 12))
+
+    # The first install registers UNO's adapter; the draft step follows.
+    assert captured[0] is None
+    mapping = captured[-1]
+    assert mapping.is_prefill is False
+    assert mapping.prompt_mapping == (0,) * 3
+    assert len(mapping.index_mapping) == 12

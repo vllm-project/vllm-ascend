@@ -58,6 +58,9 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 160
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 250
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 220
+  # UNO builds a plain reference engine and a UNO engine, and the first case
+  # runs the reference twice to measure its own run-to-run drift.
+  tests/e2e/pull_request/one_card/spec_decode/test_uno.py: 620
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/rlhf/consistency/test_fa3_mixed_batches.py: 60
   tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30

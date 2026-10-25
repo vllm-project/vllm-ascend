@@ -226,3 +226,24 @@ def test_cli_choices_include_uno():
     _compute_kwargs.cache_clear()
     choices = _compute_kwargs(SpeculativeConfig)["method"].get("choices") or []
     assert "uno" in choices
+
+
+# ---- attention backend allowlist ------------------------------------------
+
+
+def test_backend_allowlist_accepts_the_backends_unos_docs_ship():
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+    from vllm_ascend.worker.v2.spec_decode.uno import speculator
+
+    for backend in (AscendAttentionBackend, AscendMLABackend):
+        assert backend.get_name() in speculator.UNO_ASCEND_ATTN_BACKENDS
+        assert speculator.uno_attention_backend_refusal(backend.get_name()) is None
+
+
+def test_backend_allowlist_refuses_other_backends():
+    from vllm_ascend.worker.v2.spec_decode.uno.speculator import uno_attention_backend_refusal
+
+    refusal = uno_attention_backend_refusal("FLASH_ATTN")
+    assert refusal is not None
+    assert "FLASH_ATTN" in refusal
