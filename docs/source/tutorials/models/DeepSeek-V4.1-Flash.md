@@ -763,7 +763,6 @@ and use the `main` branch with the matching vLLM revision recorded in
     export VLLM_ENGINE_READY_TIMEOUT_S=360000
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
@@ -1147,7 +1146,7 @@ On the Prefill node, save the following script as `run_dp_template.sh`. Set
 
 unset https_proxy
 unset http_proxy
-
+export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<PREFILL_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
@@ -1246,7 +1245,7 @@ On the Decode node, save the following script as `run_dp_template.sh`. Set
 
 unset https_proxy
 unset http_proxy
-
+export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<DECODE_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
