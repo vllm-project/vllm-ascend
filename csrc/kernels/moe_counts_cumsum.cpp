@@ -7,15 +7,14 @@ extern "C" __global__ __aicore__ void moe_counts_cumsum_kernel(GM_ADDR input, GM
     AscendC::InitSocState();
     AscendC::GlobalTensor<int64_t> x, y;
     x.SetGlobalBuffer((__gm__ int64_t*)input,count);
-    y.SetGlobalBuffer((__gm__ int64_t*)output,count);
-    // Open-source MoE models typically have no more than 1024 experts.
-    // This specialized scan assumes counts fit in UB; capacity overflow
-    // is outside its scope.
+    // The host adapter limits count to 4096, requiring at most 32 KiB of UB.
     // Align the UB extent to 32 bytes for DataCopyPad.
     const uint32_t aligned_count = (count + 3) / 4 * 4;
+    y.SetGlobalBuffer((__gm__ int64_t*)output,aligned_count);
     AscendC::LocalTensor<int64_t> values(AscendC::TPosition::VECCALC, 0, aligned_count);
     AscendC::DataCopyExtParams copy{1,count*8,0,0,0};
-    AscendC::DataCopyPadExtParams<int64_t> padding{false,0,0,0};
+    const uint8_t right_padding = static_cast<uint8_t>(aligned_count - count);
+    AscendC::DataCopyPadExtParams<int64_t> padding{true,0,right_padding,0};
     AscendC::DataCopyPad(values,x,copy,padding);
     AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
@@ -51,7 +50,8 @@ extern "C" __global__ __aicore__ void moe_counts_cumsum_kernel(GM_ADDR input, GM
     for(;i<count;++i){prefix+=values.GetValue(i);values.SetValue(i,prefix);}
     AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-    AscendC::DataCopyPad(y,values,copy);
+    // The host adapter reserves aligned backing storage for the output tail.
+    AscendC::DataCopy(y,values,aligned_count);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
