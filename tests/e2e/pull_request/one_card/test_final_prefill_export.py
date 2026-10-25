@@ -4,10 +4,15 @@
 This is a component test; a full model P/D run is still required for TTFT.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill import (
+    C8_TO_TQ4, FinalPrefillExporter, describe_layout,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import pack_c8_kv, unpack_c8_kv
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
@@ -148,3 +153,94 @@ def test_incremental_c8_pipeline_joins_before_cache_reuse():
         torch.testing.assert_close(state.cache[1].view(-1, TQ_SLOT_BYTES)[start:end].view(torch.uint8),
                                    expected, rtol=0, atol=0)
     torch.testing.assert_close(state.cache[0].view(-1, C8_SLOT_BYTES)[:511], source[:511], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("logical_block,chunk_tokens", [(128, 256), (256, 4096)])
+@torch.inference_mode()
+def test_bulk_export_reused_indices_and_cross_layer_overlap_are_byte_exact(logical_block, chunk_tokens):
+    torch.manual_seed(213)
+    device = torch.device("npu")
+    exporter = FinalPrefillExporter.__new__(FinalPrefillExporter)
+    exporter.device = device
+    exporter.stream = torch.npu.Stream(device=device)
+    exporter.quantizer = TurboQuantLatent()
+    exporter.quantizer._initialize(device)
+    exporter.incremental = True
+    exporter.chunk_tokens = chunk_tokens
+    exporter.staging_buffers = [torch.empty(chunk_tokens, 386, dtype=torch.uint8, device=device) for _ in range(2)]
+    exporter.caches, exporter.metadata = {}, {}
+    layers, expected, targets, originals, regions = {}, {}, {}, {}, list(exporter.staging_buffers)
+    count = 2 * (chunk_tokens // logical_block) + 1
+    source_ids = list(reversed(range(count)))
+    destination_ids = list(range(1, count + 1))
+
+    def layout(tensor, group, producer):
+        meta = SimpleNamespace(tensor_group_idx=[group], kv_caches_base_addr=[tensor.data_ptr()],
+                               block_len=[tensor[0].numel() * tensor.element_size()],
+                               block_size_scale=[logical_block // tensor.shape[1]])
+        spec = SimpleNamespace(block_size=logical_block, cache_sparse_sfa_turboquant=not producer,
+                               cache_sparse_sfa_c8=producer)
+        describe_layout(meta, (tensor,), spec, C8_TO_TQ4, producer)
+        return meta
+
+    for layer, scale in [("main.a", 2), ("main.b", 2), ("draft", 1)]:
+        physical_tokens = logical_block // scale
+        blocks = (count + 2) * scale
+        raw = torch.full((blocks, physical_tokens * 656 + 32), 7, dtype=torch.int8, device=device)
+        cache = raw[:, :physical_tokens * 656].view(blocks, physical_tokens, 1, 656)
+        nope = torch.randn(blocks * physical_tokens, 512, dtype=torch.bfloat16, device=device)
+        rope = torch.randn(blocks * physical_tokens, 64, dtype=torch.bfloat16, device=device)
+        cache.copy_(quantize_c8(nope, rope).view_as(cache))
+        target = torch.full((count + 2, logical_block, 1, 386), 7, dtype=torch.uint8, device=device)
+        local = layout(cache, 0 if layer != "draft" else 1, True)
+        remote = layout(target, 4 if layer != "draft" else 7, False)
+        ids = source_ids if layer != "draft" else source_ids[1:] + source_ids[:1]
+        exporter.caches[layer] = (cache,)
+        exporter.metadata[layer] = local
+        layers[layer] = (remote, ids, destination_ids)
+        targets[layer] = target
+        originals[layer] = raw, raw.clone()
+        regions.extend([raw, target])
+        reference = torch.full_like(target, 7)
+        pages = chunk_tokens // logical_block
+        for start in range(0, count, pages):
+            selected = [block * scale + offset for block in ids[start:start + pages] for offset in range(scale)]
+            values = cache.index_select(0, torch.tensor(selected, dtype=torch.int64, device=device)).reshape(-1, 656)
+            packed = pack_c8_kv(values, exporter.quantizer).view(-1, logical_block, 1, 386)
+            for index, dst in enumerate(destination_ids[start:start + pages]):
+                reference[dst].copy_(packed[index])
+        expected[layer] = reference
+
+    def region_view(address, length):
+        for tensor in regions:
+            begin = tensor.data_ptr()
+            if begin <= address and address + length <= begin + tensor.numel() * tensor.element_size():
+                return tensor.view(torch.uint8).reshape(-1)[address - begin:address - begin + length]
+        raise AssertionError("Transfer outside live staging/destination storage")
+
+    def write(session, sources, destinations, lengths):
+        for src, dst, length in zip(sources, destinations, lengths):
+            region_view(dst, length).copy_(region_view(src, length))
+        # Emulate the completion/ownership guarantee of a synchronous transport.
+        torch.npu.current_stream().synchronize()
+
+    exporter._write = write
+    exporter.ready = torch.npu.Event()
+    exporter.ready.record()
+    for _ in range(2):
+        for target in targets.values():
+            target.fill_(7)
+        torch.npu.synchronize()
+        exporter.export_layers(layers, "test-only-copy-transport")
+        for layer in layers:
+            torch.testing.assert_close(targets[layer].cpu(), expected[layer].cpu(), rtol=0, atol=0)
+            raw, original = originals[layer]
+            torch.testing.assert_close(raw.cpu(), original.cpu(), rtol=0, atol=0)
+
+    def failed_write(*args):
+        raise RuntimeError("test transport failure")
+
+    exporter._write = failed_write
+    with pytest.raises(RuntimeError, match="test transport failure"):
+        exporter.export_layers(layers, "failure")
+    assert exporter.stream.query()  # No next-layer conversion can still read source pages.

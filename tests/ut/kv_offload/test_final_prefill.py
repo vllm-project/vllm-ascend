@@ -324,3 +324,117 @@ def test_bulk_export_preserves_unquantized_layers_with_different_group_ids():
         torch.testing.assert_close(dst[6:8], src[0:2])
         assert torch.all(dst[:2] == 7)
     exporter.stream.synchronize.assert_called_once()
+
+
+def make_bulk_exporter():
+    exporter = FinalPrefillExporter.__new__(FinalPrefillExporter)
+    exporter.incremental = True
+    exporter.device = torch.device("cpu")
+    exporter.stream, exporter.ready = MagicMock(), MagicMock()
+    exporter.chunk_tokens = 8
+    exporter.staging_buffers = [torch.empty(8, 386, dtype=torch.uint8) for _ in range(2)]
+    exporter.quantizer = MagicMock()
+    exporter.engine = CopyEngine()
+    exporter.caches, exporter.metadata = {}, {}
+    layers, destinations = {}, {}
+    # Different physical page scales/group IDs, with equal and unequal maps.
+    for name, page_tokens, group, ids in [("a", 2, 0, [3, 1, 2]), ("b", 2, 0, [3, 1, 2]),
+                                         ("draft", 4, 2, [2, 0, 3]), ("empty", 2, 3, [])]:
+        nope = torch.arange(16, dtype=torch.bfloat16).view(-1, 1).expand(-1, 512)
+        rope = torch.ones(16, 64, dtype=torch.bfloat16)
+        active = c8_cache(nope, rope).view(16 // page_tokens, page_tokens, 1, 656)
+        dest = torch.full((4, 4, 1, 386), 7, dtype=torch.uint8)
+        exporter.caches[name] = (active,)
+        exporter.metadata[name] = metadata((active,), group=group)
+        remote = metadata((dest,), group=group + 4, tq=True)
+        layers[name] = (remote, ids, [0, 2, 3][:len(ids)])
+        destinations[name] = dest
+    return exporter, layers, destinations
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_bulk_indices_reused_only_within_request_and_cross_layer_bytes_match(incremental):
+    exporter, layers, destinations = make_bulk_exporter()
+    exporter.incremental = incremental
+    exporter.staging = exporter.staging_buffers[0]
+    originals = {name: tensors[0].clone() for name, tensors in exporter.caches.items()}
+    order = []
+
+    def pack(packed, quantizer):
+        order.append("convert")
+        return fake_pack(packed, quantizer)
+
+    original_write = exporter.engine.batch_transfer_sync_write
+
+    def write(*args):
+        order.append("send")
+        return original_write(*args)
+
+    exporter.engine.batch_transfer_sync_write = write
+    with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=pack), patch(
+            "torch.tensor", wraps=torch.tensor) as upload:
+        exporter.export_layers(layers, "first")
+        first_uploads = upload.call_count
+        # a/b share a page map; draft has a different map/scale; empty uploads nothing.
+        assert first_uploads == 2
+        exporter.export_layers(layers, "second")
+        assert upload.call_count == 2 * first_uploads
+    if incremental:
+        # The next layer's first conversion precedes the previous layer's last
+        # transfer, and the last partial chunk is sent before returning.
+        assert order[:12] == ["convert", "convert", "send", "convert", "send", "convert",
+                              "send", "convert", "send", "convert", "send", "send"]
+    for name, (remote, source, target) in layers.items():
+        active = exporter.caches[name][0]
+        scale = exporter.metadata[name].block_size_scale[0]
+        for src, dst in zip(source, target):
+            expected = fake_pack(active[src * scale:(src + 1) * scale].reshape(4, 656), None)
+            torch.testing.assert_close(destinations[name][dst].reshape(4, 386), expected, rtol=0, atol=0)
+        assert torch.all(destinations[name][1] == 7)
+        torch.testing.assert_close(active, originals[name], rtol=0, atol=0)
+
+
+def test_bulk_pending_transfer_failure_drains_next_layer_conversion():
+    exporter, layers, _ = make_bulk_exporter()
+    # One chunk per layer makes the first failed write occur after the next
+    # layer has already queued its conversion in the other buffer.
+    for name, (remote, src, dst) in layers.items():
+        layers[name] = (remote, src[:1], dst[:1])
+    exporter.engine.batch_transfer_sync_write = MagicMock(return_value=-1)
+    with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=fake_pack) as pack:
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            exporter.export_layers(layers, "failed")
+        assert pack.call_count == 2
+    exporter.stream.synchronize.assert_called_once()
+
+
+def test_bulk_validates_all_layers_before_first_write():
+    exporter, layers, _ = make_bulk_exporter()
+    remote, _, dst = layers["draft"]
+    layers["draft"] = (remote, [999, 0, 3], dst)
+    with pytest.raises(ValueError, match="outside registered cache"):
+        exporter.export_layers(layers, "bad-pages")
+    assert not exporter.engine.calls
+
+
+def test_bulk_overlap_keeps_passthrough_pages_and_final_empty_layer_safe():
+    exporter, layers, destinations = make_bulk_exporter()
+    indexer = torch.arange(64, dtype=torch.int8).view(8, 2, 1, 4)
+    target = torch.full_like(indexer, 7)
+    exporter.caches["indexer"] = (indexer,)
+    exporter.metadata["indexer"] = metadata((indexer,), group=8, indexer=True)
+    remote = metadata((target,), group=9, indexer=True)
+    mixed = {"a": layers["a"], "indexer": (remote, [3, 0], [0, 3]),
+             "b": layers["b"], "empty": layers["empty"]}
+    with patch("torch.npu.Event"), patch("torch.npu.stream", side_effect=lambda _: contextlib.nullcontext()), patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.final_prefill.pack_c8_kv", side_effect=fake_pack):
+        exporter.export_layers(mixed, "mixed")
+    torch.testing.assert_close(target[:2], indexer[6:8], rtol=0, atol=0)
+    torch.testing.assert_close(target[6:8], indexer[:2], rtol=0, atol=0)
+    assert torch.all(target[2:6] == 7)
+    # Last pending TQ chunk is flushed even when the final layer has no pages.
+    expected = fake_pack(exporter.caches["b"][0][4:6].reshape(4, 656), None)
+    torch.testing.assert_close(destinations["b"][3].reshape(4, 386), expected, rtol=0, atol=0)
+    exporter.stream.synchronize.assert_called_once()

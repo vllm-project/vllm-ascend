@@ -203,6 +203,7 @@ class FinalPrefillExporter:
         task.wait_event.synchronize()
         self.ready.synchronize()
         for request in task.send_request.values():
+            indices_cache = {}
             if not request.chunk_finish and not getattr(self, "incremental", False):
                 raise ValueError("Final-prefill export received a non-final chunk")
             session = f"{request.remote_host}:{request.remote_te_rpc_port}"
@@ -223,7 +224,7 @@ class FinalPrefillExporter:
                 group = local.tensor_group_idx[0]
                 src_ids, dst_ids = request.local_block_ids[group], request.remote_block_ids[group]
                 if remote.cache_format == TQ_ABI:
-                    self._convert_and_write(name, local, remote, src_ids, dst_ids, session)
+                    self._convert_and_write(name, local, remote, src_ids, dst_ids, session, indices_cache)
                 else:
                     src, dst, lengths = [], [], []
                     for i, scale in enumerate(local.block_size_scale):
@@ -242,6 +243,8 @@ class FinalPrefillExporter:
         Cache manager group numbers need not agree across PP stages or formats.
         """
         self.ready.synchronize()
+        indices_cache = {}
+        pending = None
         for name, (remote, source, destination) in layers.items():
             local = self.metadata[name]
             validate_remote_layout(local, remote, match_group=False)
@@ -253,7 +256,13 @@ class FinalPrefillExporter:
             for name, (remote, source, destination) in layers.items():
                 local = self.metadata[name]
                 if remote.cache_format == TQ_ABI:
-                    self._convert_and_write(name, local, remote, source, destination, session)
+                    if getattr(self, "incremental", False):
+                        pending = self._pipeline_convert_and_write(
+                            name, local, remote, source, destination, session, indices_cache,
+                            pending=pending, finish=False,
+                        )
+                    else:
+                        self._convert_and_write(name, local, remote, source, destination, session, indices_cache)
                 else:
                     src, dst, lengths = [], [], []
                     for i, scale in enumerate(local.block_size_scale):
@@ -262,28 +271,47 @@ class FinalPrefillExporter:
                             dst.append(remote.kv_caches_base_addr[i] + d * remote.block_stride[i])
                             lengths.append(local.block_len[i])
                     self._write(session, src, dst, lengths)
+            if pending is not None:
+                self._send_converted(pending, session)
         finally:
             # A failed transfer must also retire any queued conversion before
             # the connector can release source pages or acknowledge failure.
             self.stream.synchronize()
 
-    def _convert_and_write(self, name, local, remote, src_ids, dst_ids, session):
+    def _source_indices(self, src_ids, scales, indices_cache):
+        # Request-local metadata only: never retain page IDs across requests.
+        # Upload once per page mapping/scale and slice the same indices for each
+        # layer/chunk. Keep these tensors alive until the export stream drains.
+        if not src_ids:
+            return []
+        source = tuple(src_ids)
+        with torch.npu.stream(self.stream):
+            for scale in scales:
+                key = (source, scale)
+                if key not in indices_cache:
+                    indices_cache[key] = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
+        return [indices_cache[(source, scale)] for scale in scales]
+
+    def _convert_and_write(self, name, local, remote, src_ids, dst_ids, session, indices_cache=None):
+        if indices_cache is None:
+            indices_cache = {}
         if getattr(self, "incremental", False):
             try:
-                return self._pipeline_convert_and_write(name, local, remote, src_ids, dst_ids, session)
+                return self._pipeline_convert_and_write(name, local, remote, src_ids, dst_ids, session, indices_cache)
             except Exception:
                 # A later buffer can still be reading source pages when an
                 # earlier transfer fails. Retire it before ownership is released.
                 self.stream.synchronize()
                 raise
         pages_per_chunk = self.chunk_tokens // local.logical_block_size
+        layer_indices = self._source_indices(src_ids, local.block_size_scale, indices_cache)
         for start in range(0, len(src_ids), pages_per_chunk):
             source = src_ids[start:start + pages_per_chunk]
             destination = dst_ids[start:start + pages_per_chunk]
             with torch.npu.stream(self.stream):
                 parts = []
-                for tensor, scale in zip(self.caches[name], local.block_size_scale):
-                    indices = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
+                for tensor, scale, all_indices in zip(self.caches[name], local.block_size_scale, layer_indices):
+                    indices = all_indices[start * scale:(start + len(source)) * scale]
                     parts.append(tensor.index_select(0, indices).reshape(-1, tensor.shape[-1]))
                 packed = pack_c8_kv(parts[0], self.quantizer)
                 self.staging[:packed.shape[0]].copy_(packed)
@@ -298,7 +326,18 @@ class FinalPrefillExporter:
             )
             # No next conversion may overwrite staging until _write completes.
 
-    def _pipeline_convert_and_write(self, name, local, remote, src_ids, dst_ids, session):
+    def _send_converted(self, item, session):
+        event, buffer_index, destinations, remote = item
+        event.synchronize()
+        buffer = self.staging_buffers[buffer_index]
+        page_bytes = math.prod(remote.component_shapes[0])
+        remote_ids = kernel_ids(destinations, remote.block_size_scale[0])
+        self._write(session, [buffer.data_ptr() + i * page_bytes for i in range(len(remote_ids))],
+                    [remote.kv_caches_base_addr[0] + block * remote.block_stride[0] for block in remote_ids],
+                    [page_bytes] * len(remote_ids))
+
+    def _pipeline_convert_and_write(self, name, local, remote, src_ids, dst_ids, session, indices_cache=None,
+                                    *, pending=None, finish=True):
         """Queue conversion N+1 before the blocking transfer of buffer N.
 
         At most two registered buffers are live; a buffer is reused only after
@@ -306,31 +345,27 @@ class FinalPrefillExporter:
         owned until the model-step send queue is drained.
         """
         pages = self.chunk_tokens // local.logical_block_size
-        page_bytes = math.prod(remote.component_shapes[0])
-        pending = None
-
-        def send(item):
-            event, buffer, destinations = item
-            event.synchronize()
-            remote_ids = kernel_ids(destinations, remote.block_size_scale[0])
-            self._write(session, [buffer.data_ptr() + i * page_bytes for i in range(len(remote_ids))],
-                        [remote.kv_caches_base_addr[0] + block * remote.block_stride[0] for block in remote_ids],
-                        [page_bytes] * len(remote_ids))
-
-        for index, start in enumerate(range(0, len(src_ids), pages)):
-            buffer = self.staging_buffers[index % 2]
+        if indices_cache is None:
+            indices_cache = {}
+        layer_indices = self._source_indices(src_ids, local.block_size_scale, indices_cache)
+        for start in range(0, len(src_ids), pages):
+            buffer_index = 0 if pending is None else (pending[1] + 1) % len(self.staging_buffers)
+            buffer = self.staging_buffers[buffer_index]
             source = src_ids[start:start + pages]
             with torch.npu.stream(self.stream):
                 parts = []
-                for tensor, scale in zip(self.caches[name], local.block_size_scale):
-                    indices = torch.tensor(kernel_ids(source, scale), device=self.device, dtype=torch.int64)
+                for tensor, scale, all_indices in zip(self.caches[name], local.block_size_scale, layer_indices):
+                    indices = all_indices[start * scale:(start + len(source)) * scale]
                     parts.append(tensor.index_select(0, indices).reshape(-1, tensor.shape[-1]))
                 packed = pack_c8_kv(parts[0], self.quantizer)
                 buffer[:packed.shape[0]].copy_(packed)
                 event = torch.npu.Event()
                 event.record()
             if pending is not None:
-                send(pending)
-            pending = (event, buffer, dst_ids[start:start + pages])
-        if pending is not None:
-            send(pending)
+                self._send_converted(pending, session)
+            pending = (event, buffer_index, dst_ids[start:start + pages], remote)
+        if finish:
+            if pending is not None:
+                self._send_converted(pending, session)
+            return None
+        return pending
