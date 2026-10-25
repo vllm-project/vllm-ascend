@@ -171,10 +171,11 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
             out1 = output[2]
-            # w8a8_dynamic calls npu_dynamic_quant with an explicit dst_type
-            # (see quantization/methods/w8a8/w8a8_dynamic.py). The FX pattern
-            # matcher compares keyword arguments, so the pattern has to pass the
-            # same keyword or it never matches the runtime graph.
+            # Pin the rule to INT8: npu_dynamic_quant is shared with the INT4
+            # (torch.quint4x2) and FP8 paths, while the fused op below produces
+            # INT8. Inductor's matcher ignores a keyword the pattern does not
+            # declare, so without this the rule would also match those graphs
+            # and replace them with the INT8 fused op.
             quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
@@ -223,8 +224,11 @@ class AddRMSNormDynamicQuantPatternNoBias(BasePattern):
             )
             out0 = output[0]
             out1 = output[2]
-            # Keep the keyword identical to the runtime call, otherwise the FX
-            # matcher rejects it on the kwargs comparison.
+            # Pin the rule to INT8: npu_dynamic_quant is shared with the INT4
+            # (torch.quint4x2) and FP8 paths, while the fused op below produces
+            # INT8. Inductor's matcher ignores a keyword the pattern does not
+            # declare, so without this the rule would also match those graphs
+            # and replace them with the INT8 fused op.
             quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
@@ -278,10 +282,11 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
             )
             out0 = output[0]
             out1 = output[2]
-            # w8a8_dynamic calls npu_dynamic_quant with an explicit dst_type
-            # (see quantization/methods/w8a8/w8a8_dynamic.py). The FX pattern
-            # matcher compares keyword arguments, so the pattern has to pass the
-            # same keyword or it never matches the runtime graph.
+            # Pin the rule to INT8: npu_dynamic_quant is shared with the INT4
+            # (torch.quint4x2) and FP8 paths, while the fused op below produces
+            # INT8. Inductor's matcher ignores a keyword the pattern does not
+            # declare, so without this the rule would also match those graphs
+            # and replace them with the INT8 fused op.
             quantized_output = torch.ops.npu.npu_dynamic_quant(out0, dst_type=torch.int8)
             return quantized_output[0], quantized_output[1], out1
 
