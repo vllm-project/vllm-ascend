@@ -709,7 +709,7 @@ class _R166SlotAlloc:
         return v
 
 
-_R144_TT_DYN = {"fin": 0, "reuse": 0, "new": 0, "log": []}
+_R144_TT_DYN: dict[str, Any] = {"fin": 0, "reuse": 0, "new": 0, "log": []}
 
 
 def _r136_p0_dump(mode, layer_idx, step, scalars, tensors):
