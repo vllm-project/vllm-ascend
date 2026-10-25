@@ -97,10 +97,12 @@ class Int2PrefillMixin:
         # scatter can land AFTER this step's ring writes and overwrite them
         # with shifted window content — the N-1 block-shaped corruption).
         if _r144_ovl_os.environ.get("R164_EAGER_WAIT", "0") == "1":
+            # The replay-fence event, when present, is registered under the
+            # shared registry key by whoever records it (graph launchers);
+            # absent key => nothing to wait (same as the stash import that
+            # used to live here and resolved to nothing outside the dev tree).
             try:
-                import r161_fence as _f3w
-
-                _e = getattr(_f3w._st, "E_replay_prev", None)
+                _e = _R2XX_G.get("R161_E_REPLAY_PREV")
                 if _e is not None:
                     _e.wait(torch.npu.current_stream())
             except Exception:
@@ -588,25 +590,32 @@ class Int2PrefillMixin:
 
                 if _os170pf.environ.get("R170_PFDUMP", "0") == "1":
                     torch.npu.synchronize()
-                    import r170_stash as _st170pf
+                    # route the row dump through the gated diag sink (the
+                    # stash module it used to write to does not exist outside
+                    # the dev tree)
+                    import json as _js170pf
 
                     _pfk = self._tt_hp_k.get(self._oscar_layer_ord(layer))
                     if _pfk is not None:
                         _rows170 = min(int(_pfk.shape[1]), 1024)
-                        _st170pf.row(
-                            {
-                                "src": "pfdump",
-                                "lid": int(self._oscar_layer_ord(layer)),
-                                "slot": int(_slot),
-                                "sl": int(sl),
-                                "pref": int(pref),
-                                "rcnt": int(rcnt),
-                                "ring_k": [
-                                    round(float(x), 2)
-                                    for x in _pfk[_slot, :_rows170].float().abs().sum(dim=(1, 2)).tolist()
-                                ],
-                            }
-                        )
+                        with _odiag_o("r170_pfdump.jsonl") as _f170pf:
+                            _f170pf.write(
+                                _js170pf.dumps(
+                                    {
+                                        "src": "pfdump",
+                                        "lid": int(self._oscar_layer_ord(layer)),
+                                        "slot": int(_slot),
+                                        "sl": int(sl),
+                                        "pref": int(pref),
+                                        "rcnt": int(rcnt),
+                                        "ring_k": [
+                                            round(float(x), 2)
+                                            for x in _pfk[_slot, :_rows170].float().abs().sum(dim=(1, 2)).tolist()
+                                        ],
+                                    }
+                                )
+                                + "\n"
+                            )
             except Exception:
                 pass
             _oscar_dbg(
