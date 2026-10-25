@@ -26,6 +26,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from image_csrc_cache import snapshot_key
+
 
 def _append_values(path: Path | None, values: dict[str, str]) -> None:
     if path is None:
@@ -107,30 +109,33 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         csrc_hash = args.csrc_hash or _tracked_csrc_hash(source_root)
-        result = subprocess.run(
-            [
-                "python3",
-                str(engine),
-                "snapshot-key",
-                "--architecture",
-                args.architecture,
-                "--soc-version",
-                args.soc_version,
-                "--toolchain-image",
-                args.toolchain_image,
-                "--csrc-hash",
-                csrc_hash,
-                "--unique-suffix",
-                _unique_suffix(),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        key_parts = result.stdout.splitlines()
+        arguments = [
+            "--architecture",
+            args.architecture,
+            "--soc-version",
+            args.soc_version,
+            "--toolchain-image",
+            args.toolchain_image,
+            "--csrc-hash",
+            csrc_hash,
+            "--unique-suffix",
+            _unique_suffix(),
+        ]
+        if getattr(args, "runtime_image", ""):
+            if args.toolchain_image:
+                raise ValueError("runtime-image and toolchain-image are mutually exclusive")
+            response = snapshot_key(args.runtime_image, engine, arguments)
+        else:
+            response = subprocess.run(
+                ["python3", str(engine), "snapshot-key", *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        key_parts = response.splitlines()
         if len(key_parts) != 3 or not all(key_parts):
             raise ValueError("snapshot-key returned an invalid response")
-    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+    except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError) as exc:
         _notice(f"Unable to prepare the L1 snapshot identity ({exc}); building without persistent L1.", warning=True)
         return {"supported": "false"}
 
@@ -149,6 +154,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--architecture", required=True)
     parser.add_argument("--soc-version", required=True)
     parser.add_argument("--toolchain-image", default="")
+    parser.add_argument("--runtime-image", default="")
     parser.add_argument("--source-root", default=".")
     parser.add_argument("--csrc-hash", default="")
     return parser.parse_args()

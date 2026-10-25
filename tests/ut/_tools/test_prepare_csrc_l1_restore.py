@@ -22,7 +22,9 @@ def _load_helper(name: str):
     spec = importlib.util.spec_from_file_location(name, HELPER)
     assert spec is not None and spec.loader is not None
     helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.syspath_prepend(str(HELPER.parent))
+        spec.loader.exec_module(helper)
     return helper
 
 
