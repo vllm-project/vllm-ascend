@@ -7,6 +7,9 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 
 namespace vllm_ascend {
+// Keep in sync with _MOE_COUNTS_CUMSUM_MAX_EXPERTS in moe_utils.py.
+constexpr int64_t kMoeCountsCumsumMaxExperts = 4096;
+
 void moe_counts_cumsum_impl(void* stream, void* input, void* output, uint32_t count);
 
 at::Tensor moe_counts_cumsum(const at::Tensor& counts)
@@ -16,9 +19,17 @@ at::Tensor moe_counts_cumsum(const at::Tensor& counts)
     TORCH_CHECK(counts.scalar_type() == at::kLong && counts.dim() == 1 && counts.is_contiguous(),
                 "moe_counts_cumsum expects contiguous one-dimensional INT64 counts");
     TORCH_CHECK(counts.numel() > 0, "moe_counts_cumsum expects nonempty counts");
+    TORCH_CHECK(counts.numel() <= kMoeCountsCumsumMaxExperts,
+                "moe_counts_cumsum expects at most ", kMoeCountsCumsumMaxExperts,
+                " expert counts");
     const c10_npu::NPUGuard guard(counts.device());
-    at::Tensor output = at::empty_like(counts);
     const uint32_t count = static_cast<uint32_t>(counts.numel());
+    const uint32_t aligned_count = (count + 3) / 4 * 4;
+    // DataCopy writes whole 32-byte blocks. Reserve backing storage for the
+    // alignment tail while keeping the returned tensor's logical shape.
+    at::Tensor output = count == aligned_count
+                            ? at::empty_like(counts)
+                            : at::empty({aligned_count}, counts.options()).narrow(0, 0, count);
     // Launch through the existing task queue without draining pending work.
     const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
     at_npu::native::OpCommand command;

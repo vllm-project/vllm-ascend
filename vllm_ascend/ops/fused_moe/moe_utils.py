@@ -36,6 +36,8 @@ from vllm_ascend.utils import enable_custom_op
 
 COMM_STREAM = None
 
+_MOE_COUNTS_CUMSUM_MAX_EXPERTS = 4096
+
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
 _CANN_MEGA_MOE_QUANT_MODE_NONE = 0
@@ -328,7 +330,7 @@ def cumsum_group_list(
             and group_list.dtype == torch.int64
             and group_list.ndim == 1
             and group_list.is_contiguous()
-            and group_list.numel() > 0
+            and 0 < group_list.numel() <= _MOE_COUNTS_CUMSUM_MAX_EXPERTS
             # Register custom ops lazily before checking this kernel.
             and enable_custom_op()
             and hasattr(torch.ops._C_ascend, "moe_counts_cumsum")

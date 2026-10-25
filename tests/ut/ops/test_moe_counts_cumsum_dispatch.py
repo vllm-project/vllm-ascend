@@ -18,8 +18,10 @@ def npu_counts():
     return counts
 
 
-def test_int64_counts_dispatches_to_custom_scan():
+@pytest.mark.parametrize("n", [1, 32, 1024, 4096])
+def test_int64_counts_dispatches_to_custom_scan(n):
     counts = npu_counts()
+    counts.numel.return_value = n
     with (
         patch.object(moe_utils, "enable_custom_op", return_value=True),
         patch.object(torch.ops._C_ascend, "moe_counts_cumsum", create=True) as scan,
@@ -30,11 +32,13 @@ def test_int64_counts_dispatches_to_custom_scan():
         counts.cumsum.assert_not_called()
 
 
-@pytest.mark.parametrize("case", ["disabled", "empty", "strided", "int32", "matrix"])
+@pytest.mark.parametrize("case", ["disabled", "empty", "too_large", "strided", "int32", "matrix"])
 def test_unsupported_counts_keep_existing_conversion(case):
     counts = npu_counts()
     if case == "empty":
         counts.numel.return_value = 0
+    elif case == "too_large":
+        counts.numel.return_value = moe_utils._MOE_COUNTS_CUMSUM_MAX_EXPERTS + 1
     elif case == "strided":
         counts.is_contiguous.return_value = False
     elif case == "int32":

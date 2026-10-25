@@ -1,0 +1,5 @@
+pr: 19762
+entries:
+  - category: performance
+    text: Accelerated small INT64 MoE group-list cumulative sums on Ascend 910B2 using an AIV scalar kernel.
+    hardware: [A2]
