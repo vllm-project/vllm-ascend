@@ -1,0 +1,12 @@
+pr: 19756
+entries:
+  - category: bugfix
+    text: >-
+      Fixed FX fusion patterns being registered only for the first compiled
+      graph. Every later graph (the decode range and the draft module of a
+      speculative-decoding deployment) was compiled with an empty pattern
+      matcher, silently disabling all graph fusion passes on it.
+  - category: bugfix
+    text: >-
+      Fixed the dynamic norm+quant fusion patterns never matching W8A8 dynamic
+      models whose RMSNorm has no bias.
