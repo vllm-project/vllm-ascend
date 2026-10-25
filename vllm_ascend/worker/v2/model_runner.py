@@ -303,6 +303,16 @@ class NPUModelRunner(GPUModelRunner):
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
             super().load_model(load_dummy_weights, *args, **kwargs)
             self.pd_dspark_aux_layer_ids = aux_layers
+            # UNO's shared-model draft routes its adapter rows through the
+            # worker LoRA manager. Upstream installs this hook from its own
+            # runner; Ascend does it here so the vLLM tree stays unmodified.
+            set_lora_manager = getattr(self.speculator, "set_lora_manager", None)
+            if (
+                set_lora_manager is not None
+                and self.speculative_config is not None
+                and getattr(self.speculative_config, "method", None) == "uno"
+            ):
+                set_lora_manager(getattr(self, "lora_manager", None))
         finally:
             # Join even when weight loading fails: these threads touch the NPU
             # device and must not outlive this call. Joining here is also before

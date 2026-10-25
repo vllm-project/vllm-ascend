@@ -39,6 +39,10 @@ _orig_init_speculator = ascend_spec_decode.init_speculator
 def _init_speculator_310p(vllm_config, device, req_states=None):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "uno":
+        # UNO needs the 910 attention backend's uniform-batch decode metadata
+        # and gated LoRA path; neither exists on 310P.
+        raise NotImplementedError("UNO speculative decoding is not supported on Ascend 310P.")
     if (
         speculative_config.method == "mtp"
         and not speculative_config.use_gemma4_mtp()

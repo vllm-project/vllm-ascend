@@ -22,6 +22,7 @@ The following speculative decoding methods are supported:
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
 | `draft_model` | Generic external draft LLM |
+| `uno` | Shared-model drafting with a gated LoRA adapter (no draft checkpoint) |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
 ## Common Configuration
@@ -1040,3 +1041,94 @@ Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
+
+## Speculating with UNO (shared model + gated LoRA)
+
+UNO drafts with the **target model itself** plus a rank-128 gated LoRA adapter,
+so it needs no separate draft checkpoint and no extra model weights in memory
+beyond the adapter. One draft forward over `K` rows per request produces the
+whole draft block: the first row replays the verified token against the base
+weights and the remaining `K - 1` rows are noise tokens evaluated through the
+adapter.
+
+### Requirements
+
+- **Hardware**: Atlas A2 or A3.
+- **Model runner**: Model Runner V2 (the default on Ascend). UNO is refused when
+  `VLLM_USE_V2_MODEL_RUNNER=0` selects V1.
+- **Model**: a text-only decoder with full attention in every layer. Hybrid,
+  sliding-window, multimodal, encoder-decoder and diffusion models are refused.
+- **Parallelism**: tensor parallelism is supported. Pipeline, prefetch-context
+  and decode-context parallelism are not.
+- **`K = num_speculative_tokens`**: at most **15**, because the NPU fused infer
+  attention TND layout used by the draft pass supports at most 16 query rows
+  per request (1 anchor + K draft rows).
+- **`max_num_batched_tokens >= max_num_seqs * K`**, so one batch can hold every
+  request's draft rows.
+- **Asynchronous scheduling** must stay enabled (the default).
+
+### LoRA adapter
+
+UNO owns the engine-wide LoRA slot, so:
+
+- `--enable-lora` and `--max-lora-rank 128` (or larger) are required.
+- Per-request LoRA adapters are refused, as are `default_mm_loras` and
+  `VLLM_ALLOW_RUNTIME_LORA_UPDATING`.
+
+### Configuration
+
+UNO's adapter settings live in `additional_config`, because there is no draft
+checkpoint to attach them to:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `uno_lora_path` | str, **required** | Local directory holding UNO's gated adapter. |
+| `uno_mask_token_id` | int, optional | Exclusive upper bound of the per-step noise range `[1, uno_mask_token_id)`. Defaults to the target vocabulary size. |
+| `uno_noise_seed` | int, default `0` | Seed mixed into the deterministic draft-noise hash. |
+
+**Offline inference**:
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
+
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    speculative_config={
+        "method": "uno",
+        "num_speculative_tokens": 8,
+    },
+    enable_lora=True,
+    max_lora_rank=128,
+    max_loras=1,
+    additional_config={"uno_lora_path": "path/to/uno/adapter"},
+    enforce_eager=True,
+)
+```
+
+**Online serving**:
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{"method": "uno", "num_speculative_tokens": 8}' \
+  --enable-lora --max-lora-rank 128 --max-loras 1 \
+  --additional-config '{"uno_lora_path": "path/to/uno/adapter"}' \
+  --enforce-eager
+```
+
+### Current limitations
+
+- **Eager only**: the draft pass does not capture an ACL graph yet, so keep
+  `enforce_eager=True` (or accept that the draft runs eagerly while the target
+  still uses its own graph mode).
+- **Linear sampler only**: tree verification is not implemented.
+- **`rejection_sample_method` must be `standard`**; `synthetic` and `block` are
+  refused. Adaptive verification and `use_local_argmax_reduction` are refused
+  as well, because UNO needs the full draft logits.
+- **lmhead tensor parallelism is refused**: UNO sets
+  `draft_sample_method="probabilistic"`, which the group-aligned lmhead-TP draft
+  sampler does not support.
+- UNO depends on the still-open upstream core PR
+  [vllm-project/vllm#55947](https://github.com/vllm-project/vllm/pull/55947);
+  until it lands, `method="uno"` is accepted through an Ascend-side config
+  patch.

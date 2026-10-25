@@ -1,0 +1,6 @@
+pr: 0 # TODO: replace with the PR number once it exists
+entries:
+  - category: feature
+    text: Added UNO shared-model speculative decoding for Model Runner V2, which drafts with the target model plus a rank-128 gated LoRA adapter instead of a separate draft checkpoint.
+    highlight: true
+    hardware: [A2, A3]

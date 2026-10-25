@@ -586,6 +586,17 @@ class AscendConfig:
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
+    # ---- UNO shared-model speculative decoding (method="uno") ----
+    # UNO drafts with the target model plus a gated LoRA adapter, so its
+    # adapter-specific settings live here rather than in SpeculativeConfig
+    # (which has no drafter checkpoint to attach them to).
+    uno_lora_path: str | None = None
+    # Exclusive upper bound of UNO's per-step noise range [1, uno_mask_token_id).
+    # None means the target vocabulary size.
+    uno_mask_token_id: int | None = None
+    # Seed for the deterministic draft noise; a fixed seed keeps draft tokens
+    # reproducible across identical steps.
+    uno_noise_seed: int = 0
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -928,7 +939,108 @@ class AscendConfig:
 
         # sparse KV offload vs packed SFA main cache mutex
         self._validate_sparse_packed_kv_offload_compatibility()
+
+        # UNO shared-model speculative decoding (method="uno")
+        self._validate_uno(vc)
         return self
+
+    def _validate_uno(self, vllm_config: VllmConfig) -> None:
+        """Fail closed on unsupported UNO configurations.
+
+        UNO drafts with the target model plus a gated LoRA adapter, so it
+        collides with several Ascend features that assume a separate draft
+        model or exclusive access to the LoRA slot. Validating here fails at
+        startup with an actionable message instead of deep inside the worker,
+        before any weight is loaded.
+
+        The attention-side limit (``decode_threshold <= 16`` in
+        ``attention_v1.py``) is also reported here so users see the constraint
+        as a config error rather than an assertion inside the backend.
+        """
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if spec_config is None or getattr(spec_config, "method", None) != "uno":
+            return
+
+        num_speculative_tokens = getattr(spec_config, "num_speculative_tokens", None) or 0
+        if num_speculative_tokens < 1:
+            raise ValueError("UNO requires num_speculative_tokens >= 1.")
+        if num_speculative_tokens + 1 > 16:
+            raise ValueError(
+                "UNO requires num_speculative_tokens <= 15: the NPU fused "
+                "infer attention TND layout used by the draft pass supports at "
+                "most 16 query rows per request (1 anchor + K draft rows), got "
+                f"{num_speculative_tokens}."
+            )
+
+        if self.uno_lora_path is None:
+            raise ValueError(
+                "UNO requires the gated draft adapter path. Set "
+                '"uno_lora_path" in additional_config (for example '
+                "-O additional_config='{\"uno_lora_path\": \"/path/to/adapter\"}')."
+            )
+        if not os.path.isdir(self.uno_lora_path):
+            raise ValueError(f"uno_lora_path does not exist or is not a directory: {self.uno_lora_path}")
+
+        if self.uno_mask_token_id is not None and self.uno_mask_token_id < 2:
+            raise ValueError(
+                "uno_mask_token_id is the exclusive upper bound of UNO's noise "
+                f"range [1, uno_mask_token_id), so it must be >= 2, got {self.uno_mask_token_id}."
+            )
+
+        # The draft pass runs the target model once per step over the whole
+        # context, so context/pipeline sharding of the draft is not modelled.
+        # Tensor parallelism is fine: the draft reuses the target's sharding.
+        parallel_config = vllm_config.parallel_config
+        for name, value in (
+            ("data parallel size", parallel_config.data_parallel_size),
+            ("pipeline parallel size", parallel_config.pipeline_parallel_size),
+            ("prefill context parallel size", parallel_config.prefill_context_parallel_size),
+            ("decode context parallel size", parallel_config.decode_context_parallel_size),
+        ):
+            if value > 1:
+                raise ValueError(
+                    f"UNO does not support {name} > 1 (got {value}). UNO drafts on the full target model in a single query pass."
+                )
+
+        if getattr(spec_config, "enable_adaptive_verification", False):
+            raise ValueError("UNO does not support enable_adaptive_verification.")
+        rejection = getattr(spec_config, "rejection_sample_method", "standard")
+        if rejection != "standard":
+            raise ValueError(f"UNO requires rejection_sample_method='standard', got '{rejection}'.")
+        if getattr(spec_config, "use_local_argmax_reduction", False):
+            raise ValueError("UNO does not support use_local_argmax_reduction.")
+
+        if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+            raise ValueError(
+                "UNO requires draft_sample_method='probabilistic', which the "
+                "lmhead tensor-parallel draft sampler rejects. Remove "
+                "finegrained_tp_config.lmhead_tensor_parallel_size."
+            )
+
+        lora_config = getattr(vllm_config, "lora_config", None)
+        if lora_config is None:
+            raise ValueError(
+                "UNO requires LoRA to carry its gated draft adapter. Enable it with --enable-lora --max-lora-rank 128."
+            )
+        if lora_config.max_loras < 1:
+            raise ValueError("UNO requires --max-loras >= 1.")
+        if lora_config.max_lora_rank < 128:
+            raise ValueError(
+                "UNO's gated draft adapter has rank 128, so --max-lora-rank "
+                f"must be >= 128, got {lora_config.max_lora_rank}."
+            )
+        if lora_config.default_mm_loras:
+            raise ValueError(
+                "UNO reserves the engine-wide LoRA slot for its draft adapter; "
+                "default_mm_loras is not supported together with method='uno'."
+            )
+        from vllm import envs as vllm_envs
+
+        if vllm_envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+            raise ValueError(
+                "UNO reserves the engine-wide LoRA slot for its draft adapter; "
+                "VLLM_ALLOW_RUNTIME_LORA_UPDATING is not supported together with method='uno'."
+            )
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
