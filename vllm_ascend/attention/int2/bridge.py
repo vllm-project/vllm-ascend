@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from vllm_ascend.attention.int2.ctx import (  # noqa: F401
+    _R2XX_G,
     logger,
 )
 from vllm_ascend.attention.int2.helpers import (  # noqa: F401
@@ -24,12 +25,12 @@ class Int2BridgeMixin:
     # readers go through type(self).
     _r91_loaded: Any = None
     _r91_mod: Any = None
-    _r91_entry_count: Any = None
-    _r91_fallback_count: Any = None
-    _r91_getws_count: Any = None
-    _r91_launch_count: Any = None
-    _r91_sync_count: Any = None
-    _r91_output_consumed_count: Any = None
+    _r91_entry_count: int = 0
+    _r91_fallback_count: int = 0
+    _r91_getws_count: int = 0
+    _r91_launch_count: int = 0
+    _r91_sync_count: int = 0
+    _r91_output_consumed_count: int = 0
     _r112_loaded: Any = None
     _r112_mod: Any = None
     _r135_loaded: Any = None
@@ -87,22 +88,23 @@ class Int2BridgeMixin:
             # overrides, e.g. for an out-of-tree frozen copy).
             LSE_SRC = _opaths91.lse_bridge_src()
             TN = _os.path.dirname(_tn.__file__ or "")
+            _cann = _os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest")
             INC = [
                 _os.path.join(TN, "include"),
                 _os.path.join(TN, "include", "third_party", "op-plugin"),
-                "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
-                "/usr/local/Ascend/cann-9.0.0/include",
+                _cann + "/aarch64-linux/include",
+                _cann + "/include",
                 VENDOR + "/op_api/include",
             ]
             LD = [
                 "-L" + VENDOR + "/op_api/lib",
                 "-lcust_opapi",
-                "-L/usr/local/Ascend/cann-9.0.0/lib64",
+                "-L" + _cann + "/lib64",
                 "-lascendcl",
                 "-L" + _os.path.join(TN, "lib"),
                 "-ltorch_npu",
                 "-Wl,-rpath," + VENDOR + "/op_api/lib",
-                "-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64",
+                "-Wl,-rpath," + _cann + "/lib64",
             ]
             type(self)._r91_mod = _ce.load(
                 name="int2_op_launch_lse_r108",
@@ -154,22 +156,23 @@ class Int2BridgeMixin:
             from torch.utils import cpp_extension as _ce
 
             TN = _os.path.dirname(_tn.__file__)
+            _cann = _os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest")
             INC = [
                 _os.path.join(TN, "include"),
                 _os.path.join(TN, "include", "third_party", "op-plugin"),
-                "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
-                "/usr/local/Ascend/cann-9.0.0/include",
+                _cann + "/aarch64-linux/include",
+                _cann + "/include",
                 VENDOR + "/op_api/include",
             ]
             LD = [
                 "-L" + VENDOR + "/op_api/lib",
                 "-lcust_opapi",
-                "-L/usr/local/Ascend/cann-9.0.0/lib64",
+                "-L" + _cann + "/lib64",
                 "-lascendcl",
                 "-L" + _os.path.join(TN, "lib"),
                 "-ltorch_npu",
                 "-Wl,-rpath," + VENDOR + "/op_api/lib",
-                "-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64",
+                "-Wl,-rpath," + _cann + "/lib64",
             ]
             type(self)._r112_mod = _ce.load(
                 name=_opaths.launcher_name(),
@@ -206,6 +209,8 @@ class Int2BridgeMixin:
                 _v133 = _os.environ.get("R133_VENDOR", "")
                 if _v133:
                     VENDOR = _v133
+            if not VENDOR:
+                raise FileNotFoundError("vendor OPP path not set (R106_VENDOR/R133_VENDOR)")
             _os.environ["TORCH_EXTENSIONS_DIR"] = R135BASE + "/TASK_OWNED/torch_ext"
             _os.makedirs(_os.environ["TORCH_EXTENSIONS_DIR"], exist_ok=True)
             _os.environ["KERNEL_META"] = R135BASE + "/TASK_OWNED/kernel_meta"
@@ -226,23 +231,24 @@ class Int2BridgeMixin:
             from torch.utils import cpp_extension as _ce
 
             TN = _os.path.dirname(_tn.__file__)
+            _cann = _os.environ.get("ASCEND_TOOLKIT_HOME", "/usr/local/Ascend/ascend-toolkit/latest")
             INC = [
                 _os.path.join(TN, "include"),
                 _os.path.join(TN, "include", "third_party", "op-plugin"),
-                "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
-                "/usr/local/Ascend/cann-9.0.0/include",
+                _cann + "/aarch64-linux/include",
+                _cann + "/include",
                 VENDOR + "/op_api/include",
                 R135BASE + "/TASK_OWNED",
             ]
             LD = [
                 "-L" + VENDOR + "/op_api/lib",
                 "-lcust_opapi",
-                "-L/usr/local/Ascend/cann-9.0.0/lib64",
+                "-L" + _cann + "/lib64",
                 "-lascendcl",
                 "-L" + _os.path.join(TN, "lib"),
                 "-ltorch_npu",
                 "-Wl,-rpath," + VENDOR + "/op_api/lib",
-                "-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64",
+                "-Wl,-rpath," + _cann + "/lib64",
             ]
             type(self)._r135_mod = _ce.load(
                 name="int2_lse_v1_r135",
@@ -337,7 +343,7 @@ class Int2BridgeMixin:
             # Rotate Q
             if R_k is not None:
                 query_bnsd = torch.matmul(query_bnsd, R_k)
-                _r218b = globals().setdefault("_R218_ROT_SEEN", set())
+                _r218b = _R2XX_G.setdefault("_R218_ROT_SEEN", set())
                 if "B" not in _r218b:
                     _r218b.add("B")
                     _r218_diag("FIRE-B")

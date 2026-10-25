@@ -105,8 +105,11 @@ class Int2StagingMixin:
 
         def _dbg_w(msg):
             if _dbg:
-                with open("/tmp/r156_h3_dbg.log", "a") as _f:
-                    _f.write(f"{msg}\n")
+                try:
+                    with open("/tmp/r156_h3_dbg.log", "a") as _f:
+                        _f.write(f"{msg}\n")
+                except Exception:
+                    pass
 
         _dbg_w(f"stage_all enter L={len(params)} sl={sl} mid={mid_len}")
         if not impl._r156_h3_ensure(None):
@@ -517,9 +520,8 @@ class Int2StagingMixin:
             _mk = type(impl)._r163_markers = set()
         if marker not in _mk:
             _mk.add(marker)
-            open("/tmp/r163_markers.log", "a").write(  # noqa: SIM115 - fire-and-forget diagnostic write
-                f"ACTIVE marker={marker} lid={_lid} Bcap={Bcap}\n"
-            )
+            with _odiag_o("r163_markers.log") as _f:
+                _f.write(f"ACTIVE marker={marker} lid={_lid} Bcap={Bcap}\n")
         md = forward_context.attn_metadata[key]
         sl_list = md.seq_lens_list
         active = len(sl_list)
@@ -668,9 +670,8 @@ class Int2StagingMixin:
             _mk = type(impl)._r163_markers = set()
         if marker not in _mk:
             _mk.add(marker)
-            open("/tmp/r163_markers.log", "a").write(  # noqa: SIM115 - fire-and-forget diagnostic write
-                f"ACTIVE marker={marker} lid={_lid} Bcap={Bcap}\n"
-            )
+            with _odiag_o("r163_markers.log") as _f:
+                _f.write(f"ACTIVE marker={marker} lid={_lid} Bcap={Bcap}\n")
         md = forward_context.attn_metadata[key]
         sl_list = md.seq_lens_list
         active = len(sl_list)
