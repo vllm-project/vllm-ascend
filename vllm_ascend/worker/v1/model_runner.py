@@ -6472,6 +6472,26 @@ class NPUModelRunner(GPUModelRunner):
                 reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
             )
 
+    def initialize_metadata_builders(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+    ) -> None:
+        # Upstream also initializes the drafter here, but Ascend creates one
+        # only on the last PP stage and initializes it after binding KV tensors
+        # in initialize_kv_cache. Target builders are needed on every stage.
+        for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    kernel_block_sizes[kv_cache_group_id]
+                    if kv_cache_group_id < len(kernel_block_sizes)
+                    else None,
+                    num_metadata_builders=1
+                    if not self.parallel_config.use_ubatching
+                    else self.parallel_config.num_ubatches,
+                )
+        self.calculate_reorder_batch_threshold()
+
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
