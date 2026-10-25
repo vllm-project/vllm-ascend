@@ -7,6 +7,7 @@ import os as _r144_ovl_os
 from typing import Any
 
 import torch
+import torch_npu  # noqa: F401 - registers torch.npu
 
 from vllm_ascend.attention.int2.ctx import (  # noqa: F401
     _OSCAR_CFG,
@@ -425,7 +426,7 @@ class Int2RingMixin:
         # stream (write-side covered by the next pre-replay sync).
         _cudef_on = _os.environ.get("R167_CUDEF", "0") == "1"
         if _os.environ.get("R167_CUSYNC", "0") == "1" or _cudef_on:
-            import torch.npu as _np167cs
+            _np167cs = torch.npu  # torch_npu at module top registers the submodule
 
             _np167cs.synchronize()
         pref = _OSCAR_CFG.prefix_window
@@ -510,7 +511,7 @@ class Int2RingMixin:
         if _cudef_on:
             import contextlib as _cl167cd
 
-            import torch.npu as _np167cd
+            _np167cd = torch.npu  # torch_npu at module top registers the submodule
 
             _cu_ctx = torch.npu.stream(_np167cd.default_stream())
         else:
