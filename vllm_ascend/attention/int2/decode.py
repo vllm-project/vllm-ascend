@@ -211,17 +211,20 @@ class Int2DecodeMixin:
             all_v.append(cat_v)
             total_kv_lens.append(sl)
 
-        max_kv = max(total_kv_lens) if total_kv_lens else 0
-        key_tnd = query.new_zeros(max_kv, self.num_kv_heads, self.head_size)
-        val_tnd = query.new_zeros(max_kv, self.num_kv_heads, self.head_size)
-        if batch_size == 1:
-            key_tnd[: total_kv_lens[0]] = all_k[0]
-            val_tnd[: total_kv_lens[0]] = all_v[0]
-        else:
-            for b in range(batch_size):
-                n = total_kv_lens[b]
-                key_tnd[:n] = all_k[b]
-                val_tnd[:n] = all_v[b]
+        # TND is packed-varlen: the fused op reads request i's KV from the
+        # cumulative offset of actual_seq_lengths_kv[:i], so each request needs
+        # its OWN rows. Allocating max(lens) and overwriting rows [0, n) per
+        # request handed every request the LAST request's KV for B >= 2 (and
+        # read past max_kv rows for sum(lens) > max_kv).
+        kv_total = int(sum(total_kv_lens)) if total_kv_lens else 0
+        key_tnd = query.new_zeros(kv_total, self.num_kv_heads, self.head_size)
+        val_tnd = query.new_zeros(kv_total, self.num_kv_heads, self.head_size)
+        _off = 0
+        for b in range(batch_size):
+            _n = total_kv_lens[b]
+            key_tnd[_off : _off + _n] = all_k[b]
+            val_tnd[_off : _off + _n] = all_v[b]
+            _off += _n
 
         # Rotate Q into the same space
         query_tnd = query[:batch_size].contiguous()
