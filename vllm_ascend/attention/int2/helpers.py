@@ -709,7 +709,7 @@ class _R166SlotAlloc:
         return v
 
 
-_R144_TT_DYN = {"fin": 0, "reuse": 0, "new": 0, "log": []}
+_R144_TT_DYN: dict[str, Any] = {"fin": 0, "reuse": 0, "new": 0, "log": []}
 
 
 def _r136_p0_dump(mode, layer_idx, step, scalars, tensors):
@@ -785,6 +785,14 @@ def _r114_ts_write():
     import time as _time
 
     _R114_TS_FH.write(_json.dumps({"t": _time.time_ns(), "pid": _os.getpid()}) + "\n")
+
+
+def _oscar_dbg(*args, **kwargs):
+    # gated debug print for INT2 paths; no-op unless SGLANG_OSCAR_DEBUG set
+    import os as _os
+
+    if _os.environ.get("SGLANG_OSCAR_DEBUG"):
+        print(*args, **kwargs)
 
 
 def _oscar_diag_write(relname, text):
