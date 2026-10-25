@@ -173,8 +173,12 @@ class Int2SlotStateMixin:
                 # dict pair once; the migrator unions lids across all of them.
                 _reg171 = getattr(_c170, "_r171_hp_reg", None)
                 if _reg171 is None:
-                    setattr(_c170, "_r171_hp_reg", [])  # noqa: B010 - dynamic mirror by design
-                    _reg171 = _c170._r171_hp_reg
+                    # create the registry in a local and setattr that: the
+                    # mirror target includes the foreign base class, where
+                    # plain attribute syntax cannot type-check, and the
+                    # stored list stays identity-aliased with _reg171
+                    _reg171 = []
+                    setattr(_c170, "_r171_hp_reg", _reg171)  # noqa: B010 - dynamic mirror by design
                 if not any(k is self._tt_hp_k for k, _v in _reg171):
                     _reg171.append((self._tt_hp_k, self._tt_hp_v))
         # req_ids that currently have an assigned slot (the "live" set). A
