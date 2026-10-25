@@ -1065,7 +1065,7 @@ class Int2SlotStateMixin:
         For the standard transformer forward (layers 0..N-1 in order) the
         ordinals are 0..N-1 == the R137 first-seen values, so R_k indexing is
         unchanged (no regression). Runtime-derived: no model-name / 36 / D128 /
-        NKV literals. Fail-closed if ``layer_name`` is absent/unparseable, or
+        NKV literals. Fail-closed if ``layer_name`` is absent/unparsable, or
         (when R_k is loaded) the parsed ordinal >= R_k rows (config mismatch).
 
         Optional proof (R137_RK_PROOF=1): on first sight of a layer name,

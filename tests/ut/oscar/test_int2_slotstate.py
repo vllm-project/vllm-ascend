@@ -111,7 +111,7 @@ class TestLayerOrdinal:
         else:
             raise AssertionError("expected fail-closed RuntimeError")
 
-    def test_fail_closed_on_unparseable_name(self):
+    def test_fail_closed_on_unparsable_name(self):
         s = _SlotSelf()
         try:
             s._oscar_layer_ord(SimpleNamespace(layer_name="encoder.h.three"))
