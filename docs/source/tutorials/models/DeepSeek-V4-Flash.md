@@ -2591,16 +2591,6 @@ Keep `export VLLM_USE_V2_MODEL_RUNNER=1` in both pooled templates. PCP requires 
 
 For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
-Compared with normal PD in [Section 5.2.4](#524-950dt-series-pd-separation-deployment), pay attention to these pooling-only requirements:
-
-| Item | Normal PD ([Section 5.2.4](#524-950dt-series-pd-separation-deployment)) | Pooled PD (this section) |
-| ---- | ------------------------- | ------------------------ |
-| Connector | `MooncakeConnectorV2` | `MultiConnector` wrapping `MooncakeConnectorV2` and `AscendStoreConnector` |
-| KV pool service | Not required | Start one Memcache MetaService before Prefill and Decode |
-| Additional environment | HCCL and Ascend direct-transfer variables | Also configure `MMC_LOCAL_CONFIG_PATH`, the Memcache library path, and `PYTHONHASHSEED` |
-| Startup order | Prefill and Decode → Proxy | MetaService → Prefill and Decode → Proxy |
-| Verification | Confirm P-to-D KV transfer | Also confirm an external KV Cache Pool hit with a repeated prefix |
-
 ##### 5.3.2.1 Prerequisites and MemCache Configuration
 
 Configure the Memcache environment and configuration files inside the container where both Prefill and Decode run. Then, open separate terminals in the same container to launch Prefill on NPUs 0–3 and Decode on NPUs 4–7.
