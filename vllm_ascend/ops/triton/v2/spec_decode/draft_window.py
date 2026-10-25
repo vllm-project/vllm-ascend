@@ -47,17 +47,20 @@ def _gather_draft_kv_fp32(
     VALUE_PAGE_STRIDE: tl.constexpr,
     BLOCK_SPAN: tl.constexpr,
     TOKEN_SIZE: tl.constexpr,
-    TOTAL_TOKENS: tl.constexpr,
+    TOKEN_PADDING: tl.constexpr,
     TOKEN_BLOCK: tl.constexpr,
     CHANNEL_BLOCK: tl.constexpr,
 ):
+    # Infer allocation extent from the launch grid. Only the final tile's
+    # padding specializes this kernel, not each Full-prefill capacity.
+    total_tokens = tl.num_programs(0) * TOKEN_BLOCK - TOKEN_PADDING
     token = tl.program_id(0) * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
     channel = tl.arange(0, CHANNEL_BLOCK)
-    slot = tl.load(slots + token, mask=token < TOTAL_TOKENS, other=0).to(tl.int64)
+    slot = tl.load(slots + token, mask=token < total_tokens, other=0).to(tl.int64)
     page, offset = slot // BLOCK_SPAN, slot % BLOCK_SPAN
     # Compute each physical token address once, then broadcast its channels.
     # The flat version repeated the slot load and page arithmetic per channel.
-    valid = (token[:, None] < TOTAL_TOKENS) & (channel[None, :] < TOKEN_SIZE)
+    valid = (token[:, None] < total_tokens) & (channel[None, :] < TOKEN_SIZE)
     output_offset = token[:, None] * TOKEN_SIZE + channel[None, :]
     key_offset = (page * KEY_PAGE_STRIDE + offset * TOKEN_SIZE)[:, None] + channel[None, :]
     key = tl.load(keys + key_offset, mask=valid, other=0)
@@ -121,7 +124,7 @@ def gather_draft_kv_fp32(
         values.stride(0),
         keys.shape[1],
         token_size,
-        slots.numel(),
+        -slots.numel() % GATHER_TOKEN_BLOCK_SIZE,
         GATHER_TOKEN_BLOCK_SIZE,
         triton.next_power_of_2(token_size),
     )
@@ -150,7 +153,7 @@ def _plan_draft_window(
     BLOCK_SPAN: tl.constexpr,
     ANCHOR_SPAN: tl.constexpr,
     WINDOW: tl.constexpr,
-    CAPACITY: tl.constexpr,
+    CAPACITY_PADDING: tl.constexpr,
     QUERY_WIDTH: tl.constexpr,
     CAUSAL: tl.constexpr,
     HAS_FROZEN: tl.constexpr,
@@ -159,10 +162,11 @@ def _plan_draft_window(
     HAS_QUERY_OFFSETS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    capacity = tl.num_programs(1) * BLOCK - CAPACITY_PADDING
     req = tl.program_id(0)
     column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     query = tl.program_id(2)
-    valid = column < CAPACITY
+    valid = column < capacity
     end = tl.load(exact + req * EXACT_STRIDE).to(tl.int64)
     if HAS_FROZEN:
         start = tl.load(frozen + req * FROZEN_STRIDE).to(tl.int64)
@@ -186,7 +190,7 @@ def _plan_draft_window(
         physical = tl.load(table + row * TABLE_ROW_STRIDE + block_column * TABLE_COLUMN_STRIDE, mask=valid, other=0).to(
             tl.int64
         )
-        tl.store(slots + req * CAPACITY + column, physical * BLOCK_SPAN + absolute % BLOCK_SPAN, mask=valid)
+        tl.store(slots + req * capacity + column, physical * BLOCK_SPAN + absolute % BLOCK_SPAN, mask=valid)
     excluded = column >= length
     if CAUSAL:
         query_end = tl.load(query_ends + req * QUERY_END_STRIDE).to(tl.int64) if HAS_QUERY_ENDS else end
@@ -194,7 +198,7 @@ def _plan_draft_window(
     if HAS_QUERY_OFFSETS:
         query_length = tl.load(query_offsets + req + 1) - tl.load(query_offsets + req)
         excluded = excluded | (query < QUERY_WIDTH - query_length)
-    tl.store(mask + (req * QUERY_WIDTH + query) * CAPACITY + column, excluded, mask=valid)
+    tl.store(mask + (req * QUERY_WIDTH + query) * capacity + column, excluded, mask=valid)
 
 
 def plan_draft_window(
@@ -245,7 +249,7 @@ def plan_draft_window(
         block_span,
         anchor_span,
         window,
-        capacity,
+        -capacity % PLAN_BLOCK_SIZE,
         query_width,
         causal,
         frozen is not None,
