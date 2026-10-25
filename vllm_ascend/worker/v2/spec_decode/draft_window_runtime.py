@@ -837,8 +837,11 @@ class DraftWindowRuntime:
         if self.mla_layer_names:
             from vllm_ascend.worker.v2.spec_decode.draft_window_mla import freeze_mla_read_metadata
 
-            rotary_reads = freeze_mla_read_metadata(metadata, self.mla_layer_names)
-            self.pool.retain(self._owner, *rotary_reads)
+            owner = self._owner
+            rotary_reads = freeze_mla_read_metadata(
+                metadata, self.mla_layer_names, retain=lambda *objects: self.pool.retain(owner, *objects)
+            )
+            self.pool.retain(owner, *rotary_reads)
         if self.sfa_layer_names:
             from vllm_ascend.worker.v2.spec_decode.draft_window_sfa import freeze_sfa_read_metadata
 

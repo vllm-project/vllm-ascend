@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Own the mutable derived read inputs of an eager MLA draft invocation."""
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
+import torch
 
-def freeze_mla_read_metadata(metadata: Mapping[str, Any], mla_layer_names: Collection[str]) -> tuple[Any, ...]:
+
+def freeze_mla_read_metadata(
+    metadata: Mapping[str, Any],
+    mla_layer_names: Collection[str],
+    *,
+    retain: Callable[..., None] | None = None,
+) -> tuple[Any, ...]:
     """Detach only MLA decode RoPE from the builder's process-wide scratch.
 
     ``AscendMLAMetadataBuilder.build_decode_metadata`` calls
@@ -36,7 +43,14 @@ def freeze_mla_read_metadata(metadata: Mapping[str, Any], mla_layer_names: Colle
         for field in ("cos", "sin"):
             value = getattr(decode, field)
             if value is not None:
-                owned = value.clone()
+                if retain is None:
+                    owned = value.clone()
+                else:
+                    # Own both operands before a copy can partially submit and
+                    # raise. A later field failure must not lose this snapshot.
+                    owned = torch.empty_like(value)
+                    retain(value, owned)
+                    owned.copy_(value, non_blocking=True)
                 setattr(decode, field, owned)
                 retained.append(owned)
     return tuple(retained)

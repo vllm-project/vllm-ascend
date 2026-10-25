@@ -35,7 +35,8 @@ def metadata_for_decode(positions, cos, sin):
     )
 
 
-def test_later_real_rope_build_cannot_overwrite_inflight_window_metadata(monkeypatch):
+@pytest.mark.parametrize("owned_submission", [False, True])
+def test_later_real_rope_build_cannot_overwrite_inflight_window_metadata(monkeypatch, owned_submission):
     cos_cache = torch.arange(64, dtype=torch.float32).view(16, 4)
     sin_cache = -cos_cache
     for name, value in {
@@ -56,7 +57,13 @@ def test_later_real_rope_build_cannot_overwrite_inflight_window_metadata(monkeyp
         metadata.decode,
     )
     layers = {"draft.a": metadata, "draft.b": metadata}
-    retained = freeze_mla_read_metadata(layers, tuple(layers))
+    submitted = []
+    retain = lambda *objects: submitted.extend(objects)
+    retained = freeze_mla_read_metadata(layers, tuple(layers), retain=retain if owned_submission else None)
+    if owned_submission:
+        assert any(value is cos for value in submitted)
+        assert any(value is sin for value in submitted)
+        assert all(any(value is output for value in submitted) for output in retained)
     rotary_embedding.get_cos_and_sin_mla(torch.tensor([2, 3]), use_cache=True)
     # The original producer is demonstrably mutable; the Window read isn't.
     assert not torch.equal(cos, expected_cos)

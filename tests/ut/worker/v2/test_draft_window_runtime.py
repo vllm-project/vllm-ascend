@@ -1081,3 +1081,39 @@ def test_parallel_prompt_producer_rejects_uncertified_preparation(setup, invalid
         spec.replicated_pcp = True
     with pytest.raises(RuntimeError, match="did not consume"), runtime.proposal_context(spec, state):
         assert runtime._parallel_prefill_exact_lengths(2) is None
+
+
+def test_mla_partial_rotary_copy_failure_keeps_submitted_operands(setup, monkeypatch):
+    runtime, spec, canonical, _ = setup
+    runtime.mla_layer_names = ("draft",)
+    cos, sin = torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])
+    metadata = {"draft": SimpleNamespace(external_flashmla=None, decode=SimpleNamespace(cos=cos, sin=sin))}
+    original_clone, original_copy = torch.Tensor.clone, torch.Tensor.copy_
+    full = canonical.clone()
+    owner = None
+
+    def clone(source, *args, **kwargs):
+        if source is sin:
+            raise RuntimeError("MLA second RoPE copy failed")
+        return original_clone(source, *args, **kwargs)
+
+    def copy(destination, source, *args, **kwargs):
+        if source is cos or source is sin:
+            assert any(value is destination for value in owner.retained)
+            assert any(value is source for value in owner.retained)
+            if source is sin:
+                raise RuntimeError("MLA second RoPE copy failed")
+        return original_copy(destination, source, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", clone)
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
+    with pytest.raises(RuntimeError, match="MLA second RoPE copy failed"), runtime.proposal_context(spec, batch()):
+        owner = runtime._owner
+        runtime.retain_metadata(metadata)
+    assert owner.state is DraftWindowOwnerState.QUARANTINED
+    first_copy = metadata["draft"].decode.cos
+    assert first_copy is not cos
+    assert any(value is first_copy for value in owner.retained)
+    with pytest.raises(RuntimeError, match="quarantined"):
+        runtime.pool.acquire()
+    torch.testing.assert_close(canonical, full, rtol=0, atol=0)
