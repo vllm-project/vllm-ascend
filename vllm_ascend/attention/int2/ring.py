@@ -558,7 +558,7 @@ class Int2RingMixin:
                                 "b": int(b),
                                 "sl": int(sl),
                                 "tlo": int(t_lo),
-                                "thi": int(t_hi),
+                                "t_hi": int(t_hi),
                                 "slot": int(_slot_r),
                                 "ck": _ck168,
                                 "blk": [int(x) for x in bt_live[b][(t_lo // bs) : (t_hi // bs + 1)].tolist()],
