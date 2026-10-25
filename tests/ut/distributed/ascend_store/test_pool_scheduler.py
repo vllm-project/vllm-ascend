@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import zmq
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -35,8 +34,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from zmq.constants import RCVTIMEO
+from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
+from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -260,7 +260,7 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
         with tempfile.TemporaryDirectory(prefix="kv-dp-") as rpc_dir, ExitStack() as stack:
             stack.enter_context(patch(f"{module}.envs.VLLM_RPC_BASE_PATH", rpc_dir))
-            context = stack.enter_context(zmq.Context())
+            context = stack.enter_context(Context())
             paths = []
             for dp_index in range(2):
                 config = SimpleNamespace(
@@ -270,7 +270,7 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
                 paths.append(get_zmq_rpc_path_lookup(config))
             self.assertNotEqual(paths[0], paths[1])
             for path in paths:
-                server = stack.enter_context(context.socket(zmq.REP))
+                server = stack.enter_context(context.socket(REP))
                 server.bind(path)
 
 
