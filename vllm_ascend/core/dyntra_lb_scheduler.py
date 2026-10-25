@@ -30,7 +30,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
@@ -860,7 +859,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.

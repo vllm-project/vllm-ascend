@@ -16,9 +16,9 @@
 #
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
-The ``schedule()`` override below follows the ``Scheduler.schedule()``
-contract of vLLM v0.31.0. When the upstream
-``schedule()`` method is refactored, this override must be updated accordingly.
+The ``schedule()`` override originated from the ``Scheduler.schedule()``
+contract of vLLM v0.31.0 and carries subsequent compatibility updates. When
+the upstream method is refactored, this override must be updated accordingly.
 """
 
 import inspect
@@ -46,7 +46,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -812,7 +811,7 @@ class ProfilingChunkScheduler(Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > request_token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.

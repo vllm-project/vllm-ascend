@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import inspect
 import math
 from dataclasses import replace
 from types import SimpleNamespace
@@ -54,16 +53,11 @@ from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
-# that prefix caching requires `mamba_cache_mode="align"`; the v0.31.0 lane still
-# allowed `"none"` together with `enable_caching=True`.
-_MAMBA_CACHING_MODE = "none" if vllm_version_is("0.31.0") else "align"
+# that prefix caching requires `mamba_cache_mode="align"` in both supported lanes.
+_MAMBA_CACHING_MODE = "align"
 
-# vLLM #42309 gives the upstream admission helper a leading `builder` argument;
-# v0.31.0 and older main checkouts keep the two-argument form. `vllm_version_is`
-# cannot tell two main dev builds apart, so probe the live upstream signature.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = (
-    "builder" in inspect.signature(kv_cache_utils_patch._orig_max_memory_usage_bytes_from_groups).parameters
-)
+# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
+_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -1024,18 +1018,13 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
-            # vLLM main (#57169) resolves the KV cache layout when computing the
-            # pool bytes per block; v0.31.0 has no such argument.
+            # Both supported lanes (#57169) resolve the KV cache layout when
+            # computing the pool bytes per block.
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
         )
     )
-
-    if vllm_version_is("0.31.0"):
-        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
-        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
-    else:
-        ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-        upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     live_module = kv_cache_utils_patch._kv_cache_planning
     assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block

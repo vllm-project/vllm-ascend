@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal
 import torch
 import torch_npu
 from torch import nn
+from transformers import Glm5NextConfig
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -75,16 +76,6 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
-# package on main; the release lane (v0.31.0) still ships them under
-# `vllm.transformers_utils.configs.glm5_next`.
-if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
-else:
-    from transformers import Glm5NextConfig
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size

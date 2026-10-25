@@ -1131,9 +1131,9 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
-            if not vllm_version_is("0.31.0"):
+            if not vllm_version_is("0.32.0"):
                 # vLLM main's rejection sampler rejects drafts that were verified
-                # against a permissive grammar row; v0.31.0 has neither the
+                # against a permissive grammar row; v0.32.0 has neither the
                 # `invalid_drafts` argument nor the helper that builds it.
                 from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
 
@@ -1155,7 +1155,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
-                *(() if vllm_version_is("0.31.0") else (invalid_drafts,)),
+                *(() if vllm_version_is("0.32.0") else (invalid_drafts,)),
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected

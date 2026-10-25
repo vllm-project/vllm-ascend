@@ -4,6 +4,7 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_pcp_group
@@ -31,15 +32,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #57387 moved the GLM-5-Next config classes into the `transformers`
-# package on main; the release lane (v0.31.0) still ships them under
-# `vllm.transformers_utils.configs.glm5_next`.
-if vllm_version_is("0.31.0"):
-    from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig  # type: ignore[import-not-found]
-else:
-    from transformers import Glm5NextConfig
 
 
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):

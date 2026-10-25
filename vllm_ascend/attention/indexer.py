@@ -46,7 +46,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
@@ -149,8 +148,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_name() -> str:
