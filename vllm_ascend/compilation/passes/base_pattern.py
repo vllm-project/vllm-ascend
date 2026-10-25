@@ -1,3 +1,4 @@
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
@@ -13,8 +14,13 @@ except ImportError:
 
 from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import extra_stream_scope_check
 
-# Global set to track registered patterns and prevent duplicates
+# Patterns already handed to the process-global npugraph_ex backend registry.
 _registered_patterns: set[str] = set()
+# Pattern keys already registered into a given matcher. A module-level set cannot
+# be used here because every compiled graph builds its own PatternMatcherPass; a
+# weak-keyed map keeps the bookkeeping off the third-party matcher object and
+# does not extend its lifetime.
+_registered_by_matcher: "weakref.WeakKeyDictionary[PatternMatcherPass, set[str]]" = weakref.WeakKeyDictionary()
 
 
 class BasePattern(ABC):
@@ -42,12 +48,22 @@ class BasePattern(ABC):
         return f"{self.__class__.__name__}_{self.eps}"
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        # Create a unique identifier for this pattern
+        # NOTE: every GraphFusionPassManager instance owns its own PatternMatcherPass,
+        # and a new instance is built for each compiled graph (prefill range, decode
+        # range, speculator, ...). Registering into ``pm_pass`` must therefore happen
+        # unconditionally: an earlier global de-duplication skipped it for every graph
+        # after the first one, which left their matchers empty and silently disabled
+        # every FX fusion pass. Only the npugraph_ex backend registry is global, so
+        # only that call is de-duplicated.
         pattern_id = self.pattern_key()
 
-        # Skip registration if this pattern has already been registered globally
-        if pattern_id in _registered_patterns:
+        registered = _registered_by_matcher.get(pm_pass)
+        if registered is None:
+            registered = set()
+            _registered_by_matcher[pm_pass] = registered
+        if pattern_id in registered:
             return
+        registered.add(pattern_id)
 
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
@@ -55,12 +71,12 @@ class BasePattern(ABC):
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 
-        nge.register_replacement(
-            search_fn=pattern_fn,
-            replace_fn=replacement_fn,
-            example_inputs=example_inputs,
-            extra_check=self.get_extra_stream_scope_check(),
-        )
-
-        # Mark this pattern as registered
-        _registered_patterns.add(pattern_id)
+        if pattern_id not in _registered_patterns:
+            nge.register_replacement(
+                search_fn=pattern_fn,
+                replace_fn=replacement_fn,
+                example_inputs=example_inputs,
+                extra_check=self.get_extra_stream_scope_check(),
+            )
+            # Mark this pattern as registered in the global backend registry
+            _registered_patterns.add(pattern_id)
