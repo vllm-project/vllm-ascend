@@ -131,11 +131,11 @@ Eagle3's first pass preserves rejected query padding in the native layout.
 Its logical proposal end is the current last valid query position plus one;
 the padded native extent must not choose the frozen anchor. For example,
 live E=1159, native extent=1160, K=3, W=1035 and B=128 require S=0, whereas
-using the native extent would incorrectly choose S=128. For an eligible
-uniform decode layout, the runtime keeps both values on device and freezes
-the anchor there. Legacy first-pass consumers take one combined current Host
-snapshot, shared across groups. Ragged decode, mixed phases, terminal prefill
-and other legacy consumers retain their exact synchronization.
+using the native extent would incorrectly choose S=128. Eligible ordinary
+GQA reads keep the current live/native pair and frozen anchor on device,
+including their admitted ragged and mixed layouts. Legacy consumers outside
+that route take one combined current Host snapshot, shared across groups;
+their synchronization is not removed by the dense reader.
 
 An all-continuing ordinary GQA Eagle3 batch without draft placeholders has a
 narrower exact producer: current computed prompt progress plus this batch's
@@ -225,10 +225,12 @@ padding repeats the last valid row and remains masked. FP32 native attention
 consumes the mask without extracting exact device lengths on Host. Its
 workspace and conversion costs remain part of the performance evaluation.
 
-Eagle3 uses this consumer for eligible uniform non-prefill first passes and
-later one-token AR steps, retaining the proposal's frozen start. Continuing
-prefill remains on the exact Full-read path at every step, including mixed
-batches. First prefill and ragged layouts also retain their legacy path.
+Eagle3 uses this consumer for admitted first-pass and later AR layouts,
+retaining the proposal's frozen start. Continuing prefill rows keep Full reads
+at every step. In a mixed decode/prompt batch, private cohorts separate Full
+and windowed rows and their query widths; the device exact lengths still
+select each valid read interval. A prompt-only producer may instead retain
+the native Full reader under the certificate described below.
 
 Legacy consumers obtain one current exact CPU snapshot per metadata build,
 shared across groups. DSpark with ordinary MLA and no DCP is an explicit
@@ -381,8 +383,9 @@ separate from device exact lengths. Capacity never selects the window start.
 Directly masking an unwritten paged-cache tail is unsafe: NaNs in that tail
 can contaminate the result despite zero attention weights.
 
-This path requires uniform parallel query width, ordinary unquantized cache
-layout, and scheduling uppers covered by initialized Full block-table columns.
+This path requires ordinary unquantized cache layout and scheduling uppers
+covered by initialized Full block-table columns. Each private cohort has a
+uniform query width; packed Eagle3 queries retain explicit gather/output maps.
 Combined K/V pages may have gaps between blocks and nonzero storage offsets;
 the reader maps token indices through the actual page stride without copying
 the full cache or reading the gaps.
@@ -391,15 +394,24 @@ upper checks address capacity for that contract, without reconstructing E.
 Scratch capacity is bounded by both `W+B-1` and the current batch's maximum
 Host upper, then rounded for allocation. This avoids gathering a large
 window's padding on short contexts; it does not change exact `S` or `V`.
-Continuing prefill, ragged queries and other consumers retain the existing
-exact path. This preserves Window semantics rather than forcing Window OFF.
-Eagle3, MLA, DSA and SFA exact-path synchronization remains separate work.
+A continuing prefill row retains its Full read. Mixed Full/windowed rows
+are partitioned by phase, query width and CPU-known aligned capacity, so short
+Full rows do not inherit a long peer's allocation. These capacity decisions
+never reconstruct exact lengths or choose S. Unsupported layouts retain their
+existing exact consumer and its synchronization; dense-route evidence cannot
+be extended to MLA, DSA, SFA or other providers without their own contract.
 
 The GQA builder carries a typed device read only on enabled proposals. Its
 capacity CPU fields are consumed exclusively by the dedicated eager reader;
 the original Full write slots, absolute positions and canonical cache stay
-unchanged. Every per-layer scratch is retained by the proposal owner through
-its completion boundary. OFF, Target metadata and dummy/profile paths create
+unchanged. Copy sources and destinations are retained before submission,
+including a submission that raises after work may have been queued. Scratch
+is retained through the proposal completion boundary. Immediate attention
+consumers reuse FP32 KV buffers only across sequential layers of the same
+read, NPU stream and geometry. Other reads or streams receive distinct buffers;
+standalone gather callers retain independent materializations. No early release
+or new synchronization is used to obtain this bound. OFF, Target metadata and
+dummy/profile paths create
 no device read; Target Graph remains compatible with Draft eager execution.
 Device-to-device gathering adds traffic and storage; actual
 engine correctness, reader completion and performance must be measured before
@@ -419,22 +431,49 @@ FP32 path preserves the independent same-window numerical contract without
 relaxing its tolerance. This adds intermediate storage and compute that must
 be included in actual correctness, lifetime and performance measurements.
 
-## Isolated prompt-only terminal-row producer experiment
+## Prompt-only exact producers
 
-The `experiment/mrv2-eagle-prompt-exact-20261024` branch extends only ordinary
-GQA Eagle legacy metadata whose entire batch is still prefilling, contains no
-Draft placeholders, and has actual CPU query widths equal to scheduled prompt
-counts. Scheduling must not cross the prompt end, and terminal rows must have
-one target logit. Replicated PCP and non-advancing positions remain excluded.
+Ordinary GQA Eagle3 can reuse a current prompt producer when the entire batch
+is prefilling without Draft placeholders, actual query widths equal scheduled
+prompt widths, scheduling does not cross the prompt end, and terminal rows
+have one Target logit. Replicated PCP and non-advancing positions are excluded.
+Current prompt progress plus the actual scheduled count then gives the exact
+native extent: continuing prompts reject zero tokens, and a terminal row has
+no speculative candidates to reject. Request identity, state-row mapping and
+preparation fields are bound to the proposal. AR steps advance and clamp that
+retained base using the existing method preparation semantics. A changed
+identity invalidates it; the optimistic CPU length mirror is not a producer.
 
-For that certified producer, current prompt progress and scheduled counts give
-the exact native extent; zero rejection makes it the live first-pass anchor
-as well. The current device native/live pair and frozen starts are retained
-for later dense AR consumers. Continuing rows retain Full reads, terminal rows
-use their original frozen window after step0, and reader selection is unchanged.
-CPU snapshots are scoped to the proposal and retained through its original
-completion token. Ambiguous producers retain the existing exact fallback.
+Continuing rows retain Full reads; terminal rows preserve the method's frozen
+window after the first prefill pass. The current device live/native pair and
+frozen anchor remain available to later dense AR consumers. Mixed decode and
+prompt batches use device exact planning rather than estimating accepted counts.
 
-This isolated experiment has Host evidence only until model and trace validation.
-It does not establish native-copy elimination, complete A01 resolution or main
-PR support, and it does not change the certified Full-only C23 fast path.
+DFlash and DSpark have a separate certificate for all-unfinished, unsharded
+prompt batches with no Draft placeholders and matching scheduled query widths.
+Their preparation places the actual parallel query block after the last valid
+Target position. The certified current prompt end plus the actual method query
+width supplies the clamped native extent. Terminal, mixed or replicated-PCP
+batches keep their device-exact or provider-specific route. This does not
+extend the ordinary-MLA same-preparation snapshot contract to other backends.
+
+## Memory and validation limits
+
+Window bounds Draft reads; Full KV storage and writes remain allocated. Plan
+batch capacity using the actual Full KV groups, model memory and private
+workspace, including mixed long-prefill/decode workloads. Reducing W does not
+make many long Full contexts fit automatically.
+
+The dense planner and gather derive allocation extent from their actual Triton
+grid and named padding constants. This avoids capacity-specific scalar
+specialization without changing exact lengths, addresses, masks or alignment.
+Full/windowed request cohorts are distinct from KV groups: they do not change
+the historical group-start compatibility rule above.
+
+Validate actual methods and backends with an independent same-window reference,
+Full-write and Target-isolation checks, and device completion evidence. Keep
+intrusive numerical observation separate from natural asynchronous lifetime
+and unprofiled timing. Native operation schemas or a few trace samples alone
+do not establish copy elimination for every fallback. Compare fixed-source OFF
+and ON with matching warmup, cache state, request arrival and sampling settings;
+report acceptance changes and low-load regressions alongside throughput.
