@@ -52,23 +52,46 @@ class TestLoaderFailClosed:
 
 
 class TestClassStateDefaults:
-    def test_counters_default_none_and_are_class_level(self):
+    def test_latches_default_none_counters_default_zero(self):
         for name in (
             "_r91_loaded",
             "_r91_mod",
-            "_r91_entry_count",
-            "_r91_fallback_count",
-            "_r91_getws_count",
-            "_r91_launch_count",
-            "_r91_sync_count",
-            "_r91_output_consumed_count",
             "_r112_loaded",
             "_r112_mod",
             "_r135_loaded",
             "_r135_mod",
         ):
             assert getattr(Int2BridgeMixin, name, None) is None
+        for name in (
+            "_r91_entry_count",
+            "_r91_fallback_count",
+            "_r91_getws_count",
+            "_r91_launch_count",
+            "_r91_sync_count",
+            "_r91_output_consumed_count",
+        ):
+            # counters must start at 0: they are incremented on the class
+            # before any init path runs (None + 1 raised TypeError)
+            assert getattr(Int2BridgeMixin, name) == 0
         # subclass state never leaks back to the mixin
         _B: Any = type("_B", (Int2BridgeMixin,), {})
         _B._r91_loaded = True
         assert Int2BridgeMixin._r91_loaded is None
+
+    def test_bridge_decode_counters_increment_on_fail_closed(self):
+        # regression: with None counter defaults the exception handler itself
+        # raised TypeError and crashed instead of falling back
+        _B: Any = type("_B", (Int2BridgeMixin,), {})
+        self_obj = _B()
+        # key_cache is None -> shape access raises -> fallback path
+        assert self_obj._r91_bridge_decode(None, None, None, None, None, None) is False
+        assert _B._r91_entry_count == 1
+        assert _B._r91_fallback_count == 1
+
+    def test_r135_fails_closed_without_vendor(self, monkeypatch):
+        for var in ("R106_VENDOR", "R133_VENDOR", "R133_GRAPH_V1", "R135_BASE", "R157_OPP", "R144_OPP_PATH"):
+            monkeypatch.delenv(var, raising=False)
+        self_obj = _BridgeSelf()
+        assert self_obj._r135_ensure_v1("npu:0") is False
+        assert self_obj._r135_loaded is True
+        assert self_obj._r135_mod is None
