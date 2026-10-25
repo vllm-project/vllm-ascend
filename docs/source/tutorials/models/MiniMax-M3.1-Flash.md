@@ -814,4 +814,5 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| AIME2026 | — | — | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, chat_template_kwargs={"reasoning_effort":"max","thinking_mode":"enabled"} |
+| AIME2026 | Ascend 950DT Products | 93.33@repeat4 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
+| AIME2026 | A3 | 93.33@repeat1 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
