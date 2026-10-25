@@ -426,10 +426,14 @@ class Int2QuantCacheMixin:
                 type(self)._r113_stage = {}
             _stg = type(self)._r113_stage
             _s = _stg.get(layer_idx)
-            # first use, or a longer step than the one that sized the
-            # staging tensors (split-prefill continuation): reallocate —
-            # every field is fully re-copied below, so nothing is lost
-            if _s is None or _s["k"].shape[0] < num_tokens:
+            # first use, or a step whose token count differs from the one
+            # that sized the staging tensors (split-prefill continuation, or
+            # a SMALLER step after a larger one): reallocate — every field is
+            # fully re-copied below, so nothing is lost. Size-exact also
+            # keeps the flush consumer's indexed write in lockstep with the
+            # staged slot tensor: an oversize staging would either raise in
+            # copy_ (shape mismatch) or flush stale zero slots into row 0.
+            if _s is None or _s["k"].shape[0] != num_tokens:
                 _stg[layer_idx] = _s = {
                     "k": torch.zeros_like(key_packed[:num_tokens]),
                     "v": torch.zeros_like(value_packed[:num_tokens]),
