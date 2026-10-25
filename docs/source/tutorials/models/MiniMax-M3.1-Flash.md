@@ -31,8 +31,8 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
-| MiniMax-M3.1-Flash-MXFP8 | 950DT products, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-MXFP8 | 950DT products, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
 Download the weight variant used by the serving commands to the same model directory on both nodes. It is recommended to place the model weight in a shared cache directory.
 
