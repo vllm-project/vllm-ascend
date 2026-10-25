@@ -28,6 +28,45 @@ static int64_t g_r144_call = 0;
 #include "aclnn_oscar_int2_fused_attn_int2_lse.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
+
+// ===== R218-P7 (2026-10-25): torch_npu task-queue commit boundary =====
+// torch_npu 2.10.0.post7 (git 3363ea59) submits ALL op_api/ATen host work
+// through a per-device Repository task queue drained by a consumer thread
+// (OpCommand.cpp RunOpApi -> enCurrentNPUStream -> Repository::Enqueue,
+// NPUQueue.cpp ReadQueue executes + only then advances read_idx). A DIRECT
+// aclnn* call from this extension submits immediately on the calling thread
+// and can therefore OVERTAKE ops the consumer has not yet submitted -- both
+// the caller's operand staging and the lse sentinel fill in this file.
+// NPUStream::stream(false) (NPUStream.cpp:838) returns the raw handle with NO
+// flush; the implicit operator aclrtStream() conversion and stream(true) call
+// MakeSureQueueEmpty first (NPUQueue.cpp:243): the official host-side commit
+// boundary. r218_qbound_flush establishes exactly that boundary: on return,
+// every op enqueued before the call has been SUBMITTED to the stream
+// (submission order only -- NOT a device synchronization).
+#include <atomic>
+#include <chrono>
+static std::atomic<int64_t> g_qb_calls{0};
+static std::atomic<int64_t> g_qb_ns{0};
+static std::atomic<int64_t> g_qb_max_ns{0};
+static std::atomic<int> g_qb_seen[8];
+static inline aclrtStream r218_qbound_flush(c10::DeviceIndex dev){
+    auto t0 = std::chrono::steady_clock::now();
+    aclrtStream s = c10_npu::getCurrentNPUStream(dev).stream(true);
+    int64_t dt = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    g_qb_calls.fetch_add(1, std::memory_order_relaxed);
+    g_qb_ns.fetch_add(dt, std::memory_order_relaxed);
+    int64_t prev = g_qb_max_ns.load(std::memory_order_relaxed);
+    while (dt > prev && !g_qb_max_ns.compare_exchange_weak(prev, dt, std::memory_order_relaxed)) {}
+    return s;
+}
+static inline void r218_qbound_seen(int slot, const char* entry){
+    if (!g_qb_seen[slot].exchange(1)) {
+        std::fprintf(stderr, "[R218-QBOUND] entry=%s slot=%d ACTIVE\n", entry, slot);
+        std::fflush(stderr);
+    }
+}
+// ===== end R218-P7 helper =====
 namespace py = pybind11;
 static aclDataType acl_dtype(at::ScalarType t){ switch(t){
     case at::ScalarType::BFloat16:return ACL_BF16; case at::ScalarType::Char: return ACL_INT8;
@@ -140,6 +179,13 @@ static py::object launch_lse_fast(
         r192_predump("launch_lse_fast", _d, _n, _nb, _ml, blockSize, scale, numHeads, numKvHeads);
     }
     lse.fill_(torch::Scalar(-9999.0));   // async on same stream, ordered before the op
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(q.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)q.device().index());
+    r218_qbound_seen(0, "launch_lse_fast");
     uint64_t ws=0; aclOpExecutor* ex=nullptr;
     aclnnStatus r=aclnnOscarInt2FusedAttnInt2LseGetWorkspaceSize(
         a_q,a_k,a_v,/*pse*/nullptr,a_mask,a_asq,a_askv,
@@ -151,8 +197,10 @@ static py::object launch_lse_fast(
         sparseMode,/*innerPrecise*/0,blockSize,/*antiquantMode*/1,
         keyAntiqMode,valAntiqMode,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && launchKernel && ex!=nullptr){
+    if(launchKernel){
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -171,6 +219,7 @@ static py::object launch_lse_fast(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
     aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
@@ -272,6 +321,13 @@ static py::object oscar_middle_prep(
     std::vector<char> lb{'B','N','S','D','\0'};
     aclrtStream s=c10_npu::getCurrentNPUStream(q.device().index()).stream(false);
     lse.fill_(torch::Scalar(-9999.0));
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(q.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)q.device().index());
+    r218_qbound_seen(1, "oscar_middle_prep");
     uint64_t ws=0; aclOpExecutor* ex=nullptr;
     aclnnStatus r=aclnnOscarInt2FusedAttnInt2LseGetWorkspaceSize(
         a_q,a_k,a_v,/*pse*/nullptr,/*mask*/nullptr,a_asq,a_askv,
@@ -282,8 +338,10 @@ static py::object oscar_middle_prep(
         /*sparse*/0,/*innerPrecise*/0,blockSize,/*antiquantMode*/1,
         /*keyAntiq*/1,/*valAntiq*/1,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && ex!=nullptr){
+    {
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -301,6 +359,7 @@ static py::object oscar_middle_prep(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     // --- R144 G1 OPERAND DUMP (capture gathered middle operands for A/B/C replay) ---
     // Gated by R144_OPDUMP=1. Saves the EXACT gathered tensors that enter the aclnn
@@ -572,6 +631,13 @@ static py::object oscar_middle_prep_batched(
     std::vector<char> lb{'B','N','S','D','\0'};
     aclrtStream s=c10_npu::getCurrentNPUStream(q_stack.device().index()).stream(false);
     lse_stack.fill_(torch::Scalar(-9999.0));
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(q_stack.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)q_stack.device().index());
+    r218_qbound_seen(2, "oscar_middle_prep_batched");
     uint64_t ws=0; aclOpExecutor* ex=nullptr;
     aclnnStatus r=aclnnOscarInt2FusedAttnInt2LseGetWorkspaceSize(
         a_q,a_k,a_v,nullptr,nullptr,a_asq,a_askv,
@@ -581,8 +647,10 @@ static py::object oscar_middle_prep_batched(
         numHeads,scale,0,0,lb.data(),numKvHeads,
         0,0,blockSize,1,1,1,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && ex!=nullptr){
+    {
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -591,6 +659,7 @@ static py::object oscar_middle_prep_batched(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     if (_r215_gm_post && (int64_t)r == 0) {
         aclrtSynchronizeStream(s);
@@ -633,6 +702,13 @@ static py::object oscar_middle_replay(
     std::vector<char> lb{'B','N','S','D','\0'};
     aclrtStream s=c10_npu::getCurrentNPUStream(qd.device().index()).stream(false);
     ld.fill_(torch::Scalar(-9999.0));
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(qd.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)qd.device().index());
+    r218_qbound_seen(3, "oscar_middle_replay");
     uint64_t ws=0; aclOpExecutor* ex=nullptr;
     aclnnStatus r=aclnnOscarInt2FusedAttnInt2LseGetWorkspaceSize(
         a_q,a_k,a_v,nullptr,nullptr,a_asq,a_askv,
@@ -642,8 +718,10 @@ static py::object oscar_middle_replay(
         numHeads,scale,0,0,lb.data(),numKvHeads,
         0,0,blockSize,1,1,1,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && ex!=nullptr){
+    {
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -652,6 +730,7 @@ static py::object oscar_middle_replay(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
     aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
@@ -687,6 +766,13 @@ static py::object oscar_middle_replay_batched(
     std::vector<char> lb{'B','N','S','D','\0'};
     aclrtStream s=c10_npu::getCurrentNPUStream(qd.device().index()).stream(false);
     ld.fill_(torch::Scalar(-9999.0));
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(qd.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)qd.device().index());
+    r218_qbound_seen(4, "oscar_middle_replay_batched");
     uint64_t ws=0; aclOpExecutor* ex=nullptr;
     aclnnStatus r=aclnnOscarInt2FusedAttnInt2LseGetWorkspaceSize(
         a_q,a_k,a_v,nullptr,nullptr,a_asq,a_askv,
@@ -696,8 +782,10 @@ static py::object oscar_middle_replay_batched(
         numHeads,scale,0,0,lb.data(),numKvHeads,
         0,0,blockSize,1,1,1,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && ex!=nullptr){
+    {
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -706,6 +794,7 @@ static py::object oscar_middle_replay_batched(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
     aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
@@ -1085,6 +1174,13 @@ static py::object oscar_middle_prep_batched_v2(
     std::vector<char> lb{'B','N','S','D','\0'};
     aclrtStream s=c10_npu::getCurrentNPUStream(q_stack.device().index()).stream(false);
     lse_stack.fill_(torch::Scalar(-9999.0));
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(q_stack.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)q_stack.device().index());
+    r218_qbound_seen(5, "oscar_middle_prep_batched_v2");
     out_stack.zero_();   // R144 P1 sha1 FIX: op reads out's initial value (shadow
                         // proved: out1=zeros vs carrier=prior -> differ). v1 path
                         // zeros out each step (torch.zeros); v2 carrier must too.
@@ -1097,8 +1193,10 @@ static py::object oscar_middle_prep_batched_v2(
         numHeads,scale,0,0,lb.data(),numKvHeads,
         0,0,blockSize,1,1,1,
         a_o,a_lse,&ws,&ex);
+    TORCH_CHECK(r==0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex!=nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr=-1;
-    if(r==0 && ex!=nullptr){
+    {
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
@@ -1107,6 +1205,7 @@ static py::object oscar_middle_prep_batched_v2(
             ws_p=g_ws.data_ptr();
         }
         lr=(int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
+        TORCH_CHECK(lr==0, "R218-P7: aclnn launch failed lr=",lr);
     }
     aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
     aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
@@ -1226,6 +1325,13 @@ static py::object oscar_middle_op_v3(
     aclTensor *a_asq = make_acl(asq), *a_askv = make_acl(askv);
     std::vector<char> lb{'B', 'N', 'S', 'D', '\0'};
     aclrtStream s = c10_npu::getCurrentNPUStream(q.device().index()).stream(false);
+
+    // R218-P7 commit boundary: host task-queue flush AFTER the sentinel fill
+    // (and any caller staging enqueued before this call), BEFORE the direct
+    // ACLNN submit. Submission-order guarantee only; NOT a device sync.
+    s = r218_qbound_flush(q.device().index());
+    TORCH_CHECK(s != nullptr, "R218-P7: task-queue flush failed dev=", (int)q.device().index());
+    r218_qbound_seen(6, "oscar_middle_op_v3");
     uint64_t ws = 0; aclOpExecutor* ex = nullptr;
     aclnnStatus r = aclnnOscarInt2FusedAttnInt2LseTensorGetWorkspaceSize(
         a_q, a_k, a_v, /*pse*/nullptr, /*mask*/nullptr,
@@ -1236,8 +1342,10 @@ static py::object oscar_middle_op_v3(
         numHeads, scale, 0, 0, lb.data(), numKvHeads,
         0, 0, blockSize, 1, 1, 1,
         a_o, a_lse, &ws, &ex);
+    TORCH_CHECK(r == 0, "R218-P7: GetWorkspaceSize failed r=",(int64_t)r);
+    TORCH_CHECK(ex != nullptr, "R218-P7: GetWorkspaceSize returned null executor");
     int64_t lr = -1;
-    if (r == 0 && ex != nullptr) {
+    {
         void* ws_p = nullptr;
         if (ws > 0) {
             if (!g_ws.defined() || (uint64_t)g_ws.numel() < ws) {
@@ -1247,6 +1355,7 @@ static py::object oscar_middle_op_v3(
             ws_p = g_ws.data_ptr();
         }
         lr = (int64_t)aclnnOscarInt2FusedAttnInt2Lse(ws_p, ws, ex, s);
+        TORCH_CHECK(lr == 0, "R218-P7: aclnn launch failed lr=", lr);
     }
     aclDestroyTensor(a_q); aclDestroyTensor(a_k); aclDestroyTensor(a_v); aclDestroyTensor(a_bt);
     aclDestroyTensor(a_ks); aclDestroyTensor(a_ko); aclDestroyTensor(a_vs); aclDestroyTensor(a_vo);
@@ -1333,7 +1442,7 @@ static py::object oscar_merge_tail(
     return py::make_tuple((int64_t)0);
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("r112fast_version",[](){return std::string("r113.orch.v9+r145v3");});
+    m.def("r112fast_version",[](){return std::string("r113.orch.v9+r145v3+r218p7bound");});
     m.def("launch_lse_fast",&launch_lse_fast,"R112: sync-free launch, cached ws");
     m.def("verify_lse",&verify_lse,"R112: explicit readback for correctness legs");
     m.def("warm_ws",&warm_ws,"R113: pre-grow cached ws outside capture/task-update regions");
@@ -1349,4 +1458,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("oscar_middle_op_v3",&oscar_middle_op_v3,"R145 v3: fixed-capacity tensor-ABI op call (graph-capturable)");
     m.def("oscar_fill_v3",&oscar_fill_v3,"R204: single-crossing eager mixed-step fill layer (value-identical port)");
     m.def("oscar_merge_tail",&oscar_merge_tail,"R204: single-crossing S+R merge tail (value-identical port)");
+    m.def("qbound_stats",[](){ return py::make_tuple((int64_t)g_qb_calls.load(), (int64_t)g_qb_ns.load(), (int64_t)g_qb_max_ns.load()); }, "R218-P7 commit-boundary counters (calls, ns_total, ns_max)");
 }
