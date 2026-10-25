@@ -49,18 +49,27 @@ def test_apply_builder_inputs_windows_seq_lens_and_block_tables_on_cpu():
     original_b = full_table_b.clone()
     slot_mappings = torch.arange(8, dtype=torch.int32)
 
-    input_buffers = SimpleNamespace(seq_lens=torch.tensor([300, 0], dtype=torch.int32))
+    original_seq_lens = torch.tensor([300, 0], dtype=torch.int32)
+    input_buffers = SimpleNamespace(seq_lens=original_seq_lens)
     block_tables = SimpleNamespace(
         input_block_tables=[full_table_a, full_table_b],
         slot_mappings=slot_mappings,
     )
-    upper_bound = torch.tensor([300, 0], dtype=torch.int32)
+    # Independent windowing of 320 would yield 128; the shared crop must keep
+    # this an upper bound of the windowed actual length (172).
+    upper_bound = torch.tensor([320, 0], dtype=torch.int32)
+    seq_lens_cpu = torch.tensor([300, 0], dtype=torch.int32)
     saved_slots = slot_mappings.clone()
 
-    with helper.apply_builder_inputs(input_buffers, block_tables, upper_bound, num_reqs) as windowed_ub:
+    with helper.apply_builder_inputs(
+        input_buffers, block_tables, upper_bound, num_reqs, extra_seq_lens=(seq_lens_cpu,)
+    ) as windowed_ub:
         # 300 with W=128,b=64 -> start=128, windowed=172 (matches MRV1 adapter tests).
+        assert input_buffers.seq_lens is not original_seq_lens
         assert input_buffers.seq_lens[0].item() == 172
-        assert windowed_ub[0].item() == 172
+        metadata_seq_lens = input_buffers.seq_lens
+        assert windowed_ub[0].item() == 192  # 320 - 128, still >= 172
+        assert seq_lens_cpu[0].item() == 172
         assert block_tables.input_block_tables[0].shape[1] == helper.adapter.max_window_blocks
         assert block_tables.input_block_tables[1].shape[1] == helper.adapter.max_window_blocks
         # Cropped columns are the recent blocks (start_block=128/64=2).
@@ -69,11 +78,40 @@ def test_apply_builder_inputs_windows_seq_lens_and_block_tables_on_cpu():
         # Slot mapping invariant: never windowed.
         torch.testing.assert_close(block_tables.slot_mappings, saved_slots)
 
-    # Restored after the build scope.
+    # Buffer identity is restored; metadata that aliased the windowed clone
+    # still sees 172.
+    assert input_buffers.seq_lens is original_seq_lens
     torch.testing.assert_close(input_buffers.seq_lens, torch.tensor([300, 0], dtype=torch.int32))
+    torch.testing.assert_close(metadata_seq_lens, torch.tensor([172, 0], dtype=torch.int32))
     torch.testing.assert_close(block_tables.input_block_tables[0], original_a)
     torch.testing.assert_close(block_tables.input_block_tables[1], original_b)
     torch.testing.assert_close(block_tables.slot_mappings, saved_slots)
+
+
+def test_clamp_metadata_keeps_upper_bound_after_draft_step():
+    helper = MRV2DraftSlidingWindow(
+        window_size=128,
+        block_size=64,
+        max_num_reqs=1,
+        future_offset=0,
+        device=torch.device("cpu"),
+        num_groups=1,
+    )
+    helper._last_windowed_seq_lens = torch.tensor([172], dtype=torch.int32)
+    # Upstream added step=5 to the crop-aligned bound 192.
+    metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([197], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([197], dtype=torch.int32),
+        seq_lens_list=[197],
+    )
+
+    helper.clamp_metadata_after_step({"layer": metadata}, num_reqs=1)
+
+    # Cropped table holds max_window_blocks * block_size = 192 tokens.
+    assert metadata.seq_lens_cpu_upper_bound[0].item() == 192
+    assert metadata.seq_lens_cpu[0].item() == 192
+    assert metadata.seq_lens_list == [192]
+    assert metadata.seq_lens_cpu_upper_bound[0].item() >= 172
 
 
 def test_maybe_create_returns_none_when_disabled():

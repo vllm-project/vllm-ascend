@@ -674,6 +674,8 @@ class AscendAutoRegressiveSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSampl
         offload_kwargs = self._sparse_kv_offload_metadata.build_kwargs(
             self.input_batch, self.model_state, num_reqs, batch_desc, query_start_loc_np, step
         )
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu.clone()
         with (
             build_attn_metadata_factory(
                 self.input_buffers.positions,
@@ -683,7 +685,9 @@ class AscendAutoRegressiveSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSampl
                 parallel_config=self.draft_vllm_config.parallel_config,
                 offload_kwargs=offload_kwargs,
             ),
-            self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub,
+            self._maybe_draft_sliding_window(
+                seq_lens_cpu_upper_bound, num_reqs, extra_seq_lens=(seq_lens_cpu,)
+            ) as windowed_ub,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs,
@@ -694,6 +698,7 @@ class AscendAutoRegressiveSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSampl
                 causal,
                 dcp_local_seq_lens,
             )
+        self._clamp_windowed_metadata(attn_metadata, num_reqs)
         if attn_metadata is not None:
             for metadata in attn_metadata.values():
                 if metadata is None:

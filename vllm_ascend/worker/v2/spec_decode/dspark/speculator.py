@@ -345,7 +345,7 @@ class AscendDSparkSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin
             # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
             # Ascend CPU-side DCP preparation.
             with self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub:
-                return super()._build_attn_metadata(
+                attn_metadata = super()._build_attn_metadata(
                     num_reqs=num_reqs,
                     batch_desc=batch_desc,
                     query_start_loc_np=query_start_loc_np,
@@ -354,12 +354,16 @@ class AscendDSparkSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin
                     causal=causal,
                     dcp_local_seq_lens=dcp_local_seq_lens,
                 )
+            self._clamp_windowed_metadata(attn_metadata, num_reqs)
+            return attn_metadata
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu.clone()
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
@@ -370,7 +374,9 @@ class AscendDSparkSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
-            self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub,
+            self._maybe_draft_sliding_window(
+                seq_lens_cpu_upper_bound, num_reqs, extra_seq_lens=(seq_lens_cpu,)
+            ) as windowed_ub,
         ):
             attn_metadata = super()._build_attn_metadata(
                 num_reqs=num_reqs,
@@ -381,6 +387,7 @@ class AscendDSparkSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,
             )
+        self._clamp_windowed_metadata(attn_metadata, num_reqs)
         if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
             # FULL replay uses the captured padded Q, so FIA needs cumulative
             # query lengths through every padded request slot.

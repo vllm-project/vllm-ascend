@@ -11,7 +11,7 @@ Model Runner V2 bakes ``seq_lens`` / block tables into per-layer metadata inside
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -93,6 +93,11 @@ class MRV2DraftSlidingWindow:
             )
             for _ in range(num_groups)
         ]
+        self._last_windowed_seq_lens: torch.Tensor | None = None
+
+    @property
+    def max_window_tokens(self) -> int:
+        return self.adapter.max_window_blocks * self.adapter.block_size
 
     @classmethod
     def maybe_create(
@@ -120,6 +125,11 @@ class MRV2DraftSlidingWindow:
             num_groups=len(input_block_tables),
         )
 
+    def _subtract_crop(self, tensor: torch.Tensor, crop: torch.Tensor, num_reqs: int) -> None:
+        """Subtract the block-table crop offset from a length tensor in-place."""
+        aligned = crop.to(device=tensor.device, dtype=tensor.dtype)
+        tensor[:num_reqs].sub_(aligned)
+
     @contextmanager
     def apply_builder_inputs(
         self,
@@ -127,6 +137,7 @@ class MRV2DraftSlidingWindow:
         block_tables: Any,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_reqs: int,
+        extra_seq_lens: Sequence[torch.Tensor | None] = (),
     ) -> Iterator[torch.Tensor]:
         """Window seq_lens + block tables for one metadata build; restore after.
 
@@ -137,8 +148,7 @@ class MRV2DraftSlidingWindow:
             yield seq_lens_cpu_upper_bound
             return
 
-        seq_lens = input_buffers.seq_lens
-        saved_seq_lens = seq_lens[:num_reqs].clone()
+        original_seq_lens = input_buffers.seq_lens
         original_tables = list(block_tables.input_block_tables)
         if len(original_tables) != len(self._clones):
             raise RuntimeError(
@@ -146,10 +156,12 @@ class MRV2DraftSlidingWindow:
                 f"expected {len(self._clones)}, got {len(original_tables)}"
             )
 
+        extras = [extra for extra in extra_seq_lens if extra is not None]
+
         windowed_seq_lens: torch.Tensor | None = None
         for i, full_table in enumerate(original_tables):
             meta = SimpleNamespace(
-                seq_lens=saved_seq_lens,
+                seq_lens=original_seq_lens[:num_reqs],
                 block_table_tensor=full_table,
             )
             self.adapter.full_block_table = full_table
@@ -159,21 +171,72 @@ class MRV2DraftSlidingWindow:
             block_tables.input_block_tables[i] = self._clones[i][:num_reqs]
 
         assert windowed_seq_lens is not None
-        seq_lens[:num_reqs].copy_(windowed_seq_lens)
+        crop = self.adapter.start_tokens_in_window_rounding
+        self._last_windowed_seq_lens = windowed_seq_lens
 
-        k_future = self.adapter._future_offset
-        w = self.adapter.window_size
-        b = self.adapter.block_size
+        # Separate storage: metadata may alias ``input_buffers.seq_lens``.
+        windowed_buffer = original_seq_lens.clone()
+        windowed_buffer[:num_reqs].copy_(windowed_seq_lens)
+        input_buffers.seq_lens = windowed_buffer
+
         windowed_upper_bound = seq_lens_cpu_upper_bound.clone()
-        src = windowed_upper_bound[:num_reqs]
-        windowed_upper_bound[:num_reqs] = src - ((src + k_future - w).clamp(min=0) // b) * b
+        self._subtract_crop(windowed_upper_bound, crop, num_reqs)
+        for extra in extras:
+            self._subtract_crop(extra, crop, num_reqs)
 
         try:
             yield windowed_upper_bound
         finally:
-            seq_lens[:num_reqs].copy_(saved_seq_lens)
+            input_buffers.seq_lens = original_seq_lens
             for i, table in enumerate(original_tables):
                 block_tables.input_block_tables[i] = table
+
+    def clamp_metadata_after_step(self, attn_metadata: Any, num_reqs: int) -> None:
+        """Keep length fields an upper bound of the cropped block table.
+
+        Upstream adds ``step`` to ``seq_lens_cpu_upper_bound`` after our crop.
+        Clamp so the bound cannot exceed the cropped table, and cannot fall
+        below the windowed actual length.
+        """
+        if not attn_metadata or num_reqs <= 0:
+            return
+        max_tokens = self.max_window_tokens
+        min_lens = self._last_windowed_seq_lens
+        metadata_items: Iterable[Any] = attn_metadata.values() if isinstance(attn_metadata, dict) else (attn_metadata,)
+        for metadata in metadata_items:
+            if metadata is None:
+                continue
+            self._clamp_length_fields(metadata, num_reqs, max_tokens, min_lens)
+            decode = getattr(metadata, "decode", None)
+            if decode is not None:
+                self._clamp_length_fields(decode, num_reqs, max_tokens, min_lens)
+
+    def _clamp_length_fields(
+        self,
+        obj: Any,
+        num_reqs: int,
+        max_tokens: int,
+        min_lens: torch.Tensor | None,
+    ) -> None:
+        for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+            src = getattr(obj, name, None)
+            if src is None or not isinstance(src, torch.Tensor) or src.device.type != "cpu":
+                continue
+            sl = src[: min(num_reqs, src.shape[0])]
+            sl.clamp_(max=max_tokens)
+            if min_lens is not None:
+                sl.clamp_(min=min_lens[: sl.shape[0]].to(device=sl.device, dtype=sl.dtype))
+        seq_lens_list = getattr(obj, "seq_lens_list", None)
+        if seq_lens_list:
+            floor = (
+                min_lens[: min(num_reqs, len(seq_lens_list))].tolist()
+                if min_lens is not None
+                else [0] * len(seq_lens_list)
+            )
+            obj.seq_lens_list = [
+                max(int(floor[i]) if i < len(floor) else 0, min(int(x), max_tokens))
+                for i, x in enumerate(seq_lens_list)
+            ]
 
 
 class DraftSlidingWindowMixin:
@@ -209,6 +272,7 @@ class DraftSlidingWindowMixin:
         self,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_reqs: int,
+        extra_seq_lens: Sequence[torch.Tensor | None] = (),
     ) -> Iterator[torch.Tensor]:
         helper = getattr(self, "_draft_sliding_window", None)
         if helper is None:
@@ -219,5 +283,12 @@ class DraftSlidingWindowMixin:
             self.block_tables,
             seq_lens_cpu_upper_bound,
             num_reqs,
+            extra_seq_lens=extra_seq_lens,
         ) as windowed_upper_bound:
             yield windowed_upper_bound
+
+    def _clamp_windowed_metadata(self, attn_metadata: Any, num_reqs: int) -> None:
+        helper = getattr(self, "_draft_sliding_window", None)
+        if helper is None:
+            return
+        helper.clamp_metadata_after_step(attn_metadata, num_reqs)

@@ -94,9 +94,14 @@ so there is no shared `common_attn_metadata` to mutate after the build.
 `DraftSlidingWindowMixin` (`vllm_ascend/worker/v2/spec_decode/sliding_window.py`)
 applies the same window math to the **builder inputs** around that call:
 
-- windowed `input_buffers.seq_lens`
+- windowed `input_buffers.seq_lens` on a **separate clone**, so GQA metadata
+  that aliases the builder tensor keeps windowed lengths after the buffer is
+  restored
 - cropped per-group `block_tables.input_block_tables` clones
-- capped `seq_lens_cpu_upper_bound`
+- the same crop offset applied to DSpark MLA `seq_lens_cpu` and to
+  `seq_lens_cpu_upper_bound` (so the bound stays `>=` the windowed actual
+  length). After upstream adds the draft `step`, CPU bounds are clamped to
+  the cropped table
 
 Wired into Ascend DSpark, DFlash (and DFlash2), and autoregressive EAGLE
 speculators. Slot mappings remain absolute. `draft_window_size` no longer

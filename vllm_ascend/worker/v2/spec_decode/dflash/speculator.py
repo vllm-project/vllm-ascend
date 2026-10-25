@@ -262,9 +262,12 @@ class AscendDFlashSpeculator(DraftSlidingWindowMixin, LmheadTPDraftSamplingMixin
         with self._maybe_draft_sliding_window(seq_lens_cpu_upper_bound, num_reqs) as windowed_ub:
             if bound_via_kwargs:
                 kwargs = {**kwargs, "seq_lens_cpu_upper_bound": windowed_ub}
-                return super()._build_attn_metadata(*args, **kwargs)
-            args = (*args[:3], windowed_ub, *args[4:])
-            return super()._build_attn_metadata(*args, **kwargs)
+                attn_metadata = super()._build_attn_metadata(*args, **kwargs)
+            else:
+                args = (*args[:3], windowed_ub, *args[4:])
+                attn_metadata = super()._build_attn_metadata(*args, **kwargs)
+        self._clamp_windowed_metadata(attn_metadata, num_reqs)
+        return attn_metadata
 
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main, and
     # vLLM #60335 added `num_speculative_tokens`. Define the per-version public
