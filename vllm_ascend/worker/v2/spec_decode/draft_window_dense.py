@@ -8,7 +8,7 @@ directly is unsafe because zero attention weights can still multiply NaNs.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -28,6 +28,9 @@ class DenseDraftRead:
     may_have_empty_rows: bool = False
     query_indices: torch.Tensor | None = None
     output_indices: torch.Tensor | None = None
+    _attention_workspaces: dict[tuple[int, ...], tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict, init=False, compare=False, repr=False
+    )
 
     @property
     def num_query_tokens(self) -> int:
@@ -388,6 +391,7 @@ def gather_dense_draft_kv(
     value_cache: torch.Tensor,
     *,
     output_dtype: torch.dtype | None = None,
+    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather ND token rows, including interleaved/padded physical KV pages."""
     if key_cache.ndim != 4 or key_cache.shape != value_cache.shape:
@@ -420,9 +424,17 @@ def gather_dense_draft_kv(
         # Raw Triton addresses require an ND physical layout. Other formats
         # retain the existing format-aware PyTorch gather/conversion path.
         if all(torch_npu.get_npu_format(cache) in (0, 2) for cache in (key_cache, value_cache)):
-            keys, values = gather_draft_kv_fp32(read.slots, key_cache, value_cache, retain=read.retain)
+            keys, values = gather_draft_kv_fp32(
+                read.slots,
+                key_cache,
+                value_cache,
+                retain=read.retain,
+                **({"output_buffers": output_buffers} if output_buffers is not None else {}),
+            )
             read.retain(keys, values)
             return keys, values
+    if output_buffers is not None:
+        raise ValueError("Reusable Draft operands require the native ND FP32 gather")
     slots = read.slots.reshape(-1)
     indices_by_stride = {}
     gathered = []
@@ -471,7 +483,30 @@ def dense_draft_attention(
             value = dense_draft_attention(part.read, queries, key_cache, value_cache, scale)
             output.index_copy_(0, part.query_indices, value)
         return output
-    keys_fp32, values_fp32 = gather_dense_draft_kv(read, key_cache, value_cache, output_dtype=torch.float32)
+    workspace_key = None
+    if (
+        key_cache.device.type == "npu"
+        and value_cache.device == key_cache.device
+        and key_cache.ndim == value_cache.ndim == 4
+        and all(torch_npu.get_npu_format(cache) in (0, 2) for cache in (key_cache, value_cache))
+    ):
+        # Only this immediate native FA consumer reuses scratch. Its next
+        # gather is queued after the preceding FA on the same NPU stream,
+        # so the overwrite executes after that reader. A different stream,
+        # KV geometry, read/group or proposal gets independent storage.
+        # Standalone gather callers retain independent materializations.
+        stream = torch.npu.current_stream(key_cache.device)
+        workspace_key = (stream.npu_stream, read.num_reqs, read.capacity, *key_cache.shape[2:])
+    buffers = read._attention_workspaces.get(workspace_key) if workspace_key is not None else None
+    keys_fp32, values_fp32 = gather_dense_draft_kv(
+        read,
+        key_cache,
+        value_cache,
+        output_dtype=torch.float32,
+        **({"output_buffers": buffers} if buffers is not None else {}),
+    )
+    if workspace_key is not None:
+        read._attention_workspaces[workspace_key] = (keys_fp32, values_fp32)
     query = query[: read.num_query_tokens]
     if read.query_indices is not None:
         query = query.index_select(0, read.query_indices.flatten())

@@ -68,7 +68,12 @@ def _gather_draft_kv_fp32(
 
 
 def gather_draft_kv_fp32(
-    slots: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, *, retain: Callable[..., None] | None = None
+    slots: torch.Tensor,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    *,
+    retain: Callable[..., None] | None = None,
+    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather validated ND token rows directly into private native FP32 operands.
 
@@ -79,8 +84,30 @@ def gather_draft_kv_fp32(
     if not slots.is_contiguous():
         raise ValueError("Fused Draft gather requires contiguous private slots")
     shape = (*slots.shape, *keys.shape[2:])
-    gathered_keys = torch.empty(shape, dtype=torch.float32, device=keys.device)
-    gathered_values = torch.empty_like(gathered_keys)
+    if output_buffers is None:
+        gathered_keys = torch.empty(shape, dtype=torch.float32, device=keys.device)
+        gathered_values = torch.empty_like(gathered_keys)
+    else:
+        import torch_npu
+
+        if len(output_buffers) != 2 or any(
+            buffer.shape != shape
+            or buffer.dtype != torch.float32
+            or buffer.device != keys.device
+            or not buffer.is_contiguous()
+            or torch_npu.get_npu_format(buffer) not in (0, 2)
+            for buffer in output_buffers
+        ):
+            raise ValueError("Reusable Draft gather outputs must match contiguous ND FP32 operands")
+        gathered_keys, gathered_values = output_buffers
+        regions = []
+        for tensor in (slots, keys, values, gathered_keys, gathered_values):
+            storage = tensor.untyped_storage()
+            regions.append((storage.data_ptr(), storage.nbytes()))
+        for index in (3, 4):
+            start, size = regions[index]
+            if any(start < other + count and other < start + size for other, count in regions[:index]):
+                raise ValueError("Reusable Draft outputs must not alias Full KV, slots or one another")
     if retain is not None:
         retain(slots, keys, values, gathered_keys, gathered_values)
     token_size = keys.shape[2] * keys.shape[3]
