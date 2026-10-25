@@ -102,7 +102,7 @@ class Int2MiddleBatchedMixin:
                 f"pg={globals().get('_R200_CNT', {}).get('pg', -1)} "
                 f"rowfb={globals().get('_R200_CNT', {}).get('mid', -1)}\n"
             )
-        if min(nprs) < 1:
+        if not nprs or min(nprs) < 1:
             _r200e["min0"] += 1
             if _r144_ovl_os.environ.get("R197_PROBE", "0") == "1":
                 open("/tmp/r197_r196skip.log", "a").write(  # noqa: SIM115 - fire-and-forget diagnostic write
