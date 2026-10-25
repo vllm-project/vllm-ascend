@@ -34,6 +34,11 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.uv.pip]
+# Reuse the build dependencies provisioned by the Ascend development/CI image.
+# Keep this in source so PR nightly installs use it with the main workflow.
+no-build-isolation = true
+
 [tool.uv.extra-build-dependencies]
 pandas = ["setuptools<72"]
 
