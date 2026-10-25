@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <c10/core/DeviceGuard.h>
+#include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "aclnn_oscar_int2_fused_attn_int2_lse.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 namespace py = pybind11;
@@ -43,6 +45,9 @@ static py::dict launch_lse(
         int64_t keyAntiqMode,int64_t valAntiqMode, std::vector<int64_t> askv,
         torch::Tensor attenMask, int64_t sparseMode,
         int64_t preTokens, int64_t nextTokens, bool launchKernel) {
+    const c10::DeviceGuard device_guard(q.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q.device().index()));
     LseDiag d{0,0,false,-1,-1,0,0,0,torch::Tensor(),torch::Tensor()};
     aclTensor *a_q=make_acl(q),*a_k=make_acl(k),*a_v=make_acl(v),*a_bt=make_acl(bt);
     aclTensor *a_ks=make_acl(kScale),*a_ko=make_acl(kOff),*a_vs=make_acl(vScale),*a_vo=make_acl(vOff);
@@ -74,7 +79,19 @@ static py::dict launch_lse(
     fprintf(stderr,"] sparse=%ld mask=%s\n",(long)sparseMode,a_mask?"PROVIDED":"nullptr");
     if(r==0 && launchKernel){
         at::Tensor wsh; void* ws_p=nullptr;
-        if(ws>0){ wsh=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device())); ws_p=wsh.data_ptr();}
+        if(ws>0){
+            try {
+                wsh=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device()));
+                ws_p=wsh.data_ptr();
+            } catch(...) {
+                aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
+                aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
+                aclDestroyTensor(a_o);aclDestroyTensor(a_lse);
+                if(a_mask) aclDestroyTensor(a_mask);
+                aclDestroyIntArray(a_asq);aclDestroyIntArray(a_askv);
+                throw;
+            }
+        }
         aclrtStream s=kstream;
         aclnnStatus lr=aclnnOscarInt2FusedAttnInt2Lse(ws_p,ws,ex,s);
         aclError sr=aclrtSynchronizeStream(s);

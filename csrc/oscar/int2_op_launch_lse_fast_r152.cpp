@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <filesystem>
+#include <system_error>
 #include <pybind11/pybind11.h>
 #include <map>
 #include <utility>
@@ -55,8 +57,8 @@ static void r192_predump(const std::string& site, const at::Tensor* ts, const ch
         if(const char* m = std::getenv("R192_PREDUMP_MAX")) mx = std::atoll(m);
         if(g_r192_call >= mx) return;
         std::string odir = std::getenv("R192_PREDUMP_DIR") ? std::getenv("R192_PREDUMP_DIR") : "/tmp/r192_livedump";
-        std::string mk = "mkdir -p " + odir;
-        if(std::system(mk.c_str()) != 0) {}
+        std::error_code _fs_ec;
+        std::filesystem::create_directories(odir, _fs_ec);
         auto to_cpu = [](const at::Tensor& t){ return t.contiguous().to(at::kCPU).contiguous(); };
         at::Tensor cpu[10];
         for(int i=0;i<10;i++) cpu[i] = to_cpu(ts[i]);
@@ -118,6 +120,9 @@ static py::object launch_lse_fast(
         int64_t keyAntiqMode,int64_t valAntiqMode, std::vector<int64_t> askv,
         torch::Tensor attenMask, int64_t sparseMode,
         int64_t preTokens, int64_t nextTokens, bool launchKernel) {
+    const c10::DeviceGuard device_guard(q.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q.device().index()));
     aclTensor *a_q=make_acl(q),*a_k=make_acl(k),*a_v=make_acl(v),*a_bt=make_acl(bt);
     aclTensor *a_ks=make_acl(kScale),*a_ko=make_acl(kOff),*a_vs=make_acl(vScale),*a_vo=make_acl(vOff);
     aclTensor *a_o=make_acl(out),*a_lse=make_acl(lse);
@@ -151,8 +156,17 @@ static py::object launch_lse_fast(
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
-                g_ws=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device()));
-                g_ws_hits=0;
+                try {
+                    g_ws=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device()));
+                    g_ws_hits=0;
+                } catch(...) {
+                    aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
+                    aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
+                    aclDestroyTensor(a_o);aclDestroyTensor(a_lse);
+                    if(a_mask) aclDestroyTensor(a_mask);
+                    aclDestroyIntArray(a_asq);aclDestroyIntArray(a_askv);
+                    throw;
+                }
             } else { g_ws_hits++; }
             ws_p=g_ws.data_ptr();
         }
@@ -171,6 +185,9 @@ static py::object launch_lse_fast(
 // replay updates with larger askv need a bigger workspace than the
 // capture-time placeholder call sized. Call once during the eager warmup.
 static py::object warm_ws(torch::Tensor dev_ref, int64_t bytes){
+    const c10::DeviceGuard device_guard(dev_ref.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(dev_ref.device().index()));
     if(!g_ws.defined() || g_ws.numel()<bytes){
         g_ws=torch::empty({bytes},torch::TensorOptions().dtype(torch::kUInt8).device(dev_ref.device()));
         g_ws_hits=0;
@@ -191,6 +208,8 @@ static py::object oscar_middle_prep(
         torch::Tensor q, torch::Tensor out, torch::Tensor lse,
         int64_t numHeads, double scale, int64_t numKvHeads, int64_t blockSize){
     const c10::DeviceGuard device_guard(q.device());   // R113: see oscar_quant_kv
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q.device().index()));
     auto dev = q.device();
     auto key = std::make_pair(nb, (int64_t)dev.index());
     auto it = g_btcache.find(key);
@@ -268,8 +287,16 @@ static py::object oscar_middle_prep(
         void* ws_p=nullptr;
         if(ws>0){
             if(!g_ws.defined() || (uint64_t)g_ws.numel()<ws){
-                g_ws=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device()));
-                g_ws_hits=0;
+                try {
+                    g_ws=torch::empty({(int64_t)ws},torch::TensorOptions().dtype(torch::kUInt8).device(q.device()));
+                    g_ws_hits=0;
+                } catch(...) {
+                    aclDestroyTensor(a_q);aclDestroyTensor(a_k);aclDestroyTensor(a_v);aclDestroyTensor(a_bt);
+                    aclDestroyTensor(a_ks);aclDestroyTensor(a_ko);aclDestroyTensor(a_vs);aclDestroyTensor(a_vo);
+                    aclDestroyTensor(a_o);aclDestroyTensor(a_lse);
+                    aclDestroyIntArray(a_asq);aclDestroyIntArray(a_askv);
+                    throw;
+                }
             } else { g_ws_hits++; }
             ws_p=g_ws.data_ptr();
         }
@@ -437,6 +464,8 @@ static py::object oscar_middle_prep_batched(
         torch::Tensor q_stack, torch::Tensor out_stack, torch::Tensor lse_stack,
         int64_t numHeads, double scale, int64_t numKvHeads, int64_t blockSize) {
     const c10::DeviceGuard device_guard(q_stack.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q_stack.device().index()));
     auto dev = q_stack.device();
     int64_t B = q_stack.size(0);
     int64_t D = q_stack.size(3);
@@ -522,7 +551,8 @@ static py::object oscar_middle_prep_batched(
         if (r215e && r215e[0]=='1' && !r215_gm_done && (int64_t)q_stack.size(0) >= r215minb) {
             r215_gm_done = 1;
             std::string odir = std::getenv("R215_GMDUMP_DIR") ? std::getenv("R215_GMDUMP_DIR") : "/tmp/r215_gm";
-            std::system(("mkdir -p " + odir).c_str());
+            std::error_code _fs_ec;
+        std::filesystem::create_directories(odir, _fs_ec);
             try {
                 torch::Tensor _pre[10] = {q_stack,k_b,v_b,bt_b,ks_b,ko_b,vs_b,vo_b,out_stack.clone(),lse_stack.clone()};
                 const char* _pn[10] = {"q","k","v","bt","ks","ko","vs","vo","out_pre","lse_pre"};
@@ -641,6 +671,8 @@ static py::object oscar_middle_replay_batched(
         int64_t numHeads, double scale, int64_t numKvHeads, int64_t blockSize,
         std::vector<int64_t> mid_len_list) {
     const c10::DeviceGuard device_guard(q_stack.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q_stack.device().index()));
     auto dev = q_stack.device();
     int64_t B = q_stack.size(0);
     auto mk = [&](const at::Tensor& t){ return (t.device()==dev)?t:t.to(dev); };
@@ -688,6 +720,9 @@ static py::object oscar_middle_replay_batched(
 // counts to attentionOutGm[:640] = 16 bf16/core x 40 cores. For B=2 grouped, dK=B*NKV*tiles,
 // mC=B*NQ*tiles => K/mC stays 1/G=0.25 (proof grouped active at B>1). Counter corrupts output.
 static py::object r144_read_counter(torch::Tensor out_gm, int64_t B, int64_t NQ, int64_t NKV) {
+    const c10::DeviceGuard device_guard(out_gm.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(out_gm.device().index()));
     aclrtSynchronizeStream(c10_npu::getCurrentNPUStream(out_gm.device().index()).stream(false));
     at::Tensor cnt = out_gm.reshape(-1).narrow(0,0,640).to(at::kFloat).to(at::kCPU).contiguous();
     float* p = cnt.data_ptr<float>();
@@ -712,6 +747,7 @@ static py::object r144_read_counter(torch::Tensor out_gm, int64_t B, int64_t NQ,
 static std::vector<at::Tensor> r113_quant_one(const at::Tensor& x, double clip_ratio){
     auto T = x.size(0), H = x.size(1), D = x.size(2);
     int64_t clip_idx = (int64_t)(clip_ratio * (double)D);
+    clip_idx = clip_idx < 1 ? 1 : (clip_idx > (int64_t)D ? (int64_t)D : clip_idx);
     auto abs_x = at::abs(x);
     // R113: kthvalue instead of full sort — same threshold VALUE (k-th smallest
     // == ascending-sorted index k-1) => bit-exact, but avoids the AICPU sort
@@ -741,6 +777,8 @@ static py::object oscar_scatter_int2(
         torch::Tensor k_scale, torch::Tensor k_zero,
         torch::Tensor v_scale, torch::Tensor v_zero){
     const c10::DeviceGuard device_guard(k_cache.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(k_cache.device().index()));
     int64_t num_blocks = k_cache.size(0);
     int64_t block_size = k_cache.size(1);
     auto k_flat = k_cache.view({num_blocks * block_size, k_cache.size(2), k_cache.size(3)});
@@ -951,6 +989,8 @@ static py::object oscar_middle_prep_batched_v2(
         torch::Tensor bt_carrier,
         int64_t numHeads, double scale, int64_t numKvHeads, int64_t blockSize) {
     const c10::DeviceGuard device_guard(q_stack.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(q_stack.device().index()));
     auto dev = q_stack.device();
     int64_t B = q_stack.size(0);
     int64_t D = q_stack.size(3);
@@ -1109,6 +1149,8 @@ static py::object oscar_middle_prep_v3_fill(
         int64_t Bp, int64_t BcapT, int64_t nbC, int64_t CAP,
         int64_t numKvHeads, int64_t blockSize) {
     const c10::DeviceGuard device_guard(askv.device());
+    const c10_npu::NPUStreamGuard stream_guard(
+        c10_npu::getCurrentNPUStream(askv.device().index()));
     auto dev = askv.device();
     int64_t nkv = numKvHeads;
     int64_t B = (int64_t)b_list.size();
@@ -1154,8 +1196,8 @@ static py::object oscar_middle_prep_v3_fill(
     // askv: active rows = mid_len; inactive active-slots = 1; sentinel row [BcapT-1] = CAP
     // (set once at carrier init; never rewritten here).
     {
-        at::Tensor lens = at::from_blob(mid_len_list.data(), {B},
-            at::TensorOptions().dtype(torch::kInt64).device(torch::kCPU)).to(dev);
+        at::Tensor lens = torch::tensor(mid_len_list,
+            at::TensorOptions().dtype(torch::kInt64)).to(dev);
         askv.narrow(0, 0, Bp).copy_(lens);
         if (BcapT - 1 > Bp) askv.narrow(0, Bp, BcapT - 1 - Bp).fill_(1);
     }
