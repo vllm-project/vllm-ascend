@@ -15,6 +15,7 @@ class OscarRotationLoader:
     """Loads and caches OSCAR rotation matrices."""
 
     _instance: Optional["OscarRotationLoader"] = None
+    _from_env_signature: tuple | None = None
 
     def __init__(
         self,
@@ -30,11 +31,7 @@ class OscarRotationLoader:
         self.device = device
         self.dtype = dtype
 
-        logger.info(
-            "[OSCAR] Loading rotation matrices:\n  K: %s\n  V: %s",
-            k_rotation_path,
-            v_rotation_path,
-        )
+        logger.info("[OSCAR] Loading rotation matrices:\n  K: %s\n  V: %s", k_rotation_path, v_rotation_path)
 
         k_data = torch.load(k_rotation_path, map_location="cpu", weights_only=True)
         v_data = torch.load(v_rotation_path, map_location="cpu", weights_only=True)
