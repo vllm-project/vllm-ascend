@@ -33,6 +33,7 @@ REGISTRY_NAMES = [
     "_R218_DISC",
     "_R218_FIRES",
     "_R218_MIDC_N",
+    "_R218_ROT_SEEN",
     "_R218_XAS",
 ]
 
