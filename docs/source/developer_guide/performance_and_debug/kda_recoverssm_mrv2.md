@@ -147,3 +147,61 @@ checks supplement the repository's multi-step recurrence tests. The 64 complete
 serving smoke responses were readable and naturally terminated, but they are
 not a formal model accuracy evaluation. Other Ascend generations have not been
 revalidated for these tile choices.
+
+### Two-head commit grouping on Ascend950DT
+
+For non-aligned FP32 states with head dimensions 128, 32 or 64 heads, and the
+six-token MTP5 window, each program handles two adjacent heads with value tiles
+of 64. The live state tile remains 16384 FP32 elements. Program count, useful
+state bytes, reverse FMA order and accepted-record masking are preserved.
+Splitting the value dimension repeats key/gate normalization work; it does not
+reduce the state bytes or promise a peak-bandwidth improvement. Other devices,
+dtypes, shapes, windows and the aligned boundary-state path retain the previous
+kernel.
+
+Six service shapes, accepted lengths 1, 3 and 6, eight rotating paged-cache
+slots and NPUGraph replay produced 54 measurements, each with five samples of
+40 launches. Correctness checks passed for all 54 points. Compared with PR6
+revision `393b0cec94481d137274c1bdd5288cffd6770b9f`, kernel time decreased by
+11.5% to 13.7% for accepted lengths 1 and 3, and by 3.0% to 3.7% for length 6.
+Both eight-device A5 hosts passed 67 affected NPU tests each, including the
+new 32/64-head multilayer paged-state cases. One unchanged large-memory
+convolution reproduction test was deselected on each host.
+
+Fresh full-service comparisons on October 25, 2026 used Recover off, that PR6
+revision, and this grouped candidate on the same host and weights within each
+configuration. Each condition completed 16 readable natural-EOS outputs,
+three fully drained batches of 90 long-output requests, and profiling of eight
+workers for ten forwards. All measurement windows had actual global decode
+concurrency 90, no prefill, target/MTP graph replay, MTP5 and single-stream
+Recover commits. The table reports the median token-weighted TPOT of the three
+unprofiled trials; the first SSE event of each request is excluded.
+
+| Configuration | Recover off | PR6 before grouping | Grouped | Grouped vs PR6 | Grouped vs off |
+| --- | --- | --- | --- | --- | --- |
+| DP8/TP1 | 19.2695 ms/token | 19.8409 ms/token | 19.6862 ms/token | -0.780% | +2.162% |
+| DP4/TP2 | 22.3328 ms/token | 22.4728 ms/token | 22.3455 ms/token | -0.567% | +0.057% |
+
+| Configuration | Commit median before | Grouped median | Before per rank/step | Grouped per rank/step |
+| --- | --- | --- | --- | --- |
+| DP8/TP1 | 604.250 us | 569.269 us | 1.8568 ms | 1.7638 ms |
+| DP4/TP2 | 614.265 us | 569.739 us | 1.8519 ms | 1.7023 ms |
+
+Each Recover profile contains 2720 verify calls and 240 calls to each commit
+stage, including the expected grouped kernel. Worker source hashes, graph
+counters, full D90 windows, SSE accounting and absence of external NPU
+processes were checked. Device cumulative times can overlap and are not a
+serial critical-path decomposition. Fixed condition order, three trials and
+acceptance variation limit causal interpretation of small TPOT differences.
+The grouped DP4/TP2 profile retains a 35.612 ms device gap on DP2/TP0,
+with a 77.223 ms CPU Event::synchronize and 37.32-39.41 ms Dispatch calls
+on other DP ranks. Its raw ten-step device span is not used to override
+the separate unprofiled TPOT trials; the initial delay cause is unresolved.
+DP8/TP1 smoke question 13 changed from the baseline's correct answer 18 to
+the candidate's incorrect answer 36. This answer difference remains unresolved;
+passing operator tolerances does not establish model accuracy or the cause.
+Grouped reduction layout can introduce small floating-point differences
+despite retaining the reverse FMA order. Readable smoke outputs do not
+establish formal model accuracy. The two
+configurations also use different hosts, drivers and model configurations;
+their absolute values are not an isolated DP/TP comparison.

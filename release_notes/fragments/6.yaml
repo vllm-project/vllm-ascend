@@ -1,6 +1,6 @@
 pr: 6
 entries:
   - category: performance
-    text: Reduced experimental GLM KDA RecoverSSM verification, convolution-state compaction, and accepted-state commit overhead, validated on Ascend950DT.
+    text: Reduced experimental GLM KDA RecoverSSM verification, convolution-state compaction, and accepted-state commit overhead, including two-head commit grouping validated on Ascend950DT.
     model: glm-5.3-flash
     hardware: [A5]

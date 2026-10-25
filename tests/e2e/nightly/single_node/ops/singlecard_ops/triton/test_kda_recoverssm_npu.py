@@ -49,15 +49,16 @@ def page_view(shape, dtype, padding):
     return backing, backing.as_strided(shape, (elements + padding, *inner_strides))
 
 
+@pytest.mark.parametrize("heads", [2, 32, 64])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("padding", [0, 128])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype, padding):
+def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype, padding, heads):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(73)
-    heads, dim, length, slots = 2, 128, 6, 5
+    dim, length, slots = 128, 6, 5
     blocks, starts, accepted = [3, 1, 0], [0, 6, 8, 8], [4, 2, 0]
     indices = torch.tensor(blocks, dtype=torch.int32, device="npu")
     offsets = torch.tensor(starts, dtype=torch.int32, device="npu")

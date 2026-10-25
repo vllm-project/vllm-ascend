@@ -15,6 +15,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+from vllm_ascend.device.device_config import is_950
+
+RECOVERSSM_COMMIT_HEAD_TILE = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
@@ -146,11 +149,11 @@ def _kda_recoverssm_verify_kernel(
     if EVEN_K and EVEN_V:
         mask_state = None
     elif EVEN_K:
-        mask_state = tl.broadcast_to(mask_v[:, None], (BV, BK))
+        mask_state = tl.broadcast_to((offs_v < V)[:, None], (BV, BK))
     elif EVEN_V:
-        mask_state = tl.broadcast_to(mask_k[None, :], (BV, BK))
+        mask_state = tl.broadcast_to((offs_k < K)[None, :], (BV, BK))
     else:
-        mask_state = mask_v[:, None] & mask_k[None, :]
+        mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
 
     if state_idx <= null_block_id:
         for token_offset in range(query_len):
@@ -548,11 +551,11 @@ def _commit_kda_state_kernel(
     if K == BK and V % BV == 0:
         mask_state = None
     elif K == BK:
-        mask_state = tl.broadcast_to(mask_v[:, None], (BV, BK))
+        mask_state = tl.broadcast_to((offs_v < V)[:, None], (BV, BK))
     elif V % BV == 0:
-        mask_state = tl.broadcast_to(mask_k[None, :], (BV, BK))
+        mask_state = tl.broadcast_to((offs_k < K)[None, :], (BV, BK))
     else:
-        mask_state = mask_v[:, None] & mask_k[None, :]
+        mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
     state_ptrs = source_state_ptr + offs_v[:, None] * stride_state_v + offs_k[None, :] * stride_state_k
     A = tl.exp(tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32))
 
@@ -674,6 +677,164 @@ def _commit_kda_state_kernel(
         + pid_h * stride_state_head
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
+    )
+    tl.store(final_ptrs, state, mask=mask_state)
+
+
+@triton.jit
+def _kda_l2_normalize_heads(vector):
+    norm_square = tl.sum(vector * vector, axis=1)
+    inverse = tl.rsqrt(tl.where(norm_square > 0.0, norm_square, 1.0))
+    return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
+
+
+@triton.jit
+def _commit_kda_state_grouped_kernel(
+    state_ref_ptr,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    correction_cache_ref_ptr,
+    correction_cache_base_addrs_ptr,
+    correction_cache_block_strides_ptr,
+    kg_cache_ref_ptr,
+    kg_cache_base_addrs_ptr,
+    kg_cache_block_strides_ptr,
+    A_log_ptr,
+    dt_bias_ptr,
+    state_indices_ptr,
+    commit_lens_ptr,
+    final_state_indices_ptr,
+    boundary_state_indices_ptr,
+    boundary_recovery_lens_ptr,
+    lower_bound,
+    null_block_id,
+    stride_state_head: tl.constexpr,
+    stride_state_v: tl.constexpr,
+    stride_state_k: tl.constexpr,
+    stride_correction_cache_head: tl.constexpr,
+    stride_correction_cache_pos: tl.constexpr,
+    stride_correction_cache_dim: tl.constexpr,
+    stride_kg_cache_head: tl.constexpr,
+    stride_kg_cache_pos: tl.constexpr,
+    stride_kg_cache_dim: tl.constexpr,
+    stride_A_layer: tl.constexpr,
+    stride_A_head: tl.constexpr,
+    stride_dt_bias_layer: tl.constexpr,
+    stride_dt_bias_head: tl.constexpr,
+    stride_dt_bias_dim: tl.constexpr,
+    stride_state_indices: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+    ALIGN_MODE: tl.constexpr,
+    SPEC_QUERY_LEN: tl.constexpr = 6,
+    BH: tl.constexpr = 2,
+):
+    # Vectorize two independent heads while keeping one state tile live.
+    tl.static_assert(not ALIGN_MODE)
+    tl.static_assert(SPEC_QUERY_LEN == 6)
+    tl.static_assert(K == 128)
+    tl.static_assert(V == 128)
+    tl.static_assert(BK == 128)
+    tl.static_assert(BV == 64)
+    pid_v = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_lh = tl.program_id(2)
+    tl.static_assert(NUM_HEADS % BH == 0)
+    pid_l = pid_lh // (NUM_HEADS // BH)
+    pid_h = pid_lh % (NUM_HEADS // BH) * BH + tl.arange(0, BH)
+    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
+    if source_state_idx <= null_block_id:
+        return
+    commit_len = tl.load(commit_lens_ptr + pid_b)
+    if commit_len == 0:
+        return
+    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
+    if final_state_idx <= null_block_id:
+        return
+    state_base_addr = tl.load(state_base_addrs_ptr + pid_l)
+    state_block_stride = tl.load(state_block_strides_ptr + pid_l)
+    state_ptr = state_base_addr.to(tl.pointer_type(state_ref_ptr.dtype.element_ty))
+    source_state_ptr = state_ptr + source_state_idx * state_block_stride + pid_h * stride_state_head
+    correction_cache_base_addr = tl.load(correction_cache_base_addrs_ptr + pid_l)
+    correction_cache_block_stride = tl.load(correction_cache_block_strides_ptr + pid_l)
+    correction_cache_ptr = correction_cache_base_addr.to(tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty))
+    correction_cache_ptr += source_state_idx * correction_cache_block_stride + pid_h * stride_correction_cache_head
+    kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
+    kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
+    kg_cache_ptr = kg_cache_base_addr.to(tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty))
+    kg_cache_ptr += source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    offs_k = tl.arange(0, BK)
+    offs_v = pid_v * BV + tl.arange(0, BV)
+    mask_k = None if K == BK else offs_k < K
+    mask_v = None if V % BV == 0 else offs_v < V
+    if K == BK and V % BV == 0:
+        mask_state = None
+    elif K == BK:
+        mask_state = tl.broadcast_to((offs_v < V)[:, None], (BV, BK))
+    elif V % BV == 0:
+        mask_state = tl.broadcast_to((offs_k < K)[None, :], (BV, BK))
+    else:
+        mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
+    if mask_state is not None:
+        mask_state = tl.broadcast_to(mask_state[None, :, :], (BH, BV, BK))
+    if mask_k is not None:
+        mask_k = tl.broadcast_to(mask_k[None, :], (BH, BK))
+    if mask_v is not None:
+        mask_v = tl.broadcast_to(mask_v[None, :], (BH, BV))
+    state_ptrs = (
+        source_state_ptr[:, None, None]
+        + offs_v[None, :, None] * stride_state_v
+        + offs_k[None, None, :] * stride_state_k
+    )
+    A = tl.exp(tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32))
+    dt_bias = tl.load(
+        dt_bias_ptr
+        + pid_l * stride_dt_bias_layer
+        + pid_h[:, None] * stride_dt_bias_head
+        + offs_k[None, :] * stride_dt_bias_dim,
+        mask=mask_k,
+        other=0.0 if mask_k is not None else None,
+    ).to(tl.float32)
+    final_decay = tl.full([BH, BK], 1.0, tl.float32)
+    final_correction = tl.zeros([BH, BV, BK], tl.float32)
+    for reverse_offset in tl.static_range(6):
+        if reverse_offset < commit_len:
+            token_offset = commit_len - reverse_offset - 1
+            correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
+            kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
+            k = tl.load(
+                kg_ptr[:, None] + offs_k[None, :] * stride_kg_cache_dim,
+                mask=mask_k,
+                other=0.0 if mask_k is not None else None,
+            ).to(tl.float32)
+            correction = tl.load(
+                correction_ptr[:, None] + offs_v[None, :] * stride_correction_cache_dim,
+                mask=mask_v,
+                other=0.0 if mask_v is not None else None,
+            ).to(tl.float32)
+            raw_g = tl.load(
+                kg_ptr[:, None] + (K + offs_k[None, :]) * stride_kg_cache_dim,
+                mask=mask_k,
+                other=0.0 if mask_k is not None else None,
+            ).to(tl.float32)
+            normalized_k = _kda_l2_normalize_heads(k)
+            gate = _kda_gate(raw_g, dt_bias, A[:, None], lower_bound, USE_LOWER_BOUND)
+            decay = tl.exp(gate)
+            weighted_k = normalized_k * final_decay
+            final_correction = tl.fma(correction[:, :, None], weighted_k[:, None, :], final_correction)
+            final_decay *= decay
+    initial_state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
+    state = initial_state * final_decay[:, None, :] + final_correction
+    final_ptrs = (
+        state_ptr
+        + final_state_idx * state_block_stride
+        + pid_h[:, None, None] * stride_state_head
+        + offs_v[None, :, None] * stride_state_v
+        + offs_k[None, None, :] * stride_state_k
     )
     tl.store(final_ptrs, state, mask=mask_state)
 
@@ -1090,16 +1251,22 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        # Commit can use twice the verify value tile after shortening state liveness.
-        # Align mode keeps both final and boundary correction tiles live.
-        value_tile = RECOVERSSM_VALUE_TILE if block_table is not None else RECOVERSSM_VALUE_TILE * 2
-        block_v = min(triton.next_power_of_2(value_dim), value_tile)
-        grid = (
-            triton.cdiv(value_dim, block_v),
-            batch,
-            num_layers * num_heads,
+        # Group adjacent heads on A5 without increasing the state tile size.
+        # Keep the existing path for align, other dtypes/shapes and devices.
+        grouped_commit = (
+            is_950()
+            and block_table is None
+            and state_ref.dtype == torch.float32
+            and key_dim == value_dim == 128
+            and num_heads in (32, 64)
+            and self.spec_query_len == 6
         )
-        _commit_kda_state_kernel[grid](
+        value_tile = RECOVERSSM_VALUE_TILE if block_table is not None or grouped_commit else RECOVERSSM_VALUE_TILE * 2
+        block_v = min(triton.next_power_of_2(value_dim), value_tile)
+        head_groups = num_heads // RECOVERSSM_COMMIT_HEAD_TILE if grouped_commit else num_heads
+        grid = (triton.cdiv(value_dim, block_v), batch, num_layers * head_groups)
+        commit_kernel = _commit_kda_state_grouped_kernel if grouped_commit else _commit_kda_state_kernel
+        commit_kernel[grid](
             state_ref,
             self.state_base_addrs,
             self.state_block_strides,
