@@ -22,6 +22,54 @@ TOLERANCES = {torch.bfloat16: (2**-7, 2**-6), torch.float16: (2**-10, 2**-9)}
 # Prespecified dtype tolerances vs an independent FP32 oracle.
 
 
+@pytest.mark.parametrize("query_width", [1, 4, 16])
+def test_planner_query_tiles_preserve_unaligned_capacity_and_frozen_reads(query_width):
+    from vllm_ascend.ops.triton.v2.spec_decode.draft_window import plan_draft_window
+
+    capacity, block = 1171, 128
+    canonical = torch.arange(24, dtype=torch.int32).reshape(2, 12)
+    rows = torch.tensor([1, 0], dtype=torch.int64)
+    exact = torch.tensor([1159, 1281], dtype=torch.int32)
+    frozen = torch.tensor([0, 128], dtype=torch.int32)
+    table_device, rows_device, exact_device, frozen_device = [value.npu() for value in (canonical, rows, exact, frozen)]
+    retained, outputs = [], []
+    for _ in range(8):
+        outputs.append(
+            plan_draft_window(
+                table_device,
+                rows_device,
+                exact_device,
+                frozen_device,
+                block_span=block,
+                anchor_span=block,
+                window=1035,
+                capacity=capacity,
+                query_width=query_width,
+                causal=True,
+                retain=lambda *items: retained.extend(items),
+            )
+        )
+    # Retain every allocation across queued launches, then check each query
+    # boundary and the repeated final valid token with an independent oracle.
+    slots_reference, mask_reference = [], []
+    for row, end, start in zip(rows.tolist(), exact.tolist(), frozen.tolist()):
+        length = end - start
+        positions = [start + min(column, length - 1) for column in range(capacity)]
+        slots_reference.append([int(canonical[row, pos // block]) * block + pos % block for pos in positions])
+        mask_reference.append(
+            [
+                [column >= length or column > length - query_width + query for column in range(capacity)]
+                for query in range(query_width)
+            ]
+        )
+    for slots, starts, lengths, mask in outputs:
+        assert torch.equal(slots.cpu(), torch.tensor(slots_reference, dtype=torch.int64))
+        assert torch.equal(starts.cpu(), frozen)
+        assert torch.equal(lengths.cpu(), exact - frozen)
+        assert torch.equal(mask.cpu(), torch.tensor(mask_reference, dtype=torch.bool)[:, None])
+    assert torch.equal(table_device.cpu(), canonical)
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("block", [64, 128])
 def test_fp32_gather_preserves_distinct_page_strides_and_storage_offsets(dtype, block):

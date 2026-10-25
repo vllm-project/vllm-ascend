@@ -133,10 +133,9 @@ def _plan_draft_window(
     BLOCK: tl.constexpr,
 ):
     req = tl.program_id(0)
-    index = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    valid = index < QUERY_WIDTH * CAPACITY
-    query = index // CAPACITY
-    column = index % CAPACITY
+    column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    query = tl.program_id(2)
+    valid = column < CAPACITY
     end = tl.load(exact + req * EXACT_STRIDE).to(tl.int64)
     if HAS_FROZEN:
         start = tl.load(frozen + req * FROZEN_STRIDE).to(tl.int64)
@@ -145,19 +144,22 @@ def _plan_draft_window(
     if HAS_FULL_ROWS:
         start = tl.where(tl.load(full_rows + req) != 0, 0, start)
     length = end - start
-    if tl.program_id(1) == 0:
+    if tl.program_id(1) == 0 and query == 0:
         tl.store(starts + req, start)
         tl.store(visible + req, length)
     # Only the first query writes the shared token read set. Capacity padding
     # repeats a valid token, never an unwritten or NaN Full-cache tail.
-    first = valid & (query == 0)
-    row = tl.load(rows + req * ROW_STRIDE)
-    absolute = start + tl.minimum(column, length - 1)
-    block_column = absolute // BLOCK_SPAN
-    physical = tl.load(table + row * TABLE_ROW_STRIDE + block_column * TABLE_COLUMN_STRIDE, mask=first, other=0).to(
-        tl.int64
-    )
-    tl.store(slots + req * CAPACITY + column, physical * BLOCK_SPAN + absolute % BLOCK_SPAN, mask=first)
+    if query == 0:
+        # Keep stores linear within each tile. Flattening query and column
+        # then taking modulo CAPACITY makes the NPU compiler lower this to
+        # scalar scatter stores protected by a global cross-block lock.
+        row = tl.load(rows + req * ROW_STRIDE)
+        absolute = start + tl.minimum(column, length - 1)
+        block_column = absolute // BLOCK_SPAN
+        physical = tl.load(table + row * TABLE_ROW_STRIDE + block_column * TABLE_COLUMN_STRIDE, mask=valid, other=0).to(
+            tl.int64
+        )
+        tl.store(slots + req * CAPACITY + column, physical * BLOCK_SPAN + absolute % BLOCK_SPAN, mask=valid)
     excluded = column >= length
     if CAUSAL:
         query_end = tl.load(query_ends + req * QUERY_END_STRIDE).to(tl.int64) if HAS_QUERY_ENDS else end
@@ -165,7 +167,7 @@ def _plan_draft_window(
     if HAS_QUERY_OFFSETS:
         query_length = tl.load(query_offsets + req + 1) - tl.load(query_offsets + req)
         excluded = excluded | (query < QUERY_WIDTH - query_length)
-    tl.store(mask + req * QUERY_WIDTH * CAPACITY + index, excluded, mask=valid)
+    tl.store(mask + (req * QUERY_WIDTH + query) * CAPACITY + column, excluded, mask=valid)
 
 
 def plan_draft_window(
@@ -195,7 +197,7 @@ def plan_draft_window(
         # must already own every private output when that happens, including
         # when recording the exception-path completion subsequently fails.
         retain(table, rows, exact, frozen, query_ends, full_rows, query_offsets, slots, starts, visible, mask)
-    _plan_draft_window[(n, triton.cdiv(query_width * capacity, PLAN_BLOCK_SIZE))](
+    _plan_draft_window[(n, triton.cdiv(capacity, PLAN_BLOCK_SIZE), query_width)](
         table,
         rows,
         exact,
