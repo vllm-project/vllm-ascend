@@ -1720,7 +1720,7 @@ class Int2BatchMetaUpdateMixin:
                             "slot_exp": _pinS.tolist(),
                             "bt_mirror": _me["bt_mirror"].tolist(),
                             "bt_md": _btmd169.tolist(),
-                            "bt_mis_md": int((_me["bt_mirror"] != _btmd169).sum().item()),
+                            "bt_miss_md": int((_me["bt_mirror"] != _btmd169).sum().item()),
                             "mid_start": int(mid_start),
                             "rcnt": int(rcnt),
                             "blk_lo": int(blk_lo),
@@ -1734,12 +1734,12 @@ class Int2BatchMetaUpdateMixin:
                                 _rr169 = _hb169[_r169, blk_lo : blk_lo + nb_max].tolist()
                                 _rows169.append([int(v) if int(v) >= 0 else 0 for v in _rr169])
                             _fl169["bt_host"] = _rows169
-                            _mis169 = 0
+                            _miss169 = 0
                             for _r169, _row169 in enumerate(_rows169):
-                                _mis169 += sum(
+                                _miss169 += sum(
                                     1 for _c169 in range(nb_max) if _fl169["bt_mirror"][_r169][_c169] != _row169[_c169]
                                 )
-                            _fl169["bt_mis_host"] = _mis169
+                            _fl169["bt_miss_host"] = _miss169
                         _snap168["flats"] = _fl169
                     if _os.environ.get("R218_ROWCMP", "0") == "1" and _si168 < int(
                         _os.environ.get("R218_ROWCMP_N", "40")
