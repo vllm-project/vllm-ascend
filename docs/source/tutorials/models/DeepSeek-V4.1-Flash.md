@@ -1425,7 +1425,7 @@ set -euo pipefail
 unset https_proxy
 unset http_proxy
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-
+export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<PREFILL_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
@@ -1530,7 +1530,7 @@ set -euo pipefail
 unset https_proxy
 unset http_proxy
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-
+export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_1_IP>,<PREFILL_NODE_2_IP>,<DECODE_NODE_1_IP>,<DECODE_NODE_2_IP>"
 NIC_NAME="<NETWORK_INTERFACE>"
 LOCAL_IP="<DECODE_NODE_IP>"
 MODEL_PATH="<YOUR_MODEL_PATH>"
