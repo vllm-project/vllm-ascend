@@ -161,7 +161,7 @@ a3-560t:
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
-      # Functional smoke only; accuracy/performance templates await baseline measurement.
+      # Qwen3.8 Flash Next chat, accuracy, and performance cases.
       - name: Qwen3.8-Flash-Next-w8a8-mtp-A3
         os: linux-aarch64-a3-800i-8
         config_file_path: Qwen3.8-Flash-Next-w8a8-mtp-A3.yaml
@@ -341,7 +341,7 @@ a5:
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_235b_w8a8_A5.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
-      # Requires PR #16981-compatible A5 operators; functional smoke only.
+      # Requires PR #16981-compatible A5 operators; chat, accuracy, and performance cases.
       - name: Qwen3.8-Flash-Next-w8a8-mxfp8-mtp-A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3.8-Flash-Next-w8a8-mxfp8-mtp-A5.yaml
