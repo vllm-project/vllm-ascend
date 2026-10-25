@@ -166,21 +166,81 @@ def test_conv_compaction_recorded_b11_l11_shape():
         finals,
         boundary,
         boundary,
-        len(blocks),
         0,
         channels,
         history,
         1,
         BLOCK_D=block_d,
-        BLOCK_B=1,
         BLOCK_HISTORY=4,
         ALIGN_MODE=False,
-        EVEN_D=True,
         DIM_STRIDE=1,
         num_warps=4,
     )
     for backing, expected_backing in zip(backings, expectations):
         torch.testing.assert_close(backing[checked_blocks], expected_backing, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("channels", [127, 12288])
+@pytest.mark.parametrize("dim_first", [False, True])
+@pytest.mark.parametrize("align", [False, True])
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_conv_compaction_large_tile_preserves_other_slots(channels, dim_first, align):
+    if not torch.npu.is_available():
+        pytest.skip("requires an Ascend NPU")
+    torch.manual_seed(91)
+    slots, state_len, history, block_d = 8, 8, 3, 4096
+    sources, destinations, accepted = [6, 3, 1, 0], [7, 4, 2, 0], [6, 1, 3, 6]
+    boundaries, boundary_lengths = [5, 0, 0, 0], [2, 0, 0, 0]
+    views, backings, expected_backings = [], [], []
+    for _ in range(2):
+        shape = (slots, channels, state_len) if dim_first else (slots, state_len, channels)
+        backing, conv = page_view(shape, torch.bfloat16, 128)
+        conv.copy_(torch.randn_like(conv))
+        expected_backing = backing.clone()
+        expected = expected_backing.as_strided(conv.shape, conv.stride())
+        source_view = conv if dim_first else conv.transpose(-1, -2)
+        expected_view = expected if dim_first else expected.transpose(-1, -2)
+        for source, destination, count in zip(sources[:3], destinations[:3], accepted[:3]):
+            expected_view[destination, :, :history] = source_view[source, :, count - 1 : count + 2]
+        if align:
+            expected_view[5, :, :history] = source_view[6, :, 1:4]
+        views.append(source_view)
+        backings.append(backing)
+        expected_backings.append(expected_backing)
+    metadata = [
+        torch.tensor(values, dtype=torch.int64, device="npu")
+        for values in (
+            [view.data_ptr() for view in views],
+            [view.stride(0) for view in views],
+            [view.stride(1) for view in views],
+            [view.stride(2) for view in views],
+        )
+    ]
+    indices, counts, finals, boundary, lengths = (
+        torch.tensor(values, dtype=torch.int32, device="npu")
+        for values in (sources, accepted, destinations, boundaries, boundary_lengths)
+    )
+    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(sources), len(views))](
+        views[0],
+        *metadata,
+        indices,
+        counts,
+        finals,
+        boundary,
+        lengths,
+        0,
+        channels,
+        history,
+        1,
+        BLOCK_D=block_d,
+        BLOCK_HISTORY=4,
+        ALIGN_MODE=align,
+        DIM_STRIDE=views[0].stride(1),
+        num_warps=4,
+    )
+    for actual, expected in zip(backings, expected_backings):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts, blocks, accepted):
