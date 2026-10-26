@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock
 
+import pytest
 import yaml
 
 _REPOSITORY_ROOT = Path(__file__).parents[3]
@@ -51,6 +52,7 @@ def _load_feature_handlers(monkeypatch, module_name: str, feature: str):
     feature module's import resolves without importing the whole package.
     """
     common = _load_source(f"{module_name}_common", "handlers/common.py")
+    common.set_metric_level("basic")
     monkeypatch.setitem(sys.modules, _COMMON_MODULE, common)
     return _load_source(module_name, f"handlers/{feature}.py")
 
@@ -325,3 +327,108 @@ def test_eplb_handler_given_metric_failure_then_preserves_inference_result(monke
         )
         == "updated"
     )
+
+
+def _hotness_worker():
+    return type(
+        "Worker",
+        (),
+        {
+            "rank_id": 0,
+            "latest_expert_hotness": {
+                "current_mean": 2.0,
+                "current_max": 4.0,
+                "update_mean": 3.0,
+                "update_max": 6.0,
+                "current_imbalance_list": [1.1, 1.2],
+                "update_imbalance_list": [1.3, 1.4],
+            },
+        },
+    )()
+
+
+def test_record_metric_skips_specs_above_active_level_and_registers_on_raise(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    common = _load_source("test_metric_level_common", "handlers/common.py")
+    common.set_metric_level("basic")
+    low = common.MetricSpec("low", "gauge", ())
+    high = common.MetricSpec("high", "gauge", ("layer",), level=common.METRIC_LEVEL_DETAIL)
+    recorders: dict[str, object] = {}
+
+    assert common.register_metrics((low, high), recorders, "group") is metrics
+    assert metrics.get_or_create_metric.call_count == 1
+    common.record_metric(metrics, high, 1.0, {"layer": "0"})
+    metrics.record_metric.assert_not_called()
+    common.record_metric(metrics, low, 1.0, {})
+    metrics.record_metric.assert_called_once_with("low", value=1.0, labels={})
+
+    common.set_metric_level("detail")
+    common.register_metrics((low, high), recorders, "group")
+    assert metrics.get_or_create_metric.call_count == 3
+    common.record_metric(metrics, high, 2.0, {"layer": "0"})
+    assert metrics.record_metric.call_count == 2
+
+    common.set_metric_level("basic")
+    common.record_metric(metrics, high, 3.0, {"layer": "0"})
+    common.record_metric(metrics, low, 3.0, {})
+    common.record_metric(None, low, 3.0, {})
+    assert metrics.record_metric.call_count == 3
+
+
+def test_set_metric_level_rejects_unknown_value(monkeypatch):
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        get_metric_recorder=lambda: None,
+    )
+    common = _load_source("test_metric_level_reject", "handlers/common.py")
+
+    with pytest.raises(ValueError):
+        common.set_metric_level("nope")
+    with pytest.raises(ValueError):
+        common.set_metric_level(2)
+    with pytest.raises(ValueError):
+        common.set_metric_level("off")
+
+
+def test_eplb_handler_skips_higher_level_series_until_level_rises(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_level_rise", "eplb")
+    common = sys.modules[_COMMON_MODULE]
+    imbalance = common.MetricSpec(
+        handlers._IMBALANCE_METRIC,
+        handlers.MetricType.GAUGE,
+        ("rank", "phase", "layer"),
+        level=common.METRIC_LEVEL_DETAIL,
+    )
+    handlers._IMBALANCE_SPEC = imbalance
+    handlers._EPLB_METRIC_SPECS = (*handlers._SUMMARY_SPECS, imbalance)
+    worker = _hotness_worker()
+
+    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
+
+    assert metrics.get_or_create_metric.call_count == 4
+    recorded_names = [call.args[0] for call in metrics.record_metric.call_args_list]
+    assert recorded_names == [
+        "eplb:expert_hotness:current_mean",
+        "eplb:expert_hotness:current_max",
+        "eplb:expert_hotness:update_mean",
+        "eplb:expert_hotness:update_max",
+    ]
+
+    common.set_metric_level("detail")
+    handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
+
+    assert metrics.get_or_create_metric.call_count == 9
+    recorded_names = [call.args[0] for call in metrics.record_metric.call_args_list]
+    assert recorded_names.count("eplb:expert_hotness:imbalance") == 4
