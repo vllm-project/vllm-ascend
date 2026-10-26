@@ -99,14 +99,14 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
     ) -> PreparedLinearInput | None:
         """Move MX quant before the router wait while keeping QMM after it.
 
         Shared-expert inputs are two-dimensional. Higher-dimensional inputs
         keep the original wrapper so its output reshape remains unchanged.
         """
-        if x.dim() != 2:
+        if not isinstance(x, torch.Tensor) or x.dim() != 2:
             return None
         quantized_x, pertoken_scale = self._quantize_input(layer, x)
         return PreparedLinearInput(quantized_x, pertoken_scale, x.dtype)
