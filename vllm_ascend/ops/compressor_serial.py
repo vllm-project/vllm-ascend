@@ -226,6 +226,12 @@ class CompressorSerialPlan:
                 struct.unpack("I", struct.pack("f", norm_eps))[0],
                 2 * coff * dim,
                 coff * dim,
+            ]
+            + [0] * 6
+            + [4 * ((j ^ 1) if rotary_mode == 2 else (j + 32) % 64) for j in range(64)]
+            + [
+                struct.unpack("i", struct.pack("f", -1.0 if (j % 2 == 0 if rotary_mode == 2 else j < 32) else 1.0))[0]
+                for j in range(64)
             ],
             dtype=torch.int32,
             device=x.device,

@@ -16,7 +16,15 @@ public:
         auto x = storage.Get<float>();
         auto weight = x[512], square = x[1024], scratch = x[1536];
         auto scaled = x[2048], rotated = x[2560], sine = x[3072], cosine = x[3584];
-        auto result = storage.Get<Output>()[8192];
+        auto offsets = storage.Get<uint32_t>()[4096];
+        auto signs = x[4160];
+        auto result = storage.Get<Output>()[12288];
+        GlobalTensor<uint32_t> gmOffsets;
+        GlobalTensor<float> gmSigns;
+        gmOffsets.SetGlobalBuffer((__gm__ uint32_t*)p->ropeOffsets);
+        gmSigns.SetGlobalBuffer((__gm__ float*)p->ropeSigns);
+        DataCopy(offsets, gmOffsets, 64);
+        DataCopy(signs, gmSigns, 64);
         GlobalTensor<float> src, gmGamma, gmSin, gmCos;
         GlobalTensor<Output> dst;
         src.SetGlobalBuffer((__gm__ float*)pooled);
@@ -47,12 +55,10 @@ public:
             PipeBarrier<PIPE_V>();
             Mul(scaled, scaled, weight, d);
             PipeBarrier<PIPE_ALL>();
-            for (uint32_t j = 0; j < 64; ++j) {
-                uint32_t partner = p->rotaryMode == 2 ? (j ^ 1) : (j + 32) % 64;
-                bool negative = p->rotaryMode == 2 ? (j % 2 == 0) : (j < 32);
-                rotated.SetValue(j, (negative ? -1.f : 1.f) * scaled.GetValue(d - 64 + partner));
-            }
-            PipeBarrier<PIPE_ALL>();
+            Gather(rotated, scaled[d - 64], offsets, 0, 64);
+            PipeBarrier<PIPE_V>();
+            Mul(rotated, rotated, signs, 64);
+            PipeBarrier<PIPE_V>();
             Mul(square, scaled[d - 64], cosine, 64);
             Mul(rotated, rotated, sine, 64);
             PipeBarrier<PIPE_V>();

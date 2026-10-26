@@ -41,7 +41,7 @@ void compressor_serial_vector(const at::Tensor& projection, at::Tensor& state, c
     TORCH_CHECK(gamma.dim() == 1 && (gamma.numel() == 128 || gamma.numel() == 512), "invalid head dimension");
     TORCH_CHECK(state.dim() == 3 && state.stride(2) == 1 && state.stride(1) == state.size(2), "invalid cache strides");
     TORCH_CHECK(projection.device().is_privateuseone() && projection.is_contiguous(), "invalid projection");
-    TORCH_CHECK(params.scalar_type() == at::kInt && params.numel() == 18 && params.is_contiguous(), "invalid metadata ABI");
+    TORCH_CHECK(params.scalar_type() == at::kInt && params.numel() == 152 && params.is_contiguous(), "invalid metadata ABI");
     TORCH_CHECK(params.device() == projection.device() && output.device() == projection.device(), "device mismatch");
     TORCH_CHECK(output.scalar_type() == at::kBFloat16 || output.scalar_type() == at::kHalf, "invalid output dtype");
     for (const auto* tensor : {&table, &cu, &used, &start}) {
