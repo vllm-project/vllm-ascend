@@ -314,7 +314,7 @@ def _probabilistic_rejection_kernel(
                     draft_log_prob = draft_logit - draft_lse
                 else:
                     # One-hot draft: q(draft_token) = 1, log_q = 0.
-                    draft_log_prob = 0
+                    draft_log_prob = 0.0
                 if SYNTHETIC_MODE:
                     # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
                     # The logprob/LSE values above are still needed to
