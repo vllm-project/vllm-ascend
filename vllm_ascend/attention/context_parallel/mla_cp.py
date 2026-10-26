@@ -180,7 +180,7 @@ class AscendMlaDCPMetadataBuilder(
             may have only one local fragment, so row counts need not be 2:1.
         """
         context = getattr(self, "_pcp_context", None)
-        if not self.pcp_enabled or context is None or not context.global_batch.is_prefilling_np.any():
+        if not self.use_pcp or context is None or not context.global_batch.is_prefilling_np.any():
             return None, None, None
         if self._pcp_cache_group_idx is None or context.local_to_global_req_indices is None:
             raise ValueError("PCP+DCP chunks require global tables and the upstream request mapping.")
@@ -210,7 +210,7 @@ class AscendMlaDCPMetadataBuilder(
             chunk_workspace_size = self.chunked_prefill_workspace_size
         local_rows = None
         block_table = None
-        if self.pcp_enabled and self.dcp_enabled:
+        if self.use_pcp and self.use_dcp:
             pcp_gather_lens, local_rows, block_table = self._get_pcp_prefill_kv_inputs()
             if pcp_gather_lens is not None:
                 if chunk_plan_lens_cpu is None:
@@ -324,12 +324,12 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         super().process_weights_after_loading(act_dtype)
         # PCP cannot consume the RoPE PROLOG_V3 workspaces. The legacy no-rope
         # MLAPO decode buffer still has a consumer with PCP enabled.
-        if self.dcp_enabled and (
-            (self.supports_prolog_v3_writer() and not self.pcp_enabled and not self.is_pcp_decode_sharded)
+        if self.use_dcp and (
+            (self.supports_prolog_v3_writer() and not self.use_pcp and not self.is_pcp_decode_sharded)
             or (self.enable_mlapo and not self.fa_quant_layer and not self.use_mla_rope and not self.enable_kv_nz)
         ):
             self._prepare_dcp_current_kv_buffers()
-        if self.dcp_enabled:
+        if self.use_dcp:
             # The shared writer contract checks these workspaces. Prepare the
             # projections after them, still inside the loader memory profile.
             self._prepare_prolog_v3_weights_after_loading()
@@ -400,7 +400,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     def _prefill_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
         """Whether DCP prefill attention needs the complete current chunk."""
         return (
-            self.dcp_enabled
+            self.use_dcp
             and attn_metadata.prefill is not None
             and attn_metadata.num_actual_tokens > attn_metadata.num_decode_tokens
         )
@@ -527,7 +527,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def get_context_block_table(self, attn_metadata: AscendMLAMetadata) -> torch.Tensor:
         """Use the global PCP request table for DCP prefill KV loading."""
-        if not self.pcp_enabled:
+        if not self.use_pcp:
             return super().get_context_block_table(attn_metadata)
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None

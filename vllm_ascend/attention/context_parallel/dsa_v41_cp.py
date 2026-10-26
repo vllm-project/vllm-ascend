@@ -22,7 +22,7 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41MetadataBuilder,
     _config_value,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pcp
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 from vllm_ascend.utils import enable_dsa_cp
@@ -32,7 +32,7 @@ def get_v41_cp_classes():
     use_dsa_cp = enable_dsa_cp()
     # Read the current model config: DSpark's target uses PCP, while its
     # replicated draft is constructed under a separate PCP=1 config.
-    use_pcp = enable_pcp()
+    use_pcp = is_pcp_enabled()
     if use_dsa_cp and use_pcp:
         raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
     if use_dsa_cp:
