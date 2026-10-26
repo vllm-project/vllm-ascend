@@ -9,10 +9,19 @@ constraints and Ascend-specific lowering notes.
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
+from typing import Any
 
 import torch
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 if HAS_TRITON:
@@ -161,6 +170,157 @@ def dspark_swa_indices_supported(
     return triton.next_power_of_2(block_table_width) <= _MAX_ROW_POW2
 
 
+class DsparkSwaIndicesKernel(AscendTritonJitKernel["DsparkSwaIndicesKernel.CompileKey"]):
+    kernel = _dspark_swa_indices_kernel
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        window_size: int
+        block_size: int
+        index_w: int
+        block_w: int
+        row_pow2: int
+        q_pow2: int
+        # Representative of stride_bt_r's Triton specialization class (the
+        # contiguous block-table row pitch == block_table_width).
+        bt_stride: int
+
+    def dispatch(
+        self,
+        *,
+        window_size: int,
+        block_size: int,
+        index_w: int,
+        block_w: int,
+        row_pow2: int,
+        q_pow2: int,
+        bt_stride: int,
+    ) -> "DsparkSwaIndicesKernel.CompileKey":
+        return self.CompileKey(
+            window_size=window_size,
+            block_size=block_size,
+            index_w=index_w,
+            block_w=block_w,
+            row_pow2=row_pow2,
+            q_pow2=q_pow2,
+            bt_stride=bt_stride,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        window_size: int,
+        block_size: int,
+        index_width: int,
+        block_table_width: int,
+        num_speculative_tokens: int,
+    ) -> list["DsparkSwaIndicesKernel.CompileKey"]:
+        # The whole constexpr set is pinned by the startup configuration, so
+        # each registration expands to exactly one key. All capacity scalars
+        # are do_not_specialize; only stride_bt_r carries a value class.
+        W = int(index_width)
+        return self._trace_dispatch(self.dispatch)(
+            window_size=int(window_size),
+            block_size=int(block_size),
+            index_w=W,
+            block_w=min(_DEFAULT_BLOCK_W, W),
+            row_pow2=triton.next_power_of_2(int(block_table_width)),
+            q_pow2=triton.next_power_of_2(int(num_speculative_tokens) + 1),
+            bt_stride=triton_scalar_specialization_rep(int(block_table_width)),
+        )
+
+    def warmup_inputs(self, compile_key: "DsparkSwaIndicesKernel.CompileKey") -> dict[str, Any]:
+        W = compile_key.index_w
+        # Pointer specialization of the runtime buffers (all torch-allocated,
+        # 16-byte aligned) is reproduced with aligned TritonWarmupTensors; the
+        # kernels are compiled, never launched, during warmup.
+        return dict(
+            block_table=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(compile_key.bt_stride, 1)),
+            query_start_loc=TritonWarmupTensor(torch.int32, shape=(2,)),
+            seq_lens=TritonWarmupTensor(torch.int32, shape=(1,)),
+            out_slots=TritonWarmupTensor(torch.int32, shape=(1, 1, W), strides=(W, W, 1)),
+            out_lens=TritonWarmupTensor(torch.int64, shape=(1,)),
+            num_blocks=1,
+            num_reqs=1,
+            num_rows_padded=1,
+            num_rows=1,
+            num_query_per_req=1,
+            num_slots=1,
+            WINDOW_SIZE=compile_key.window_size,
+            BLOCK_SIZE=compile_key.block_size,
+            INDEX_W=W,
+            BLOCK_W=compile_key.block_w,
+            ROW_POW2=compile_key.row_pow2,
+            Q_POW2=compile_key.q_pow2,
+            grid_size=1,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        out_slots: torch.Tensor,
+        out_lens: torch.Tensor,
+        *,
+        num_blocks: int,
+        num_reqs: int,
+        num_rows_padded: int,
+        num_rows: int,
+        num_query_per_req: int,
+        num_slots: int,
+        WINDOW_SIZE: int,
+        BLOCK_SIZE: int,
+        INDEX_W: int,
+        BLOCK_W: int,
+        ROW_POW2: int,
+        Q_POW2: int,
+        grid_size: int,
+    ) -> LaunchSpec:
+        return (grid_size,), dict(
+            # The kernel's short pointer names cannot be derived from the
+            # launcher's tensor argument names; bind them explicitly.
+            bt_ptr=block_table,
+            qsl_ptr=query_start_loc,
+            seq_lens_ptr=seq_lens,
+            slots_ptr=out_slots,
+            lens_ptr=out_lens,
+            stride_bt_r=block_table.stride(0),
+        )
+
+
+_DSPARK_SWA_INDICES_KERNEL = DsparkSwaIndicesKernel()
+
+
+def register_dspark_swa_indices_warmup(
+    *,
+    window_size: int,
+    block_size: int,
+    index_width: int,
+    block_table_width: int,
+    num_speculative_tokens: int,
+) -> bool:
+    """Register the DSpark SWA indices kernel for one draft attention group.
+
+    The block-table width (and therefore ROW_POW2 and the stride
+    specialization) is only final once the draft proposer and the input batch
+    exist, so this runs from ``kernel_warmup`` inside its own activation
+    window rather than from the metadata builder's ``__init__``. No-op
+    outside an active window.
+    """
+    if not dspark_swa_indices_supported(block_size, block_table_width):
+        return False
+    _DSPARK_SWA_INDICES_KERNEL.register_warmup(
+        window_size=window_size,
+        block_size=block_size,
+        index_width=index_width,
+        block_table_width=block_table_width,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    return True
+
+
 def build_dspark_swa_slot_indices_triton(
     block_table: torch.Tensor,
     num_speculative_tokens: int,
@@ -271,25 +431,25 @@ def build_dspark_swa_slot_indices_triton(
     init_device_properties_triton()
     grid = min(get_vectorcore_num(), total_items)
 
-    _dspark_swa_indices_kernel[(grid,)](
-        block_table,
-        block_table.stride(0),
-        query_start_loc,
-        seq_lens,
-        out_slots,
-        out_lens,
-        num_blocks,
-        num_reqs,
-        num_rows_padded,
-        num_rows,
-        num_query_per_req,
-        R_alloc,
+    _DSPARK_SWA_INDICES_KERNEL(
+        block_table=block_table,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        out_slots=out_slots,
+        out_lens=out_lens,
+        num_blocks=num_blocks,
+        num_reqs=num_reqs,
+        num_rows_padded=num_rows_padded,
+        num_rows=num_rows,
+        num_query_per_req=num_query_per_req,
+        num_slots=R_alloc,
         WINDOW_SIZE=int(window_size),
         BLOCK_SIZE=int(block_size),
         INDEX_W=W,
         BLOCK_W=eff_block_w,
         ROW_POW2=row_pow2,
         Q_POW2=triton.next_power_of_2(int(num_speculative_tokens) + 1),
+        grid_size=grid,
     )
 
     # Return views sized to the active extent, mirroring the eager function.
