@@ -7,6 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest.mock import Mock, patch
 
 INIT_PATH = Path(__file__).resolve().parents[2] / "vllm_ascend" / "__init__.py"
@@ -41,11 +42,13 @@ class TestTritonKeyCompat(unittest.TestCase):
                 setattr(self.modules[parent], child, module)
         self.compiler = self.modules["triton.compiler.compiler"]
         self.runtime_key = Mock(return_value="compiler-source-fingerprint")
-        self.modules["triton.runtime.cache"].triton_key = self.runtime_key
-        self.enterContext(patch.dict(sys.modules, self.modules))
+        vars(self.modules["triton.runtime.cache"])["triton_key"] = self.runtime_key
+        modules_patch = patch.dict(sys.modules, self.modules)
+        modules_patch.start()
+        self.addCleanup(modules_patch.stop)
 
     def test_new_layout_restores_legacy_import(self):
-        namespace = {}
+        namespace: dict[str, Any] = {}
         # Reproduce torch_npu's import before applying the compatibility alias.
         with self.assertRaises(ImportError):
             exec("from triton.compiler.compiler import triton_key", namespace)
@@ -58,33 +61,29 @@ class TestTritonKeyCompat(unittest.TestCase):
 
         # Reinitialization must retain the same function rather than wrap it.
         runpy.run_path(str(INIT_PATH))
-        self.assertIs(self.compiler.triton_key, self.runtime_key)
+        self.assertIs(vars(self.compiler)["triton_key"], self.runtime_key)
 
     def test_existing_compiler_key_is_preserved(self):
         original_key = Mock(return_value="old-compiler-fingerprint")
-        self.compiler.triton_key = original_key
-        del self.modules["triton.runtime.cache"].triton_key
+        vars(self.compiler)["triton_key"] = original_key
+        del vars(self.modules["triton.runtime.cache"])["triton_key"]
 
         runpy.run_path(str(INIT_PATH))
 
-        self.assertIs(self.compiler.triton_key, original_key)
+        self.assertIs(vars(self.compiler)["triton_key"], original_key)
         original_key.assert_not_called()
 
     def test_no_triton_remains_optional(self):
-        for name in self.modules:
-            if name == "triton" or name.startswith("triton."):
-                sys.modules[name] = None
-
-        runpy.run_path(str(INIT_PATH))
-
-        self.assertIsNone(sys.modules["triton"])
+        missing_modules = {name: None for name in self.modules if name == "triton" or name.startswith("triton.")}
+        with patch.dict(sys.modules, missing_modules):
+            runpy.run_path(str(INIT_PATH))
+            self.assertIsNone(sys.modules["triton"])
         self.runtime_key.assert_not_called()
 
     def test_unavailable_compiler_remains_optional(self):
         # CPU UT environments may expose Triton but stub its runtime modules.
-        sys.modules["triton.compiler.compiler"] = None
-
-        runpy.run_path(str(INIT_PATH))
+        with patch.dict(sys.modules, {"triton.compiler.compiler": None}):
+            runpy.run_path(str(INIT_PATH))
 
         self.runtime_key.assert_not_called()
 
