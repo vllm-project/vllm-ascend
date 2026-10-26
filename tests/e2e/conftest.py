@@ -58,7 +58,6 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.multi_node.internal_dp.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
-from tests.e2e.common.startup_diagnostics import StartupDiagnostics
 from tests.e2e.coverage_taxonomy import (
     validate_coverage_marker,
 )
@@ -276,9 +275,6 @@ class RemoteOpenAIServer:
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
-        diagnostics = getattr(self, "startup_diagnostics", None)
-        if diagnostics is not None:
-            env = diagnostics.server_env(env)
         logger.info("Starting server with command: %s", " ".join(server_cmd))
         self.proc: subprocess.Popen = subprocess.Popen(
             server_cmd,
@@ -302,7 +298,6 @@ class RemoteOpenAIServer:
         proxy_port: int | None = None,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
-        startup_diagnostics: bool = False,
     ) -> None:
         if isinstance(vllm_serve_args, str):
             vllm_serve_args = shlex.split(vllm_serve_args)
@@ -333,22 +328,13 @@ class RemoteOpenAIServer:
         self.cur_index = os.getenv("LWS_WORKER_INDEX", 0)
         self.proxy_port = proxy_port
 
-        self.startup_diagnostics = StartupDiagnostics() if startup_diagnostics else None
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 2800
-        try:
-            self._start_server(model, vllm_serve_args, env_dict)
-            if self.disaggregated_prefill:
-                assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
-                self._wait_for_server_pd(timeout=max_wait_seconds)
-            else:
-                self._wait_for_multiple_servers([(self.host, self.url_for("health"))], timeout=max_wait_seconds)
-        except BaseException:
-            if hasattr(self, "proc"):
-                self._terminate_server()
-            raise
+        if self.disaggregated_prefill:
+            assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
+            self._wait_for_server_pd(timeout=max_wait_seconds)
         else:
-            if self.startup_diagnostics is not None:
-                self.startup_diagnostics.stop(self.proc.pid, "ready")
+            self._wait_for_multiple_servers([(self.host, self.url_for("health"))], timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -411,32 +397,29 @@ class RemoteOpenAIServer:
         targets: List[(node_ip, url)]
         log_interval
         """
-        start = time.monotonic()
+        start = time.time()
         client = requests
 
-        ready = {target: False for target in targets}
+        ready = {node_ip: False for node_ip, _ in targets}
 
         last_log_time = 0.0
 
         while True:
-            now = time.monotonic()
+            now = time.time()
+            all_ready = True
             should_log = (now - last_log_time) >= log_interval
-            diagnostics = getattr(self, "startup_diagnostics", None)
-            if diagnostics is not None:
-                diagnostics.sample(self.proc.pid)
 
             for node_ip, url in targets:
-                target = (node_ip, url)
-                if ready[target] and not always_check_nodes:
+                if ready[node_ip] and not always_check_nodes:
                     continue
 
-                ready[target] = False
                 try:
-                    resp = client.get(url, timeout=5)
+                    resp = client.get(url)
                     if resp.status_code == 200:
-                        ready[target] = True
+                        ready[node_ip] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
+                    all_ready = False
                     if should_log:
                         logger.debug("[WAIT] %s: connection failed", url)
 
@@ -449,13 +432,11 @@ class RemoteOpenAIServer:
             if should_log:
                 last_log_time = now
 
-            if all(ready.values()):
+            if all_ready:
                 break
 
-            if time.monotonic() - start > timeout:
-                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
-                if diagnostics is not None:
-                    diagnostics.stop(self.proc.pid, "timeout-before-cleanup")
+            if now - start > timeout:
+                not_ready_nodes = [n for n, ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
                     f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
@@ -469,9 +450,6 @@ class RemoteOpenAIServer:
 
     def _terminate_server(self) -> None:
         """Subclasses override this method to customize server process termination"""
-        diagnostics = getattr(self, "startup_diagnostics", None)
-        if diagnostics is not None:
-            diagnostics.stop(self.proc.pid, "terminating-before-cleanup")
         self._terminate_process_tree(self.proc)
 
     def _terminate_process_tree(self, proc: subprocess.Popen) -> None:

@@ -637,8 +637,6 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             server_port=config.server_port,
             env_dict={**config.envs, **kv_pool_manager.server_envs},
             auto_port=False,
-            max_wait_seconds=config.server_ready_timeout,
-            startup_diagnostics=config.startup_diagnostics,
         ) as server,
     ):
         errors = []

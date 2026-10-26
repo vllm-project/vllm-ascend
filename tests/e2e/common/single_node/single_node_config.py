@@ -41,8 +41,6 @@ class SingleNodeConfig:
     expected_response: dict[str, Any] = field(default_factory=dict)
     kv_pool: KVPoolConfig | None = None
     extra_config: dict[str, Any] = field(default_factory=dict)
-    server_ready_timeout: float = 2800
-    startup_diagnostics: bool = False
 
     def __post_init__(self) -> None:
         port_keys = ["SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"]
@@ -70,11 +68,6 @@ class SingleNodeConfig:
 
         for key, value in self.extra_config.items():
             setattr(self, key, value)
-
-        if not isinstance(self.server_ready_timeout, (int, float)) or not 0 < self.server_ready_timeout <= 86400:
-            raise ValueError("server_ready_timeout must be a positive number <= 86400 seconds")
-        if not isinstance(self.startup_diagnostics, bool):
-            raise ValueError("startup_diagnostics must be a boolean")
 
     @staticmethod
     def _expand_values(values: list[str], envs: dict[str, Any]) -> list[str]:
