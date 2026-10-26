@@ -63,16 +63,16 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
     assert "SupportsCUDAGraphInitialization" in runner
 
     for proposer in (
-        "vllm_ascend/spec_decode/qwen4_exp.py",
-        "vllm_ascend/spec_decode/dspark_proposer.py",
-        "vllm_ascend/spec_decode/gemma4_proposer.py",
+        "vllm_ascend/worker/v1/spec_decode/qwen4_exp.py",
+        "vllm_ascend/worker/v1/spec_decode/dspark_proposer.py",
+        "vllm_ascend/worker/v1/spec_decode/gemma4_proposer.py",
     ):
         assert "def uses_per_group_kernel_block_sizes" in _source(proposer)
 
 
 def test_qwen4_exp_proposer_is_owned_by_qwen_spec_decode_module() -> None:
-    qwen = _source("vllm_ascend/spec_decode/qwen4_exp.py")
-    eagle = _source("vllm_ascend/spec_decode/eagle_proposer.py")
+    qwen = _source("vllm_ascend/worker/v1/spec_decode/qwen4_exp.py")
+    eagle = _source("vllm_ascend/worker/v1/spec_decode/eagle_proposer.py")
 
     assert "class AscendQwen4ExpMTPProposer" in qwen
     assert "Qwen4ExpMTPProposer" not in eagle
