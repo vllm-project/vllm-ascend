@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 
 def is_qwen4_exp_mtp(speculative_config: Any) -> bool:

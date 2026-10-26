@@ -271,7 +271,6 @@ from vllm_ascend.worker.utils import (
     prepare_ascend_kernel_block_sizes,
     row_major_strides,
 )
-
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip

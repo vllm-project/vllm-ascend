@@ -12,7 +12,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.worker.v1.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
+from vllm_ascend.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
 
 
 def _attention_spec() -> FullAttentionSpec:

@@ -28,8 +28,8 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
-from vllm_ascend.worker.v1 import model_runner as model_runner_v1
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker import model_runner_v1
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 def _groups() -> list[KVCacheGroupSpec]:

@@ -41,7 +41,7 @@ def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
 
 
 def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
     # The concrete class is part of the static drafter union so mypy can see
     # the inherited proposer methods. Runtime dispatch still uses capabilities.
     assert "AscendQwen4ExpMTPProposer" in runner
@@ -63,16 +63,16 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
     assert "SupportsCUDAGraphInitialization" in runner
 
     for proposer in (
-        "vllm_ascend/worker/v1/spec_decode/qwen4_exp.py",
-        "vllm_ascend/worker/v1/spec_decode/dspark_proposer.py",
-        "vllm_ascend/worker/v1/spec_decode/gemma4_proposer.py",
+        "vllm_ascend/spec_decode/qwen4_exp.py",
+        "vllm_ascend/spec_decode/dspark_proposer.py",
+        "vllm_ascend/spec_decode/gemma4_proposer.py",
     ):
         assert "def uses_per_group_kernel_block_sizes" in _source(proposer)
 
 
 def test_qwen4_exp_proposer_is_owned_by_qwen_spec_decode_module() -> None:
-    qwen = _source("vllm_ascend/worker/v1/spec_decode/qwen4_exp.py")
-    eagle = _source("vllm_ascend/worker/v1/spec_decode/eagle_proposer.py")
+    qwen = _source("vllm_ascend/spec_decode/qwen4_exp.py")
+    eagle = _source("vllm_ascend/spec_decode/eagle_proposer.py")
 
     assert "class AscendQwen4ExpMTPProposer" in qwen
     assert "Qwen4ExpMTPProposer" not in eagle
@@ -80,7 +80,7 @@ def test_qwen4_exp_proposer_is_owned_by_qwen_spec_decode_module() -> None:
 
 
 def test_runner_customizes_compressed_attention_cache_specs() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
     branch_start = runner.index("elif self.use_compress:")
     branch_end = runner.index(
         "elif isinstance(attn_module, Attention):",
@@ -107,7 +107,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
+    runner = _source("vllm_ascend/worker/model_runner_v1.py")
     branch_start = runner.index("isinstance(builder, QSAMetadataBuilder)")
     branch_end = runner.index("if is_gdn_noop:", branch_start)
     branch = runner[branch_start:branch_end]
