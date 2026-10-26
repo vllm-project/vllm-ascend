@@ -384,7 +384,9 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
         for step in range(len(steps))
         for provider in providers
     ]
-    graph = SimpleNamespace(tasks=tasks, provider_sizes={provider: len(steps) for provider in providers})
+    graph = UpdatableGraph()
+    graph.tasks = tasks
+    graph.provider_sizes = {provider: len(steps) for provider in providers}
     with patch.object(
         AscendMetadataForDecode,
         "update_dcp_seq_lens_cpu",
@@ -434,6 +436,7 @@ def test_draft_builder_owns_history_and_padding(rank):
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.use_pcp = False
+    builder.supports_update_block_table = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
     builder.speculative_config = SimpleNamespace(parallel_drafting=False)
@@ -458,6 +461,7 @@ def test_draft_builder_owns_history_and_padding(rank):
         seq_lens=advanced,
         dcp_local_seq_lens_cpu=get_dcp_local_seq_lens(advanced, dcp_size=2, dcp_rank=rank),
         _seq_lens_cpu=advanced,
+        seq_lens_cpu_is_exact=False,
         seq_lens_cpu=advanced,
         block_table_tensor=torch.zeros(4, 1, dtype=torch.int32),
         slot_mapping=torch.arange(16, dtype=torch.int32),
