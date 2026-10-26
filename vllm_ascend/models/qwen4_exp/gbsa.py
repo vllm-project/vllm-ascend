@@ -137,20 +137,11 @@ def qsa_gbsa_attention(
             value_subpages,
         ):
             raise ValueError("QSA GBSA requires matching K/V cache strides")
-        subpage_offsets = (
-            torch.arange(
-                subpages,
-                dtype=block_table.dtype,
-                device=block_table.device,
-            )
-            * subpage_stride
-        )
-        expanded_table = block_table.unsqueeze(-1) * block_stride + subpage_offsets
-        block_table = torch.where(
-            block_table.unsqueeze(-1) >= 0,
-            expanded_table,
-            torch.full_like(expanded_table, -1),
-        ).flatten(1)
+        # vLLM's block table already addresses virtual 128-token pages.
+        # Packed K/V leaves a V-sized gap between consecutive K storage blocks.
+        physical_pages = torch.div(block_table, subpages, rounding_mode="floor") * block_stride
+        physical_pages = physical_pages + block_table.remainder(subpages) * subpage_stride
+        block_table = torch.where(block_table >= 0, physical_pages, torch.full_like(block_table, -1))
     num_kv_heads = key_cache.shape[2]
     if query.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("QSA GBSA requires FP16/BF16 query")

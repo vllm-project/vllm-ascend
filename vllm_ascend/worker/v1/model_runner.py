@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+
 import logging
 import math
 import sys
@@ -155,16 +156,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.six_region_kv_cache_layout import (
-    GDN,
-    HIDDEN,
-    PLE,
-    QSA_COMPRESSED,
-    QSA_MAIN,
-    QSA_RAW,
-    build_six_region_kv_cache_layout,
-    make_contiguous_slab_view,
-)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -193,6 +184,16 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    GDN,
+    HIDDEN,
+    PLE,
+    QSA_COMPRESSED,
+    QSA_MAIN,
+    QSA_RAW,
+    build_qwen4_kv_cache_layout,
+    make_slab_view,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -333,6 +334,8 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
 
 
 @dataclass
@@ -5621,7 +5624,7 @@ class NPUModelRunner(GPUModelRunner):
         six_region_layout = (
             None
             if use_legacy_shared_by_layout
-            else build_six_region_kv_cache_layout(
+            else build_qwen4_kv_cache_layout(
                 kv_cache_config.kv_cache_groups,
                 kv_cache_config.num_blocks,
             )
@@ -5656,7 +5659,13 @@ class NPUModelRunner(GPUModelRunner):
                 alignment,
             )
             for owner in six_region_layout.owners:
-                if owner.role != HIDDEN:
+                if owner.role == PLE:
+                    assert isinstance(owner.spec, MambaSpec)
+                    kv_cache_raw_tensors[owner.layer_name] = self._allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * owner.spec.state_content_size_bytes,
+                        alignment,
+                    )
+                elif owner.role != HIDDEN:
                     kv_cache_raw_tensors[owner.layer_name] = backing
 
         if uses_page_strided_shared_backing:
@@ -6186,35 +6195,20 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec,
                             FullAttentionSpec,
                         )
-                        k_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r2").offset
-                            ),
+                        region = six_region_layout.region("r2")
+                        spec = current_kv_cache_spec
+                        k_bytes = spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+                        kv_caches[layer_name] = tuple(
+                            make_slab_view(
+                                raw_slab,
+                                dtype=spec.dtype,
+                                num_blocks=kv_cache_config.num_blocks,
+                                item_shape=(spec.block_size, spec.num_kv_heads, head_size),
+                                storage_offset=slot_offset + region.offset + offset,
+                                block_stride=region.page_size_bytes,
+                            )
+                            for head_size, offset in ((spec.head_size, 0), (spec.head_size_v, k_bytes))
                         )
-                        v_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size_v,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r3").offset
-                            ),
-                        )
-                        kv_caches[layer_name] = (k_cache, v_cache)
                         continue
                     if owner.role in (QSA_RAW, QSA_COMPRESSED):
                         assert isinstance(
@@ -6247,7 +6241,7 @@ class NPUModelRunner(GPUModelRunner):
                                 f"view={expected_page_bytes}, "
                                 f"region={region.page_size_bytes}."
                             )
-                        kv_caches[layer_name] = make_contiguous_slab_view(
+                        kv_caches[layer_name] = make_slab_view(
                             raw_slab,
                             dtype=current_kv_cache_spec.dtype,
                             num_blocks=kv_cache_config.num_blocks,
@@ -6259,11 +6253,22 @@ class NPUModelRunner(GPUModelRunner):
                             storage_offset=slot_offset + region.offset,
                         )
                         continue
-                    if owner.role in (GDN, PLE):
+                    if owner.role == PLE:
+                        assert isinstance(current_kv_cache_spec, MambaSpec)
+                        # Indexed PLE updates must see dense blocks. Sharing r2's
+                        # larger page stride makes torch-npu materialize the pool.
+                        kv_caches[layer_name] = [make_slab_view(
+                            raw_slab,
+                            dtype=current_kv_cache_spec.dtypes[0],
+                            num_blocks=kv_cache_config.num_blocks,
+                            item_shape=tuple(current_kv_cache_spec.shapes[0]),
+                            storage_offset=0,
+                        )]
+                        continue
+                    if owner.role == GDN:
                         assert isinstance(current_kv_cache_spec, MambaSpec)
                         region_names = {
                             GDN: ("r1", "r2"),
-                            PLE: ("r6",),
                         }[owner.role]
                         if len(region_names) != len(
                             current_kv_cache_spec.shapes
@@ -6274,11 +6279,12 @@ class NPUModelRunner(GPUModelRunner):
                                 f"shapes={current_kv_cache_spec.shapes}."
                             )
                         kv_caches[layer_name] = [
-                            make_contiguous_slab_view(
+                            make_slab_view(
                                 raw_slab,
                                 dtype=dtype,
                                 num_blocks=kv_cache_config.num_blocks,
                                 item_shape=tuple(shape),
+                                block_stride=six_region_layout.region(region_name).page_size_bytes,
                                 storage_offset=(
                                     slot_offset
                                     + six_region_layout.region(

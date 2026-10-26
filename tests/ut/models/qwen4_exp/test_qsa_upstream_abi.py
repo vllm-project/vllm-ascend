@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
@@ -128,3 +129,47 @@ def test_fused_prepare_zeros_gate_without_runtime_metadata(monkeypatch) -> None:
 
     assert not output.any()
     assert not gate.any()
+
+
+@pytest.mark.parametrize("manager_block_size", [128, 384, 768])
+def test_compressed_metadata_recovers_manager_pages_for_drafting(manager_block_size):
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.worker.utils import select_common_block_size
+
+    spec = MLAAttentionSpec(
+        block_size=manager_block_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4
+    )
+    kernel_size = select_common_block_size(manager_block_size, [qsa.AscendQSABackend, qsa.qsa_cache.QSAStateBackend])
+    factor = manager_block_size // kernel_size
+    manager = torch.tensor([[2, 0, -1], [1, 3, -1]], dtype=torch.int32)
+    expanded = (manager.unsqueeze(-1) * factor + torch.arange(factor)).flatten(1)
+    expanded = torch.where(manager.repeat_interleave(factor, dim=1) >= 0, expanded, -1).to(torch.int32)
+    locs = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=locs,
+        query_start_loc_cpu=locs,
+        seq_lens=torch.tensor([1, 1], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=1,
+        block_table_tensor=expanded,
+        slot_mapping=torch.tensor([0, 1]),
+    )
+    builder = qsa.AscendQSAStateMetadataBuilder.__new__(qsa.AscendQSAStateMetadataBuilder)
+    builder.kv_cache_spec = spec
+    builder.is_circular_buffer = False
+    builder._manager_table = None
+    builder._manager_table_rows = 2
+    # Inspect the real common-metadata boundary before upstream Triton kernels.
+    with patch.object(qsa.qsa_cache.QSAMetadataBuilder, "build", side_effect=lambda prefix, metadata, fast: metadata):
+        first = builder.build(0, common)
+        torch.testing.assert_close(first.block_table_tensor, manager)
+        ptr = first.block_table_tensor.data_ptr()
+        second = builder.build_for_drafting(common, 1)
+        assert second.block_table_tensor.data_ptr() == ptr
+        torch.testing.assert_close(second.block_table_tensor, manager)
+        assert common.block_table_tensor is expanded
+        builder.is_circular_buffer = True
+        assert builder.build(0, common).block_table_tensor is expanded
