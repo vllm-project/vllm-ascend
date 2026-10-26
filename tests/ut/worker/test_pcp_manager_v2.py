@@ -347,7 +347,8 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
-    assert manager.global_batch is global_batch
+    assert manager._attn_global_batch is global_batch
+    assert manager.global_batch.num_tokens_after_padding == global_batch.num_tokens
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
@@ -505,7 +506,11 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded(req
     ):
         result = _partition_batch(manager, global_batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    upstream_partition.assert_called_once_with(global_batch, batch_desc)
+    # Upstream partitions the scheduled extent; graph padding stays private.
+    unpadded_batch, partition_desc = upstream_partition.call_args.args
+    assert partition_desc is batch_desc
+    assert unpadded_batch.num_tokens_after_padding == 3
+    np.testing.assert_array_equal(unpadded_batch.query_start_loc_np, np.array([0, 1, 2, 3], dtype=np.int32))
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -553,7 +558,9 @@ def test_partition_batch_keeps_piecewise_request_extent():
     ):
         result = _partition_batch(manager, batch, padded_num_tokens=4, batch_desc=batch_desc)
 
-    upstream_partition.assert_called_once_with(batch, batch_desc)
+    unpadded_batch, partition_desc = upstream_partition.call_args.args
+    assert partition_desc is batch_desc
+    assert unpadded_batch.num_tokens_after_padding == 2
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -582,7 +589,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     ).view(len(block_tables), slot_mapping_capacity)
     gather_block_tables = MagicMock(return_value=block_tables)
     num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
-    manager._global_batch = input_batch
+    manager._attn_global_batch = input_batch
     manager._local_batch = SimpleNamespace(
         num_reqs=3, num_tokens=input_batch.num_tokens, idx_mapping_np=np.array([3, 3, 7], dtype=np.int32)
     )
@@ -627,7 +634,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
 def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:
     manager = _make_replicated_pcp_manager()
     manager.pcp_world_size = 2
-    manager._global_batch = SimpleNamespace(
+    manager._attn_global_batch = SimpleNamespace(
         num_tokens_after_padding=8,
         num_tokens=4,
         is_prefilling_np=np.array([False, False, False, False]),
@@ -733,8 +740,10 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     )
     assert local_batch.seq_lens_cpu_upper_bound.tolist() == [11, 0]
     assert local_batch.is_padding.tolist() == [False, True, True, True]
+    # Restore indices cover only scheduled tokens, like upstream; the FIA
+    # query offsets stay on the attention batch.
     assert manager._hidden_restore_idx is not None
-    assert manager._hidden_restore_idx[1:4].tolist() == [0, 0, 0]
+    assert manager._hidden_restore_idx.tolist() == [0]
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])
@@ -776,7 +785,7 @@ def test_partition_batch_preserves_speculative_target_inputs(pcp_rank) -> None:
     ):
         result = _partition_batch(manager, global_batch)
 
-    assert manager.global_batch is global_batch
+    assert manager._attn_global_batch is global_batch
     assert global_batch.num_draft_tokens == 3
     np.testing.assert_array_equal(global_batch.num_draft_tokens_per_req, np.array([1, 2], dtype=np.int32))
     assert result.req_ids == global_batch.req_ids
@@ -825,63 +834,29 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
 
 
 @pytest.mark.parametrize("is_draft_prefill_sharded", [False, True], ids=["replicated", "sharded"])
-def test_sampling_restore_exposes_unpadded_global_view(is_draft_prefill_sharded: bool) -> None:
+def test_sampling_restore_keeps_sharded_draft_aux_local(is_draft_prefill_sharded: bool) -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager._is_draft_prefill_sharded = is_draft_prefill_sharded
-    batch = _make_global_pcp_batch()
-    batch.is_dummy = False
-    batch.num_tokens = 12
-    batch.num_tokens_after_padding = 16
-    batch.query_start_loc_np = np.array([0, 12, 16], dtype=np.int32)
-    batch.query_start_loc = torch.tensor([0, 12, 16], dtype=torch.int32)
-    manager._global_batch = batch
-    hidden_states = torch.arange(32).reshape(16, 2)
+    batch = object()
+    hidden_states = torch.arange(24).reshape(12, 2)
     local_aux = [torch.zeros(8, 2)]
 
     def parent_restore(self, hidden, aux):
         restored_aux = None if aux is None else [hidden_states for _ in aux]
         return hidden_states, restored_aux, batch
 
-    with (
-        patch.object(AscendPCPManager, "_restore_unpadded_global_batch", return_value=True),
-        patch.object(PCPManager, "restore_for_sampling", autospec=True, side_effect=parent_restore) as parent,
-    ):
+    with patch.object(PCPManager, "restore_for_sampling", autospec=True, side_effect=parent_restore) as parent:
         # vLLM #57980 threads aux_hidden_states through this hook.
         restored_hidden, restored_aux, restored_batch = manager.restore_for_sampling(torch.zeros(8, 2), local_aux)
+    assert restored_hidden is hidden_states
+    assert restored_batch is batch
     assert len(restored_aux) == 1
     if is_draft_prefill_sharded:
         # Sharded drafts consume aux states next to the local last hidden states.
         assert parent.call_args.args[2] is None
         assert restored_aux is local_aux
     else:
-        assert restored_aux[0].shape == (12, 2)
-        assert restored_aux[0].data_ptr() == hidden_states.data_ptr()
-    assert manager._sampling_global_batch is restored_batch
-    assert restored_batch is not batch
-    assert restored_batch.num_tokens_after_padding == 12
-    assert restored_batch.query_start_loc.tolist() == [0, 12]
-    assert restored_batch.query_start_loc_np.tolist() == [0, 12]
-    assert restored_hidden.shape == (12, 2)
-    assert restored_hidden.data_ptr() == hidden_states.data_ptr()
-    assert batch.num_tokens_after_padding == 16
-    assert batch.query_start_loc.tolist() == [0, 12, 16]
-
-
-def test_pcp_manager_preserves_unpadded_restored_hidden_states() -> None:
-    manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._global_batch = SimpleNamespace(num_tokens=6, num_tokens_after_padding=6)
-    restored_hidden_states = torch.randn(6, 2)
-
-    with (
-        patch(
-            "vllm_ascend.worker.v2.pcp_manager.get_pp_group",
-            return_value=SimpleNamespace(is_last_rank=True),
-        ),
-        patch.object(PCPManager, "restore_hidden_states", return_value=restored_hidden_states),
-    ):
-        result = manager.restore_hidden_states(torch.randn(3, 2))
-
-    assert result is restored_hidden_states
+        assert restored_aux[0] is hidden_states
 
 
 def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
@@ -1061,6 +1036,7 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     )
 
     with (
+        patch.object(AscendPCPManager, "_expose_unpadded_global_batch", side_effect=lambda batch: batch),
         patch.object(
             vllm_model_runner.pcp.PCPManager,
             "partition_batch",
@@ -1286,22 +1262,8 @@ def _hook_manager() -> AscendPCPManager:
         speculative_config=SimpleNamespace(method="mtp"),
     )
     manager._staged_draft_inputs = None
-    manager._sampling_global_batch = None
     manager.draft_prefill_batch = None
     return manager
-
-
-@pytest.mark.parametrize("use_sampling_batch", [True, False])
-def test_prepare_draft_prefill_accepts_unpadded_sampling_batch(use_sampling_batch: bool) -> None:
-    manager = _hook_manager()
-    manager._global_batch = object()
-    manager._sampling_global_batch = object()
-    batch = manager._sampling_global_batch if use_sampling_batch else object()
-    input_ids = torch.arange(4)
-    with patch.object(PCPManager, "prepare_draft_prefill") as parent:
-        manager.prepare_draft_prefill(batch, input_ids)
-    expected = manager._global_batch if use_sampling_batch else batch
-    parent.assert_called_once_with(expected, input_ids)
 
 
 @pytest.mark.parametrize("draft_pcp_size", [1, 2], ids=["replicated", "sharded"])
