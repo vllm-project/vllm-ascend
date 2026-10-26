@@ -1937,6 +1937,28 @@ def test_init_kv_zero_meta_uses_tuple_aware_zeroer_without_mxfp8():
     assert not isinstance(runner.kv_block_zeroer, C8KVBlockZeroer)
 
 
+def test_init_kv_zero_meta_excludes_only_registered_topk_components():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+    runner.device = torch.device("cpu")
+    runner.attn_groups = []
+    runner.kernel_block_sizes = [128]
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=5856)
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    exclusions = {("target", 4), ("target", 5), ("draft", 4), ("draft", 5)}
+    runner.sparse_kv_offload_manager = SimpleNamespace(get_topk_cache_components=Mock(return_value=exclusions))
+
+    with patch.object(model_runner_mod, "AscendV2KVBlockZeroer") as cls:
+        runner._init_kv_zero_meta()
+
+    runner.sparse_kv_offload_manager.get_topk_cache_components.assert_called_once_with()
+    assert cls.call_args.kwargs["excluded_cache_components"] == exclusions
+    assert "runner_only_attn_layers" not in cls.call_args.kwargs
+
+
 def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     _, _, _, runner, _ = _c8_packet(ratio=1)
     entries = runner._c8_mxfp_v_scale_caches

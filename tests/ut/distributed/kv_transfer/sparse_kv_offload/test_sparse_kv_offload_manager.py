@@ -409,6 +409,17 @@ if __name__ == "__main__":
 
 
 class TestHostKVRegistration(unittest.TestCase):
+    def test_topk_cache_components_exclude_only_registered_scratch_views(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.offload_layer_names = ["target", "draft"]
+
+        self.assertEqual(
+            manager.get_topk_cache_components(),
+            {("target", 4), ("target", 5), ("draft", 4), ("draft", 5)},
+        )
+        manager.offload_layer_names = ["other"]
+        self.assertEqual(manager.get_topk_cache_components(), {("other", 4), ("other", 5)})
+
     def test_copy_sfa_exports_block_byte_strides_on_all_tp_ranks(self):
         torch = manager_module.torch
         original_zeros = torch.zeros
