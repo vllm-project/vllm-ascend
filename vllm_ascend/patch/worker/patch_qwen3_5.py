@@ -42,21 +42,12 @@ _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
 
 def _gdn_init_with_lora_config(
     self,
-    config,
-    vllm_config,
-    prefix="",
-    gqa_interleaved_layout=False,
-    reduce_results=True,
+    *args,
+    **kwargs,
 ):
-    _GDN_ORIGINAL_INIT(
-        self,
-        config=config,
-        vllm_config=vllm_config,
-        prefix=prefix,
-        gqa_interleaved_layout=gqa_interleaved_layout,
-        reduce_results=reduce_results,
-    )
-    self.enable_lora = vllm_config.lora_config is not None
+    _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+    vllm_config = kwargs.get("vllm_config", args[1] if len(args) > 1 else getattr(self, "vllm_config", None))
+    self.enable_lora = getattr(vllm_config, "lora_config", None) is not None
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:

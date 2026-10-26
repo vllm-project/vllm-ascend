@@ -343,6 +343,28 @@ def test_gdn_init_caches_enable_lora(monkeypatch, lora_config, expected):
     assert layer.enable_lora is expected
 
 
+@pytest.mark.parametrize("lora_config", [None, object()])
+def test_gdn_init_preserves_packed_weight_setup(monkeypatch, lora_config):
+    """The main-branch packed-weight initializer must retain the LoRA flag."""
+    if not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"):
+        pytest.skip("The 310P branch does not install packed GDN weights")
+
+    calls: list[object] = []
+    monkeypatch.setattr(patch_qwen3_5, "_GDN_ORIGINAL_INIT", lambda self, *args, **kwargs: calls.append("base"))
+    monkeypatch.setattr(
+        patch_qwen3_5,
+        "initialize_packed_conv_weight",
+        lambda layer: calls.append(("packed", layer.enable_lora)),
+    )
+    layer = object.__new__(QwenGatedDeltaNetAttention)
+
+    patch_qwen3_5._gdn_init_with_packed_weight(
+        layer, config=object(), vllm_config=SimpleNamespace(lora_config=lora_config)
+    )
+
+    assert calls == ["base", ("packed", lora_config is not None)]
+
+
 def test_quantized_qkvz_projection_uses_module_forward():
     """Packed quantized weights must go through their quantization method."""
     wrapper = _GDNQkvzForwardWrapper(
