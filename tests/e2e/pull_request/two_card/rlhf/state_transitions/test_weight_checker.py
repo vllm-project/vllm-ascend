@@ -24,6 +24,7 @@ import json
 import math
 import os
 import threading
+from typing import Any
 
 import pytest
 import requests
@@ -59,7 +60,7 @@ INIT_TIMEOUT = 120
 # co-located trainer in the same-chip transfer lanes.
 GPU_MEMORY_UTILIZATION = 0.25
 MODEL = "Qwen/Qwen3-0.6B"
-HF_OVERRIDES = {"num_hidden_layers": 4}
+HF_OVERRIDES: dict[str, Any] = {}
 # Physical cards; see the NPU weight-transfer tests.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
