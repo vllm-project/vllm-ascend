@@ -80,7 +80,8 @@ templates:
       - "${TP_SIZE}"
       - "--pipeline-parallel-size"
       - "${PP_SIZE}"
-      - "--enforce-eager"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--distributed-executor-backend"
       - "mp"
       - "--enable-expert-parallel"
@@ -155,7 +156,8 @@ templates:
       - "ascend"
       - "--max-num-seqs"
       - "128"
-      - "--enforce-eager"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--gpu-memory-utilization"
       - "0.92"
       - "--limit-mm-per-prompt"
