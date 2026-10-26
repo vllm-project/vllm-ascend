@@ -30,6 +30,7 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerBlockRange,
@@ -2272,6 +2273,18 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         self.assertEqual([(r.start_block, r.end_block) for r in ranges], [(1, 8)])
                         self.assertTrue(all(r.partial_block_index is None for r in ranges))
                         self.assertEqual(request.block_gvas_by_group_np[0].shape, (8,))
+                        database = SimpleNamespace(
+                            group_block_len={0: [64]},
+                            group_kv_caches_base_addr={0: [1024]},
+                            group_block_stride={0: [64]},
+                            group_layer_cache_entry_offsets={0: [0, 1]},
+                        )
+                        builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=1)
+                        task = worker.layer_save_tasks[0][0]
+                        actual_ids, _ = builder._require_request_arrays(task.block_ranges[0], is_save=True)
+                        self.assertIs(actual_ids, request.block_ids_by_group_np[0])
+                        shared = builder.build_shared(task, is_save=True)
+                        self.assertEqual(shared.block_ids_arr.tolist(), list(range(2, 9)))
                     self.assertEqual(request.partial_save_gva_per_group, [0])
 
     def test_oversized_load_plan_fails_only_affected_request(self):
