@@ -95,6 +95,16 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "long_prompt.txt")]
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
+        "--step5-text-checkpoint",
+        default=None,
+        help="Complete reduced BF16 Step5 text checkpoint for live weight-update E2Es",
+    )
+    parser.addoption(
+        "--step5-vl-checkpoint",
+        default=None,
+        help="Complete reduced BF16 Step5 VL checkpoint, including processor/tokenizer assets",
+    )
+    parser.addoption(
         "--msa-m3-sparse-backend",
         action="store",
         default=os.environ.get("MINIMAX_M3_SPARSE_BACKEND", "all"),
