@@ -33,4 +33,4 @@ W13 is loaded with native FP4 metadata; scales use E8M0 metadata and N-major
 views without copying storage. W2 and the existing GMM2 path are unchanged.
 
 The Ascend 950 end-to-end case is in
-`tests/e2e/nightly/single_node/ops/singlecard_ops/test_gmm_situ_small_experts.py`.
+`tests/e2e/nightly/single_node/ops/singlecard_ops/test_grouped_matmul_situ_quant_weight_nz.py`.

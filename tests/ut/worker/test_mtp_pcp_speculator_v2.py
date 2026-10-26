@@ -318,8 +318,11 @@ def eplb_worker_config(tmp_path):
         patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
+        # Keep the model dtype float-compatible with the bfloat16 KV cache the
+        # draft loader override below sets: vLLM main rejects a mismatched
+        # explicit float KV dtype.
         model_config = ModelConfig(
-            model=str(tmp_path), skip_tokenizer_init=True, dtype="float32", enforce_eager=True, max_model_len=128
+            model=str(tmp_path), skip_tokenizer_init=True, dtype="bfloat16", enforce_eager=True, max_model_len=128
         )
         parallel_config = ParallelConfig(
             prefill_context_parallel_size=8,

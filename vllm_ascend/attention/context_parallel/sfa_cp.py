@@ -41,7 +41,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_dcp,
+    is_dcp_enabled,
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -916,7 +916,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -1136,7 +1136,7 @@ class AscendSFADCPMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
             treat_short_extends_as_decodes=(
-                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
             ),
         )
         kv_gather_block_ids = None
@@ -1275,10 +1275,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        pcp_context: Any | None = None,
-        pcp_cache_group_idx: int | None = None,
         **kwargs,
     ) -> AscendSFAMetadata:
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if pcp_context is None:
             # Decode-only graph capture builds dummy metadata without running
             # PCP's prefill gather, so no PCP context is available or needed.
@@ -1978,12 +1978,12 @@ def resolve_sfa_metadata_builder(
     """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
+    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
     if dsa_cp_enabled:
         return AscendSFADSACPMetadataBuilder
-    if pcp_enabled and dcp_enabled:
+    if use_pcp and dcp_enabled:
         return AscendSFAPCPDCPMetadataBuilder
     if dcp_enabled:
         return AscendSFADCPMetadataBuilder
@@ -1994,15 +1994,15 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
     """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
+    use_pcp = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl
     if dsa_cp_enabled:
         return AscendSFADSACPImpl
-    if pcp_enabled and dcp_enabled:
+    if use_pcp and dcp_enabled:
         return AscendSFAPCPDCPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
-    if pcp_enabled:
+    if use_pcp:
         return AscendSFAPCPImpl
     return AscendSFAImpl

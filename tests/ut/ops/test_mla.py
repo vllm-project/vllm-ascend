@@ -122,7 +122,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.use_torch_npu_lightning_indexer = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
-        indexer._pcp_active = False
+        indexer.use_pcp = False
         indexer._is_pcp_decode_sharded = False
         indexer._dsa_cp_active = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
@@ -225,7 +225,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
     def test_gather_cache_inputs_pcp_gathers_prefill_region(self):
         indexer = self._make_forward_indexer()
-        indexer._pcp_active = True
+        indexer.use_pcp = True
         k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
         k_li_scale = torch.ones(2, 1, dtype=torch.float32)
         slots = torch.tensor([7, 8], dtype=torch.int64)

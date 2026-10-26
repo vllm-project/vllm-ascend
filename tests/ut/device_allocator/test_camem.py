@@ -13,12 +13,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from tests.ut.base import PytestBase
+from vllm_ascend.device_allocator import camem as camem_module
 from vllm_ascend.device_allocator.camem import (
     AllocationData,
     CaMemAllocator,
@@ -37,6 +39,30 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
+    @pytest.fixture(autouse=True)
+    def _camem_available(self):
+        # get_instance() asserts camem_available, but CPU UTs can run without
+        # the vllm_ascend_C extension.
+        with patch("vllm_ascend.device_allocator.camem.camem_available", True):
+            yield
+
+    @pytest.fixture
+    def _npu_camem_allocator(self, monkeypatch):
+        if not torch.npu.is_available() or camem_module.python_create_and_map is None:
+            pytest.skip("requires an Ascend NPU and the CaMem extension")
+
+        torch.npu.set_device(0)
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "pointer_to_data", {})
+        monkeypatch.setattr(allocator, "allocator_and_pools", {})
+        yield allocator
+
+        if any(data.is_asleep for data in allocator.pointer_to_data.values()):
+            allocator.wake_up()
+        gc.collect()
+        torch.npu.synchronize()
+        allocator.release_pools()
+
     @pytest.mark.parametrize(
         "handle",
         [
@@ -83,7 +109,116 @@ class TestCaMem(PytestBase):
         instance2 = CaMemAllocator.get_instance()
         assert instance1 is instance2
 
-    def test_python_malloc_and_free_callback(self):
+    def test_release_pools_clears_all_tags(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        pools = {
+            "weights": (MagicMock(name="weights_pool"), MagicMock(name="weights_allocator")),
+            "kv_cache": (MagicMock(name="kv_pool"), MagicMock(name="kv_allocator")),
+        }
+        monkeypatch.setattr(allocator, "allocator_and_pools", pools)
+
+        allocator.release_pools()
+        assert allocator.allocator_and_pools == {}
+
+        # Cleanup is safe to call repeatedly, including during shutdown.
+        allocator.release_pools()
+
+    def test_shutdown_singleton_releases_pools(self, monkeypatch):
+        allocator = MagicMock()
+        monkeypatch.setattr(CaMemAllocator, "instance", allocator)
+
+        CaMemAllocator._shutdown_singleton()
+
+        allocator.release_pools.assert_called_once_with()
+
+    def test_discard_tags(self, _npu_camem_allocator):
+        allocator = _npu_camem_allocator
+
+        def mapped_bytes():
+            return sum(data.handle[1] for data in allocator.pointer_to_data.values() if not data.is_asleep)
+
+        with allocator.use_memory_pool("weights"):
+            weights = torch.ones(1024, 1024, device="npu")
+
+        with allocator.use_memory_pool("kv_cache"):
+            kv_cache = torch.ones(512, 512, device="npu")
+
+        mapped_before = mapped_bytes()
+        allocator.discard("kv_cache")
+        mapped_after_discard = mapped_bytes()
+        assert mapped_before - mapped_after_discard >= kv_cache.nbytes
+        assert mapped_after_discard >= weights.nbytes
+        assert torch.allclose(weights, torch.ones_like(weights))
+
+        allocator.wake_up()
+        assert kv_cache.shape == (512, 512)
+
+        allocator.sleep(offload_tags="weights")
+        allocator.wake_up()
+        assert torch.allclose(weights, torch.ones_like(weights))
+
+    def test_sleep_with_only_weights_asleep(self, _npu_camem_allocator):
+        allocator = _npu_camem_allocator
+        with allocator.use_memory_pool("weights"):
+            weights = torch.ones(1024, 1024, device="npu")
+        with allocator.use_memory_pool("kv_cache"):
+            kv_cache = torch.ones(512, 512, device="npu")
+
+        allocator.sleep(offload_tags="weights")
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+        weights_backup = next(
+            data.cpu_backup_tensor for data in allocator.pointer_to_data.values() if data.tag == "weights"
+        )
+        assert weights_backup is not None
+
+        allocator.wake_up(tags=["kv_cache"])
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "weights")
+        assert all(not data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "kv_cache")
+
+        allocator.sleep(offload_tags="weights")
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+        assert (
+            next(data.cpu_backup_tensor for data in allocator.pointer_to_data.values() if data.tag == "weights")
+            is weights_backup
+        )
+        allocator.wake_up(tags=["weights"])
+        assert all(not data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "weights")
+        assert torch.allclose(weights, torch.ones_like(weights))
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "kv_cache")
+
+        allocator.wake_up(tags=["kv_cache"])
+        assert all(not data.is_asleep for data in allocator.pointer_to_data.values())
+        assert kv_cache.shape == (512, 512)
+
+    @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
+    def test_selective_wake_restores_requested_tags(self, _npu_camem_allocator, tag):
+        allocator = _npu_camem_allocator
+        internal_tag = tag or allocator.default_tag
+        with allocator.use_memory_pool(tag):
+            internal = torch.empty(16 << 20, dtype=torch.uint8, device="npu")
+        with allocator.use_memory_pool("kv_cache"):
+            kv_cache = torch.empty(32 << 20, dtype=torch.uint8, device="npu")
+
+        allocator.sleep(offload_tags=())
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+
+        allocator.wake_up(tags=[internal_tag])
+        assert all(not data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == internal_tag)
+        assert all(data.is_asleep for data in allocator.pointer_to_data.values() if data.tag == "kv_cache")
+        mapped_internal_bytes = sum(
+            data.handle[1]
+            for data in allocator.pointer_to_data.values()
+            if not data.is_asleep and data.tag == internal_tag
+        )
+        assert mapped_internal_bytes >= internal.nbytes
+
+        allocator.wake_up(tags=["kv_cache"])
+        assert all(not data.is_asleep for data in allocator.pointer_to_data.values())
+        assert kv_cache.numel() == 32 << 20
+
+    @patch("vllm_ascend.device_allocator.camem.torch.cuda.synchronize")
+    @patch("vllm_ascend.device_allocator.camem.torch.npu.synchronize")
+    def test_python_malloc_and_free_callback(self, mock_npu_sync, mock_cuda_sync):
         allocator = CaMemAllocator.get_instance()
 
         # mock allocation_handle
@@ -102,6 +237,8 @@ class TestCaMem(PytestBase):
         data.cpu_backup_tensor = torch.zeros(1)
         result_handle = allocator.python_free_callback(ptr)
         assert result_handle == handle
+        mock_npu_sync.assert_called_once_with(handle[0])
+        mock_cuda_sync.assert_not_called()
         assert ptr not in allocator.pointer_to_data
         assert data.cpu_backup_tensor is None
 
@@ -147,7 +284,7 @@ class TestCaMem(PytestBase):
 
         handle = (1, 10, 1000, 0)
         tensor = torch.zeros(5, dtype=torch.uint8)
-        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor)
+        data = AllocationData(handle, "tag1", cpu_backup_tensor=tensor, is_asleep=True)
         allocator.pointer_to_data = {1000: data}
 
         allocator.wake_up(tags=["tag1"])

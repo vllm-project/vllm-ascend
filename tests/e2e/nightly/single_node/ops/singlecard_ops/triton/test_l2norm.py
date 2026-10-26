@@ -4,10 +4,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.fla.l2norm import l2norm_fwd
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "dtype"),
     [

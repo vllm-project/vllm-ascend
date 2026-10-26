@@ -1,0 +1,5 @@
+pr: 19408
+entries:
+  - category: performance
+    text: Reduced GLM-5.3 Flash initialization overhead by reusing metadata-owned convolution output buffers and removing redundant KDA output clears.
+    model: glm-5.3-flash

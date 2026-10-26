@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261016144033-310p-openeuler24.03-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-310p-openeuler24.03-py3.12
 
 WORKDIR /workspace
 
@@ -113,7 +113,7 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
 # ===== Install pinned torch-npu =====
 # 310P installs only torch-npu (no memfabric/memcache/triton-ascend).
 ARG TORCH_NPU_VERSION="26.2.0"
-ARG TORCH_NPU_DATE="20261020.3"
+ARG TORCH_NPU_DATE="20261015.5"
 ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
 RUN ARCH=$(uname -m) && \
     mkdir -p /tmp/torch_npu && \
