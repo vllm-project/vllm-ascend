@@ -1,0 +1,27 @@
+{
+  "iteration": 10,
+  "hypothesis": "final-verification",
+  "commit": "e131775d67b9dc9106442139abd5e8dd500cd2fd",
+  "library_sha256": "45abf4062e7ee5d2764675785f33e2aa008756e17fb8e886f25cfffe0aed7eb8",
+  "fused_library_sha256": "984996ebe42c3038784ba7a7ca9042297e7b1eb5db7296fb6df3d1b19bd9a38b",
+  "torch": "2.10.0+cpu",
+  "hf32": true,
+  "cube_math_type": "3",
+  "launch_policy": "adaptive",
+  "config": {
+    "cast_blocks": 48,
+    "pool_blocks": 48,
+    "final_blocks": 48,
+    "pool_threads": 256,
+    "weight_layout": "nk"
+  },
+  "metadata": "synthetic; original export retained; runtime TND RoPE capacity adapted",
+  "cases": [
+    {
+      "id": "decode-r128-d512",
+      "profile": "fused",
+      "expected_target_samples": 10,
+      "precision_passed": true
+    }
+  ]
+}

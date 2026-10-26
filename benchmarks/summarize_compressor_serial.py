@@ -6,9 +6,10 @@ import csv
 import hashlib
 import json
 import math
-import re
 import statistics
 from pathlib import Path
+
+import regex as re
 
 
 def summarize(path, mode, cube_pattern, vector_pattern):
