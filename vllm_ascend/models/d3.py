@@ -73,3 +73,7 @@ class AscendD3ForSequenceClassification(_D3ForSequenceClassificationBase):
                 allow_patterns_overrides=[READOUT_WEIGHTS],
             )
         ]
+
+    @staticmethod
+    def is_unused_checkpoint_weight(name: str) -> bool:
+        return name == "weight"
