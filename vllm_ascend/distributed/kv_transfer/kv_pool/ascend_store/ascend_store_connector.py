@@ -382,6 +382,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._mamba_state is not None:
             self._mamba_state.do_mamba_copy_for_layer(layer_name)
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Wait until ``layer_name``'s layerwise pool load has landed.
+
+        Unlike :meth:`wait_for_layer_load` this only observes completion: it
+        does not advance the per-step layer schedule, so KVPP can use it to gate
+        a layer broadcast on the load of that same layer.
+        """
+        if not self.use_layerwise:
+            return
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load_ready(layer_name)
+
     def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
         """Take over the mamba align pre-copy for this step.
 
