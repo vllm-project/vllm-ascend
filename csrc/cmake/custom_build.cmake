@@ -705,7 +705,6 @@ if (BUILD_OPEN_PROJECT)
                 ${OP_BUILD_TOOL}
                 $<TARGET_FILE:op_host_aclnnExc>
                 ${base_aclnn_binary_dir}/exc
-                DEPENDS op_host_aclnnExc
         )
     endif ()
 
