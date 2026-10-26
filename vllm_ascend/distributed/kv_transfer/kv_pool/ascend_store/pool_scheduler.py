@@ -744,10 +744,8 @@ class KVPoolScheduler:
         if num_external_tokens == 0:
             # No need to load anything
             load_spec = self.load_specs[request.request_id]
-            self.load_specs[request.request_id].can_load = (
-                self.use_layerwise
-                and load_spec.kvpool_cached_tokens <= load_spec.vllm_cached_tokens
-                and (load_spec.kvpool_cached_tokens > 0 or bool(load_spec.kvpool_store_skip_tokens))
+            self.load_specs[request.request_id].can_load = self.use_layerwise and (
+                load_spec.kvpool_cached_tokens > 0 or bool(load_spec.kvpool_store_skip_tokens)
             )
             logger.debug(
                 "KV pool load spec updated req=%s because num_external_tokens=0 "
