@@ -1,0 +1,4 @@
+pr: 12659
+entries:
+  - category: bugfix
+    text: Generate random-sampling noise on the calling stream instead of switching to an auxiliary stream.
