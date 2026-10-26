@@ -65,6 +65,58 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 )
 
 
+@pytest.mark.parametrize("local_rank,visible_device", [(0, 0), (1, 1), (0, 1), (1, 3), (0, 3), (1, 0)])
+def test_send_thread_uses_visible_device_mapping(local_rank, visible_device):
+    state = ProducerSendState(
+        last_layer_idx=0,
+        layer_metadata={},
+        p_session="test-session",
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(),
+        layer_storage_slots={},
+    )
+    thread = MembPullSendingThread(ready_event=threading.Event(), state=state)
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    with (
+        patch("vllm.distributed.get_world_group") as world_group,
+        patch(f"{module}.current_platform", create=True) as platform,
+        patch(f"{module}.torch.device") as device,
+        patch(f"{module}.torch.npu.set_device") as set_device,
+    ):
+        world_group.return_value.local_rank = local_rank
+        platform.logical_device_id_to_visible_device_id.return_value = visible_device
+        thread.run()
+
+        device.assert_called_once_with(f"npu:{visible_device}")
+        set_device.assert_called_once_with(device.return_value)
+        assert thread.ready_event.is_set()
+        assert thread.startup_error is None
+
+
+def test_send_thread_reports_device_mapping_failure():
+    thread = MembPullSendingThread(
+        ready_event=threading.Event(),
+        state=ProducerSendState(0, {}, "test-session", 0, 0, (), {}),
+    )
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    error = IndexError("local rank is outside the assigned devices")
+    with (
+        patch("vllm.distributed.get_world_group") as world_group,
+        patch(f"{module}.current_platform", create=True) as platform,
+        patch(f"{module}.torch.npu.set_device") as set_device,
+    ):
+        world_group.return_value.local_rank = 2
+        platform.logical_device_id_to_visible_device_id.side_effect = error
+        thread.run()
+
+        assert thread.startup_error is error
+        assert thread.ready_event.is_set()
+        set_device.assert_not_called()
+
+
 def test_sfa_remote_d2h_connector_is_registered():
     with (
         patch.object(KVConnectorFactory, "_registry", {}),
