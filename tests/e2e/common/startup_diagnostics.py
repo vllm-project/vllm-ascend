@@ -70,7 +70,8 @@ class StartupDiagnostics:
             return
         self.last_sample = elapsed
         self.sequence += 1
-        data = {"time": time.time(), "elapsed_seconds": elapsed, "reason": reason, "processes": []}
+        process_records: list[dict[str, object]] = []
+        data = {"time": time.time(), "elapsed_seconds": elapsed, "reason": reason, "processes": process_records}
         try:
             parent = psutil.Process(pid)
             processes = [parent, *parent.children(recursive=True)]
@@ -89,9 +90,9 @@ class StartupDiagnostics:
                     info["resource_error"] = str(exc)
                 proc_dir = Path(f"/proc/{proc.pid}")
                 info["proc"] = {name: _read(proc_dir / name) for name in ("status", "wchan", "stack", "cgroup")}
-                data["processes"].append(info)
+                process_records.append(info)
             except psutil.Error as exc:
-                data["processes"].append({"pid": proc.pid, "error": str(exc)})
+                process_records.append({"pid": proc.pid, "error": str(exc)})
         data["host"] = {
             name: _read(Path(name))
             for name in ("/proc/meminfo", "/proc/pressure/cpu", "/proc/pressure/memory", "/proc/pressure/io")
