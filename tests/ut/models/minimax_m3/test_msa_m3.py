@@ -50,6 +50,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
 from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _as_ascendc_index_kv_cache,
+    _decode_gbsa_block_counts,
     _minimax_m3_index_score,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
@@ -65,6 +66,7 @@ from vllm_ascend.utils import AscendDeviceType
 @pytest.fixture
 def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     gbsa_metadata_op = MagicMock()
+    gbsa_metadata_op.return_value = torch.zeros(1024, dtype=torch.int32)
     gbsa_attention_op = MagicMock()
     gbsa_ops_module = ModuleType("cann_ops_transformer.ops")
     gbsa_ops_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
@@ -136,6 +138,12 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 8192,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layer0.attn": SimpleNamespace(num_heads=4, num_kv_heads=2, head_dim=128, topk_blocks=16),
+            }
+        ),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=max_num_batched_tokens,
         ),
@@ -365,7 +373,7 @@ def test_minimax_m3_sparse_forward_zeros_output_without_dict_metadata(
     ],
     ids=lambda case: case.name,
 )
-def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
+def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
     device = torch.device("cpu")
     builder = _make_sparse_builder(device)
     common = _create_common_attn_metadata(batch_spec, block_size=128, device=device)
@@ -422,7 +430,7 @@ def test_sparse_decode_prefix_rejects_invalid_dimensions(batch_size: int, query_
 
 @pytest.mark.parametrize("query_len", [0, 1, 4])
 def test_sparse_metadata_builder_forwards_uniform_decode_prefix(
-    monkeypatch: pytest.MonkeyPatch, query_len: int
+    monkeypatch: pytest.MonkeyPatch, query_len: int, mock_gbsa_ops
 ) -> None:
     device = torch.device("cpu")
     builder = _make_sparse_builder(device)
@@ -488,7 +496,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
-def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
+def test_sparse_metadata_builder_fia_padded_dummy_request(mock_gbsa_ops) -> None:
     """FIA mixed-batch padding can append a dummy request beyond max_num_seqs."""
     device = torch.device("cpu")
     batch_size = 16
@@ -1679,7 +1687,9 @@ def test_sparse_decode_unverified_paths_do_not_reuse_metadata(
 @pytest.mark.parametrize(
     "device_type,enabled", [(AscendDeviceType.A3, True), (AscendDeviceType.A2, False), (AscendDeviceType.A5, False)]
 )
-def test_sparse_builder_metadata_cache_is_forward_local(device_type: AscendDeviceType, enabled: bool) -> None:
+def test_sparse_builder_metadata_cache_is_forward_local(
+    device_type: AscendDeviceType, enabled: bool, mock_gbsa_ops
+) -> None:
     with patch.object(msa_m3_module, "get_ascend_device_type", return_value=device_type):
         builder = _make_sparse_builder(torch.device("cpu"))
         common = _create_common_attn_metadata(BatchSpec([512], [1]), 128, torch.device("cpu"))
@@ -1687,10 +1697,101 @@ def test_sparse_builder_metadata_cache_is_forward_local(device_type: AscendDevic
         second = builder.build(0, common).decode
     assert first is not None and second is not None
     if enabled:
-        assert first.gbsa_metadata_cache == {} and second.gbsa_metadata_cache == {}
+        assert len(first.gbsa_metadata_cache) == len(second.gbsa_metadata_cache) == 1
         assert first.gbsa_metadata_cache is not second.gbsa_metadata_cache
+        assert first.gbsa_metadata_prepared and second.gbsa_metadata_prepared
     else:
         assert first.gbsa_metadata_cache is None and second.gbsa_metadata_cache is None
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("topk,logical_blocks", [(1, 8), (4, 8), (16, 8), (16, 0)])
+@pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
+def test_prepared_gbsa_counts_match_decode_topk_mask(query_len, topk, logical_blocks, init_blocks, local_blocks):
+    seq_lens = torch.tensor([0, 1, 3, 4, 127, 128, 129, 131, 255, 256, 257, 2048], dtype=torch.int32)
+    heads = 2
+    width = max(logical_blocks, topk)
+    scores = torch.randn(heads, seq_lens.numel() * query_len, width)
+    # Reference the existing score-prepare / TopK / postprocess sequence.
+    visible = torch.tensor(
+        [max((int(length) - query_len + offset + 128) // 128, 0) for length in seq_lens for offset in range(query_len)]
+    )
+    columns = torch.arange(width)
+    valid = (columns < logical_blocks) & (columns < visible[:, None])
+    scores.masked_fill_(~valid, -torch.inf)
+    scores = torch.where(valid & (columns < init_blocks), 1.0e30, scores)
+    scores = torch.where(valid & (columns >= (visible - local_blocks).clamp_min(0)[:, None]), 1.0e29, scores)
+    indices = scores.topk(topk, dim=-1).indices
+    expected = ((indices < visible[:, None]) & (indices < logical_blocks)).sum(-1).to(torch.int32)
+    actual = _decode_gbsa_block_counts(seq_lens, query_len, heads, topk, logical_blocks)
+    assert actual.is_contiguous() and actual.dtype == torch.int32
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_len", [1, 4])
+def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query_len, mock_gbsa_ops, monkeypatch):
+    metadata_op, attention_op = mock_gbsa_ops
+    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    builder = _make_sparse_builder(torch.device("cpu"))
+    monkeypatch.setattr(msa_m3_module, "split_decodes_and_prefills", lambda *args, **kwargs: (2, 0, 2 * query_len, 0))
+    common = _create_common_attn_metadata(BatchSpec([128, 257], [query_len] * 2), 128, torch.device("cpu"))
+    events = []
+
+    def make_schedule(*args, **kwargs):
+        events.append("metadata")
+        return torch.full((1024,), metadata_op.call_count, dtype=torch.int32)
+
+    metadata_op.side_effect = make_schedule
+    md = builder.build(0, common)
+    assert events == ["metadata"]  # No IndexScore / sparse layer has run yet.
+    assert md.decode.gbsa_metadata_prepared
+    buffer = next(iter(md.decode.gbsa_metadata_cache.values()))
+    q = torch.zeros((2 * query_len, 4, 128), dtype=torch.bfloat16)
+    attention_op.side_effect = lambda *args, **kwargs: (events.append("gbsa") or q, torch.empty(0))
+    impl = AscendMiniMaxM3SparseImpl(4, 128, 0.5, 2, topk_blocks=16, sparse_block_size=128)
+    kv = torch.zeros((2, 6, 128, 2, 128), dtype=torch.bfloat16)
+    with patch.object(
+        msa_m3_module, "get_forward_context", return_value=SimpleNamespace(attn_metadata={"layer0.attn": md})
+    ):
+        # Re-entering the same layer models capture warmup; prepared entries
+        # must not be cleared and regenerated inside the model graph.
+        for _ in range(3):
+            impl.forward(
+                SimpleNamespace(layer_name="layer0.attn"),
+                q,
+                kv,
+                (
+                    torch.zeros((2, 2 * query_len, 16), dtype=torch.int32),
+                    None,
+                    torch.ones((2, 2 * query_len), dtype=torch.int32),
+                ),
+                torch.empty_like(q),
+            )
+            assert attention_op.call_args.kwargs["metadata"] is buffer
+    assert events == ["metadata", "gbsa", "gbsa", "gbsa"]
+    common.seq_lens.add_(1)
+    rebuilt = builder.build(0, common)
+    refreshed = next(iter(rebuilt.decode.gbsa_metadata_cache.values()))
+    assert refreshed.data_ptr() == buffer.data_ptr()
+    assert torch.all(refreshed == 2) and metadata_op.call_count == 2
+    expected_counts = _decode_gbsa_block_counts(common.seq_lens, query_len, 2, 16, common.block_table_tensor.shape[-1])
+    torch.testing.assert_close(metadata_op.call_args.args[1], expected_counts, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "dtype,block_size,query_len", [(torch.float16, 128, 1), (torch.bfloat16, 64, 1), (torch.bfloat16, 128, 2)]
+)
+def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size, query_len, mock_gbsa_ops):
+    config = _make_vllm_config()
+    config.model_config.dtype = dtype
+    spec = FullAttentionSpec(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
+    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=AscendDeviceType.A3):
+        builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))
+        common = _create_common_attn_metadata(BatchSpec([512], [query_len]), block_size, torch.device("cpu"))
+        with patch.object(msa_m3_module, "split_decodes_and_prefills", return_value=(1, 0, query_len, 0)):
+            decode = builder.build(0, common).decode
+    assert not decode.gbsa_metadata_prepared and not decode.gbsa_metadata_cache
+    mock_gbsa_ops[0].assert_not_called()
 
 
 def test_sparse_impl_resets_reused_metadata_before_warmup_or_capture() -> None:

@@ -5,6 +5,6 @@ entries:
     model: minimax-m3
     hardware: [A2, A3, A5]
   - category: performance
-    text: Reduced repeated GBSA metadata generation and query-prefix preparation for supported A3 BF16 decode layers.
+    text: Prepare GBSA metadata once before each supported A3 BF16 decode forward and share it across sparse attention layers, with stable buffers for graph replay.
     model: minimax-m3
     hardware: [A3]

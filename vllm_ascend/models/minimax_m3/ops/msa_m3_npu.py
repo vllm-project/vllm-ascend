@@ -144,6 +144,104 @@ def _build_cu_seqlens_q(query_lens: torch.Tensor) -> torch.Tensor:
     return cu_seqlens_q
 
 
+def _decode_gbsa_metadata_key(
+    num_tokens: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    topk: int,
+    query_len: int,
+) -> tuple[Any, ...]:
+    return (
+        (num_tokens, num_heads, head_size),
+        (num_kv_heads, num_tokens, topk),
+        (num_kv_heads, num_tokens),
+        num_kv_heads,
+        query_len,
+    )
+
+
+def _build_generic_block_sparse_attention_metadata(
+    topk_idx: torch.Tensor,
+    select_num_idx: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    max_query_len: int,
+    quant_mode: int,
+) -> torch.Tensor:
+    from cann_ops_transformer.ops import generic_block_sparse_attention_metadata  # noqa: PLC0415
+
+    return generic_block_sparse_attention_metadata(
+        topk_idx,
+        select_num_idx,
+        num_heads,
+        num_kv_heads,
+        head_size,
+        [1, block_size],
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_kv=seq_lens,
+        max_seqlen_q=max_query_len,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        mask_mode=_GBSA_MASK_MODE_CAUSAL,
+        quant_mode=quant_mode,
+        softmax_precision=_GBSA_SOFTMAX_PRECISION,
+    )
+
+
+def _decode_gbsa_block_counts(
+    seq_lens: torch.Tensor,
+    query_len: int,
+    num_kv_heads: int,
+    topk: int,
+    logical_block_count: int,
+) -> torch.Tensor:
+    # Match the causal validity mask in index_decode_topk_fused, including
+    # zero-length graph padding and each speculative token's query offset.
+    offsets = torch.arange(query_len, dtype=torch.int32, device=seq_lens.device)
+    visible_blocks = torch.div(
+        seq_lens[:, None] - query_len + offsets + _MSA_INDEX_BLOCK_SIZE,
+        _MSA_INDEX_BLOCK_SIZE,
+        rounding_mode="floor",
+    ).clamp_(0, min(topk, logical_block_count))
+    return visible_blocks.reshape(1, -1).expand(num_kv_heads, -1).contiguous()
+
+
+@torch.no_grad()
+def prepare_decode_gbsa_metadata(
+    seq_lens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    query_len: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    topk: int,
+    logical_block_count: int,
+) -> torch.Tensor:
+    """Prepare the A3 BF16 decode schedule before any layer's IndexScore."""
+    counts = _decode_gbsa_block_counts(seq_lens, query_len, num_kv_heads, topk, logical_block_count)
+    # CANN's metadata operator reads block counts, not selected block IDs;
+    # sparse_block_indices supplies only the [heads, tokens, topk] shape.
+    indices_shape = torch.empty((*counts.shape, topk), dtype=torch.int32, device=seq_lens.device)
+    return _build_generic_block_sparse_attention_metadata(
+        indices_shape,
+        counts,
+        cu_seqlens_q,
+        seq_lens,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        block_size=_MSA_INDEX_BLOCK_SIZE,
+        max_query_len=query_len,
+        quant_mode=_GBSA_NO_QUANT,
+    )
+
+
 @torch.no_grad()
 def _run_generic_block_sparse_attention(
     q: torch.Tensor,
@@ -182,10 +280,7 @@ def _run_generic_block_sparse_attention(
         raise TypeError("MiniMax-M3 sparse attention requires Q, K, and V to have the same dtype")
 
     block_shape = [1, block_size]
-    from cann_ops_transformer.ops import (  # type: ignore[import-not-found]  # noqa: PLC0415
-        generic_block_sparse_attention,
-        generic_block_sparse_attention_metadata,
-    )
+    from cann_ops_transformer.ops import generic_block_sparse_attention  # noqa: PLC0415
 
     # Opt-in only from the A3 model's uniform-decode metadata builder. Direct
     # callers and prefill must not assume that layer-dependent counts match.
@@ -202,21 +297,17 @@ def _run_generic_block_sparse_attention(
     cache_key = (tuple(q.shape), tuple(topk_idx.shape), tuple(select_num_idx.shape), num_kv_heads, max_query_len)
     gbsa_metadata = cache.get(cache_key) if cache is not None else None
     if gbsa_metadata is None:
-        gbsa_metadata = generic_block_sparse_attention_metadata(
+        gbsa_metadata = _build_generic_block_sparse_attention_metadata(
             topk_idx,
             select_num_idx,
-            q.shape[1],
-            num_kv_heads,
-            q.shape[2],
-            block_shape,
-            cu_seqlens_q=cu_seqlens_q,
-            seqused_kv=seq_lens,
-            max_seqlen_q=max_query_len,
-            layout_q="TND",
-            layout_kv="PA_BBND",
-            mask_mode=_GBSA_MASK_MODE_CAUSAL,
+            cu_seqlens_q,
+            seq_lens,
+            num_heads=q.shape[1],
+            num_kv_heads=num_kv_heads,
+            head_size=q.shape[2],
+            block_size=block_size,
+            max_query_len=max_query_len,
             quant_mode=quant_mode,
-            softmax_precision=_GBSA_SOFTMAX_PRECISION,
         )
         if cache is not None:
             cache[cache_key] = gbsa_metadata
