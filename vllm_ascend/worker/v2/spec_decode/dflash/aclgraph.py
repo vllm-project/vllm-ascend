@@ -2,7 +2,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -24,7 +24,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -79,8 +79,16 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
-        prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        prepare_kwargs: dict[str, Any] = (
+            {"precompute_context_kv": precompute_context_kv}
+            if vllm_version_is("0.31.0")
+            else {"prepare_forward": prepare_forward}
+        )
+        with (
+            set_current_vllm_config(self.vllm_config),
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, False),
+        ):
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -97,6 +105,20 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if getattr(self.speculator, "_deferred_draft_attn_metadata", None) is not None:
+            graph = self.graphs[desc]
+            assert isinstance(graph, UpdatableGraph)
+            # The update stream must wait for inputs BEFORE replay is queued:
+            # waiting on the replay itself would form a cycle at the first FIA.
+            self.update_stream.wait_stream(torch.npu.current_stream())
+            ret = super().run_fullgraph(desc)
+            with torch.npu.stream(self.update_stream):
+                metadata = self.speculator.build_draft_attn_metadatas(
+                    desc.num_reqs, self.speculator.input_batch.seq_lens_cpu_upper_bound
+                )
+                resolved_tasks = graph.iter_resolved_tasks(ContextSource(metadata[0]))
+                graph.update(self.update_stream, resolved_tasks)
+            return ret
         if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
             # Length preparation and FlashAttn tiling run inside the graph,
             # reading the draft's persistent device buffers on every replay.

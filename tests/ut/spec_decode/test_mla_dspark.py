@@ -246,6 +246,8 @@ def test_empty_metadata_is_a_noop(architecture):
 def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(attn_architecture=architecture)
+    manager.vllm_config = object()
+    monkeypatch.setattr(graph, "set_current_vllm_config", lambda config: nullcontext())
     events = []
 
     @contextmanager
