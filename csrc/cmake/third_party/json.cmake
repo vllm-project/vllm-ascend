@@ -43,11 +43,12 @@ if(json_FOUND AND NOT FORCE_REBUILD_CANN_3RD)
     set(JSON_INCLUDE_DIR ${JSON_INSTALL_PATH}/include)
     add_library(json INTERFACE IMPORTED)
 else()
-    set(REQ_URL "https://gitcode.com/cann-src-third-party/json/releases/download/v3.11.3/include.zip")
+    set(REQ_URL "https://antsys-hpu-inference-public-prod.oss-cn-heyuan.aliyuncs.com/vllm-ascend-third-party/json-3.11.3-include.zip")
 
     include(ExternalProject)
     ExternalProject_Add(third_party_json
             URL ${REQ_URL}
+            DOWNLOAD_NAME include.zip
             TLS_VERIFY OFF
             DOWNLOAD_DIR ${JSON_DOWNLOAD_PATH}
             DOWNLOAD_NO_EXTRACT TRUE

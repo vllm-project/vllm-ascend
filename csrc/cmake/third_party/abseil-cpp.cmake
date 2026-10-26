@@ -39,7 +39,7 @@ else()
       set(REQ_URL "file://${CANN_3RD_LIB_PATH}/pkg/${ABSEIL_VERSION_PKG}")
       message(STATUS "[ThirdPartyLib][abseil-cpp] found in ${REQ_URL}.")
   else()
-    set(REQ_URL "https://gitcode.com/cann-src-third-party/abseil-cpp/releases/download/20230802.1/abseil-cpp-20230802.1.tar.gz")
+    set(REQ_URL "https://antsys-hpu-inference-public-prod.oss-cn-heyuan.aliyuncs.com/vllm-ascend-third-party/abseil-cpp-20230802.1.tar.gz")
     message(STATUS "[ThirdPartyLib][abseil-cpp] ${REQ_URL} not found, need download.")
   endif()
 

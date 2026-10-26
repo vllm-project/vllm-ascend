@@ -14,7 +14,7 @@ endif()
 include(ExternalProject)
 ExternalProject_Add(external_protobuf
   URL               ${_protobuf_url}
-                    https://gitcode.com/cann-src-third-party/protobuf/releases/download/v25.1/protobuf-25.1.tar.gz
+                    https://antsys-hpu-inference-public-prod.oss-cn-heyuan.aliyuncs.com/vllm-ascend-third-party/protobuf-25.1.tar.gz
   DOWNLOAD_DIR      download/protobuf
   PREFIX            third_party
   SOURCE_SUBDIR     cmake
