@@ -79,6 +79,8 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: true
 env_prefill: &env_prefill
   <<: *env_common
+  # DispatchFFNCombine needs 1162 MiB for 8192 tokens per TP rank.
+  HCCL_BUFFSIZE: "2048"
   VLLM_USE_FASTOKENS: "1"
   VLLM_PP_LAYER_PARTITION: "42,36"
 
