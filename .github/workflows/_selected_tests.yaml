@@ -251,10 +251,18 @@ jobs:
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
+          set -euo pipefail
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+          # The generic CI index may not mirror the required Ascend wheel yet.
+          # Reinstall it to restore the Triton namespace after installing vLLM.
+          TRITON_REQUIREMENT=$(grep -E '^triton-ascend==' requirements.txt)
+          uv pip install --no-config --force-reinstall --no-deps \
+            --index-url https://repo.huaweicloud.com/ascend/repos/pypi \
+            "$TRITON_REQUIREMENT"
+          # Arctic and other third-party sdists need their isolated build deps.
+          # Keep the project's non-isolated build setting for Ascend itself.
+          uv pip install --no-config -r requirements-dev.txt
           # Preserve CI availability during the transition by compiling on the
           # NPU only when the new CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
