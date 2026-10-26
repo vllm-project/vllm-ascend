@@ -998,3 +998,25 @@ Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
+
+
+### Native MiniMax M3.1 Flash DSpark drafts
+
+The native MiniMax draft loader accepts a parent checkpoint with a `dspark/`
+subdirectory containing safetensors weights. It validates the native tensor
+names, shapes and dtypes before loading them through the existing DSpark
+protocol. BF16 and MXFP8 drafts are supported without creating a converted
+checkpoint directory. This loader does not provide an NVFP4 conversion path.
+
+Set `method` to `dspark` in `--speculative-config` and use the parent checkpoint
+as the speculative model, or omit `model` to reuse the target checkpoint. The
+loader resolves its draft weights from `dspark/` and retains the target model's
+configuration. An explicit `dspark/config.json` is preferred; the config-less
+fallback is restricted to the supported MiniMax M3.1 Flash dimensions and checks
+the complete draft tensor schema. Other models and independently configured
+draft checkpoints keep their existing loading behavior.
+
+On A2/A3, MiniMax target/draft attention may use the optional ecosystem FA3
+package when its backend and cache-layout constraints are satisfied. On A5,
+the existing CANN attention path is retained. Native A5 draft selection for the
+device-length CANN FlashAttn backend is tracked separately.

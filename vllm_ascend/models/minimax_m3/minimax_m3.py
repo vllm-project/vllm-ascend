@@ -312,6 +312,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=rms_norm_eps)
 
         vllm_config = get_current_vllm_config()
+        self.use_dspark = bool(vllm_config.speculative_config and vllm_config.speculative_config.use_dspark())
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_layer_kv_cache_dtypes(
             cache_config,
@@ -484,7 +485,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # ahead of the separate prepare/cache chain through 256K-token prefill;
         # retain the fallback beyond the validated range.
         return (
-            HAS_TRITON
+            not self.use_dspark
+            and HAS_TRITON
             and hidden_states.shape[0] <= _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS
             and hidden_states.device.type == "npu"
             and hidden_states.dtype == torch.bfloat16
@@ -1116,8 +1118,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self._enable_eagle3_aux_hidden_states = (
-            vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
+        self._enable_aux_hidden_states = (
+            vllm_config.speculative_config is not None and vllm_config.speculative_config.method in ("eagle3", "dspark")
         )
 
         self.vocab_size = text_config.vocab_size
@@ -1206,7 +1208,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states_are_sp = layer.use_sequence_parallel
             if hidden_states_are_sp:
                 if idx + 1 in self.aux_hidden_state_layers:
-                    # EAGLE3 consumes the residual-added full token layout.
+                    # Hidden-state drafts consume the residual-added full token layout.
                     # Gather only requested snapshots, not both outputs per layer.
                     auxiliary = hidden_states + residual
                     auxiliary = sp_all_gather(auxiliary)[: positions.shape[0]]
@@ -1242,7 +1244,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        if self._enable_eagle3_aux_hidden_states:
+        if self._enable_aux_hidden_states:
             EagleModelMixin._set_aux_hidden_state_layers(self, layers)
         else:
             EagleModelMixin._set_aux_hidden_state_layers(self, ())

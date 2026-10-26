@@ -1678,3 +1678,21 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# ** File: patch_minimax_m3_dspark.py / worker/patch_minimax_m3_dspark.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.speculative.SpeculativeConfig` and the model registry
+#    Why:
+#       Native MiniMax DSpark checkpoints use draft-specific configuration,
+#       Gemma normalization and weight names not represented by Qwen3 drafts.
+#    How:
+#       Recognize a validated parent/dspark layout during configuration and
+#       register a draft subclass that reuses the existing DSpark protocol.
+#       Read only safetensors headers when preparing configuration; do not
+#       convert or duplicate checkpoint tensors.
+#    Related PR (if no, explain why):
+#       Native MiniMax DSpark loading is proposed here for Ascend; there is
+#       no corresponding vLLM implementation at the verified revision.
+#    Future Plan:
+#       Remove this shim when vLLM supports the native MiniMax draft config,
+#       tensor schema and model implementation through its normal registry.
