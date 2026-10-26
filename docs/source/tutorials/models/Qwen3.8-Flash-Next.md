@@ -372,8 +372,9 @@ kernel/compression-aligned size whose combined K+V bytes cover the SSM state;
 for the TP8 BF16 cache configuration this is 384 tokens. K and V are zero-copy
 views with a shared physical block stride, while the SSM state covers the whole
 page. Raw indexer, compressed-key, and convolution caches retain their own
-slabs. PLE shares r2 with packed K/V and SSM, using the r2 physical page
-stride; its scheduler group owns separate block IDs. GBSA advertises a
+slabs. PLE has one private contiguous state bank, charged once rather than
+repeated for every QSA slot, so indexed updates do not materialize strided r2
+pages. Its scheduler group owns separate block IDs. GBSA advertises a
 128-token kernel block size and maps those virtual page IDs onto packed K/V
 without making the cache contiguous. Compressed indexer metadata recovers
 manager page IDs from the same table.
@@ -382,4 +383,4 @@ The pool reserves one slot per QSA layer, including MTP (13 slots for this
 model). The 36 GDN layers use three independent cache groups of 13, 13, and 10
 layers. Each group reuses slot ordinals starting at zero; separate scheduler
 block tables keep their live physical block IDs disjoint. PLE uses its own
-group over the same pool.
+group of block IDs, with its state tensors stored in the private bank.
