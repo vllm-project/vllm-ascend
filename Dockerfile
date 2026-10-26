@@ -16,6 +16,11 @@
 #
 FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20261022115200-910b-ubuntu22.04-py3.12
 
+# Optional package mirrors and GitHub download proxy.
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+ARG GIT_PROXY=""
+
 WORKDIR /workspace
 
 # Install clang-15 (for triton-ascend)
@@ -58,7 +63,9 @@ ENV SOC_VERSION=$SOC_VERSION \
 COPY . /vllm-workspace/vllm-ascend/
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG COMPILE_CUSTOM_KERNELS=1
-RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
+           PIP_INDEX_URL="${PIP_INDEX_URL}" \
+           PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
