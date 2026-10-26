@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -72,6 +73,7 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+from vllm.v1.worker.utils import request_memory
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -102,6 +104,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.model_loader.preload.config import require_private_weights
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -312,6 +315,7 @@ class NPUWorker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        require_private_weights(self.load_config, "sleep")
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -400,6 +404,7 @@ class NPUWorker(WorkerBase):
 
     def start_weight_update(self) -> None:
         """Begin a new weight update; prepares the model for layerwise reload."""
+        require_private_weights(self.load_config, "start_weight_update")
         self._check_weight_transfer_engine()
 
         if self._weight_update_active:
@@ -415,6 +420,7 @@ class NPUWorker(WorkerBase):
 
     def update_weights(self, update_info: dict) -> None:
         """Receive a chunk of weights from the trainer and load them in place."""
+        require_private_weights(self.load_config, "update_weights")
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -533,20 +539,18 @@ class NPUWorker(WorkerBase):
         if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
             setup_ascend_local_comm_res(visible_device_index, self.vllm_config.kv_transfer_config)
 
-        # take current memory snapshot
+        # Wait for externally held weights before taking the snapshot, like
+        # upstream GPUWorker. Shared weights consume the utilization budget,
+        # but must not be allocated or charged again by this worker.
+        loader = get_model_loader(self.load_config)
+        query_external_memory = getattr(loader, "get_external_weight_memory", None)
+        external_weight_memory = query_external_memory(self.vllm_config) if query_external_memory is not None else 0
+        self._preload_copy_cache_memory = getattr(loader, "resident_cache_memory", 0)
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
-        if self.init_snapshot.free_memory < self.requested_memory:
-            GiB = lambda b: round(b / GiB_bytes, 2)
-            raise ValueError(
-                f"Free memory on device "
-                f"({GiB(self.init_snapshot.free_memory)}/"
-                f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
-                f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                f"utilization or reduce GPU memory used by other processes."
-            )
+        if external_weight_memory:
+            self.requested_memory = request_memory(self.init_snapshot, self.cache_config, external_weight_memory)
+        else:
+            self.requested_memory = request_memory(self.init_snapshot, self.cache_config)
 
         if (
             self.parallel_config.data_parallel_size > 1
@@ -965,6 +969,17 @@ class NPUWorker(WorkerBase):
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if copy_cache_memory := getattr(self, "_preload_copy_cache_memory", 0):
+            model = self.model_runner.get_model()
+            released = model.__dict__.pop("_ascend_preload_released_cache_bytes", 0)
+            # A producer release is not negative engine overhead. Rebase
+            # only the cache known to exist at startup and actually freed;
+            # a failed release or disk fallback must not receive this credit.
+            correction = min(copy_cache_memory, released)
+            self.init_snapshot.free_memory += correction
+            self.init_snapshot.cuda_memory -= correction
+            self.init_snapshot.non_torch_memory -= correction
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1447,6 +1462,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        require_private_weights(self.load_config, "reload_weights")
         self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:

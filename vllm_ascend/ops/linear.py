@@ -37,7 +37,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
@@ -106,6 +106,8 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        if is_weights_pre_processed():
+            return
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
@@ -113,8 +115,20 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             weight_fp32 = layer.weight.data.to(torch.float32)
             new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
             # keep the captured graph's weight reference to the updated weight
-            # during RL weight updates.
-            replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
+            # during RL weight updates. New vLLM always prefers copying and
+            # removed the prefer_copy keyword; also retain that behavior on
+            # versions where copying was opt-in.
+            old_fp32 = getattr(layer, "weight_fp32", None)
+            if (
+                isinstance(old_fp32, nn.Parameter)
+                and old_fp32.shape == new_fp32.shape
+                and old_fp32.stride() == new_fp32.stride()
+                and old_fp32.dtype == new_fp32.dtype
+                and old_fp32.device == new_fp32.device
+            ):
+                old_fp32.data.copy_(new_fp32)
+            else:
+                replace_parameter(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's

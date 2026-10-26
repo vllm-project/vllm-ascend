@@ -94,6 +94,7 @@ class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
     device_type: str = "npu"
+    dist_backend: str = "hccl"
     simple_compile_backend: str = "eager"  # Disable torch.compile()
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
@@ -230,7 +231,7 @@ class NPUPlatform(Platform):
         device_props = torch.npu.get_device_properties(device_id)
         if not hasattr(device_props, "uuid") or device_props.uuid is None:
             raise RuntimeError(f"Device {device_id} does not have a valid UUID.")
-        return device_props.uuid
+        return str(device_props.uuid)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
