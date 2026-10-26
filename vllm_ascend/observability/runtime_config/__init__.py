@@ -96,6 +96,7 @@ def build_runtime_config_from_additional(additional_config: dict[str, Any]) -> R
         startup_overlay=raw_overlay,
     )
     runtime_cfg.apply_ascend_log_level()
+    runtime_cfg.apply_metric_level()
     runtime_cfg.start_non_worker_background_reload()
     return RuntimeConfigBootstrap(
         path=raw_path,

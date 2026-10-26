@@ -81,6 +81,7 @@ class RuntimeGuardBusMixin:
         """
         self.action_executor.apply_runtime_config()
         self.runtime_config.apply_ascend_log_level()
+        self.runtime_config.apply_metric_level()
         self.detectors.apply_runtime_config()
         self.report_writer.save_sensitive_info = self.runtime_config.report_save_sensitive_info()
         self.report_writer.max_prompt_token_ids = self.runtime_config.report_max_prompt_token_ids()

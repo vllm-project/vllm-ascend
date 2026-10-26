@@ -6,6 +6,10 @@ Each feature composes its handler from the helpers here instead of
 re-implementing metric registration, recorder caching, and failure isolation.
 This module is the only place that imports ``ms_service_metric`` directly, so
 feature handler modules stay free of framework imports.
+
+Recording is gated by the process-local level in :mod:`vllm_ascend.observability.ms_metrics.level`.
+A spec is recorded when ``spec.level`` is less than or equal to that integer.
+Runtime config sets it from ``metrics.level``.
 """
 
 import contextlib
@@ -16,18 +20,50 @@ from typing import Any
 
 from ms_service_metric.provider_api import MetricType, get_metric_recorder  # type: ignore[import-not-found]
 
-__all__ = ["MetricType", "MetricSpec", "register_metrics", "safe_recording"]
+from vllm_ascend.observability.ms_metrics.level import (
+    METRIC_LEVEL_BASIC,
+    METRIC_LEVEL_DEBUG,
+    METRIC_LEVEL_DETAIL,
+    METRIC_LEVEL_OFF,
+    get_metric_level,
+    set_metric_level,
+)
+
+__all__ = [
+    "METRIC_LEVEL_BASIC",
+    "METRIC_LEVEL_DEBUG",
+    "METRIC_LEVEL_DETAIL",
+    "METRIC_LEVEL_OFF",
+    "MetricSpec",
+    "MetricType",
+    "get_metric_level",
+    "metric_enabled",
+    "record_metric",
+    "register_metrics",
+    "safe_recording",
+    "set_metric_level",
+]
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class MetricSpec:
-    """Declarative definition of a metric to register."""
+    """Declarative definition of a metric to register.
+
+    ``level`` defaults to basic. Higher levels stay dark until the active
+    level is raised.
+    """
 
     name: str
     metric_type: Any
     label_names: tuple[str, ...]
+    level: int = METRIC_LEVEL_BASIC
+
+
+def metric_enabled(spec: MetricSpec) -> bool:
+    """Return whether ``spec`` should be sampled at the active level."""
+    return spec.level <= get_metric_level()
 
 
 def register_metrics(
@@ -35,24 +71,42 @@ def register_metrics(
     recorders: dict[str, Any],
     recorder_key: str,
 ) -> Any:
-    """Register ``metric_specs`` (iterable of MetricSpec) once per recorder.
+    """Register enabled ``metric_specs`` once per recorder and active level.
 
     ``recorders`` is the feature-owned cache and ``recorder_key`` identifies
-    the spec group within it. Re-registers when the recorder is replaced.
+    the spec group within it. Re-registers when the recorder is replaced or
+    the active level changes. Specs above the active level are left
+    unregistered so high-cardinality series are not created until enabled.
+    Already created series stay in the registry when the level drops.
     """
     metrics = get_metric_recorder()
     if metrics is None:
         return None
-    if recorders.get(recorder_key) is metrics:
+    active_level = get_metric_level()
+    if recorders.get(recorder_key) == (metrics, active_level):
         return metrics
     for spec in metric_specs:
+        if spec.level > active_level:
+            continue
         metrics.get_or_create_metric(
             metric_name=spec.name,
             metric_type=spec.metric_type,
             label_names=list(spec.label_names),
         )
-    recorders[recorder_key] = metrics
+    recorders[recorder_key] = (metrics, active_level)
     return metrics
+
+
+def record_metric(
+    metrics: Any,
+    spec: MetricSpec,
+    value: float,
+    labels: dict[str, str],
+) -> None:
+    """Record ``spec`` when the recorder exists and the active level allows it."""
+    if metrics is None or spec.level > get_metric_level():
+        return
+    metrics.record_metric(spec.name, value=float(value), labels=labels)
 
 
 @contextlib.contextmanager

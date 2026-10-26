@@ -16,7 +16,7 @@
 """Default ``runtime_config.json`` schema (hot-reload control plane).
 
 Detector sections are assembled from :mod:`detector_catalog` (each detector
-declares ``schema``). Shared dump/report/actions/ascend_log stay here.
+declares ``schema``). Shared dump/report/actions/ascend_log/metrics stay here.
 """
 
 from __future__ import annotations
@@ -65,6 +65,12 @@ _DEFAULTS: dict[str, Any] = {
         # Per-logger overrides, e.g. {"vllm.worker": "WARNING", "runtime_guard": "DEBUG"}.
         "modules": {},
     },
+    # Ascend-owned MS Service Metric level. Applied to this process on startup
+    # and again when hot-reload accepts a new JSON (same moments as ascend_log).
+    "metrics": {
+        # off | basic | detail | debug, or 0-3. basic records metrics shipped today.
+        "level": "basic",
+    },
     "report": {
         # Default False: anomaly reports store lengths only.
         # Set true to persist prompt_token_ids + cumulative output_token_ids
@@ -94,6 +100,7 @@ TOP_LEVEL_KEYS: frozenset[str] = frozenset(_DEFAULTS)
 DUMP_KEYS: frozenset[str] = frozenset(_DEFAULTS["dump"])
 REPORT_KEYS: frozenset[str] = frozenset(_DEFAULTS["report"])
 ASCEND_LOG_KEYS: frozenset[str] = frozenset(_DEFAULTS["ascend_log"])
+METRICS_KEYS: frozenset[str] = frozenset(_DEFAULTS["metrics"])
 ACTIONS_KEYS: frozenset[str] = frozenset(_DEFAULTS["actions"])
 # Per-detector action overrides (not in each detector's default dict).
 _DETECTOR_ACTION_KEYS: frozenset[str] = frozenset(
