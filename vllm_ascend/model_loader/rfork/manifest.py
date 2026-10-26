@@ -61,7 +61,7 @@ def numel_from_shape(shape: tuple[int, ...]) -> int:
     return numel
 
 
-def parse_weight_info(weight_info: Any):
+def parse_weight_info(weight_info: Any) -> tuple[int, int, int, tuple[int, ...], str] | None:
     """Parse the only supported RFork manifest entry format."""
     if not isinstance(weight_info, (list, tuple)) or len(weight_info) != 5:
         return None
