@@ -214,8 +214,8 @@ def test_token_dispatcher_with_all_gather(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("device", DEVICE)
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="BF16 W8A8 AllGather fallback UT is limited to A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="BF16 W8A8 AllGather fallback UT is limited to A2/A3/A5",
 )
 def test_token_dispatcher_with_all_gather_quant(
     m: int,
