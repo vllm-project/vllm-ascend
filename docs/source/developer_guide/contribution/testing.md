@@ -247,9 +247,9 @@ You can run tests with `pytest` as well. Typical examples:
 
 ##### Parallel single-card operator tests
 
-The A3 560T and A5 `singlecard-ops` nightly entries use one four-NPU runner
-with `pytest_workers: 4`. A runner label ending in `-4` reserves resources;
-the explicit worker setting starts four independent pytest processes, each
+The A3 560T and A5 `singlecard-ops` nightly entries use one eight-NPU runner
+with `pytest_workers: 8`. A runner label ending in `-8` reserves resources;
+the explicit worker setting starts eight independent pytest processes, each
 bound to one container-visible NPU. Other entries default to one process.
 
 The shard runner assigns each complete test file once, including files under
@@ -262,7 +262,7 @@ To reproduce inside an already provisioned multi-NPU test container:
 ```bash
 python3 .github/workflows/scripts/run_singlecard_shards.py \
     --tests tests/e2e/nightly/single_node/ops/singlecard_ops/ \
-    --workers 4 --output-dir /tmp/singlecard-run
+    --workers 8 --output-dir /tmp/singlecard-run
 ```
 
 Use a new output directory for each run. The script respects an existing
