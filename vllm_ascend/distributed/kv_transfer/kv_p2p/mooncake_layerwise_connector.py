@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
 )
 from vllm.logger import logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
@@ -278,7 +279,8 @@ class KVCacheSendingLayerThread(threading.Thread):
 
     def run(self):
         local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
+        device = torch.device(f"npu:{visible_device_index}")
         torch.npu.set_device(device)
         self.ready_event.set()
         while True:

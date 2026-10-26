@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import torch
 from typing_extensions import override
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -74,13 +73,8 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         self,
         kv_caches: CanonicalKVCaches,
     ) -> NPUOffloadingWorker:
-        world_size = self.config.parallel.world_size
-        if self.replicated_layout:
-            rank = 0
-        else:
-            # engine_id identifies the DP replica; fold the process-local
-            # physical device index into that replica's mmap slot range.
-            rank = int(torch.npu.current_device()) % world_size
+        # Match the scheduler's rank-based layout, regardless of device selection.
+        rank = 0 if self.replicated_layout else self.config.parallel.rank
 
         region_kwargs = dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         worker_mmap = SharedOffloadRegion(

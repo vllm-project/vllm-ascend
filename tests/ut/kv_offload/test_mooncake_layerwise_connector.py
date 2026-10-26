@@ -105,6 +105,28 @@ def _make_mock_kv_cache_config(block_size=16):
 
 
 class TestKVCacheSendingLayerThread(unittest.TestCase):
+    def test_run_uses_visible_device_mapping(self):
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector"
+        for local_rank, visible_device in ((0, 0), (1, 1), (0, 1), (1, 3), (0, 3), (1, 0)):
+            with self.subTest(local_rank=local_rank, visible_device=visible_device):
+                self.thread.send_queue = MagicMock()
+                self.thread.send_queue.get.side_effect = StopIteration
+                self.ready_event.clear()
+                with (
+                    patch(f"{module}.get_world_group") as world_group,
+                    patch(f"{module}.current_platform", create=True) as platform,
+                    patch(f"{module}.torch.device") as device,
+                    patch(f"{module}.torch.npu.set_device") as set_device,
+                ):
+                    world_group.return_value.local_rank = local_rank
+                    platform.logical_device_id_to_visible_device_id.return_value = visible_device
+                    with self.assertRaises(StopIteration):
+                        self.thread.run()
+
+                    device.assert_called_once_with(f"npu:{visible_device}")
+                    set_device.assert_called_once_with(device.return_value)
+                    self.assertTrue(self.ready_event.is_set())
+
     def setUp(self):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
