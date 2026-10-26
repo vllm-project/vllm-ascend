@@ -1747,7 +1747,12 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query
     assert md.decode.gbsa_metadata_prepared
     buffer = next(iter(md.decode.gbsa_metadata_cache.values()))
     q = torch.zeros((2 * query_len, 4, 128), dtype=torch.bfloat16)
-    attention_op.side_effect = lambda *args, **kwargs: (events.append("gbsa") or q, torch.empty(0))
+
+    def run_gbsa(*args, **kwargs):
+        events.append("gbsa")
+        return q, torch.empty(0)
+
+    attention_op.side_effect = run_gbsa
     impl = AscendMiniMaxM3SparseImpl(4, 128, 0.5, 2, topk_blocks=16, sparse_block_size=128)
     kv = torch.zeros((2, 6, 128, 2, 128), dtype=torch.bfloat16)
     with patch.object(
