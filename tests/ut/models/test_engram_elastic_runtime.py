@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -37,6 +38,59 @@ def runtime():
         ),
     )
     return ElasticEngramRuntime(model, config())
+
+
+@pytest.fixture
+def initialization(monkeypatch):
+    from vllm_ascend import ascend_config
+    from vllm_ascend.models.deepseek_v41.engram import runtime as runtime_mod
+
+    rt = runtime()
+    rt.model._engram_overlap_enabled = False
+    # The model buffer deliberately differs from the ambient CPU device.
+    rt.model.topk_indices_buffer = torch.empty(1, device="meta")
+    rt.model.config.engram_num_embeddings = [64, 64]
+    rt.model.config.engram_head_dim = 64
+    rt.model.engram_layout = SimpleNamespace(primes=[[[31, 33]], [[29, 35]]])
+    rt.model.engram_weight_root = "/checkpoint"
+    rt.model.engram_rotated = False
+    rt.model.layers = [SimpleNamespace(engram=SimpleNamespace()) for _ in range(15)]
+    monkeypatch.setattr(
+        ascend_config, "get_ascend_config", lambda: SimpleNamespace(engram_config=SimpleNamespace(group_size=4))
+    )
+    groups = Mock(side_effect=[("group-1", True), ("group-14", True)])
+    monkeypatch.setattr(runtime_mod, "create_engram_process_group", groups)
+    tables = [Mock(width=64), Mock(width=64)]
+    factory = Mock(side_effect=tables)
+    monkeypatch.setattr(runtime_mod, "ElasticEngramEmbedding", factory)
+    ops = ModuleType("cann_ops_transformer.ops")
+    ops.ElasticBuffer = object()
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    return rt, factory, tables, groups
+
+
+def test_initialize_binds_every_table_to_model_device_and_is_idempotent(initialization):
+    rt, factory, tables, groups = initialization
+    rt.initialize()
+    rt.initialize()
+    assert factory.call_count == groups.call_count == 2
+    assert rt.tables == dict(zip([1, 14], tables))
+    for call, layer_id, table in zip(factory.call_args_list, [1, 14], tables):
+        assert call.kwargs["device"] == rt.model.topk_indices_buffer.device
+        assert call.kwargs["layer_id"] == layer_id and call.kwargs["minimum_rows"] == 64
+        table.load_checkpoint.assert_called_once_with("/checkpoint", f"layers.{layer_id}.engram.embed.weight")
+        table.offload_weights.assert_called_once()
+        assert rt.model.layers[layer_id].engram.embed_tokens is table
+
+
+def test_initialize_failure_closes_tables_before_returning(initialization):
+    rt, factory, tables, groups = initialization
+    tables[0].offload_weights.side_effect = RuntimeError("fetch probe failed")
+    with pytest.raises(RuntimeError, match="fetch probe failed"):
+        rt.initialize()
+    tables[0].destroy.assert_called_once()
+    assert not rt.tables
+    assert factory.call_count == groups.call_count == 1
 
 
 def test_metadata_addresses_survive_reorder_padding_and_idle_steps():

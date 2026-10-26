@@ -47,6 +47,7 @@ class ElasticEngramRuntime:
                         rows,
                         self.model.config.engram_head_dim,
                         size,
+                        device=self.model.topk_indices_buffer.device,
                         group=group,
                         owns_group=owns_group,
                         layer_id=layer_id,

@@ -197,4 +197,17 @@ def resolve_engram_config(vllm_config) -> ResolvedEngramConfig:
     except Exception:
         vllm_config.engram_config = previous
         raise
+    if resolved.backend == "elastic":
+        loader_extra = getattr(vllm_config.load_config, "model_loader_extra_config", None)
+        if loader_extra and loader_extra.get("enable_multithread_load", False):
+            from vllm.logger import logger
+
+            logger.warning(
+                "Disabling multithread checkpoint loading for Elastic Engram: "
+                "complete shards would be materialized before Engram table filtering."
+            )
+            vllm_config.load_config.model_loader_extra_config = {
+                **loader_extra,
+                "enable_multithread_load": False,
+            }
     return _publish(vllm_config, resolved, projection)
