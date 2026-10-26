@@ -121,6 +121,58 @@ def _make_layer() -> SimpleNamespace:
     return layer
 
 
+@pytest.mark.parametrize("use_fused", [True, False])
+def test_pure_decode_fusion_preserves_output_and_connector_hooks(use_fused):
+    # Convolution is mocked below; this test does not exercise weight reload.
+    with patch("tests.ut.ops.test_gdn_mixed_batch._pack_conv_weights"):
+        layer = _make_layer()
+    metadata = _make_mixed_metadata()
+    metadata.num_prefills = 0
+    metadata.num_prefill_tokens = 0
+    metadata.num_actual_tokens = 1
+    metadata.num_decode_tokens = 1
+    metadata.non_spec_state_indices_tensor = torch.tensor([0], dtype=torch.int32)
+    metadata.non_spec_decode_metadata.causal_conv1d.query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    packed = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]])
+    output = torch.zeros(2, 1, 2)
+    expected = torch.tensor([[[5.0, 6.0]]])
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    with (
+        override_forward_context(context),
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector") as wait,
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start"),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector") as save,
+        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *args, **kwargs: x),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.try_fused_gdn_decode", return_value=expected if use_fused else None
+        ) as fused,
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 1, 1), torch.ones(1, 1, 1)),
+        ) as gating,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x) as norm,
+        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", return_value=expected) as recurrent,
+    ):
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(1, 1), torch.zeros(1, 1), output)
+    fused.assert_called_once()
+    wait.assert_called_once_with(layer.prefix)
+    save.assert_called_once_with("", [])
+    torch.testing.assert_close(output[:1], expected)
+    torch.testing.assert_close(output[1:], torch.zeros_like(output[1:]))
+    if use_fused:
+        gating.assert_not_called()
+        norm.assert_not_called()
+        recurrent.assert_not_called()
+    else:
+        gating.assert_called_once()
+        assert norm.call_count == 2
+        recurrent.assert_called_once()
+
+
 @pytest.mark.parametrize("initial_state", [True, False])
 def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     layer = _make_layer()
