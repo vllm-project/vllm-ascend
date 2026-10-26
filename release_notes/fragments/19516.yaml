@@ -1,10 +1,4 @@
 pr: 19516
 entries:
   - category: dependency
-    text: Updated the supported vLLM release to v0.32.0 while retaining compatibility with the verified main revision.
-  - category: bugfix
-    text: Fixed custom schedulers crashing during asynchronous KV transfer for models requiring KV cache zeroing on vLLM v0.32.0 and the supported main revision.
-  - category: bugfix
-    text: Fixed speculative decoding startup with pipeline parallelism and MoE draft EPLB registration on vLLM v0.32.0 and the supported main revision.
-  - category: bugfix
-    text: Fixed duplicate image and video normalization in Ascend Qwen3.5 and Qwen3.6 models with the vLLM v0.32.0 vision encoder.
+    text: Updated vLLM compatibility to v0.32.0.
