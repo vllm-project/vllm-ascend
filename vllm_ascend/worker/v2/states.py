@@ -17,10 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from inspect import signature
-
 import torch
 from vllm.v1.worker.gpu.states import RequestState
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendRequestState(RequestState):
@@ -36,12 +36,6 @@ class AscendRequestState(RequestState):
         device: torch.device,
         use_dense_all_token_ids: bool = False,
     ):
-        # TODO: Remove this compatibility check once the minimum supported
-        # vLLM version includes dense request history (vLLM #40704).
-        # Check the API rather than the version because development builds and
-        # backports may expose different APIs under the same version label.
-        if use_dense_all_token_ids and "use_dense_all_token_ids" not in signature(RequestState.__init__).parameters:
-            raise ValueError("MRV2 n-gram requires vLLM containing PRs #40704 and #60300")
         super().__init__(
             max_num_reqs,
             max_model_len,
@@ -49,7 +43,8 @@ class AscendRequestState(RequestState):
             num_speculative_steps,
             vocab_size,
             device,
-            **({"use_dense_all_token_ids": True} if use_dense_all_token_ids else {}),
+            # v0.31.0 predates the dense history option used by MRV2 n-gram.
+            **({} if vllm_version_is("0.31.0") else {"use_dense_all_token_ids": use_dense_all_token_ids}),
         )
         # Ascend attention needs a torch CPU view of the upstream NumPy state.
         # Sharing storage keeps both APIs coherent without duplicate writes.
