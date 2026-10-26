@@ -25,9 +25,8 @@ pytestmark = pytest.mark.e2e_model(MODEL)
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_glm_dspark_kvpp_outputs(monkeypatch):
+def test_glm_dspark_kvpp_outputs():
     """Keep GLM DSpark outputs unchanged across KVPP and repeated mixed batches."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     results = []
     for enabled in (False, True):
         with VllmRunner(
