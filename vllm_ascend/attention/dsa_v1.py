@@ -23,7 +23,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
-    get_a3_draft_sparse_kv_plan,
+    get_draft_sparse_kv_plan,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
@@ -261,7 +261,7 @@ def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
     # the pre-A3 planner); the draft-only plan decides whether the DSpark
     # draft switches kernels. On A5 it degenerates to the target plan, so the
     # pre-existing A5 draft behavior is unchanged.
-    return get_a3_draft_sparse_kv_plan(vllm_config).uses_draft_sparse_flash_mla
+    return get_draft_sparse_kv_plan(vllm_config).uses_draft_sparse_flash_mla
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
@@ -561,6 +561,8 @@ def build_dspark_swa_indices(
     *,
     use_logical_indices: bool = False,
     lengths_output: torch.Tensor | None = None,
+    num_query_per_req: int | None = None,
+    max_num_reqs: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -577,6 +579,13 @@ def build_dspark_swa_indices(
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
     address stable across async ACL-graph replays, where the DSA operator
     captures ``ori_sparse_indices``'s data pointer at capture time.
+
+    Dispatch is centralized here. Physical (slot-id) builds with a stable
+    buffer and a per-request query count use the fused slot triton kernel,
+    which writes into the full-capacity ``buffer`` in place; logical builds
+    without buffers use the indices kernel; everything else falls back to the
+    reference torch chain. ``max_num_reqs`` is the caller's padded request
+    capacity for the slot kernel's capacity grid.
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
@@ -588,6 +597,29 @@ def build_dspark_swa_indices(
         )
     if query_start_loc is None or seq_lens is None:
         raise ValueError("DSpark SWA query_start_loc and seq_lens must both be provided")
+
+    if (
+        build_dspark_swa_slot_indices_triton is not None
+        and dspark_swa_indices_supported is not None
+        and not use_logical_indices
+        and buffer is not None
+        and num_query_per_req is not None
+        and query_start_loc.device.type == "npu"
+        and (max_num_reqs is None or seq_lens.shape[0] <= max_num_reqs)
+        and dspark_swa_indices_supported(block_size, int(block_table.shape[1]))
+    ):
+        return build_dspark_swa_slot_indices_triton(
+            block_table,
+            num_speculative_tokens,
+            window_size,
+            block_size,
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens=num_decode_tokens,
+            index_width=index_width,
+            indices_output=buffer,
+            num_query_per_req=num_query_per_req,
+        )
 
     if (
         use_logical_indices
@@ -1198,7 +1230,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_topk_length: torch.Tensor,
         ori_topk: int,
     ) -> torch.Tensor:
-        kv_plan = get_a3_draft_sparse_kv_plan(self.vllm_config)
+        kv_plan = get_draft_sparse_kv_plan(self.vllm_config)
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         call_kwargs = dict(
             num_heads_q=self.model_config.hf_config.num_attention_heads
@@ -1352,44 +1384,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_decode_reqs <= self.max_num_reqs_for_dspark()
         )
 
-    def _build_dspark_swa_indices_eager(
-        self, dspark_swa_args: tuple, buffer: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Eager (non-device-metadata) DSpark indices build, triton fast path first.
-
-        The eager path has no captured graph to protect, so the triton kernel
-        runs with the plain active-row allocation (no max_num_reqs capacity
-        grid) and falls back to the reference torch chain when the kernel is
-        unavailable or the shape is unsupported. ``buffer`` keeps the
-        stable-address contract of the previous eager call sites.
-        """
-        block_table, num_speculative_tokens, window_size, block_size, query_start_loc, seq_lens, num_decode_tokens = (
-            dspark_swa_args
-        )
-        if self._dspark_swa_indices_fast_path_eligible(query_start_loc.shape[0] - 1):
-            return build_dspark_swa_slot_indices_triton(
-                block_table,
-                num_speculative_tokens,
-                window_size,
-                block_size,
-                query_start_loc,
-                seq_lens,
-                num_decode_tokens=num_decode_tokens,
-                index_width=self._dspark_index_width,
-                indices_output=buffer,
-                num_query_per_req=self.dspark_num_query_per_req(),
-            )
-        return build_dspark_swa_indices(
-            block_table,
-            num_speculative_tokens,
-            window_size,
-            block_size,
-            query_start_loc,
-            seq_lens,
-            num_decode_tokens=num_decode_tokens,
-            buffer=buffer,
-        )
-
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
         self._device_metadata_tasks = ()
@@ -1497,17 +1491,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     lengths_output=lengths_output,
                 )
             else:
-                dspark_swa_indices, _ = self._build_dspark_swa_indices_eager(
-                    (
-                        self.block_table[: self.num_decodes],
-                        self.speculative_config.num_speculative_tokens,
-                        self.model_config.hf_config.sliding_window,
-                        self.storage_block_size,
-                        query_start_loc[: self.num_decodes + 1],
-                        self.seq_lens[: self.num_decodes],
-                        self.num_decode_tokens,
-                    ),
+                dspark_swa_indices, _ = build_dspark_swa_indices(
+                    self.block_table[: self.num_decodes],
+                    self.speculative_config.num_speculative_tokens,
+                    self.model_config.hf_config.sliding_window,
+                    self.storage_block_size,
+                    query_start_loc[: self.num_decodes + 1],
+                    self.seq_lens[: self.num_decodes],
+                    self.num_decode_tokens,
                     buffer=self.dspark_swa_indices_buffer,
+                    num_query_per_req=self.dspark_num_query_per_req(),
+                    max_num_reqs=self.max_num_reqs_for_dspark(),
                 )
                 dspark_swa_topk_lengths = None
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
@@ -1855,8 +1849,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         lengths_output=dspark_swa_topk_lengths,
                     )
                 else:
-                    dspark_swa_indices, _ = self._build_dspark_swa_indices_eager(
-                        dspark_swa_args, buffer=self.dspark_swa_indices_buffer
+                    dspark_swa_indices, _ = build_dspark_swa_indices(
+                        *dspark_swa_args,
+                        buffer=self.dspark_swa_indices_buffer,
+                        num_query_per_req=self.dspark_num_query_per_req(),
+                        max_num_reqs=self.max_num_reqs_for_dspark(),
                     )
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
@@ -2021,7 +2018,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # the process lifetime, so cache it like the TQ plan instead of
         # re-running the gate on every draft step.
         if self._draft_kv_plan is None:
-            self._draft_kv_plan = get_a3_draft_sparse_kv_plan(self.vllm_config)
+            self._draft_kv_plan = get_draft_sparse_kv_plan(self.vllm_config)
         return self._draft_kv_plan
 
     def __init__(

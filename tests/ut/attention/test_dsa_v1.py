@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAMetadata as AscendDSACPMetadata,
 )
-from vllm_ascend.attention.dsa_attn_kv_plan import get_a3_draft_sparse_kv_plan, get_dsa_attn_kv_plan
+from vllm_ascend.attention.dsa_attn_kv_plan import get_draft_sparse_kv_plan, get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSABackend,
@@ -323,7 +323,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
         ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
-        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_draft_sparse_kv_plan", return_value=plan),
     ):
         metadata = _build_draft_req_metadata(
             builder,
@@ -405,7 +405,7 @@ def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse
     with (
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
-        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_draft_sparse_kv_plan", return_value=plan),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as get_cmp_offsets,
     ):
@@ -3342,6 +3342,35 @@ def test_dspark_indices_fill_padded_rows_with_contract_values():
     assert lengths.flatten().tolist() == [9] * 5 + [0] * 5
 
 
+def test_dspark_indices_slot_hints_fall_back_to_reference_chain():
+    """The unified dispatch degrades to the reference torch chain when the
+    slot kernel cannot run (CPU tensors here): the fast-path hints are inert
+    and the physical slots and padded-row contract stay identical.
+    """
+    kwargs = dict(
+        # The reference chain gathers per request, so every request needs a
+        # block-table row; the dummy request's row is masked out (visible 0).
+        block_table=torch.tensor([[5, 2, 7], [0, 0, 0]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 5, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([10, 0], dtype=torch.int32),
+        num_decode_tokens=10,
+        index_width=8,
+        buffer=torch.zeros((10, 1, 8), dtype=torch.int32),
+    )
+    plain_indices, plain_lengths = build_dspark_swa_indices(**kwargs)
+    hint_indices, hint_lengths = build_dspark_swa_indices(**kwargs, num_query_per_req=5, max_num_reqs=4)
+    assert torch.equal(hint_indices, plain_indices)
+    assert torch.equal(hint_lengths, plain_lengths)
+    # Window 4 over a ten-token sequence: request 0 sees positions 1..8
+    # (block 5 -> slots 21..23, block 2 -> 8..11, block 7 -> 28); the padded
+    # tail keeps the invalid markers.
+    assert hint_indices[:, 0, :].tolist() == [[21, 22, 23, 8, 9, 10, 11, 28]] * 5 + [[-1] * 8] * 5
+    assert hint_lengths.flatten().tolist() == [9] * 5 + [0] * 5
+
+
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     impl = _make_impl()
@@ -3367,7 +3396,7 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     )
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
-        patch("vllm_ascend.attention.dsa_v1.get_a3_draft_sparse_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_draft_sparse_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=is_draft),
         patch.object(
             DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
@@ -3412,7 +3441,7 @@ def test_a3_kv_plan_routes_draft_to_compiled_binding(cache_dtype):
     config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
     profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
     with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
-        plan = get_a3_draft_sparse_kv_plan(config)
+        plan = get_draft_sparse_kv_plan(config)
     # The target attention is untouched: FIA plan, shared-kv operator.
     assert not plan.uses_sparse_flash_mla
     assert plan.sparse_attn_op is torch.ops._C_ascend.npu_sparse_attn_sharedkv
@@ -3429,7 +3458,7 @@ def test_a3_kv_plan_keeps_draft_fia_for_non_bf16_kv(cache_dtype):
     config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
     profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
     with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
-        plan = get_a3_draft_sparse_kv_plan(config)
+        plan = get_draft_sparse_kv_plan(config)
     assert not plan.uses_draft_sparse_flash_mla
     assert plan.draft_sparse_attn_op is None
     assert plan.draft_sparse_attn_metadata_op is None
@@ -3457,7 +3486,7 @@ def test_a3_kv_plan_keeps_draft_fia_under_pcp(pcp_size):
     )
     profile = _plan_hardware_profile(supports_compressed_cache=False, family=DeviceAdaptorFamily.STANDARD)
     with patch("vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile", return_value=profile):
-        plan = get_a3_draft_sparse_kv_plan(config)
+        plan = get_draft_sparse_kv_plan(config)
     if pcp_size > 1:
         assert not plan.uses_draft_sparse_flash_mla
         assert plan.draft_sparse_attn_op is None
@@ -3490,7 +3519,7 @@ def test_a3_draft_gate_disables_under_replicated_pcp_process():
         patch("vllm.distributed.get_pcp_group", return_value=pcp_group),
     ):
         assert not is_a3_bf16_kv_enabled(replica_config)
-        plan = get_a3_draft_sparse_kv_plan(replica_config)
+        plan = get_draft_sparse_kv_plan(replica_config)
     assert not plan.uses_draft_sparse_flash_mla
     assert plan.draft_sparse_attn_op is None
 

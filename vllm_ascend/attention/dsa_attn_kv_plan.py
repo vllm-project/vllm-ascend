@@ -274,7 +274,7 @@ class DsaAttnKvPlan:
         )
 
 
-def get_a3_draft_sparse_kv_plan(vllm_config) -> DsaAttnKvPlan:
+def get_draft_sparse_kv_plan(vllm_config) -> DsaAttnKvPlan:
     """Build the plan the DSpark draft attention executes against.
 
     On A3-class hardware with a BF16 KV cache this returns the FIA target
@@ -331,7 +331,7 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
         )
     if not _supports_dsv4_compressed_cache():
         # A3-class hardware keeps the FIA target plan. The compiled-binding
-        # draft path is enabled separately via get_a3_draft_sparse_kv_plan;
+        # draft path is enabled separately via get_draft_sparse_kv_plan;
         # this branch is identical to the pre-A3 FIA plan.
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
