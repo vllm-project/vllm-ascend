@@ -4,7 +4,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton_sis
 
 ## Description
 
-- **Function**: Single-input single-output (SISO) variant of [`_triton_rope`](./rope.md): applies rotary position embedding (RoPE) **in place** to one `[num_tokens, num_heads, head_dim]` tensor instead of a Q/K pair. It supports partial rotary (`rope_dim != head_dim`), NeoX and GPT-J (interleaved) styles, and either a pre-selected `cos`/`sin` pair or `cos_sin_cache` + `positions`. It is used by the SFA (sparse flash attention) path in `vllm_ascend/attention/sfa_v1.py`, where the lightweight Q and K projections are rotated one tensor at a time.
+- **Function**: Single-input single-output (SISO) RoPE that rotates one `[num_tokens, num_heads, head_dim]` tensor **in place**. It supports partial rotary (`rope_dim != head_dim`), NeoX and GPT-J (interleaved) styles, and either a pre-selected `cos`/`sin` pair or `cos_sin_cache` + `positions`. It is used by the SFA indexer path in `vllm_ascend/attention/indexer.py`, where the lightweight Q and K projections are rotated one tensor at a time.
 - **Formula**: For each token row `m`, each head, and the first `rope_dim` elements of the head (the remaining `head_dim - rope_dim` elements are left untouched):
 
     ```text
@@ -56,18 +56,18 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton_sis
 - `qk` must be 3-D `[num_tokens, n_head, head_dim]`. An already-contiguous input is modified in place. For a non-contiguous input, the wrapper creates and rotates a contiguous copy instead, so the caller's original view is unchanged and the returned tensor must be used.
 - `rope_dim <= head_dim` (asserted by the wrapper) and `rope_dim` must be even; when `rope_dim < head_dim` the trailing `head_dim - rope_dim` elements of every head are passed through unchanged.
 - Exactly one rotation-table mode must be supplied: `cos_sin_cache` together with `positions` (then `positions.shape[0] == num_tokens`), or `cos` and `sin` together (then `cos.shape[0] == sin.shape[0] == num_tokens`); otherwise the wrapper raises `ValueError`.
-- With `cos`/`sin`, each row holds `rope_dim // 2` coefficients (they must not be duplicated to `rope_dim`). Unlike `rope_forward_triton`, `rope_forward_triton_siso` must be called with an explicit `rope_dim`: it computes `pad_rope_dim` before the `rope_dim == -1` inference, so the `-1` default would propagate an invalid padded dimension to the kernel. With `cos_sin_cache`, `rope_dim` must additionally be a power of two because the kernel starts the sine load at `pad_rope_dim // 2`, not at `rope_dim // 2`.
+- With `cos`/`sin`, each row holds `rope_dim // 2` coefficients (they must not be duplicated to `rope_dim`). `rope_forward_triton_siso` must be called with an explicit `rope_dim`: it computes `pad_rope_dim` before the `rope_dim == -1` inference, so the `-1` default would propagate an invalid padded dimension to the kernel. With `cos_sin_cache`, `rope_dim` must additionally be a power of two because the kernel starts the sine load at `pad_rope_dim // 2`, not at `rope_dim // 2`.
 - `positions` values must be within `[0, cos_sin_cache.shape[0])`; they are loaded as `int64`.
-- All heads of a row are processed in a single `[pad_n_h, pad_rope_dim // 2]` tile — unlike `_triton_rope`, there is no head tiling — so `n_head * rope_dim` (rounded up to powers of two) must fit into UB. The operator therefore targets small head counts, such as the single-head lightweight K/Q of the SFA path (`n_head = 1`, `head_dim = 128`); a large `n_head` combined with a large `head_dim` can overflow UB.
+- All heads of a row are processed in a single `[pad_n_h, pad_rope_dim // 2]` tile with no head tiling, so `n_head * rope_dim` (rounded up to powers of two) must fit into UB. The operator therefore targets small head counts, such as the single-head lightweight K/Q of the SFA path (`n_head = 1`, `head_dim = 128`); a large `n_head` combined with a large `head_dim` can overflow UB.
 - Rotation is computed in fp32 and cast back to the input dtype on store.
 - `num_tokens` is dynamic (the grid is capped by the vector-core count and the kernel strides over rows), so the kernel is graph-mode friendly: the launch grid does not depend on runtime tensor values, and no host synchronization occurs inside.
 
 ## Origin and Differences
 
-- **Origin**: Developed for vllm-ascend, derived from `_triton_rope` in the same file (which implements the vLLM `rotary_embedding` custom op); it replaces the `torch.split` + `torch_npu.npu_rotary_mul` + `torch.cat` chain in the SFA lightweight-index path of `vllm_ascend/attention/sfa_v1.py`.
+- **Origin**: Developed for vllm-ascend; it replaces the `torch.split` + `torch_npu.npu_rotary_mul` + `torch.cat` chain in the SFA lightweight-index path of `vllm_ascend/attention/indexer.py`.
 - **Differences**:
     - NPU adaptation for performance: rotates a single tensor in place with a persistent grid of `min(num_tokens, get_vectorcore_num())` programs and an inner row-stride loop; the whole row (all heads) is handled in one tile, which removes the head-loop overhead for the small-head-count SFA case, and the in-place update removes the split/concat copies of the `npu_rotary_mul` path;
-    - Modified for a specific vllm-ascend logic or different input parameters: single input / single output instead of the Q+K pair, so callers that rotate Q and K in separate steps (SFA `q_li` / `k_li`) do not have to build a dummy tensor; keeps the same `cos_sin_cache` + `positions` and pre-selected `cos`/`sin` dual interface, the partial-rotary pass-through, and the NeoX / GPT-J switch as `_triton_rope`.
+    - Uses a single input / single output so callers that rotate Q and K in separate steps (SFA `q_li` / `k_li`) do not have to build a dummy tensor; keeps the `cos_sin_cache` + `positions` and pre-selected `cos`/`sin` interfaces, partial-rotary pass-through, and the NeoX / GPT-J switch.
 
 ## Test Cases
 
