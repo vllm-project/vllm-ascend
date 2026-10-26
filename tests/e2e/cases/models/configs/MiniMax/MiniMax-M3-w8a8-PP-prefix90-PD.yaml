@@ -23,7 +23,7 @@ config:
 
   - node_index: 1
     port_start: 31260
-    dp_rpc_port: 31422
+    dp_rpc_port: 32422
     dp_size: 8
     dp_size_local: 4
     dp_rank_start: 0
@@ -33,7 +33,7 @@ config:
 
   - node_index: 2
     port_start: 31260
-    dp_rpc_port: 31422
+    dp_rpc_port: 32422
     dp_size: 8
     dp_size_local: 4
     dp_rank_start: 4
@@ -51,10 +51,13 @@ env_common: &env_common
   ASCEND_LAUNCH_BLOCKING: "1"
 env_prefill: &env_prefill
   <<: *env_common
+  VLLM_PP_LAYER_PARTITION: "16,15,15,14"
+  HCCL_IF_BASE_PORT: "51000"
 
 env_decode: &env_decode
   <<: *env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_IF_BASE_PORT: "50${DP_RANK}00"
 
 templates:
   - node_index: 0
@@ -234,9 +237,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 4
-    max_out_len: 1
-    batch_size: 1
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 8
     request_rate: 0
     baseline: 0
     threshold: 0.97
