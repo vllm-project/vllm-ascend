@@ -217,9 +217,9 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
 
 
-def test_enable_dcp_tracks_active_target_and_draft_config(monkeypatch):
+def test_is_dcp_enabled_tracks_active_target_and_draft_config(monkeypatch):
     target = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=8))
     draft = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
     for config, expected in [(target, True), (draft, False), (target, True)]:
         monkeypatch.setattr(attention_utils, "get_current_vllm_config", lambda config=config: config)
-        assert attention_utils.enable_dcp() is expected
+        assert attention_utils.is_dcp_enabled() is expected
