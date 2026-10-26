@@ -302,8 +302,10 @@ Both paths in the endpoint-directory mount are configurable: the left side is th
 
 ## Install Mooncake
 
+The vLLM-Ascend container images already include a matching Mooncake version. You can use the bundled version directly; **downloading and compiling Mooncake is optional and is only needed for specific workload requirements**. Follow the source-build steps below only if your workload requires a custom Mooncake build, and ensure that it is compatible with the image's vLLM-Ascend and CANN versions.
+
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
-First, we need to obtain the Mooncake project. Refer to the following command:
+For an optional source build, first obtain the Mooncake project:
 
 ```shell
 git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
