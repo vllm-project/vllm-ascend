@@ -22,6 +22,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.utils import lmhead_tp_enable
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.utils import copy_slot_mapping_to_padded_buffer
 
 
 class AscendStep3p5MTPProposer(AscendEagleProposer):
@@ -114,10 +115,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             return group_common_attn_metadata
         slot_mapping_buffer = self._slot_mapping_buffer_for_group(attn_group)
         slot_mapping_len = slot_mapping.shape[0]
-        if slot_mapping.data_ptr() != slot_mapping_buffer.data_ptr():
-            slot_mapping_buffer[:slot_mapping_len].copy_(slot_mapping.to(torch.int32))
-        slot_mapping_buffer[slot_mapping_len:].fill_(PADDING_SLOT_ID)
-        slot_mapping_view = slot_mapping_buffer[: group_common_attn_metadata.num_actual_tokens]
+        slot_mapping_view = copy_slot_mapping_to_padded_buffer(
+            slot_mapping_buffer,
+            slot_mapping,
+            copy_tokens=slot_mapping_len,
+            padding_value=PADDING_SLOT_ID,
+        )[: group_common_attn_metadata.num_actual_tokens]
         self._per_group_slot_mappings[gid] = slot_mapping_view
         group_common_attn_metadata.slot_mapping = slot_mapping_view
 
@@ -433,9 +436,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             inputs_embeds = None
 
         slot_mapping_len = common_attn_metadata.slot_mapping.shape[0]
-        self.slot_mapping_group[0][:slot_mapping_len].copy_(common_attn_metadata.slot_mapping)
-        self.slot_mapping_group[0][slot_mapping_len:].fill_(PADDING_SLOT_ID)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
+        common_attn_metadata.slot_mapping = copy_slot_mapping_to_padded_buffer(
+            self.slot_mapping_group[0],
+            common_attn_metadata.slot_mapping,
+            copy_tokens=slot_mapping_len,
+            padding_value=PADDING_SLOT_ID,
+        )
         self._per_group_slot_mappings[self.kv_cache_gid] = self.slot_mapping_group[0][
             : common_attn_metadata.num_actual_tokens
         ]

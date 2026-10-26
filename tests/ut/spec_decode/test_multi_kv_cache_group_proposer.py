@@ -11,11 +11,9 @@ from vllm.config.compilation import CUDAGraphMode
 import vllm_ascend.worker.v1.spec_decode as spec_decode
 import vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer as multi_group_proposer
 from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolMetadata, AscendIndexerKPoolTailMetadata
+from vllm_ascend.worker.spec_decode_family import is_multi_kv_cache_group_mtp
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import (
-    AscendMultiKVCacheGroupMTPProposer,
-    is_multi_kv_cache_group_mtp,
-)
+from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import AscendMultiKVCacheGroupMTPProposer
 
 
 def test_multi_group_proposer_directly_inherits_ascend_eagle():

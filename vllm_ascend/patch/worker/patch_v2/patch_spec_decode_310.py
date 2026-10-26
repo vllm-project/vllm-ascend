@@ -15,6 +15,10 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
     update_draft_inputs_cpu,
 )
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.spec_decode_family import (
+    resolve_spec_decode_family,
+    uses_ascend_mtp_speculator,
+)
 from vllm_ascend.worker.v2 import aclgraph_utils as aclgraph_utils_mod
 from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
 
@@ -46,11 +50,7 @@ _orig_init_speculator = ascend_spec_decode.init_speculator
 def _init_speculator_310p(vllm_config, device):
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    if (
-        speculative_config.method == "mtp"
-        and not speculative_config.use_gemma4_mtp()
-        and not speculative_config.use_step3p5_mtp()
-    ):
+    if uses_ascend_mtp_speculator(resolve_spec_decode_family(vllm_config)):
         from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import (
             AscendMTPSpeculator310,
         )

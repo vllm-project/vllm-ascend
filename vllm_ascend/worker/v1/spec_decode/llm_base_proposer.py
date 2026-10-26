@@ -67,6 +67,7 @@ from vllm_ascend.worker.v1.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
     compact_mtp_topk_indices,
+    copy_slot_mapping_to_padded_buffer,
     patch_tensor_parallel_group,
 )
 
@@ -891,9 +892,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         )
                     # Set the real slot_mapping.
                     slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
-                    self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
-                    self.slot_mapping_group[draft_index][slot_mapping_lens:].fill_(PADDING_SLOT_ID)
-                    common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+                    common_attn_metadata.slot_mapping = copy_slot_mapping_to_padded_buffer(
+                        self.slot_mapping_group[draft_index],
+                        common_attn_metadata.slot_mapping,
+                        copy_tokens=slot_mapping_lens,
+                        padding_value=PADDING_SLOT_ID,
+                    )
                     self.seq_lens_group[draft_index][:num_reqs].copy_(common_attn_metadata.seq_lens)
                     self.seq_lens_group[draft_index][num_reqs:].fill_(0)
                     common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][:num_reqs]
@@ -1203,9 +1207,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Strictly speaking, `query_start_loc`, `seq_lens` should also have
         # their memory allocated separately for each step just like `slot_mapping`.
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
-        self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
-        self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
-        common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
+        common_attn_metadata.slot_mapping = copy_slot_mapping_to_padded_buffer(
+            self.slot_mapping_group[0],
+            common_attn_metadata.slot_mapping,
+            copy_tokens=slot_mapping_lens,
+            padding_value=PADDING_SLOT_ID,
+        )
 
         self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[0][num_reqs_padded:].fill_(0)
@@ -2095,9 +2102,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # update slot_mapping
             slot_indices += 1
             slot_mapping = mtp_slot_mapping[slot_indices]
-            self.slot_mapping_group[draft_index][:batch_size] = slot_mapping
-            self.slot_mapping_group[draft_index][batch_size:].fill_(PADDING_SLOT_ID)
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+            common_attn_metadata.slot_mapping = copy_slot_mapping_to_padded_buffer(
+                self.slot_mapping_group[draft_index],
+                slot_mapping,
+                copy_tokens=batch_size,
+                padding_value=PADDING_SLOT_ID,
+            )
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
@@ -2132,10 +2142,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
             slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-            self.slot_mapping_group[draft_index][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
-            self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+            common_attn_metadata.slot_mapping = copy_slot_mapping_to_padded_buffer(
+                self.slot_mapping_group[draft_index],
+                slot_mapping,
+                padding_value=PADDING_SLOT_ID,
+            )
 
         self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
