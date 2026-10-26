@@ -18,11 +18,8 @@
 #
 
 
-<<<<<<< HEAD
 from vllm_ascend.utils import vllm_version_is
-=======
 from vllm_ascend.worker.spec_decode_family import SpecDecodeFamily, resolve_spec_decode_family
->>>>>>> 2ea3888 (fix: keep speculative family selection runner-neutral)
 from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -32,7 +29,6 @@ from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.worker.v1.spec_decode.gemma4_proposer import AscendGemma4Proposer
-from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import AscendMultiKVCacheGroupMTPProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
