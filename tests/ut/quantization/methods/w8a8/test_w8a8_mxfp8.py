@@ -22,6 +22,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.model_config.architectures = []
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
@@ -251,6 +252,28 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         format_cast = patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
         self.addCleanup(format_cast.stop)
         format_cast.start()
+
+    def test_fallback_mxfp8_uses_model_scale_algorithm(self):
+        hidden_states = torch.randn(2, 128, dtype=torch.bfloat16)
+        quantized = hidden_states.to(torch.float8_e4m3fn)
+        scales = torch.ones(2, 2, 2, dtype=torch.uint8)
+        for scale_alg in (0, 1):
+            with (
+                self.subTest(scale_alg=scale_alg),
+                patch(
+                    "vllm_ascend.quantization.methods.base.get_dynamic_mx_quant_scale_alg",
+                    return_value=scale_alg,
+                    create=True,
+                ),
+                patch("torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scales)) as quantize,
+            ):
+                result, _ = self.scheme._quant_hidden_states(hidden_states)
+                quantize.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=scale_alg)
+                self.assertIs(result, quantized)
+                quantize.reset_mock()
+                result, _ = self.scheme._quant_hidden_states(quantized, scales)
+                quantize.assert_not_called()
+                self.assertIs(result, quantized)
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
