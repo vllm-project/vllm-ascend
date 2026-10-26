@@ -14,8 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import logging
-
 import torch
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
@@ -41,8 +39,6 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     torch_gather_wrapper,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
@@ -154,7 +150,6 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         assert self.cudagraph_manager is not None
         if not self.cudagraph_manager.needs_capture():
             return
-        logger.info("Capturing ACL graphs for Ascend multi-module MTP speculator...")
         # Reset indices to zeros to prevent stale values from prior dummy
         # runs from causing out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
