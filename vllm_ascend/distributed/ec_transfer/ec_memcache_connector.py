@@ -13,7 +13,10 @@ Integrate with vLLM through the ec_connector framework without modifying vLLM:
                 "matcher": "phash_ssim",
                 "max_hamming": 3,
                 "ssim_threshold": 0.99,
-                "resized_image_recv_buffer_size": 16384
+                "resized_image_recv_buffer_size": 16384,
+                "max_capacity": 1000000,
+                "eviction_threshold": 0.95,
+                "lower_watermark": 0.9
             }
         }
     }'
@@ -25,7 +28,10 @@ Cache hit rules, adapted from MultiLevelEncoderCacheManager:
   - only a miss runs ViT, then stores the result in memcache under the image's
     mm_hash.
 
-Memcache manages eviction; this connector does not implement an eviction policy.
+Memcache manages data eviction. The matcher's in-process similarity metadata
+is bounded separately: once it reaches ``max_capacity * eviction_threshold``
+entries, randomly selected entries are evicted down to
+``max_capacity * lower_watermark``.
 """
 
 from concurrent.futures import ThreadPoolExecutor

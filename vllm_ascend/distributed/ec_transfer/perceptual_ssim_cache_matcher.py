@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+import random
 from threading import Lock
 from typing import Any
 
@@ -342,9 +343,69 @@ class PhashSSIMCacheMatcher:
                         self._phash_band_index.setdefault(band, set()).add(image_phash)
             if resized_key not in candidate_resized_keys:
                 candidate_resized_keys.append(resized_key)
-            self.similarity_cache.setdefault(
-                mm_hash, SimilarityCacheItem(phash=image_phash, ssim_similar_items=OrderedDict())
-            )
+            if mm_hash not in self.similarity_cache:
+                self.similarity_cache[mm_hash] = SimilarityCacheItem(
+                    phash=image_phash,
+                    ssim_similar_items=OrderedDict(),
+                )
+                self._evict_similarity_cache_if_needed()
+
+    def _evict_similarity_cache_if_needed(self) -> None:
+        """Randomly evict metadata entries once the high watermark is reached.
+
+        Must be called while holding ``self._similarity_state_lock``. When the
+        cache grows to ``max_capacity * eviction_threshold`` entries, random
+        victims are removed until it shrinks to ``max_capacity *
+        lower_watermark``. Only local recall metadata is dropped: Memcache
+        data is untouched, and surviving entries may keep dangling
+        ``ssim_similar_items`` references, which the read path already
+        tolerates by re-checking candidates against Memcache.
+        """
+        capacity = self._config.max_capacity
+        if len(self.similarity_cache) < capacity * self._config.eviction_threshold:
+            return
+        target = int(capacity * self._config.lower_watermark)
+        num_to_evict = len(self.similarity_cache) - target
+        if num_to_evict <= 0:
+            return
+        victims = random.sample(list(self.similarity_cache), num_to_evict)
+        for mm_hash in victims:
+            evicted_item = self.similarity_cache.pop(mm_hash)
+            self._remove_reverse_index_entries(mm_hash, evicted_item.phash)
+        logger.info(
+            "EC similarity cache evicted: evicted=%d remaining=%d capacity=%d",
+            num_to_evict,
+            len(self.similarity_cache),
+            capacity,
+        )
+
+    def _remove_reverse_index_entries(self, mm_hash: str, phash: int) -> None:
+        """Drop one image's resized keys and now-empty band-index buckets.
+
+        Must be called while holding ``self._similarity_state_lock``. Several
+        images can share one pHash, so the reverse bucket only disappears,
+        together with its band-index entries, when its last resized key is
+        removed.
+        """
+        resized_keys = self.phash_to_resized_mm_hashes.get(phash)
+        if resized_keys is None:
+            return
+        remaining_keys = [
+            key
+            for key in resized_keys
+            if MemcacheResizedTensorStore.get_mm_hash_from_resized_key(key) != mm_hash
+        ]
+        if remaining_keys:
+            self.phash_to_resized_mm_hashes[phash] = remaining_keys
+            return
+        del self.phash_to_resized_mm_hashes[phash]
+        if self._config.max_hamming > 0:
+            for band in bands(phash):
+                phash_set = self._phash_band_index.get(band)
+                if phash_set is not None:
+                    phash_set.discard(phash)
+                    if not phash_set:
+                        del self._phash_band_index[band]
 
     def _collect_candidate_resized_mm_hashes_by_hamming(
         self,

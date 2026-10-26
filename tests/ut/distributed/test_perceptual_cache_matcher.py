@@ -792,3 +792,71 @@ def test_four_band_lookup_keeps_distance_three_boundary():
         assert sum(len(bucket) for bucket in matcher._phash_band_index.values()) == 2 * PHASH_NUM_BANDS
     finally:
         matcher.shutdown()
+
+
+def _make_capacity_matcher(
+    max_capacity: int,
+    eviction_threshold: float,
+    lower_watermark: float,
+) -> PhashSSIMCacheMatcher:
+    matcher = PhashSSIMCacheMatcher(
+        MagicMock(),
+        SimilarityCacheConfig(
+            enabled=True,
+            matcher="phash_ssim",
+            max_capacity=max_capacity,
+            eviction_threshold=eviction_threshold,
+            lower_watermark=lower_watermark,
+        ),
+        merge_size=2,
+        model_id="test-model",
+    )
+    matcher._tensor_store = _InMemoryResizedTensorStore()
+    return matcher
+
+
+def test_similarity_cache_capacity_config_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="max_capacity"):
+        SimilarityCacheConfig(enabled=True, max_capacity=0)
+    with pytest.raises(ValueError, match="max_capacity"):
+        SimilarityCacheConfig(enabled=True, max_capacity=True)
+    with pytest.raises(ValueError, match="eviction_threshold"):
+        SimilarityCacheConfig(enabled=True, eviction_threshold=0.0)
+    with pytest.raises(ValueError, match="lower_watermark"):
+        SimilarityCacheConfig(enabled=True, lower_watermark=0.95)
+    with pytest.raises(ValueError, match="lower_watermark"):
+        SimilarityCacheConfig(enabled=True, lower_watermark=1.0, eviction_threshold=1.0)
+
+
+def test_similarity_cache_random_eviction_syncs_reverse_and_band_index() -> None:
+    matcher = _make_capacity_matcher(max_capacity=20, eviction_threshold=0.95, lower_watermark=0.5)
+    random.seed(20261026)
+    try:
+        for index in range(19):
+            _register_phash(matcher, f"image-{index}", 0x1000 + index)
+        assert len(matcher.similarity_cache) == 10  # max_capacity * lower_watermark
+
+        surviving_phashes = {item.phash for item in matcher.similarity_cache.values()}
+        assert len(surviving_phashes) == 10
+        assert set(matcher.phash_to_resized_mm_hashes) == surviving_phashes
+        for mm_hash, item in matcher.similarity_cache.items():
+            resized_keys = matcher.phash_to_resized_mm_hashes[item.phash]
+            assert [
+                MemcacheResizedTensorStore.get_mm_hash_from_resized_key(key) for key in resized_keys
+            ] == [mm_hash]
+        for phash_set in matcher._phash_band_index.values():
+            assert phash_set
+            assert phash_set <= surviving_phashes
+    finally:
+        matcher.shutdown()
+
+
+def test_similarity_cache_keeps_growing_below_eviction_threshold() -> None:
+    matcher = _make_capacity_matcher(max_capacity=20, eviction_threshold=0.95, lower_watermark=0.5)
+    try:
+        for index in range(18):
+            _register_phash(matcher, f"image-{index}", 0x1000 + index)
+        assert len(matcher.similarity_cache) == 18
+        assert len(matcher.phash_to_resized_mm_hashes) == 18
+    finally:
+        matcher.shutdown()
