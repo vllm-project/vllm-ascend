@@ -159,21 +159,20 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Update(
     int64_t first = Simt::GetBlockIdx() * Threads + Simt::GetThreadIdx();
     int64_t step = Simt::GetBlockNum() * Threads;
     int64_t width = p->coff * p->dim;
-    for (int64_t idx = first; idx < p->batch * width; idx += step) {
-        int64_t b = idx / width, col = idx % width;
-        int64_t st = Start(start, b, p), n = Used(cu, used, b, p), end = st + n;
-        // Persist every valid token, including groups already consumed.
-        // This observable cache side effect is checked against the black box.
-        int64_t tail = st;
-        int64_t begin = Begin(cu, b, p);
-        for (int64_t pos = tail; pos < end; ++pos) {
-            int64_t dst = CacheRow(table, b, pos, p);
-            if (dst < 0) continue;
-            int64_t src = (begin + pos - st) * p->projectionStride;
-            state[dst + col] = projection[src + col];
-            state[dst + width + col] = projection[src + p->gateOffset + col]
-                                     + ape[(pos % p->ratio) * width + col];
+    for (int64_t idx = first; idx < p->tokens * width; idx += step) {
+        int64_t row = idx / width, col = idx % width, b = 0, begin = 0;
+        for (; b < p->batch; ++b) {
+            begin = Begin(cu, b, p);
+            if (row >= begin && row < begin + Used(cu, used, b, p)) break;
         }
+        if (b >= p->batch) continue;
+        int64_t pos = Start(start, b, p) + row - begin;
+        int64_t dst = CacheRow(table, b, pos, p);
+        if (dst < 0) continue;
+        int64_t src = row * p->projectionStride;
+        state[dst + col] = projection[src + col];
+        state[dst + width + col] = projection[src + p->gateOffset + col]
+                                 + ape[(pos % p->ratio) * width + col];
     }
 }
 } // namespace CompressorSerial
