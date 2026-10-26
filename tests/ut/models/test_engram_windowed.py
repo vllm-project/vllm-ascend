@@ -23,7 +23,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
 @pytest.fixture
 def window_runtime(monkeypatch):
-    calls = []
+    calls: list[tuple[object, ...]] = []
 
     class Stream:
         def __init__(self, name):
@@ -161,8 +161,21 @@ def test_decoder_passes_window_to_moe_after_attention(monkeypatch):
         setattr(layer, name, None)
     layer.hc_pre = lambda x, *args: (x.mean(1), None, None, None)
     layer.input_layernorm = lambda x: x
-    layer.self_attn = lambda *args: calls.append("attention") or args[1]
-    layer.hc_post = lambda x, residual, *args: calls.append("hc_post") or residual
+
+    def self_attn(*args):
+        calls.append("attention")
+        return args[1]
+
+    def hc_post(x, residual, *args):
+        calls.append("hc_post")
+        return residual
+
+    def reduce_scatter(x):
+        calls.append("reduce_scatter")
+        return x
+
+    layer.self_attn = self_attn
+    layer.hc_post = hc_post
     layer.rms_norm_cast = lambda x: (x, x.float())
 
     def moe(x, **kwargs):
@@ -172,7 +185,7 @@ def test_decoder_passes_window_to_moe_after_attention(monkeypatch):
 
     layer.mlp = moe
     monkeypatch.setattr(model_mod, "sp_all_gather", lambda x: x)
-    monkeypatch.setattr(model_mod, "sp_reduce_scatter", lambda x: calls.append("reduce_scatter") or x)
+    monkeypatch.setattr(model_mod, "sp_reduce_scatter", reduce_scatter)
     hidden = torch.ones(3, 4, 8)
     result, _ = model_mod.DeepseekV41DecoderLayer.forward(
         layer, torch.arange(3), hidden, None, engram_wkv_window=lambda: calls.append("window")
