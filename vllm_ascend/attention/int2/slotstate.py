@@ -105,7 +105,13 @@ class Int2SlotStateMixin:
             # R144 P0: capacity from vLLM runtime config (no hardcoded 4/8).
             self._tt_mseq = int(self.vllm_config.scheduler_config.max_num_seqs)
         else:
-            self._tt_mseq = max(self._TT_MAX_SEQS, 4)
+            # vLLM 0.31's V2 runner may append one dummy padding request to
+            # query_start_loc (batch width = max_num_seqs + 1 in the worst
+            # case), so the b-keyed HP pool needs one extra row. Keeping the
+            # engine width as the lower bound also prevents a small env cap
+            # from under-sizing the pool.
+            _mns = int(getattr(self.vllm_config.scheduler_config, "max_num_seqs", 0) or 0)
+            self._tt_mseq = max(self._TT_MAX_SEQS, 4, _mns + 1)
         # R205_HPFIT (default OFF): right-size the HP ring pool from the engine's
         # REAL concurrency instead of the env cap. The canonical
         # R109_TT_MAX_SEQS=96 over-provisions 3x for B<=32 legs: the pool is

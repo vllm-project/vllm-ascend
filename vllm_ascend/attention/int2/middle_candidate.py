@@ -29,14 +29,14 @@ class Int2MiddleCandidateMixin:
     # bridge-loader names are owned by the assembled backend / sibling mixins.
     # Bare annotations create no runtime attributes, so the MRO at assembly
     # is unaffected.
-    _r112_opool: Any = None
-    _r118_ucpool: Any = None
-    _r118_ubtpool: Any = None
+    _r112_opool: Any
+    _r118_ucpool: Any
+    _r118_ubtpool: Any
     _r185b_dumped: Any = None
-    _r112_pool: Any = None
-    _r113_cpool: Any = None
-    _r113_btpool: Any = None
-    _r135_adev: Any = None
+    _r112_pool: Any
+    _r113_cpool: Any
+    _r113_btpool: Any
+    _r135_adev: Any
     _r112_mod: Any = None
     _r135_mod: Any = None
     _r91_mod: Any = None
@@ -116,7 +116,7 @@ class Int2MiddleCandidateMixin:
                 raise RuntimeError("[R113-F1] fast module load FAILED (fail-closed)")
             _nb = blk_hi - blk_lo
             _mid_len = int(mid_end - mid_start)
-            if not hasattr(type(self), "_r112_opool"):
+            if getattr(type(self), "_r112_opool", None) is None:
                 type(self)._r112_opool = {}
             _pool2 = type(self)._r112_opool
             _ok = (int(nq), int(head_size), str(device))
@@ -161,7 +161,7 @@ class Int2MiddleCandidateMixin:
                 _nbm = (_mlen_l - _pref_l - _rcnt_l + block_size - 1) // block_size
                 if _nbm <= 0:
                     raise RuntimeError("[R118-FIX] nb_max<=0 (config)")
-                if not hasattr(type(self), "_r118_ucpool"):
+                if getattr(type(self), "_r118_ucpool", None) is None:
                     type(self)._r118_ucpool = {}
                 _cp_l = type(self)._r118_ucpool
                 if layer_idx not in _cp_l:
@@ -193,7 +193,7 @@ class Int2MiddleCandidateMixin:
                 _c_l["ko"][0, :, :_mid_eff] = (-kzb[:_mid_eff].t() * _c_l["ks"][0, :, :_mid_eff]).bfloat16()
                 _c_l["vs"][0, :, :_mid_eff] = vsb[:_mid_eff].t().bfloat16()
                 _c_l["vo"][0, :, :_mid_eff] = (-vzb[:_mid_eff].t() * _c_l["vs"][0, :, :_mid_eff]).bfloat16()
-                if not hasattr(type(self), "_r118_ubtpool"):
+                if getattr(type(self), "_r118_ubtpool", None) is None:
                     type(self)._r118_ubtpool = {}
                 _bk_l = (int(nq), int(head_size), _nbm)
                 _bp_l = type(self)._r118_ubtpool
@@ -438,7 +438,7 @@ class Int2MiddleCandidateMixin:
         # R112_BUFPOOL: identity bt is a pure function of (nb) — cache it (stream-safe:
         # read-only operand). Keyed on device too.
         if _os.environ.get("R112_BUFPOOL", "0") == "1":
-            if not hasattr(type(self), "_r112_pool"):
+            if getattr(type(self), "_r112_pool", None) is None:
                 type(self)._r112_pool = {}
             _pool = type(self)._r112_pool
             _bk = (int(blk_hi - blk_lo), str(device))
@@ -543,7 +543,7 @@ class Int2MiddleCandidateMixin:
         # stream-safe — same-stream in-order guarantees merge (enqueued earlier)
         # reads before the next op's fill_/write.
         if _os.environ.get("R112_BUFPOOL", "0") == "1":
-            if not hasattr(type(self), "_r112_opool"):
+            if getattr(type(self), "_r112_opool", None) is None:
                 type(self)._r112_opool = {}
             _pool2 = type(self)._r112_opool
             _ok = (int(nq), int(head_size), str(device))
@@ -584,7 +584,7 @@ class Int2MiddleCandidateMixin:
                     if _nb_max < _nb_now:
                         _nb_max = _nb_now  # safety: capacity >= current need
                     _S_pad = _nb_max * block_size
-                    if not hasattr(type(self), "_r113_cpool"):
+                    if getattr(type(self), "_r113_cpool", None) is None:
                         type(self)._r113_cpool = {}
                     _cp = type(self)._r113_cpool
                     if layer_idx not in _cp:
@@ -608,7 +608,7 @@ class Int2MiddleCandidateMixin:
                     if _c["nb_max"] < _nb_now:
                         raise RuntimeError(f"[R136-UNI] pool nb_max={_c['nb_max']} < nb_now={_nb_now}")
                     # capacity bt = identity arange(nb_max) (R110 D6a; R119 fix#5)
-                    if not hasattr(type(self), "_r113_btpool"):
+                    if getattr(type(self), "_r113_btpool", None) is None:
                         type(self)._r113_btpool = {}
                     _bp = type(self)._r113_btpool
                     _bk2 = (int(nq), int(head_size), int(_c["nb_max"]))
@@ -689,7 +689,7 @@ class Int2MiddleCandidateMixin:
                     )
                 else:
                     # R135 V1 eager path (F_eager, TIGHT operands). Default.
-                    if not hasattr(type(self), "_r135_adev"):
+                    if getattr(type(self), "_r135_adev", None) is None:
                         type(self)._r135_adev = {}
                     _adev = type(self)._r135_adev
                     _dk = str(device)

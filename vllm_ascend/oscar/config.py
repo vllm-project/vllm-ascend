@@ -110,8 +110,12 @@ def _from_legacy_env() -> OscarInt2Config:
         enabled=_flag("OSCAR_INT2_ENABLED") or _flag("R218_INT2_SERVE"),
         prefix_window=_int("R109_TT_PREFIX", 128),
         recent_window=_int("R109_TT_RECENT", 896),
-        k_rotation_path=os.environ.get("SGLANG_OSCAR_K_ROTATION_PATH", ""),
-        v_rotation_path=os.environ.get("SGLANG_OSCAR_V_ROTATION_PATH", ""),
+        k_rotation_path=os.environ.get(
+            "SGLANG_OSCAR_K_ROTATION_PATH", os.environ.get("VLLM_OSCAR_K_ROTATION_PATH", "")
+        ),
+        v_rotation_path=os.environ.get(
+            "SGLANG_OSCAR_V_ROTATION_PATH", os.environ.get("VLLM_OSCAR_V_ROTATION_PATH", "")
+        ),
         eager=_flag("R152_EAGER", "0"),
         batched_middle=_flag("R161_BATCHED_MID", "0"),
         cpp_quantizer=_flag("R113_QUANT_CPP", "0"),
