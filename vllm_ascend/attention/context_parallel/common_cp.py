@@ -207,7 +207,6 @@ class DCPImplMixin:
                 attn_output,
                 softmax_lse,
                 tp_size,
-                1,
                 self.tp_group.unique_name,
                 pcp_group.unique_name,
                 defer_combine=defer_combine,
@@ -216,7 +215,6 @@ class DCPImplMixin:
             attn_output,
             softmax_lse,
             self.dcp_size,
-            1,
             self.dcp_group.unique_name if self.dcp_size > 1 else "",
             defer_combine=defer_combine,
         )

@@ -24,7 +24,6 @@ def _simulate_receive(
     sender_outputs: torch.Tensor,
     sender_lses: torch.Tensor,
     destination_rank: int,
-    scatter_dim: int,
 ) -> torch.Tensor:
     dcp_size = sender_outputs.shape[0]
     send_buffers = [
@@ -32,7 +31,6 @@ def _simulate_receive(
             sender_outputs[source_rank],
             sender_lses[source_rank],
             dcp_size,
-            scatter_dim,
         )
         for source_rank in range(dcp_size)
     ]
@@ -88,11 +86,9 @@ def _check_a5_batching_case(
     local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
 
     monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
-    scalar_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
+    scalar_send = pack_dcp_output_lse(output, lse, dcp_size)
     if run_combine:
-        scalar_combined = fused_dcp_lse_combine(
-            scalar_send, head_dim, 1, local_output=local_output, local_lse=local_lse
-        )
+        scalar_combined = fused_dcp_lse_combine(scalar_send, head_dim, local_output=local_output, local_lse=local_lse)
 
     class LaunchSpy:
         def __init__(self, kernel):
@@ -113,11 +109,9 @@ def _check_a5_batching_case(
     monkeypatch.setattr(dcp_a2a, "_pack_dcp_output_lse_batched_kernel", pack_spy)
     monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", combine_spy)
     monkeypatch.setattr(dcp_a2a, "is_950", lambda: True)
-    batched_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
+    batched_send = pack_dcp_output_lse(output, lse, dcp_size)
     if run_combine:
-        batched_combined = fused_dcp_lse_combine(
-            batched_send, head_dim, 1, local_output=local_output, local_lse=local_lse
-        )
+        batched_combined = fused_dcp_lse_combine(batched_send, head_dim, local_output=local_output, local_lse=local_lse)
 
     expected_output = output.reshape(num_tokens, dcp_size, local_heads, head_dim).permute(1, 2, 0, 3)
     torch.testing.assert_close(batched_send[..., :head_dim], expected_output, atol=0, rtol=0)
@@ -211,17 +205,17 @@ def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, c
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scatter_dim", [0, 1])
+@pytest.mark.parametrize("num_tokens,num_heads", [(16, 8), (5, 64)])
 @pytest.mark.parametrize("head_dim", [96, 128, 160, 256])
 @torch.inference_mode()
 def test_pack_and_fused_lse_combine(
     dtype: torch.dtype,
-    scatter_dim: int,
     head_dim: int,
+    num_tokens: int,
+    num_heads: int,
 ) -> None:
     torch.manual_seed(2026)
     dcp_size = 8
-    num_tokens, num_heads = (16, 4) if scatter_dim == 0 else (5, 64)
     sender_outputs = torch.randn(
         dcp_size,
         num_tokens,
@@ -243,24 +237,15 @@ def test_pack_and_fused_lse_combine(
         sender_outputs,
         sender_lses,
         destination_rank,
-        scatter_dim,
     )
 
-    if scatter_dim == 0:
-        local_tokens = num_tokens // dcp_size
-        token_slice = slice(destination_rank * local_tokens, (destination_rank + 1) * local_tokens)
-        expected = _reference_merge(
-            sender_outputs[:, token_slice],
-            sender_lses[:, token_slice, :, 0],
-        )
-    else:
-        local_heads = num_heads // dcp_size
-        head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
-        expected = _reference_merge(
-            sender_outputs[:, :, head_slice],
-            sender_lses[:, :, head_slice, 0],
-        )
-    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
+    local_heads = num_heads // dcp_size
+    head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
+    expected = _reference_merge(
+        sender_outputs[:, :, head_slice],
+        sender_lses[:, :, head_slice, 0],
+    )
+    actual = fused_dcp_lse_combine(recv, head_dim)
 
     tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
@@ -269,9 +254,8 @@ def test_pack_and_fused_lse_combine(
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
-def test_stride_aware_pack(scatter_dim: int) -> None:
+def test_stride_aware_pack() -> None:
     torch.manual_seed(2026)
     dcp_size, num_tokens, num_heads, head_dim = 8, 16, 64, 128
     output_storage = torch.randn(
@@ -300,23 +284,14 @@ def test_stride_aware_pack(scatter_dim: int) -> None:
         sender_outputs,
         sender_lses,
         destination_rank,
-        scatter_dim,
     )
-    if scatter_dim == 0:
-        local_tokens = num_tokens // dcp_size
-        token_slice = slice(destination_rank * local_tokens, (destination_rank + 1) * local_tokens)
-        expected = _reference_merge(
-            sender_outputs[:, token_slice],
-            sender_lses[:, token_slice, :, 0],
-        )
-    else:
-        local_heads = num_heads // dcp_size
-        head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
-        expected = _reference_merge(
-            sender_outputs[:, :, head_slice],
-            sender_lses[:, :, head_slice, 0],
-        )
-    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
+    local_heads = num_heads // dcp_size
+    head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
+    expected = _reference_merge(
+        sender_outputs[:, :, head_slice],
+        sender_lses[:, :, head_slice, 0],
+    )
+    actual = fused_dcp_lse_combine(recv, head_dim)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
@@ -324,9 +299,8 @@ def test_stride_aware_pack(scatter_dim: int) -> None:
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
-def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
+def test_invalid_lse_and_all_invalid_rows() -> None:
     torch.manual_seed(2026)
     dcp_size, num_tokens, num_heads, head_dim = 8, 16, 64, 256
     sender_outputs = torch.randn(
@@ -357,20 +331,13 @@ def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
         sender_outputs,
         sender_lses,
         destination_rank,
-        scatter_dim,
     )
-    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim)
 
-    if scatter_dim == 0:
-        expected = _reference_merge(
-            sender_outputs[:, : num_tokens // dcp_size],
-            sender_lses[:, : num_tokens // dcp_size, :, 0],
-        )
-    else:
-        expected = _reference_merge(
-            sender_outputs[:, :, : num_heads // dcp_size],
-            sender_lses[:, :, : num_heads // dcp_size, 0],
-        )
+    expected = _reference_merge(
+        sender_outputs[:, :, : num_heads // dcp_size],
+        sender_lses[:, :, : num_heads // dcp_size, 0],
+    )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
     assert torch.count_nonzero(actual[1, 0]).item() == 0
 
@@ -379,11 +346,9 @@ def test_invalid_lse_and_all_invalid_rows(scatter_dim: int) -> None:
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scatter_dim", [0, 1])
 @torch.inference_mode()
 def test_finite_lse_outside_activation_dtype_range(
     dtype: torch.dtype,
-    scatter_dim: int,
 ) -> None:
     torch.manual_seed(2026)
     dcp_size, num_tokens, num_heads, head_dim = 8, 16, 64, 128
@@ -408,24 +373,15 @@ def test_finite_lse_outside_activation_dtype_range(
         sender_outputs,
         sender_lses,
         destination_rank,
-        scatter_dim,
     )
-    actual = fused_dcp_lse_combine(recv, head_dim, scatter_dim)
+    actual = fused_dcp_lse_combine(recv, head_dim)
 
-    if scatter_dim == 0:
-        local_tokens = num_tokens // dcp_size
-        token_slice = slice(destination_rank * local_tokens, (destination_rank + 1) * local_tokens)
-        expected = _reference_merge(
-            sender_outputs[:, token_slice],
-            sender_lses[:, token_slice, :, 0],
-        )
-    else:
-        local_heads = num_heads // dcp_size
-        head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
-        expected = _reference_merge(
-            sender_outputs[:, :, head_slice],
-            sender_lses[:, :, head_slice, 0],
-        )
+    local_heads = num_heads // dcp_size
+    head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
+    expected = _reference_merge(
+        sender_outputs[:, :, head_slice],
+        sender_lses[:, :, head_slice, 0],
+    )
 
     tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
@@ -450,15 +406,15 @@ def test_mla_history_lse_then_current_merge() -> None:
     lse[1, 3] = -float("inf")
     expected = _reference_merge(outputs, lse)
     # Compare direct and staged merges against the same independent reference.
-    partials = torch.cat((outputs, lse.unsqueeze(-1)), dim=-1).npu()
-    direct = fused_dcp_lse_combine(partials, 512, scatter_dim=0)
+    partials = torch.cat((outputs, lse.unsqueeze(-1)), dim=-1).transpose(1, 2).contiguous().npu()
+    direct = fused_dcp_lse_combine(partials, 512)
     assert direct.dtype == torch.float32
     torch.testing.assert_close(direct.cpu(), expected, atol=3e-6, rtol=3e-5)
-    history = torch.cat((outputs[:16], lse[:16].unsqueeze(-1)), dim=-1).npu()
-    merged_history = fused_dcp_lse_combine(history, 512, scatter_dim=0, return_lse=True)
+    history = torch.cat((outputs[:16], lse[:16].unsqueeze(-1)), dim=-1).transpose(1, 2).contiguous().npu()
+    merged_history = fused_dcp_lse_combine(history, 512, return_lse=True)
     assert merged_history.shape == (num_tokens, 6, 513)
     current = torch.cat((outputs[-1], lse[-1].unsqueeze(-1)), dim=-1).npu()
-    actual = fused_dcp_lse_combine(torch.stack((merged_history, current)), 512, scatter_dim=0)
+    actual = fused_dcp_lse_combine(torch.stack((merged_history, current)).transpose(1, 2).contiguous(), 512)
     torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=5e-4)
     assert torch.isfinite(actual).all()
 
@@ -467,48 +423,39 @@ def test_mla_history_lse_then_current_merge() -> None:
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
 @pytest.mark.parametrize(
-    "scatter_dim,dcp_size,head_dim,local_dtype",
+    "dcp_size,head_dim,local_dtype",
     [
-        (0, 1, 96, torch.float32),
-        (1, 1, 96, torch.float32),
-        (0, 1, 96, torch.bfloat16),
-        (1, 1, 96, torch.bfloat16),
-        (0, 1, 96, torch.float16),
-        (1, 1, 96, torch.float16),
-        (1, 1, 256, torch.float32),
-        (0, 1, 256, torch.bfloat16),
-        (1, 1, 256, torch.float16),
-        (0, 1, 512, torch.float32),
-        (1, 1, 512, torch.bfloat16),
-        (0, 1, 512, torch.float16),
-        (1, 2, 96, torch.float32),
-        (0, 2, 96, torch.bfloat16),
-        (1, 2, 96, torch.float16),
-        (0, 2, 256, torch.float32),
-        (1, 2, 256, torch.bfloat16),
-        (0, 2, 256, torch.float16),
-        (0, 2, 512, torch.float32),
-        (1, 2, 512, torch.float32),
-        (0, 2, 512, torch.bfloat16),
-        (1, 2, 512, torch.bfloat16),
-        (0, 2, 512, torch.float16),
-        (1, 2, 512, torch.float16),
-        (0, 8, 96, torch.float32),
-        (1, 8, 96, torch.bfloat16),
-        (0, 8, 96, torch.float16),
-        (0, 8, 256, torch.float32),
-        (1, 8, 256, torch.float32),
-        (0, 8, 256, torch.bfloat16),
-        (1, 8, 256, torch.bfloat16),
-        (0, 8, 256, torch.float16),
-        (1, 8, 256, torch.float16),
-        (0, 8, 512, torch.float32),
-        (1, 8, 512, torch.bfloat16),
-        (0, 8, 512, torch.float16),
+        (1, 96, torch.float32),
+        (1, 96, torch.bfloat16),
+        (1, 96, torch.float16),
+        (1, 256, torch.float32),
+        (1, 256, torch.bfloat16),
+        (1, 256, torch.float16),
+        (1, 512, torch.float32),
+        (1, 512, torch.bfloat16),
+        (1, 512, torch.float16),
+        (2, 96, torch.float32),
+        (2, 96, torch.bfloat16),
+        (2, 96, torch.float16),
+        (2, 256, torch.float32),
+        (2, 256, torch.bfloat16),
+        (2, 256, torch.float16),
+        (2, 512, torch.float32),
+        (2, 512, torch.bfloat16),
+        (2, 512, torch.float16),
+        (8, 96, torch.float32),
+        (8, 96, torch.bfloat16),
+        (8, 96, torch.float16),
+        (8, 256, torch.float32),
+        (8, 256, torch.bfloat16),
+        (8, 256, torch.float16),
+        (8, 512, torch.float32),
+        (8, 512, torch.bfloat16),
+        (8, 512, torch.float16),
     ],
 )
 @torch.inference_mode()
-def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype):
+def test_combine_with_raw_local_fia(dcp_size, head_dim, local_dtype):
     torch.manual_seed(16362)
     tokens, heads = 3, 2
     history = torch.randn(dcp_size, tokens, heads, head_dim, device="npu")
@@ -525,12 +472,8 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     history[:, 1, 0] = torch.nan
     local_lse[1, 0] = -torch.inf
     local[1, 0] = torch.nan
-    recv = torch.cat((history, history_lse), dim=-1)
-    if scatter_dim == 1:
-        recv = recv.transpose(1, 2).contiguous()
-    actual = fused_dcp_lse_combine(
-        recv, head_dim, scatter_dim, return_lse=True, local_output=local, local_lse=local_lse
-    )
+    recv = torch.cat((history, history_lse), dim=-1).transpose(1, 2).contiguous()
+    actual = fused_dcp_lse_combine(recv, head_dim, return_lse=True, local_output=local, local_lse=local_lse)
     values = torch.cat((history, local.float().unsqueeze(0)))
     lses = torch.cat((history_lse, local_lse.unsqueeze(0)))[..., 0]
     expected = _reference_merge(values, lses)

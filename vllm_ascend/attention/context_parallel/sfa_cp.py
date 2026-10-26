@@ -1025,7 +1025,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             tp_group = get_tp_group()
             tp_size = tp_group.world_size if self.dcp_size > pcp_group.world_size else 1
             return torch.ops.vllm.dcp_a2a_fused(
-                sfa_output, softmax_lse, tp_size, 1, tp_group.unique_name, pcp_group.unique_name
+                sfa_output, softmax_lse, tp_size, tp_group.unique_name, pcp_group.unique_name
             )
 
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
@@ -1033,7 +1033,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sfa_output,
             softmax_lse,
             self.dcp_size,
-            1,
             self.dcp_group.unique_name,
         )
 

@@ -56,7 +56,7 @@ def test_exchange_matches_upstream_and_reference_with_changed_input_graphs():
         lse = lses[rank].npu()
 
         def invoke(output=output, lse=lse):
-            return dcp_a2a_fused_combine(output, lse, 8, 1, dist.group.WORLD)
+            return dcp_a2a_fused_combine(output, lse, 8, dist.group.WORLD)
 
         for _ in range(5):
             invoke()
@@ -69,10 +69,10 @@ def test_exchange_matches_upstream_and_reference_with_changed_input_graphs():
             owner.copy_(outputs[rank].transpose(0, 1).contiguous())
             lse.copy_(lses[rank])
             # These unchanged upstream helpers bypass the new dispatch guard.
-            send = pack_dcp_output_lse(output, lse, 8, 1)
+            send = pack_dcp_output_lse(output, lse, 8)
             recv = torch.empty_like(send)
             dist.all_to_all_single(recv, send)
-            upstream = fused_dcp_lse_combine(recv, 512, 1)
+            upstream = fused_dcp_lse_combine(recv, 512)
             graph.replay()
             torch.npu.synchronize()
             finite = torch.isfinite(lses)
@@ -133,7 +133,7 @@ def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
         assert can_exchange(output, lse, group.world_size)
 
         def invoke(output=output, lse=lse):
-            return torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name)
+            return torch.ops.vllm.dcp_a2a_fused(output, lse, 8, group.unique_name)
 
         for _ in range(5):
             invoke()
@@ -242,7 +242,7 @@ def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
 
         def invoke(output=output, lse=lse):
             fp32 = exchange(output, lse, group.device_group)
-            bf16 = torch.ops.vllm.dcp_a2a_fused(output, lse, 8, 1, group.unique_name)
+            bf16 = torch.ops.vllm.dcp_a2a_fused(output, lse, 8, group.unique_name)
             return fp32, bf16
 
         for _ in range(3):
@@ -403,7 +403,7 @@ def test_registered_exchange_group_sizes_against_fp64(context, local_heads, toke
 
     def invoke():
         fp32 = exchange(output, lse, group.device_group) if optimized else None
-        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name)
 
     for _ in range(3):
         invoke()
@@ -455,7 +455,7 @@ def test_exchange_t1_singleton_stride_graph(context, layout):
     output.copy_(base + rank / 16)
 
     def invoke():
-        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name)
 
     for _ in range(3):
         invoke()
@@ -489,7 +489,7 @@ def test_exchange_tiled_resource_graph(context, tokens, local_heads, head_dim, m
     monkeypatch.setattr(dcp_a2a, "pack_dcp_output_lse", unexpected_fallback)
 
     def invoke():
-        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name)
 
     output.fill_(rank / 16)
     for _ in range(3):

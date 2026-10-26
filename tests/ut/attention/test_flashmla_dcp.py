@@ -68,8 +68,8 @@ def paged_attention(query, cache, **kwargs):
     return output, lse
 
 
-def combine_outputs(recv, head_dim, *, scatter_dim, local_output=None, local_lse=None):
-    assert head_dim == 512 and scatter_dim == 1
+def combine_outputs(recv, head_dim, *, local_output=None, local_lse=None):
+    assert head_dim == 512
     outputs, lses = recv
     if local_output is not None:
         outputs = [*outputs, local_output]
@@ -491,10 +491,8 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     for rank, flash in enumerate(flashes):
         owned = slice(rank * local_heads, (rank + 1) * local_heads)
 
-        def exchange(
-            output, lse, world_size, scatter_dim, group, *, defer_combine, owned=owned, rank=rank, flash=flash
-        ):
-            assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
+        def exchange(output, lse, world_size, group, *, defer_combine, owned=owned, rank=rank, flash=flash):
+            assert (world_size, group, defer_combine) == (size, "cpu-dcp", True)
             runtime.events.append(("exchange", runtime.active_stream[0]))
             assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
             expected_output, expected_lse = partials[rank]
@@ -507,14 +505,12 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
 
         monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
 
-        def combine(recv, head_dim, *, scatter_dim, local_output=None, local_lse=None):
+        def combine(recv, head_dim, *, local_output=None, local_lse=None):
             assert runtime.events[-1] == (("wait", "main", "attn") if split else ("exchange", "main"))
             assert (local_output is not None) == split
             assert (local_lse is not None) == split
             runtime.events.append(("merge", runtime.active_stream[0]))
-            return combine_outputs(
-                recv, head_dim, scatter_dim=scatter_dim, local_output=local_output, local_lse=local_lse
-            )
+            return combine_outputs(recv, head_dim, local_output=local_output, local_lse=local_lse)
 
         combined = Mock(side_effect=combine)
         runtime.scope["fused_dcp_lse_combine"] = combined
