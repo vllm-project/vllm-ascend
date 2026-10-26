@@ -1,0 +1,182 @@
+# Ascend overlay for Qwen/Qwen3-VL-30B-A3B-Instruct.
+# Extends the upstream recipe with the verified Atlas 800 A3 BF16 variant.
+variants:
+  ascend_bf16:
+    model_id: Qwen/Qwen3-VL-30B-A3B-Instruct
+    label: BF16 (Ascend A3)
+    precision: bf16
+    vram_minimum_gb: 72
+    description: Full precision BF16 checkpoint for one Atlas 800 A3 node (16x Ascend 910C, 64 GB each), using TP2 + expert
+      parallelism.
+    supported_hardware:
+      - ascend_910c
+    tp: 2
+    min_vllm_version: 0.23.0
+    extra_args:
+      - --data-parallel-size
+      - '1'
+      - --enable-expert-parallel
+      - --seed
+      - '1024'
+      - --max-num-seqs
+      - '32'
+      - --max-model-len
+      - '32768'
+      - --max-num-batched-tokens
+      - '16384'
+      - --gpu-memory-utilization
+      - '0.9'
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - '0'
+      - --limit-mm-per-prompt
+      - '{"image":1,"video":0}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
+      - --additional-config
+      - '{"enable_fused_mc2":1}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
+meta:
+  hardware:
+    ascend_910c: verified
+guide_sections:
+  ascend: |
+    ## Huawei Ascend 910C / Atlas 800 A3
+
+    Verified on a single Atlas 800 A3 node (16x Ascend 910C, 64 GB each) with
+    vLLM Ascend v0.23.0 from `quay.io/ascend/vllm-ascend:v0.23.0-a3`.
+
+    Start a container on the host:
+
+    ```bash
+    docker pull quay.io/ascend/vllm-ascend:v0.23.0-a3
+    docker run --rm -it \
+      --privileged --net=host --shm-size=512g \
+      --device /dev/davinci0 --device /dev/davinci1 \
+      --device /dev/davinci2 --device /dev/davinci3 \
+      --device /dev/davinci4 --device /dev/davinci5 \
+      --device /dev/davinci6 --device /dev/davinci7 \
+      --device /dev/davinci8 --device /dev/davinci9 \
+      --device /dev/davinci10 --device /dev/davinci11 \
+      --device /dev/davinci12 --device /dev/davinci13 \
+      --device /dev/davinci14 --device /dev/davinci15 \
+      --device /dev/davinci_manager --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf \
+      -v /root/.cache:/root/.cache \
+      quay.io/ascend/vllm-ascend:v0.23.0-a3 bash
+    ```
+
+    Image-only online serving with TP2 + expert parallelism:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3-vl-30b \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --max-num-seqs 32 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 16384 \
+      --gpu-memory-utilization 0.9 \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2":1}'
+    ```
+
+    Video serving raises the context limit and lowers concurrency to leave HBM
+    headroom. Mount the video directory to `/media` and allow that path:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3-vl-30b \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --max-num-seqs 8 \
+      --max-model-len 128000 \
+      --max-num-batched-tokens 4096 \
+      --gpu-memory-utilization 0.9 \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 1 \
+      --allowed-local-media-path /media \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2":1}'
+    ```
+
+    Functional graph validation uses TP1 + PP2 and a short context. On vLLM
+    v0.23.0, multimodal checkpoints do not populate
+    `text_config.architectures`, so the PP capability check needs an explicit
+    override:
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3-vl-30b \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 1 \
+      --pipeline-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --max-num-seqs 8 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 1024 \
+      --gpu-memory-utilization 0.9 \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2":1}' \
+      --hf-overrides '{"text_config":{"architectures":["Qwen3MoeForCausalLM"]}}'
+    ```
+
+    Notes:
+
+    - `enable_fused_mc2` is A3-specific; keep `HCCL_BUFFSIZE=1024` and
+      `--mm-processor-cache-gb 0` for these validated configurations.
+    - Image-only serving disables video inputs to reserve HBM for visual tokens
+      and KV cache.
+    - AISBench `mmmu_val` with `acc,none` in generation mode scored **66.22**
+      overall on the full 900-question set (the tutorial reference is 0.58).
+      AISBench passes images as local `file://` paths, so add
+      `--allowed-local-media-path <MMMU_images directory>` for that run.
