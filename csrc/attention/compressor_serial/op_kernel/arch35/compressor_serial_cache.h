@@ -51,7 +51,7 @@ public:
             PipeBarrier<PIPE_ALL>();
             Add(value[width], value[width], bias, width);
             PipeBarrier<PIPE_ALL>();
-            DataCopyExtParams copy{1, 2 * width * sizeof(float), 0, 0, 0};
+            DataCopyExtParams copy{1, static_cast<uint32_t>(2 * width * sizeof(float)), 0, 0, 0};
             DataCopyPad(dst[page * p->cacheStride + slot * (2 * width)], value, copy);
             PipeBarrier<PIPE_ALL>();
         }
