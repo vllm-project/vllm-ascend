@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KDARecoverSSMCommitMetadata, KimiK3KDAMetadataBuilder
 
@@ -61,6 +62,34 @@ def test_graph_staging_reuses_addresses_and_clears_prior_rows():
             t.data_ptr()
             for t in (metadata.spec_state_indices_tensor, metadata.spec_query_start_loc, metadata.num_accepted_tokens)
         ]
+
+
+@pytest.mark.parametrize("actual_reqs", [0, 1, 2, 3])
+def test_padding_offsets_stay_on_device_without_host_copy(monkeypatch, actual_reqs):
+    builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.use_full_cuda_graph = True
+    cpu_starts = torch.tensor([0, 1, 5, 11, 17], dtype=torch.int32)
+    device_starts = cpu_starts.clone()
+    original = device_starts.clone()
+    m = SimpleNamespace(num_reqs=4, num_actual_tokens=17, query_start_loc_cpu=cpu_starts, query_start_loc=device_starts)
+    m.replace = lambda **updates: SimpleNamespace(**(vars(m) | updates))
+    expected = original.clone()
+    expected[actual_reqs + 1 :] = original[actual_reqs]
+
+    def forbidden_host_copy(*args, **kwargs):
+        raise AssertionError("Padding offsets must not use Tensor.to")
+
+    def parent_build(self, prefix, common, accepted, draft_counts, fast_build):
+        torch.testing.assert_close(common.query_start_loc, expected, rtol=0, atol=0)
+        torch.testing.assert_close(common.query_start_loc_cpu, expected, rtol=0, atol=0)
+        assert common.num_actual_tokens == int(original[actual_reqs])
+        return SimpleNamespace(num_spec_decodes=0, num_prefills=0, num_decodes=0)
+
+    monkeypatch.setattr(KimiK3KDAMetadataBuilder, "build", parent_build)
+    monkeypatch.setattr(torch.Tensor, "to", forbidden_host_copy)
+    builder.build(0, m, num_actual_reqs=actual_reqs)
+    torch.testing.assert_close(device_starts, original, rtol=0, atol=0)
+    torch.testing.assert_close(cpu_starts, original, rtol=0, atol=0)
 
 
 def test_mixed_prefill_cpu_offsets_match_upstream_decode_partition():

@@ -62,9 +62,12 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
             # become sampler rows: commit receives only actual request counts.
             starts_cpu = m.query_start_loc_cpu.clone()
             starts_cpu[num_actual_reqs + 1 :] = starts_cpu[num_actual_reqs]
+            # Clamp on the current device stream. A blocking host-to-device
+            # copy here waits for the previous MTP graph before target launch.
+            starts = torch.minimum(m.query_start_loc, m.query_start_loc[num_actual_reqs])
             m = m.replace(
                 query_start_loc_cpu=starts_cpu,
-                query_start_loc=starts_cpu.to(m.query_start_loc.device),
+                query_start_loc=starts,
                 num_actual_tokens=int(starts_cpu[num_actual_reqs]),
             )
             if num_decode_draft_tokens_cpu is not None:
