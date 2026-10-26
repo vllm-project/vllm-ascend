@@ -309,10 +309,6 @@ jobs:
           elif [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
               pvc_name=gy005-az5-vllm-ascend
-          elif [ "${{ inputs.soc_version }}" = "a5" ]; then
-            npu_per_node=8
-            npu_resource_name=huawei.com/npu
-            shared_volume_path=/mnt/share
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
