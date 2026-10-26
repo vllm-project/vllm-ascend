@@ -66,7 +66,8 @@ Select the `docker run` command for your hardware platform:
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=1g \
+    --shm-size=512g \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -106,7 +107,8 @@ Select the `docker run` command for your hardware platform:
     docker run --rm \
     --name $NAME \
     --net=host \
-    --shm-size=100g \
+    --shm-size=512g \
+    --privileged=true \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
