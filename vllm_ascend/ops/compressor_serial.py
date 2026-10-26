@@ -120,9 +120,11 @@ class CompressorSerialPlan:
         rotary_mode=2,
         cache_mode=1,
         *,
-        config=CompressorSerialConfig(),
+        config=None,
     ):
         # Validate host-visible shape metadata only. No device reads or item().
+        if config is None:
+            config = CompressorSerialConfig()
         if x.device.type not in ("npu", "privateuseone"):
             raise ValueError("A5 NPU tensors are required")
         if x.ndim not in (2, 3) or x.dtype not in (torch.bfloat16, torch.float16):

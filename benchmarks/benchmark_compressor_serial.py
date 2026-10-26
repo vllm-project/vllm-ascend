@@ -9,10 +9,12 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import copy
 import statistics
 import subprocess
 import sys
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -33,7 +35,12 @@ def load_serial_module():
 
 def make_case(case, device):
     """Preserve exported shapes; metadata values are synthetic, not trace data."""
-    shapes = case["inputs"]
+    shapes = copy.deepcopy(case["inputs"])
+    # The installed public operator validates TND output capacity from X,
+    # independently of valid-token metadata. Preserve fixture shapes and record
+    # this runtime adaptation in the result rather than changing the export.
+    capacity = min(shapes[0][0], shapes[0][0] // case["ratio"] + shapes[11][0])
+    shapes[6][0] = shapes[7][0] = capacity
     ratio = case["ratio"]
     batch = shapes[11][0]
     gen = torch.Generator().manual_seed(20261026)
@@ -45,7 +52,7 @@ def make_case(case, device):
     state, ape, gamma, sin, cos = [random(s) for s in shapes[3:8]]
     # TND may contain padded tokens. Match the traced output capacity exactly.
     if case["phase"] == "prefill":
-        total = min(shapes[0][0], shapes[6][0] * ratio)
+        total = min(shapes[0][0], case["inputs"][6][0] * ratio)
         lengths = [total // batch // ratio * ratio] * batch
         lengths[-1] += total - sum(lengths)
         starts = [0] * batch
@@ -157,11 +164,14 @@ def main():
     fixture = Path(__file__).parents[1] / "tests/ut/ops/compressor_serial_shapes.json"
     cases = json.loads(fixture.read_text())["cases"]
     serial_module = load_serial_module()
-    config = serial_module.CompressorSerialConfig(opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads)
+    config = serial_module.CompressorSerialConfig(
+        opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads
+    )
     result = {
         "iteration": opts.iteration, "hypothesis": opts.hypothesis,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "library_sha256": hashlib.sha256(opts.serial_library.read_bytes()).hexdigest(),
+        "fused_library_sha256": hashlib.sha256(opts.fused_library.read_bytes()).hexdigest(),
         "torch": torch.__version__, "hf32": opts.hf32, "config": asdict(config),
         "metadata": "synthetic; exported shapes preserved", "cases": [],
     }
@@ -169,11 +179,14 @@ def main():
         if opts.case not in ("all", case["id"]):
             continue
         args = make_case(case, "npu")
-        plan = serial_module.CompressorSerialPlan.prepare(*args, cmp_ratio=case["ratio"], coff=case["coff"], config=config)
+        plan = serial_module.CompressorSerialPlan.prepare(
+            *args, cmp_ratio=case["ratio"], coff=case["coff"], config=config
+        )
+        print(f"Checking {case['id']}: runtime RoPE shape {tuple(args[6].shape)}", flush=True)
         initial, valid = check_case(args, case, plan)
-        fused_graph, fused_graph_output = capture(lambda: fused_call(args, case))
+        fused_graph, fused_graph_output = capture(partial(fused_call, args, case))
         args[3].copy_(initial)
-        serial_graph, _ = capture(lambda: plan(args[0]))
+        serial_graph, _ = capture(partial(plan, args[0]))
         args[3].copy_(initial)
         # A second correctness check must exercise the captured graph itself.
         serial_graph.replay()
@@ -193,7 +206,9 @@ def main():
         serial_us = graph_times(serial_graph)
         speed = statistics.median(fused_us) / statistics.median(serial_us)
         result["cases"].append({"id": case["id"], "fused_us": fused_us, "serial_us": serial_us,
-                                "ratio": speed, "target_met": speed >= 0.8})
+                                "ratio": speed, "target_met": speed >= 0.8,
+                                "runtime_shapes": [None if t is None else list(t.shape) for t in args],
+                                "reference_shapes": case["inputs"]})
         print(json.dumps(result["cases"][-1]), flush=True)
     if not result["cases"]:
         raise ValueError("no case selected")
