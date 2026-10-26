@@ -62,6 +62,26 @@ if _triton_available:
 
             _triton_compiler.triton_key = _triton_key
 
+        # Triton 3.6 moved launch hooks to knobs.runtime. Keep torch_npu's
+        # legacy class reads live, including hooks installed after import.
+        # Remove once supported torch_npu launchers read knobs.runtime.
+        try:
+            from triton import knobs as _triton_knobs  # type: ignore[import-untyped]
+        except ImportError:
+            pass  # Older Triton versions retain the original class attributes.
+        else:
+
+            class _TritonLaunchHook:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+                def __get__(self, instance, owner=None):
+                    return getattr(_triton_knobs.runtime, self.name)
+
+            for _hook_name in ("launch_enter_hook", "launch_exit_hook"):
+                if not hasattr(_triton_compiler.CompiledKernel, _hook_name):
+                    setattr(_triton_compiler.CompiledKernel, _hook_name, _TritonLaunchHook(_hook_name))
+
 _GLOBAL_PATCH_APPLIED = False
 
 

@@ -31,16 +31,21 @@
 # ** File: vllm_ascend/__init__.py (early Triton compatibility) **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `triton.compiler.compiler.triton_key`
+#   2. `triton.compiler.compiler.CompiledKernel.launch_enter_hook / launch_exit_hook`
 #    Why:
-#       torch_npu's Inductor cache imports the old path, removed in Triton 3.6.
+#       torch_npu's Inductor cache and launcher use APIs moved in Triton 3.6.
 #    How:
 #       At package initialization, export runtime.cache.triton_key at the old
 #       path only if missing. This also covers direct compilation outside a
 #       vLLM worker and preserves the original compiler fingerprint function.
+#       Missing launch hook attributes are descriptors reading knobs.runtime
+#       on each access. Preserve existing attributes and forward callbacks
+#       unchanged, including runtime hook replacement and metadata handling.
 #    Related PR (if no, explain why):
 #       No torch_npu PR yet; this bridges the pinned dependency versions.
 #    Future Plan:
-#       Remove when all supported torch_npu versions use runtime.cache.
+#       Remove when all supported torch_npu versions use runtime.cache and
+#       knobs.runtime for the cache key and launch hooks respectively.
 #
 # * Platform Patch:
 # ==========#
