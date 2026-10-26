@@ -1,0 +1,8 @@
+pr: 16981
+entries:
+  - category: feature
+    text: Added Qwen3.8 Flash Next support with QSA sparse attention, hybrid KV caching, and MTP speculative decoding on Model Runner V1.
+    model: Qwen3.8-Flash-Next
+  - category: feature
+    text: Packed QSA K/V, GDN SSM and PLE in shared pages, sized slots by QSA layer count and exposed 128-token GBSA kernel blocks.
+    model: Qwen3.8-Flash-Next

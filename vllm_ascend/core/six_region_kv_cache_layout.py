@@ -1,3 +1,11 @@
+"""QSA hybrid cache storage.
+
+[Role] Plan block-packed K/V sharing a physical page with GDN SSM state.
+[Invariants] Pool block IDs have one group owner; K+V, SSM and PLE alias r2.
+[Timeouts & Locks] Pure layout arithmetic; no waits or locks.
+[Side-Effect Policy] View construction aliases caller-owned storage without copies.
+"""
+
 from __future__ import annotations
 
 import math
@@ -37,6 +45,7 @@ class CacheOwner:
     spec: KVCacheSpec
     role: str
     slot: int
+    group_id: int
 
 
 @dataclass(frozen=True)
@@ -59,7 +68,7 @@ class SlabRegion:
 
 @dataclass(frozen=True)
 class SixRegionKVCacheLayout:
-    """Six global contiguous slabs in every shared layer-slot backing."""
+    """Shared layer slots with packed K/V-or-state pages and two indexer slabs."""
 
     regions: tuple[SlabRegion, ...]
     owners: tuple[CacheOwner, ...]
@@ -83,7 +92,7 @@ class SixRegionKVCacheLayout:
             QSA_RAW: "r4",
             QSA_COMPRESSED: "r5",
             GDN: "r1",
-            PLE: "r6",
+            PLE: "r2",
         }[self.owner(layer_name).role]
 
 
@@ -158,7 +167,7 @@ def build_six_region_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
     num_blocks: int,
 ) -> SixRegionKVCacheLayout | None:
-    """Build a spec-driven six-slab layout, if the raw circular owner exists."""
+    """Build the hybrid layout; r2 contains packed K/V or one GDN SSM/PLE state."""
 
     if num_blocks <= 0:
         raise ValueError("Six-region layout requires a positive block count")
@@ -216,30 +225,16 @@ def build_six_region_kv_cache_layout(
         for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
     }
     alignment = math.lcm(16, *dtype_sizes)
-    main_pages = [
-        _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
-    ]
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
     max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
     for layer_name, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
-        k_token_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
-        if max_ssm_bytes % k_token_bytes:
+        kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
+        minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
+        if spec.block_size < minimum_block_size or spec.block_size % 128:
             raise ValueError(
-                f"GDN SSM page ({max_ssm_bytes} bytes) is not an integral "
-                f"number of {layer_name} K tokens ({k_token_bytes} bytes/token)"
-            )
-        aligned_block_size = max_ssm_bytes // k_token_bytes
-        target_block_size = max(spec.block_size, aligned_block_size)
-        if target_block_size % 128:
-            raise ValueError(
-                f"{layer_name} aligned block_size={target_block_size} is not "
-                "a multiple of the QSA kernel block size 128"
-            )
-        if spec.block_size != target_block_size:
-            raise ValueError(
-                f"{layer_name} block_size={spec.block_size} was not aligned "
-                f"before KV-cache grouping; expected {target_block_size}"
+                f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
+                f"minimum={minimum_block_size}, kernel_multiple=128"
             )
     for source in qsa_sources:
         main_name, main_spec = qsa_by_role[QSA_MAIN][source]
@@ -268,56 +263,49 @@ def build_six_region_kv_cache_layout(
         _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
     ]
     ple_specs = [spec for _, spec in role_members[PLE] if isinstance(spec, MambaSpec)]
-    page_sizes = (
-        max(_state_bytes(spec, 0) for spec in gdn_specs),
-        max(max(_state_bytes(spec, 1) for spec in gdn_specs), max(k_bytes for k_bytes, _ in main_pages)),
-        max(v_bytes for _, v_bytes in main_pages),
-        max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
-        max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED]),
-        max(_state_bytes(spec, 0) for spec in ple_specs),
+    # r3 used to hold a separate V slab. V now occupies the tail of each
+    # r2 physical page, so GDN state aliases the complete K+V footprint.
+    # GBSA exposes K and V through 128-token views, including padding when
+    # a larger state determines the r2 stride. Each K/V subpage must align.
+    subpage_alignment = math.lcm(
+        *(
+            128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
+            for _, spec in role_members[QSA_MAIN]
+            for size in (spec.head_size, spec.head_size_v)
+        )
     )
-
-    max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
-    for layer_name, spec in role_members[QSA_MAIN]:
-        assert isinstance(spec, FullAttentionSpec)
-        k_token_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
-        if max_ssm_bytes % k_token_bytes:
-            raise ValueError(
-                f"GDN SSM page ({max_ssm_bytes} bytes) is not an integral "
-                f"number of {layer_name} K tokens ({k_token_bytes} bytes/token)"
-            )
-        aligned_block_size = max_ssm_bytes // k_token_bytes
-        if spec.block_size < aligned_block_size or spec.block_size % 128:
-            raise ValueError(
-                f"{layer_name} block_size={spec.block_size} violates the "
-                "Qwen3.5 hybrid alignment: "
-                f"minimum={aligned_block_size}, kernel_multiple=128"
-            )
-
+    r2_bytes = max(max_ssm_bytes, *(k + v for k, v in main_pages), *(_state_bytes(spec, 0) for spec in ple_specs))
+    page_sizes = {
+        "r1": max(_state_bytes(spec, 0) for spec in gdn_specs),
+        "r2": round_up(r2_bytes, subpage_alignment),
+        "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
+        "r5": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED]),
+    }
     regions: list[SlabRegion] = []
     cursor = 0
-    for index, page_size in enumerate(page_sizes, 1):
+    for name, page_size in page_sizes.items():
         cursor = round_up(cursor, alignment)
-        regions.append(
-            SlabRegion(
-                name=f"r{index}",
-                offset=cursor,
-                page_size_bytes=page_size,
-                num_blocks=num_blocks,
-            )
-        )
+        regions.append(SlabRegion(name, cursor, page_size, num_blocks))
         cursor += page_size * num_blocks
     slot_backing_size = round_up(cursor, alignment)
 
+    # Each QSA layer needs one slot. State groups reuse those slots with
+    # separate scheduler block tables, so live groups own disjoint block IDs.
+    slot_count = len(role_members[QSA_MAIN])
     owners: list[CacheOwner] = []
     for role in required:
-        owners.extend(
-            CacheOwner(layer_name, spec, role, slot) for slot, (layer_name, spec) in enumerate(role_members[role])
-        )
+        group_slots: dict[int, int] = {}
+        for ordinal, (layer_name, spec) in enumerate(role_members[role]):
+            group_id = owner_group_ids[layer_name]
+            slot = group_slots.get(group_id, 0) if role in (GDN, PLE) else ordinal
+            if slot >= slot_count:
+                raise ValueError(f"Cache group {group_id} exceeds the {slot_count} QSA slots")
+            owners.append(CacheOwner(layer_name, spec, role, slot, group_id))
+            group_slots[group_id] = slot + 1
     owners.extend(
-        CacheOwner(layer_name, spec, HIDDEN, slot) for slot, (layer_name, spec) in enumerate(role_members[HIDDEN])
+        CacheOwner(layer_name, spec, HIDDEN, slot, owner_group_ids[layer_name])
+        for slot, (layer_name, spec) in enumerate(role_members[HIDDEN])
     )
-    slot_count = max(len(role_members[role]) for role in required)
     layout = SixRegionKVCacheLayout(
         regions=tuple(regions),
         owners=tuple(owners),
@@ -341,29 +329,37 @@ def build_six_region_kv_cache_layout(
         assert all(region.offset % get_dtype_size(dtype) == 0 for dtype in dtypes)
     for _, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
-        k_token_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
-        assert layout.region("r2").page_size_bytes // k_token_bytes >= spec.block_size
+        assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r2").page_size_bytes
     return layout
 
 
-def make_contiguous_slab_view(
+def make_slab_view(
     backing: torch.Tensor,
     *,
     dtype: torch.dtype,
     num_blocks: int,
     item_shape: tuple[int, ...],
     storage_offset: int,
+    block_stride: int | None = None,
 ) -> torch.Tensor:
-    """Create one contiguous [num_blocks, *item_shape] region view."""
+    """Create dense block contents with an explicit physical byte stride."""
 
     dtype_size = get_dtype_size(dtype)
     if storage_offset % dtype_size:
         raise ValueError("Slab cache offset must align to the view dtype")
-    required_bytes = num_blocks * math.prod(item_shape) * dtype_size
+    item_bytes = math.prod(item_shape) * dtype_size
+    block_stride = item_bytes if block_stride is None else block_stride
+    if block_stride < item_bytes or block_stride % dtype_size:
+        raise ValueError("Slab block stride must fit one item and align to its dtype")
+    required_bytes = (num_blocks - 1) * block_stride + item_bytes
     if storage_offset + required_bytes > backing.numel():
         raise ValueError("Slab cache view exceeds its backing allocation")
-    result = backing[storage_offset : storage_offset + required_bytes].view(dtype).view(num_blocks, *item_shape)
-    assert result.is_contiguous()
+    inner_strides = tuple(math.prod(item_shape[index + 1 :]) for index in range(len(item_shape)))
+    result = (
+        backing[storage_offset : storage_offset + required_bytes]
+        .view(dtype)
+        .as_strided((num_blocks, *item_shape), (block_stride // dtype_size, *inner_strides))
+    )
     return result
 
 
@@ -376,5 +372,5 @@ __all__ = [
     "QSA_RAW",
     "SixRegionKVCacheLayout",
     "build_six_region_kv_cache_layout",
-    "make_contiguous_slab_view",
+    "make_slab_view",
 ]

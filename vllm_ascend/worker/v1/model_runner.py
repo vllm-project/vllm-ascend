@@ -17,6 +17,11 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+# [Role] Ascend platform configuration and execution integration.
+# [Invariants] QSA K+V share one physical page with GDN SSM state.
+# [Timeouts & Locks] Existing worker lifecycle owns device waits and locks.
+# [Side-Effect Policy] Configuration and cache views follow the active model config.
+
 import logging
 import math
 import sys
@@ -163,7 +168,7 @@ from vllm_ascend.core.six_region_kv_cache_layout import (
     QSA_MAIN,
     QSA_RAW,
     build_six_region_kv_cache_layout,
-    make_contiguous_slab_view,
+    make_slab_view,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
@@ -6186,35 +6191,20 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec,
                             FullAttentionSpec,
                         )
-                        k_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r2").offset
-                            ),
+                        region = six_region_layout.region("r2")
+                        spec = current_kv_cache_spec
+                        k_bytes = spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+                        kv_caches[layer_name] = tuple(
+                            make_slab_view(
+                                raw_slab,
+                                dtype=spec.dtype,
+                                num_blocks=kv_cache_config.num_blocks,
+                                item_shape=(spec.block_size, spec.num_kv_heads, head_size),
+                                storage_offset=slot_offset + region.offset + offset,
+                                block_stride=region.page_size_bytes,
+                            )
+                            for head_size, offset in ((spec.head_size, 0), (spec.head_size_v, k_bytes))
                         )
-                        v_cache = make_contiguous_slab_view(
-                            raw_slab,
-                            dtype=current_kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(
-                                current_kv_cache_spec.block_size,
-                                current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size_v,
-                            ),
-                            storage_offset=(
-                                slot_offset
-                                + six_region_layout.region("r3").offset
-                            ),
-                        )
-                        kv_caches[layer_name] = (k_cache, v_cache)
                         continue
                     if owner.role in (QSA_RAW, QSA_COMPRESSED):
                         assert isinstance(
@@ -6247,7 +6237,7 @@ class NPUModelRunner(GPUModelRunner):
                                 f"view={expected_page_bytes}, "
                                 f"region={region.page_size_bytes}."
                             )
-                        kv_caches[layer_name] = make_contiguous_slab_view(
+                        kv_caches[layer_name] = make_slab_view(
                             raw_slab,
                             dtype=current_kv_cache_spec.dtype,
                             num_blocks=kv_cache_config.num_blocks,
@@ -6263,7 +6253,7 @@ class NPUModelRunner(GPUModelRunner):
                         assert isinstance(current_kv_cache_spec, MambaSpec)
                         region_names = {
                             GDN: ("r1", "r2"),
-                            PLE: ("r6",),
+                            PLE: ("r2",),
                         }[owner.role]
                         if len(region_names) != len(
                             current_kv_cache_spec.shapes
@@ -6274,11 +6264,12 @@ class NPUModelRunner(GPUModelRunner):
                                 f"shapes={current_kv_cache_spec.shapes}."
                             )
                         kv_caches[layer_name] = [
-                            make_contiguous_slab_view(
+                            make_slab_view(
                                 raw_slab,
                                 dtype=dtype,
                                 num_blocks=kv_cache_config.num_blocks,
                                 item_shape=tuple(shape),
+                                block_stride=six_region_layout.region(region_name).page_size_bytes,
                                 storage_offset=(
                                     slot_offset
                                     + six_region_layout.region(

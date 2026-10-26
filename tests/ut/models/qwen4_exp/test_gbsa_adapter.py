@@ -5,9 +5,12 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize("group_ids", [(0, 1), (31, 32), (95, 96)])
+@pytest.mark.parametrize("storage_page_size", [128, 384, 768])
+@pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tail_tokens", range(4))
-def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
+def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens, storage_page_size, packed, group_ids):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -17,7 +20,7 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
         assert block_shape == [1, 4]
         assert head_dim == 128
         assert kwargs["residual_block_mode"] == 1
-        assert kwargs["seqused_kv"].tolist() == [8 + tail_tokens]
+        assert kwargs["seqused_kv"].tolist() == [sequence_length]
         return torch.empty(0)
 
     def attention(query, keys, values, indices, counts, block_shape, **kwargs):
@@ -49,11 +52,19 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
 
     torch.manual_seed(42 + tail_tokens)
     query = torch.randn(1, 4, 128, dtype=dtype)
-    keys = torch.randn(3, 128, 2, 128, dtype=dtype)
-    values = torch.randn_like(keys)
-    block_table = torch.tensor([[2]], dtype=torch.int32)
-    seq_lens = torch.tensor([8 + tail_tokens], dtype=torch.int32)
-    groups = torch.tensor([0, 1], dtype=torch.int32)
+    if packed:
+        backing = torch.randn(3, 2, storage_page_size, 2, 128, dtype=dtype)
+        keys, values = backing[:, 0], backing[:, 1]
+    else:
+        keys = torch.randn(3, storage_page_size, 2, 128, dtype=dtype)
+        values = torch.randn_like(keys)
+    sequence_length = (max(group_ids) + 1) * 4 + tail_tokens
+    logical_blocks = (sequence_length + storage_page_size - 1) // storage_page_size
+    manager_table = torch.tensor([[(index + 2) % 3 for index in range(logical_blocks)]], dtype=torch.int32)
+    subpages = storage_page_size // 128
+    block_table = (manager_table.unsqueeze(-1) * subpages + torch.arange(subpages)).flatten(1).to(torch.int32)
+    seq_lens = torch.tensor([sequence_length], dtype=torch.int32)
+    groups = torch.tensor(group_ids, dtype=torch.int32)
     compact_indices = torch.cat((groups, torch.full((3,), -1, dtype=torch.int32))).view(1, -1)
     output = torch.empty_like(query)
 
@@ -64,15 +75,31 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
         compact_indices,
         block_table,
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([7 + tail_tokens], dtype=torch.int32),
+        torch.tensor([sequence_length - 1], dtype=torch.int32),
         seq_lens,
         output,
     )
 
     assert result is output
+    selected_tokens = [token for group in group_ids for token in range(group * 4, group * 4 + 4)]
+    selected_tokens.extend(range(sequence_length - tail_tokens, sequence_length))
+    tokens = torch.tensor(selected_tokens)
+    physical = manager_table[0, tokens // storage_page_size].long()
+    offsets = tokens % storage_page_size
+    ref_keys = keys[physical, offsets].float().repeat_interleave(2, dim=1)
+    ref_values = values[physical, offsets].float().repeat_interleave(2, dim=1)
+    scores = torch.einsum("hd,shd->hs", query[0].float(), ref_keys) / 128**0.5
+    expected_output = torch.einsum("hs,shd->hd", scores.softmax(-1), ref_values).to(dtype)
+    torch.testing.assert_close(output[0], expected_output)
     assert calls[0][0] == keys.data_ptr()
     assert calls[0][1] == values.data_ptr()
-    torch.testing.assert_close(calls[0][2], block_table)
+    if storage_page_size == 128:
+        torch.testing.assert_close(calls[0][2], block_table)
+    else:
+        subpages = storage_page_size // 128
+        block_stride = subpages * (2 if packed else 1)
+        expected = manager_table.unsqueeze(-1) * block_stride + torch.arange(subpages)
+        torch.testing.assert_close(calls[0][2], expected.flatten(1).to(torch.int32))
 
 
 def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
