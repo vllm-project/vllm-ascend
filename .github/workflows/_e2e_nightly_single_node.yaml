@@ -220,7 +220,7 @@ jobs:
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-nightly.txt
-          # Keep the daily-built packages shipped by the image (torch/torch-npu/
+          # Keep the packages shipped by the image (torch/torch-npu/
           # torchvision/torchaudio, triton-ascend, memfabric/memcache) while still
           # installing the other runtime dependencies declared by requirements.txt.
           # `|| true` matters: grep returns 1 when every line is filtered out while
