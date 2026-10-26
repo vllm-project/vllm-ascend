@@ -26,6 +26,7 @@ _GBSA_MASK_MODE_CAUSAL = 1
 _GBSA_NO_QUANT = 0
 _GBSA_FP8_STATIC_CAST_P = 5
 _GBSA_SOFTMAX_PRECISION = 0
+_GBSA_FP8_SOFTMAX_PRECISION = 1
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
 
@@ -162,30 +163,39 @@ def _run_generic_block_sparse_attention(
     dequant_scale: torch.Tensor | None = None,
     gbsa_metadata_cache: dict[tuple[Any, ...], torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """Run MiniMax-M3 sparse attention through CANN Ops GBSA."""
+    """Run MiniMax-M3 sparse attention through the bundled GBSA operators."""
     del dequant_scale
-    topk_idx = topk_idx.to(dtype=torch.int32).contiguous()
+    # GBSA's sparse token-band geometry requires ascending block IDs.
+    # Score-ordered top-k can place a partial causal block before full
+    # blocks, allowing its future/padded tokens into the attention result.
+    topk_idx = topk_idx.to(dtype=torch.int32)
+    invalid_block = torch.iinfo(torch.int32).max
+    topk_idx = topk_idx.masked_fill(topk_idx < 0, invalid_block).sort(dim=-1).values
+    topk_idx = topk_idx.masked_fill(topk_idx == invalid_block, -1).contiguous()
     select_num_idx = select_num_idx.to(dtype=torch.int32).contiguous()
     block_table = block_table.to(dtype=torch.int32).contiguous()
     cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int64).contiguous()
     seq_lens = seq_lens.to(dtype=torch.int32).contiguous()
 
     quant_mode = _GBSA_NO_QUANT
+    softmax_precision = _GBSA_SOFTMAX_PRECISION
     quant_kwargs: dict[str, Any] = {}
     if key.dtype == torch.float8_e4m3fn:
         if value.dtype != torch.float8_e4m3fn:
             raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
         q = _to_fp8_e4m3(q)
         quant_mode = _GBSA_FP8_STATIC_CAST_P
+        # Bundled GBSA requires low-precision softmax for FP8 quant mode 5.
+        # Keep FP32 softmax for unquantized inputs, including A5 BF16.
+        softmax_precision = _GBSA_FP8_SOFTMAX_PRECISION
         quant_kwargs = {"attention_out_dtype": torch.bfloat16}
     elif q.dtype != key.dtype or value.dtype != key.dtype:
         raise TypeError("MiniMax-M3 sparse attention requires Q, K, and V to have the same dtype")
 
     block_shape = [1, block_size]
-    from cann_ops_transformer.ops import (  # type: ignore[import-not-found]  # noqa: PLC0415
-        generic_block_sparse_attention,
-        generic_block_sparse_attention_metadata,
-    )
+    enable_custom_op()
+    generic_block_sparse_attention = torch.ops._C_ascend.npu_generic_block_sparse_attention
+    generic_block_sparse_attention_metadata = torch.ops._C_ascend.npu_generic_block_sparse_attention_metadata
 
     # Opt-in only from the A3 model's uniform-decode metadata builder. Direct
     # callers and prefill must not assume that layer-dependent counts match.
@@ -216,7 +226,7 @@ def _run_generic_block_sparse_attention(
             layout_kv="PA_BBND",
             mask_mode=_GBSA_MASK_MODE_CAUSAL,
             quant_mode=quant_mode,
-            softmax_precision=_GBSA_SOFTMAX_PRECISION,
+            softmax_precision=softmax_precision,
         )
         if cache is not None:
             cache[cache_key] = gbsa_metadata
@@ -236,7 +246,7 @@ def _run_generic_block_sparse_attention(
         softmax_scale=sm_scale,
         mask_mode=_GBSA_MASK_MODE_CAUSAL,
         quant_mode=quant_mode,
-        softmax_precision=_GBSA_SOFTMAX_PRECISION,
+        softmax_precision=softmax_precision,
         return_softmax_lse=False,
         **quant_kwargs,
     )

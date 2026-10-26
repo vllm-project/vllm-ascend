@@ -5,10 +5,9 @@
 from __future__ import annotations
 
 import inspect
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -66,10 +65,11 @@ from vllm_ascend.utils import AscendDeviceType
 def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     gbsa_metadata_op = MagicMock()
     gbsa_attention_op = MagicMock()
-    gbsa_ops_module = ModuleType("cann_ops_transformer.ops")
-    gbsa_ops_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
-    gbsa_ops_module.generic_block_sparse_attention = gbsa_attention_op  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", gbsa_ops_module)
+    monkeypatch.setattr(msa_m3_npu_module, "enable_custom_op", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        torch.ops._C_ascend, "npu_generic_block_sparse_attention_metadata", gbsa_metadata_op, raising=False
+    )
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_generic_block_sparse_attention", gbsa_attention_op, raising=False)
     return gbsa_metadata_op, gbsa_attention_op
 
 
@@ -1433,11 +1433,14 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
 
 
 @pytest.mark.parametrize("reuse_prefix", [False, True])
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
     monkeypatch: pytest.MonkeyPatch,
     reuse_prefix: bool,
+    device_type: AscendDeviceType,
 ) -> None:
+    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     q = torch.zeros(4, 2, 4, dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 6, 128, 2, 4, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
@@ -1771,7 +1774,11 @@ def test_m3_impls_provide_update_graph_params_protocol():
 
 def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        msa_m3_npu_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
     q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
     topk_idx = torch.tensor([[[0]]], dtype=torch.int32)
@@ -1801,6 +1808,7 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
 
     metadata_kwargs = gbsa_metadata_op.call_args.kwargs
     assert metadata_kwargs["quant_mode"] == 5
+    assert metadata_kwargs["softmax_precision"] == 1
     assert metadata_kwargs["max_seqlen_q"] == 1
     assert torch.equal(
         metadata_kwargs["cu_seqlens_q"],
@@ -1814,6 +1822,7 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
     assert args[2].dtype == torch.float8_e4m3fn
     assert torch.equal(args[4], select_num_idx)
     assert kwargs["quant_mode"] == 5
+    assert kwargs["softmax_precision"] == 1
     assert "q_dequant_scale" not in kwargs
     assert "k_dequant_scale" not in kwargs
     assert "v_dequant_scale" not in kwargs
@@ -1906,7 +1915,7 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     gbsa_metadata_op.assert_called_once()
     metadata_kwargs = gbsa_metadata_op.call_args.kwargs
     assert metadata_kwargs["max_seqlen_q"] == 3
-    assert metadata_kwargs["softmax_precision"] == 0
+    assert metadata_kwargs["softmax_precision"] == (1 if dtype == torch.float8_e4m3fn else 0)
     assert torch.equal(metadata_kwargs["cu_seqlens_q"], torch.tensor([0, 2, 5], dtype=torch.int64))
     assert torch.equal(metadata_kwargs["seqused_kv"], torch.tensor([130, 3], dtype=torch.int32))
 
@@ -1918,7 +1927,7 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     assert args[3] is topk_idx
     torch.testing.assert_close(args[4], torch.ones(5, 1, dtype=torch.int32))
     assert kwargs["metadata"] is metadata
-    assert kwargs["softmax_precision"] == 0
+    assert kwargs["softmax_precision"] == metadata_kwargs["softmax_precision"]
     if dtype == torch.float8_e4m3fn:
         torch.testing.assert_close(args[0].float(), q.float().clamp(-448, 448))
         assert kwargs["attention_out_dtype"] == torch.bfloat16
