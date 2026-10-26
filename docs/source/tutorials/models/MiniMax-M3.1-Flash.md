@@ -10,7 +10,7 @@
 
 MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 428B total parameters and 23B activated parameters per token. It uses sparse attention throughout the model.
 
-This document covers supported features, environment and model preparation, single-node deployment, PD separation, and accuracy evaluation.
+This document covers supported features, environment and model preparation, single-node deployment, PD separation, functional verification, accuracy and performance evaluation, performance tuning, and troubleshooting.
 
 !!! warning
 
@@ -50,7 +50,7 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 Run the following on each A3 host. Set the model path to the W8A8 checkpoint.
 
 ```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a3-openeuler"
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a3-openeuler"
 export CONTAINER_NAME=minimax_m31_flash
 export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
@@ -81,12 +81,12 @@ docker run -it --name "$CONTAINER_NAME" \
     -w /workspace "$IMAGE" bash
 ```
 
-### 4.2 A5 Docker Container
+### 4.2 950DT products Docker Container
 
-Run the following on each A5 host. Set the model path to the W8A8-MXFP8 checkpoint.
+Run the following on each 950DT products host. Set the model path to the W8A8-MXFP8 checkpoint.
 
 ```bash
-export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-a5-openeuler"
+export IMAGE="quay.io/ascend/vllm-ascend:minimax-m3.1-flash-a5-openeuler"
 export CONTAINER_NAME=minimax_m31_flash
 export MODEL_DIR="<MINIMAX_M31_FLASH_W8A8_MXFP8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
@@ -119,13 +119,23 @@ Use the container and model weights for your hardware from [Installation](#4-ins
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
-**Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+**Note**: In the scripts below, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+
+`MAX_MODEL_LEN` is a shell variable whose value is passed to the vLLM argument `--max-model-len`. The examples use the following context budgets:
+
+| Deployment | MAX_MODEL_LEN |
+| --- | --- |
+| Single-node, A3 or 950DT products | 133000 |
+| PD disaggregation, A3 | 263000 |
+| PD disaggregation, 950DT products | 133000 |
+
+These values belong to different deployment profiles. Weights, communication buffers, parallelism, and KV caches share device memory, so a context budget that fits one profile may not fit another. Select a value that covers the prompt and generated tokens together, and check available KV cache capacity at the intended concurrency. The `1M` model limit in the support matrix does not mean every example configuration reserves enough memory for 1M-token requests. To use the `263000` setting reported in [Text Evaluation](#72-text-evaluation), update `MAX_MODEL_LEN` in the serving scripts, including both roles for PD deployment, and recheck memory capacity before evaluation.
 
 For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment runs Prefill and Decode on the same host. Both examples use W8A8 weights and DSpark speculative decoding, with all 16 NPUs on A3 or all eight NPUs on A5.
+Single-node deployment runs Prefill and Decode on the same host. Both examples use W8A8 weights and [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model. They use all 16 NPUs on A3 or all eight NPUs on 950DT products.
 
 === "A3 series (W8A8)"
 
@@ -137,6 +147,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     ```bash
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    export MAX_MODEL_LEN=133000
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
@@ -148,7 +159,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
       --port 11223 \
       --served-model-name minimax-m3.1-flash \
       --trust-remote-code \
-      --max-model-len 133000 \
+      --max-model-len "$MAX_MODEL_LEN" \
       --tensor-parallel-size 4 \
       --data-parallel-size 4 \
       --enable-expert-parallel \
@@ -179,18 +190,32 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
       --safetensors-load-strategy prefetch
     ```
 
-    Send requests directly to port `11223` with model name `minimax-m3.1-flash`.
+    Wait for the following startup messages, then check the health endpoint from another terminal in the container:
+
+    ```text
+    INFO:     Started server process
+    INFO:     Waiting for application startup.
+    INFO:     Application startup complete.
+    ```
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --output /dev/null \
+        --write-out '%{http_code}\n' http://127.0.0.1:11223/health
+    ```
+
+    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 === "950DT products"
 
     **Start the Service**
 
-    Run the following inside the A5 container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8-MXFP8 weights, and DSpark speculative decoding with seven draft tokens.
+    Run the following inside the 950DT products container. It uses DP2 x TP4 / EP8 across all eight NPUs, W8A8-MXFP8 weights, and DSpark speculative decoding with seven draft tokens.
 
     Set `MODEL_PATH` to your model weight directory; the following example uses the container mount path configured in [Section 4](#4-installation).
 
     ```bash
     export MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    export MAX_MODEL_LEN=133000
 
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
@@ -202,7 +227,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
       --port 11223 \
       --served-model-name minimax-m3.1-flash \
       --trust-remote-code \
-      --max-model-len 133000 \
+      --max-model-len "$MAX_MODEL_LEN" \
       --tensor-parallel-size 4 \
       --data-parallel-size 2 \
       --enable-expert-parallel \
@@ -231,11 +256,26 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
       --safetensors-load-strategy prefetch
     ```
 
-    Send requests directly to port `11223` with model name `minimax-m3.1-flash`.
+    Wait for the following startup messages, then check the health endpoint from another terminal in the container:
+
+    ```text
+    INFO:     Started server process
+    INFO:     Waiting for application startup.
+    INFO:     Application startup complete.
+    ```
+
+    ```bash
+    curl --noproxy '*' --fail --silent --show-error --output /dev/null \
+        --write-out '%{http_code}\n' http://127.0.0.1:11223/health
+    ```
+
+    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 ### 5.2 PD Disaggregation
 
 PD disaggregation runs Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
+
+Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress and `Application startup complete` to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
 
 === "A3 series (W8A8)"
 
@@ -814,5 +854,118 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| AIME2026 | Ascend 950DT Products | 93.33@repeat4 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
+| AIME2026 | Ascend 950DT products | 93.33@repeat4 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
 | AIME2026 | A3 | 93.33@repeat1 | 263000 | 32 | 81920 | 32 | temperature=1.0, top_p=0.95, reasoning_effort="max", chat_template_kwargs={"thinking_mode":"enabled"} |
+
+## 8 Performance Evaluation
+
+Use [vLLM serving benchmarks](../../developer_guide/performance_and_debug/performance_benchmark.md#321-online-serving) to measure request throughput, output-token throughput, time to first token (TTFT), and time per output token (TPOT). Start the matching service in [Section 5](#5-online-service-deployment) and wait until it is ready before running the benchmark from a container with the model tokenizer available.
+
+Set `SERVICE_HOST` to the reachable API or proxy IP. Use port `11223` for single-node deployment, `19080` for the A3 PD proxy, or `8009` for the 950DT products PD proxy. Set `MODEL_PATH` to the corresponding mounted weight directory from [Section 4](#4-installation); the following example uses the A3 path.
+
+```bash
+SERVICE_HOST="<SERVICE_IP>"
+SERVICE_PORT=11223
+MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+mkdir -p ./benchmark_results
+
+vllm bench serve \
+    --backend vllm \
+    --base-url "http://${SERVICE_HOST}:${SERVICE_PORT}" \
+    --endpoint /v1/completions \
+    --model "$MODEL_PATH" \
+    --served-model-name minimax-m3.1-flash \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 128 \
+    --num-prompts 32 \
+    --max-concurrency 4 \
+    --request-rate inf \
+    --ignore-eos \
+    --save-result \
+    --result-dir ./benchmark_results
+```
+
+This is an initial benchmark workload, not a peak-performance configuration. A successful run completes all 32 requests with no failed requests and saves a result JSON file under `./benchmark_results`. The output has the following form; `<measured>` fields are placeholders for the values produced by your run, not MiniMax-M3.1-Flash performance measurements:
+
+```text
+============ Serving Benchmark Result ============
+Successful requests:                     32
+Failed requests:                         0
+Benchmark duration (s):                  <measured>
+Total input tokens:                      <measured>
+Total generated tokens:                  <measured>
+Request throughput (req/s):              <measured>
+Output token throughput (tok/s):         <measured>
+Peak output token throughput (tok/s):    <measured>
+Peak concurrent requests:                <measured>
+Total Token throughput (tok/s):          <measured>
+---------------Time to First Token----------------
+Mean TTFT (ms):                          <measured>
+Median TTFT (ms):                        <measured>
+P99 TTFT (ms):                           <measured>
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          <measured>
+Median TPOT (ms):                        <measured>
+P99 TPOT (ms):                           <measured>
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           <measured>
+Median ITL (ms):                         <measured>
+P99 ITL (ms):                            <measured>
+==================================================
+```
+
+Keep the hardware, image tag, weight variant, serving command, input/output lengths, request rate, and concurrency with each result. Increase the number of requests for sustained measurements and repeat the same workload when comparing configurations. Refer to the [benchmark CLI arguments](https://docs.vllm.ai/en/latest/cli/bench/serve/) for workload and result options.
+
+## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+Use the commands in [Section 5](#5-online-service-deployment) as starting configurations. They are not globally optimal: the appropriate settings depend on request lengths, concurrency, prefix-cache hit rate, and the available device memory. Evaluate each adjustment with the same workload and compare latency, throughput, and memory use.
+
+| Scenario | Starting Configuration | Parameters to Evaluate | Validation |
+| --- | --- | --- | --- |
+| Long context | A3 PD example with `MAX_MODEL_LEN=263000`; the other examples start at `133000`. | Set `MAX_MODEL_LEN` for the combined input/output budget and reduce `--max-num-seqs` if KV cache capacity is insufficient. | Confirm the requested context fits at the target concurrency before increasing load. |
+| Low latency | Single-node examples in Section 5.1. | Reduce request concurrency and compare `--max-num-seqs` and `--max-num-batched-tokens` settings. | Compare TTFT and TPOT alongside output-token throughput. |
+| High throughput | PD examples in Section 5.2. | Adjust `MAX_NUM_SEQS` and `MAX_BATCHED_TOKENS` on Prefill and Decode separately while keeping both connector topology declarations consistent. | Increase offered load gradually and check throughput, latency, and failed requests. |
+
+### 9.2 Tuning Guidelines
+
+The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
+
+Change one parameter at a time and retain the command and benchmark result for each run. For general methods, refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md). For feature descriptions and configuration constraints, refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) and [Speculative Decoding Guide](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark).
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md). This section covers MiniMax-M3.1-Flash-specific deployment issues.
+
+### 10.1 DSpark Draft Initialization Fails with FP8 KV Cache
+
+**Symptom:** A 950DT products PD service fails while initializing the DSpark draft because FP8 KV quantization parameters are missing.
+
+**Cause:** The draft inherits the main model's FP8 KV cache configuration unless a draft cache dtype is specified.
+
+**Resolution:** Keep the main-model argument `--kv-cache-dtype fp8`, and set `kv_cache_dtype` to `bfloat16` inside `--speculative-config` on both Prefill and Decode:
+
+```json
+{
+    "method": "dspark",
+    "num_speculative_tokens": 7,
+    "enforce_eager": true,
+    "kv_cache_dtype": "bfloat16",
+    "draft_sample_method": "probabilistic"
+}
+```
+
+The scripts in Section 5.2 already include this setting. It changes only the draft KV cache dtype.
+
+### 10.2 Model Loading Is Still in Progress or Startup Fails
+
+**Symptom:** The API is not ready while loading the approximately 428B-parameter checkpoint or capturing graphs.
+
+**Cause:** Weight loading, initialization, and graph capture depend on storage speed, the hardware, and the selected configuration. Elapsed time alone does not distinguish ongoing initialization from a failure.
+
+**Resolution:** Follow the foreground logs for single-node deployment. For PD deployment, use `tail -f prefill.log` on Prefill; use `tail -f decode-0.log decode-1.log decode-2.log decode-3.log` for A3 Decode, or `tail -f decode.log` for 950DT products Decode. Allow initialization to continue while logs show progress. Send requests or start the PD proxy after every required service prints `Application startup complete`; the single-node health check must return `200`.
+
+If logs stop progressing or the process exits, inspect the first error in every affected role log. Check that `MODEL_PATH` points to the matching weight variant mounted in Section 4, confirm the expected devices are visible with `npu-smi info`, and compare the actual startup command with the corresponding platform example. For PD communication failures, also recheck `LOCAL_IP`, `NIC_NAME`, and [inter-node connectivity](#32-verify-multi-node-communication). For memory errors, review the context budget and concurrency described in [Section 5](#5-online-service-deployment) and the [out-of-memory FAQ](../../faqs.md#12-how-to-handle-the-out-of-memory-issue).
