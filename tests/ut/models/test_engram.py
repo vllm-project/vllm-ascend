@@ -5,6 +5,7 @@
 
 import ctypes
 import json
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -377,6 +378,84 @@ def test_idle_hashes_have_no_valid_rows(num_tokens):
     assert keep.shape == (num_tokens,)
     assert keep.dtype == torch.bool
     assert not keep.any()
+
+
+@pytest.mark.parametrize("num_tokens", [0, 3, 33])
+@pytest.mark.parametrize("use_cache", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+def test_hash_forward_uses_ascendc(monkeypatch, num_tokens, use_cache, strided):
+    state = object.__new__(AscendNgramHashState)
+    torch.nn.Module.__init__(state)
+    state.multipliers = torch.ones(2, 4, dtype=torch.int64)
+    state.primes = torch.full((2, 3, 3), 257, dtype=torch.int64)
+    state.offsets = torch.zeros_like(state.primes)
+    state.token_map = torch.arange(32, dtype=torch.int32)
+    state.pad_id = 2
+    state.block_size = 4
+    state.use_slot_cache = use_cache
+    state._cache = torch.zeros(24, dtype=torch.int32) if use_cache else None
+    step = 2 if strided else 1
+    tokens = torch.zeros(num_tokens * step, dtype=torch.int64)[::step]
+    positions = torch.arange(num_tokens * step, dtype=torch.int64)[::step]
+    dead = torch.zeros(num_tokens * step, dtype=torch.bool)[::step]
+    query = torch.tensor([0, num_tokens], dtype=torch.int32)
+    window = torch.full((1, 3 * step), -1, dtype=torch.int32)[:, ::step]
+    window_dead = torch.zeros(1, 3 * step, dtype=torch.bool)[:, ::step]
+    slots = torch.arange(num_tokens, dtype=torch.int64) if use_cache else None
+    table = torch.zeros(1, 6, dtype=torch.int32) if use_cache else None
+    events = []
+
+    def request_search(query, requests, *args, **kwargs):
+        events.append("requests")
+        requests.zero_()
+
+    def write_cache(*args):
+        events.append("cache")
+
+    def hash_ids(*args, **kwargs):
+        events.append("hash")
+        args[13].fill_(7)
+
+    hash_op = Mock(side_effect=hash_ids)
+    request_grid = ((num_tokens + 31) // 32,)
+    cache_grid = ((num_tokens + 255) // 256,)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.engram_hash",
+        SimpleNamespace(_engram_req_index_kernel={request_grid: request_search}),
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.models.deepseek_v41.engram.hash_state._write_hash_cache_kernel",
+        {cache_grid: write_cache},
+    )
+    monkeypatch.setattr(torch.ops._C_ascend, "engram_hash_ids", hash_op, raising=False)
+    output = state.forward(tokens, positions, query, dead, window, window_dead, slots, table)
+    assert output.shape == (num_tokens, 2, 9)
+    assert output.dtype == torch.int32
+    if num_tokens == 0:
+        hash_op.assert_not_called()
+        assert not events
+        return
+    assert events == (["requests", "cache", "hash"] if use_cache else ["requests", "hash"])
+    hash_op.assert_called_once()
+    args, kwargs = hash_op.call_args
+    for index, tensor in enumerate((tokens, state.token_map, dead, positions, table, query)):
+        assert args[index] is tensor
+    assert args[6].shape == (num_tokens,)
+    for index, tensor in enumerate(
+        (state.multipliers, state.primes, state.offsets, state._cache, window, window_dead, output), start=7
+    ):
+        assert args[index] is tensor
+    assert args[14:] == (num_tokens, 24 if use_cache else 0, state.pad_id)
+    assert kwargs["num_layers"] == 2
+    assert kwargs["MAX_NGRAM"] == 4
+    assert kwargs["num_heads"] == 3
+    assert kwargs["input_stride"] == tokens.stride(0)
+    assert kwargs["position_stride"] == positions.stride(0)
+    assert kwargs["lookback_col_stride"] == window.stride(1)
+    assert kwargs["lookback_mask_col_stride"] == window_dead.stride(1)
+    assert not {"BLOCK_T", "BLOCK_H", "num_warps"} & kwargs.keys()
+    assert (output == 7).all()
 
 
 def _runner(rows, computed, prompt):
