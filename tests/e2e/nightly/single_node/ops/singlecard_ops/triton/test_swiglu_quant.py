@@ -18,9 +18,6 @@ SCALE_TOLERANCES = {
     torch.bfloat16: (2e-2, 1e-4),
 }
 
-# Triton Ascend 3.6.0 does not support BF16 sigmoid/exp.
-BF16_SIGMOID_SKIP = pytest.mark.skip(reason="Triton Ascend 3.6.0 does not support BF16 sigmoid/exp")
-
 
 @pytest.fixture(scope="module", autouse=True)
 def init_triton_device_properties():
@@ -51,7 +48,6 @@ def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
             torch.bfloat16,
             [0, 17, 1, 0, 31, 16],
             torch.int64,
-            marks=BF16_SIGMOID_SKIP,
             id="multi-core-bf16-empty-experts",
         ),
     ],
@@ -83,7 +79,7 @@ def test_swiglu_quant_correctness(shape, dtype, group_counts, group_list_dtype, 
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("dtype", [torch.float16, pytest.param(torch.bfloat16, marks=BF16_SIGMOID_SKIP)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_swiglu_quant_without_quantization(dtype):
     torch.manual_seed(42)
