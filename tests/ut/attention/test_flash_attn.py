@@ -90,6 +90,36 @@ def test_minimax_m3_dspark_selects_flash_attn_for_eager_and_graph_drafts(
     assert not select(config, selector, "dspark_head")
 
 
+@pytest.mark.parametrize("draft_architecture", ["DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"])
+def test_native_minimax_dspark_flash_attn_retains_eager_topology_guards(
+    select_flash_attn, dflash2_config, draft_architecture
+):
+    select, _ = select_flash_attn
+    config = dflash2_config
+    config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    spec = config.speculative_config
+    spec.method = "dspark"
+    spec.target_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=["MiniMaxM3SparseForConditionalGeneration"])
+    )
+    spec.draft_model_config.architectures = [draft_architecture]
+    selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
+    assert select(config, selector, "dspark_head")
+    assert not select(config, selector, "backbone")
+    assert not select(config, selector._replace(kv_cache_dtype="fp8"), "dspark_head")
+    spec.enforce_eager = False
+    assert not select(config, selector, "dspark_head")
+    spec.enforce_eager = True
+    for field in ("pipeline_parallel_size", "prefill_context_parallel_size", "decode_context_parallel_size"):
+        setattr(config.parallel_config, field, 2)
+        assert not select(config, selector, "dspark_head")
+        setattr(config.parallel_config, field, 1)
+    spec.enable_adaptive_verification = True
+    assert not select(config, selector, "dspark_head")
+
+
 def test_flash_attn_is_selected_only_for_a5_dflash2_eager_drafts(select_flash_attn, dflash2_config):
     select, profile = select_flash_attn
     config = dflash2_config

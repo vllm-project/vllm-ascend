@@ -6,6 +6,7 @@
 from dataclasses import dataclass, field
 
 import torch
+from vllm.logger import logger
 
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -66,6 +67,8 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         """Reuse device lengths and tiling plans across layers in one draft step."""
         # Load CANN only in workers using this backend.
         from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
+
+        logger.info_once("Using CANN FlashAttn with device lengths.", scope="process")
 
         metadata = attn_metadata
         if metadata.flash_attn_lengths is None:
