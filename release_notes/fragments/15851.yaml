@@ -9,3 +9,6 @@ entries:
   - category: bugfix
     text: Fixed per-channel W4A8 Kimi K3 Situ grouped matmul weight layout and scale grouping on 950.
     model: kimi-k3
+  - category: bugfix
+    text: Fixed Kimi K3 integer-quantized shared experts using an unsupported fused Situ operator on 950 by retaining the registered linear and activation implementations.
+    model: kimi-k3

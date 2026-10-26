@@ -713,6 +713,12 @@ class AscendSharedExperts:
         # W8A8 and W4A8 share an INT8-activation implementation; A8 names
         # the activation width and does not imply that weights are INT8.
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            if self.situ_activation is not None and not get_current_hardware_profile().supports(
+                HardwareCapability.DEQUANT_SITU_QUANT
+            ):
+                # Preserve the registered linears and Situ activation when the
+                # fused INT32 activation kernel is unavailable on this device.
+                return SharedExpertMLPPath.LINEAR_WRAPPER
             return SharedExpertMLPPath.A8_INT_FUSED
         # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
         # with MXFP8 activations).
