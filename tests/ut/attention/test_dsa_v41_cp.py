@@ -667,8 +667,11 @@ class TestPCPMetadata:
     def test_builds_ordinary_metadata_without_pcp_context(self, builders):
         # A replicated draft decode builds through PCP builders without a
         # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        common = _batch(2, 0, "decode").local
+        # Replicated drafts keep rank-local slots, unlike target PCP batches.
+        common = common.replace(slot_mapping=common.slot_mapping[: common.num_input_tokens])
         for builder in builders().values():
-            metadata = builder.build(0, _batch(2, 0, "decode").local)
+            metadata = builder.build(0, common)
             assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 

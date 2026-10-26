@@ -1542,6 +1542,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
                 self.mock_vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
                 builder.pcp_size = pcp_size
                 builder.use_pcp = pcp_size > 1
+                common_attn_metadata.pcp_context = SimpleNamespace() if pcp_size > 1 else None
                 common_attn_metadata.slot_mapping = torch.arange(3 * pcp_size)
                 metadata = builder.build(0, common_attn_metadata)
                 expected_decodes = 3 if pcp_size == 1 else 0

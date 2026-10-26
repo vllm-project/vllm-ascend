@@ -421,7 +421,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     assert metadata is expected_metadata
     kwargs = mock_build_attn_metadata.call_args.kwargs
     # Hybrid attention groups get the same PCP context as the default state.
-    state.get_pcp_attention_context.assert_called_once_with(input_batch, (), ANY, [])
+    state.get_pcp_attention_context.assert_called_once_with(input_batch, (), ANY)
     assert kwargs["pcp_context"] is pcp_context
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
