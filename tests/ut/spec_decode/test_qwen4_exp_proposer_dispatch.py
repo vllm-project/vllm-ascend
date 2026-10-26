@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm_ascend import spec_decode
+from vllm_ascend.worker.v1 import spec_decode
 from vllm_ascend.worker.v1.spec_decode.qwen4_exp import is_qwen4_exp_mtp
 
 
