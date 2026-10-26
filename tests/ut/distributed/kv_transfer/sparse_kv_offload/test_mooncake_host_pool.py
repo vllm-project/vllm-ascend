@@ -94,6 +94,7 @@ class TestMooncakeHostPool(unittest.TestCase):
         raw.narrow.assert_called_once_with(0, alignment - 1, requested_size)
         self.assertIs(region.tensor, aligned)
         self.assertEqual(region.tensor.numel(), requested_size)
+        self.assertEqual(region.segment_offset, alignment - 1)
 
     def test_vmm_reservation_size_covers_padding_and_heap_alignment(self):
         # Include the reported failure and both sides of the 1 GiB boundary
@@ -129,6 +130,7 @@ class TestMooncakeHostPool(unittest.TestCase):
                 self.assertEqual(block["shape"], (expected_allocation,))
                 raw.narrow.assert_called_once_with(0, 15, requested_size)
                 self.assertIs(region.tensor, aligned)
+                self.assertEqual(region.segment_offset, 15)
 
     def test_selects_vmm_without_host_registration(self):
         with patch.object(
@@ -181,3 +183,25 @@ class TestMooncakeHostPool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_layout_uses_segment_offsets_and_rejects_overlaps():
+    pools, descriptions = [], []
+    for rank in range(2):
+        pool = MooncakeHostPool(
+            HostMemoryRegion(torch.empty(256, dtype=torch.int8), segment_offset=8),
+            HostPoolTopology(tp_rank=rank, tp_size=2),
+        )
+        k, v = [t.view(torch.bfloat16).reshape(4, 2, 1, 2) for t in pool.allocate_tensors([32, 32], 16)]
+        views = [("layer", "k", k), ("layer", "v", v)]
+        descriptions.append(pool.describe_local_views(views, 4))
+        pools.append(pool)
+        assert k.reshape(4, 2, 2).contiguous().data_ptr() == k.data_ptr()
+    assert pools[0].data_ptr != pools[1].data_ptr
+    assert descriptions[0] == descriptions[1]
+    pools[1].region.segment_offset = 0
+    assert pools[1].describe_local_views(views, 4) != descriptions[0]
+    with unittest.TestCase().assertRaisesRegex(ValueError, "overlapping"):
+        pools[1].describe_local_views([("layer", "k", k), ("layer", "v", k)], 4)
+    with unittest.TestCase().assertRaisesRegex(ValueError, "outside"):
+        pools[0].describe_local_views(views, 4)

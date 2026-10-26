@@ -327,6 +327,17 @@ class SFAPDRD2HScheduler:
     # ------------------------------------------------------------------
     # D side (kv_consumer)
     # ------------------------------------------------------------------
+    def on_new_request(self, request: Request) -> None:
+        """Called by vLLM right before a new request enters the scheduler.
+
+        The sibling schedulers use this hook to truncate the prompt on the P
+        side (state-group / Mamba models), signalled by ``do_remote_decode``.
+        A D-side request carries ``do_remote_prefill`` instead and its
+        per-request state is created lazily in
+        :meth:`get_num_new_matched_tokens`, so nothing has to happen here.
+        """
+        del request
+
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int | None, bool]:
         # Pull the entire prompt KV from the remote P node into D's CPU pool
         # (main MLA) / HBM (indexer). Async relative to engine execution.

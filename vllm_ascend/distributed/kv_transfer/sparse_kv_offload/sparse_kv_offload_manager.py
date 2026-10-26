@@ -780,6 +780,13 @@ class SparseKVOffloadManager:
             MooncakeHostPool,
         )
 
+    def get_mooncake_host_pool(self) -> MooncakeHostPool:
+        """Return the prepared Mooncake allocator used by Decode Main KV."""
+        allocator = self._host_kv_allocator
+        if not isinstance(allocator, MooncakeHostPool):
+            raise RuntimeError("Sparse KV offload is not using the Mooncake Host backend")
+        return allocator
+
     def _get_mooncake_writeback_view(
         self,
         logical_tensor: torch.Tensor,
@@ -1186,13 +1193,17 @@ class SparseKVOffloadManager:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return CPU full KV tensors used by fused_overlap decode.
 
-        On TP0 these are the owned CPU pools; on other ranks they are non-owning
-        GVA views restored after broadcast.
+        Mooncake preserves each rank's local mapping. MemFabric restores GVA
+        views after the existing owner pointer broadcast.
         """
         if not self.use_fused_overlap:
             raise RuntimeError(
                 "get_fused_overlap_cpu_kv_inputs requires kv_offload_decode_config.use_fused_overlap=true"
             )
+        return self.get_local_host_kv_views(layer_name)
+
+    def get_local_host_kv_views(self, layer_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return this process's original Mooncake or restored MemFabric views."""
         layer_id = self._get_offload_layer_id(layer_name)
         if layer_id >= len(self.k_caches_cpu) or layer_id >= len(self.v_caches_cpu):
             raise RuntimeError(
@@ -1209,6 +1220,33 @@ class SparseKVOffloadManager:
             for layer_name in self.offload_layer_names
             for component_id in (OFFLOAD_TOPK_BUFFER_K_INDEX, OFFLOAD_TOPK_BUFFER_V_INDEX)
         }
+
+    def _register_local_mooncake_views(self) -> None:
+        pool = self.get_mooncake_host_pool()
+        descriptor, error = None, None
+        try:
+            views = [
+                (name, component, tensor)
+                for name in self.offload_layer_names
+                for component, tensor in zip(("k", "v"), self.get_local_host_kv_views(name))
+            ]
+            descriptor = pool.describe_local_views(views, self.kv_cache_config.num_blocks)
+        except (ValueError, RuntimeError) as exc:
+            error = str(exc)
+        layouts = [(descriptor, error)]
+        if pool.topology.tp_size > 1:
+            # Exchange initialization errors too, avoiding a stranded peer.
+            layouts = [None] * pool.topology.tp_size
+            torch.distributed.all_gather_object(layouts, (descriptor, error), group=self.tp_group.cpu_group)
+        for peer_layout, peer_error in layouts:
+            if peer_error is not None or peer_layout != descriptor:
+                raise ValueError(f"Mooncake Host layout mismatch: {peer_error}")
+        self.gvas_k_bases = [t.data_ptr() for t in self.k_caches_cpu]
+        self.gvas_v_bases = [t.data_ptr() for t in self.v_caches_cpu]
+        self.cpu_block_lens = [
+            (k.stride(0) * k.element_size(), v.stride(0) * v.element_size())
+            for k, v in zip(self.k_caches_cpu, self.v_caches_cpu)
+        ]
 
     def register_kv_caches(
         self,
@@ -1299,26 +1337,8 @@ class SparseKVOffloadManager:
         self.gvas_v_bases: list[int] = []
         # RD2H consumers need byte strides for each TP-shared host KV block.
         self.cpu_block_lens: list[tuple[int, int]] = []
-        if uses_local_views:
-            # HostKVAllocator gave every rank local Host KV views: use them
-            # directly instead of broadcasting the tp0 pointers.
-            for layer_id in range(self.num_layers):
-                k_cpu = self.k_caches_cpu[layer_id]
-                v_cpu = self.v_caches_cpu[layer_id]
-                self.gvas_k_bases.append(k_cpu.data_ptr())
-                self.gvas_v_bases.append(v_cpu.data_ptr())
-                self.cpu_block_lens.append(
-                    (
-                        k_cpu.numel() * k_cpu.element_size() // self.kv_cache_config.num_blocks,
-                        v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks,
-                    )
-                )
-            logger.info(
-                "Registered local Host KV views: tp=%s/%s layers=%s",
-                self.tp_rank,
-                self.tp_size,
-                self.num_layers,
-            )
+        if self._uses_mooncake_host_pool():
+            self._register_local_mooncake_views()
         else:
             gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
             gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
@@ -1718,7 +1738,7 @@ class SparseKVOffloadManager:
         if self.tp_rank != 0:
             # Decode-produced K/V is replicated across TP ranks, so TP0 alone
             # writes new decode tokens. PD pull fills disjoint parts of this
-            # shared pool from all TP ranks through the broadcast GVA.
+            # shared pool from all TP ranks through their local mappings.
             return
         if k_cache_cpu is None or v_cache_cpu is None:
             raise RuntimeError("Sparse KV offload TP0 CPU cache is not registered")

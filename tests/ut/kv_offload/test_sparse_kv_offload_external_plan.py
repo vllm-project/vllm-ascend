@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (  # noqa: E40
     sparse_kv_offload_manager as manager_module,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.mooncake_host_pool import (  # noqa: E402
+    HostMemoryRegion,
     MooncakeHostPool,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import (  # noqa: E402
@@ -999,4 +1000,44 @@ def test_paired_scatter_preserves_plan_wait_and_native_fallback(backend, rank, c
     torch.testing.assert_close(selection_rope[3], torch.tensor([40.0]))
     assert torch.count_nonzero(selection_kv[0]) == 0
     assert torch.count_nonzero(selection_rope[0]) == 0
+    manager.tp_group.broadcast.assert_not_called()
+
+
+@pytest.mark.parametrize("peer_change", [None, "offset", "invalid"])
+def test_mooncake_local_views_and_fused_inputs_share_mapping(peer_change):
+    manager = _make_plan_manager()
+    manager.tp_rank = 1
+    manager.offload_layer_names = ["layer.0"]
+    manager.kv_cache_config = SimpleNamespace(num_blocks=4)
+    pool = MooncakeHostPool(
+        HostMemoryRegion(torch.empty(256, dtype=torch.int8)),
+        manager_module.HostPoolTopology(tp_rank=1, tp_size=2),
+    )
+    manager._host_kv_allocator = pool
+    k, v = [t.view(torch.bfloat16).reshape(4, 2, 1, 2) for t in pool.allocate_tensors([32, 32], 16)]
+    manager.k_caches_cpu, manager.v_caches_cpu = [k], [v]
+
+    def gather(output, value, group):
+        descriptor, error = value
+        assert error is None
+        peer = value
+        if peer_change == "offset":
+            peer = ((descriptor[0] + 16, *descriptor[1:]), None)
+        elif peer_change == "invalid":
+            peer = (None, "outside pool")
+        output[:] = [peer, value]
+
+    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
+        if peer_change:
+            with pytest.raises(ValueError, match="layout mismatch"):
+                manager._register_local_mooncake_views()
+            return
+        manager._register_local_mooncake_views()
+    local = manager.get_local_host_kv_views("layer.0")
+    fused = manager.get_fused_overlap_cpu_kv_inputs("layer.0")
+    assert local[0] is fused[0] is k
+    assert local[1] is fused[1] is v
+    assert manager.gvas_k_bases == [k.data_ptr()]
+    assert manager.gvas_v_bases == [v.data_ptr()]
+    assert manager.cpu_block_lens == [(8, 8)]
     manager.tp_group.broadcast.assert_not_called()

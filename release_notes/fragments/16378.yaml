@@ -1,0 +1,8 @@
+pr: 16378
+entries:
+  - category: feature
+    text: >-
+      MooncakeConnectorV1 can transfer Prefill Main KV directly into Decode
+      VMM host memory through RD2H while transferring Indexer KV into HBM
+      through D2D for sparse KV offload, with Prefill CP/DCP and unequal TP
+      mappings, bounded registrations, and receive lifecycle handling.
