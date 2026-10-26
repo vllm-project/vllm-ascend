@@ -13,19 +13,36 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
+_ROTATION_BLOCK_SIZE = 32
+
 
 def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:
     """Use the A3 Quarot basis, or the native A5 identity basis."""
     rotation_path = rotation_path or Path(model_root) / "optional/quarot.safetensors"
     if not rotation_path.is_file():
-        return torch.eye(32)
+        return torch.eye(_ROTATION_BLOCK_SIZE)
     with safe_open(rotation_path, framework="pt") as checkpoint:
         rotation = checkpoint.get_tensor("global_rotation")
-    block = rotation[:32, :32].contiguous()
-    expected = torch.block_diag(*[block] * (hidden_size // 32))
-    if not torch.equal(rotation, expected):
-        raise ValueError("Engram gate requires repeated block32 global rotation")
-    return block
+    if rotation.shape != (hidden_size, hidden_size):
+        raise ValueError(f"Expected global_rotation shape {(hidden_size, hidden_size)}, but got {rotation.shape}")
+    if hidden_size % _ROTATION_BLOCK_SIZE != 0:
+        raise ValueError("Engram gate requires hidden_size divisible by block32")
+
+    num_blocks = hidden_size // _ROTATION_BLOCK_SIZE
+    blocks = rotation.reshape(
+        num_blocks,
+        _ROTATION_BLOCK_SIZE,
+        num_blocks,
+        _ROTATION_BLOCK_SIZE,
+    ).permute(0, 2, 1, 3)
+    diag_blocks = blocks[torch.arange(num_blocks), torch.arange(num_blocks)].contiguous()
+    expected_blocks = torch.zeros_like(blocks)
+    expected_blocks[torch.arange(num_blocks), torch.arange(num_blocks)] = diag_blocks
+    if not torch.equal(blocks, expected_blocks):
+        raise ValueError("Engram gate requires block-diagonal global rotation")
+    if torch.equal(diag_blocks, diag_blocks[:1].expand_as(diag_blocks)):
+        return diag_blocks[0]
+    return diag_blocks
 
 
 def engram_enabled(text_config) -> bool:
@@ -61,7 +78,19 @@ def engram_gate(
     dim = hidden.shape[-1]
     original = hidden.float()
     if rotation_block is not None:
-        original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+        if rotation_block.ndim == 2:
+            original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+        elif rotation_block.ndim == 3:
+            original = (
+                torch.matmul(
+                    original.unflatten(-1, (rotation_block.shape[0], _ROTATION_BLOCK_SIZE)).unsqueeze(-2),
+                    rotation_block.float().transpose(-1, -2),
+                )
+                .squeeze(-2)
+                .flatten(-2)
+            )
+        else:
+            raise ValueError("Engram gate rotation must be a block or block table")
     key = key.float()
     rstd = torch.rsqrt(original.square().mean(-1) + eps)
     rstd *= torch.rsqrt(key.square().mean(-1) + eps)
