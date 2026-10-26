@@ -1,0 +1,10 @@
+pr: 19874
+entries:
+  - category: breaking
+    text: >-
+      Removed the Triton FLA chunked-prefill fallback pipeline for GDN models
+      on Ascend A2/A3 and 950-series devices, leaving the separate 310P path unchanged.
+      On the affected devices, GDN prefill now requires bfloat16 inputs, PCP world size 1, and an
+      available fused prefill kernel (fla_npu or the built-in CANN operator);
+      configurations that previously relied on the fallback now fail fast with
+      a clear error instead.

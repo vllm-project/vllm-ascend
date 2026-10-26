@@ -35,15 +35,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
-    prepare_final_chunk_indices,
-    prepare_update_chunk_offsets,
 )
 from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
-# Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
-_GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
-_GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
@@ -122,11 +117,6 @@ class GDNChunkedPrefillMetadata:
     chunk_indices_chunk64_host: tuple[int, ...]
     chunk_indices_chunk64: torch.Tensor | None
     chunk_offsets_chunk64: torch.Tensor | None
-    update_chunk_offsets_chunk64: torch.Tensor | None
-    final_chunk_indices_chunk64: torch.Tensor | None
-    chunk_indices_large_block: torch.Tensor | None
-    block_indices_cumsum: torch.Tensor | None
-    num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
 
@@ -270,35 +260,13 @@ def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
 
 
 def _build_non_spec_chunked_prefill_metadata(
-    builder,
     cu_seqlens_cpu: torch.Tensor,
     device: torch.device,
     build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
     if build_device_metadata:
-        hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
-        if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
-            gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
-        elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-            gdn_num_heads = (
-                hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-            )
-        else:
-            gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(
-                builder.vllm_config.parallel_config
-            )
-        cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * _GDN_CHUNK_SIZE))
-        cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
         chunk_offsets_chunk64 = prepare_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-        update_chunk_offsets_chunk64 = prepare_update_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-        final_chunk_indices_chunk64 = prepare_final_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-        chunk_indices_large_block = prepare_chunk_indices(
-            cu_seqlens_cpu,
-            _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
-        )
-        block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
 
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
@@ -313,19 +281,11 @@ def _build_non_spec_chunked_prefill_metadata(
         device_chunk_metadata = {
             "chunk_indices_chunk64": chunk_indices_chunk64.to(device=device, non_blocking=True),
             "chunk_offsets_chunk64": chunk_offsets_chunk64.to(device=device, non_blocking=True),
-            "update_chunk_offsets_chunk64": update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
-            "final_chunk_indices_chunk64": final_chunk_indices_chunk64.to(device=device, non_blocking=True),
-            "chunk_indices_large_block": chunk_indices_large_block.to(device=device, non_blocking=True),
-            "block_indices_cumsum": block_indices_cumsum.to(device=device, non_blocking=True),
         }
     else:
         device_chunk_metadata = {
             "chunk_indices_chunk64": None,
             "chunk_offsets_chunk64": None,
-            "update_chunk_offsets_chunk64": None,
-            "final_chunk_indices_chunk64": None,
-            "chunk_indices_large_block": None,
-            "block_indices_cumsum": None,
         }
 
     return GDNChunkedPrefillMetadata(
@@ -915,7 +875,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             assert prefill_query_start_loc_cpu is not None
             if self._USE_COMMON_KERNEL_METADATA:
                 non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
-                    self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
                     build_device_metadata=self.build_device_chunk_metadata,

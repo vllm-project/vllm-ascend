@@ -28,8 +28,6 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
@@ -815,64 +813,6 @@ class BaseDeviceAdaptor:
     def get_dsa_kernel_block_sizes():
         """Non-A5: return supported kernel block sizes."""
         return [8, 32, 128]
-
-    @staticmethod
-    def chunk_scaled_dot_kkt_fwd(
-        num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
-    ):
-        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
-            k=k,
-            beta=beta,
-            g_cumsum=g_cumsum,
-            A=A,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            B=B,
-            H=H,
-            Hg=Hg,
-            K=K,
-            BT=BT,
-            BK=BK,
-            bh_step=bh_step,
-            task_num=task_num,
-            num_core=num_core,
-            num_warps=8,
-            num_stages=3,
-            multibuffer=True,
-        )
-
-        return A
-
-    @staticmethod
-    def solve_tril_16x16(
-        A,
-        Ad,
-        cu_seqlens,
-        chunk_indices,
-        T,
-        H,
-        BT,
-        LARGE_BLOCK_T,
-        NT,
-        B,
-    ):
-        extract_slice_stride_1 = LARGE_BLOCK_T // 32
-        solve_tril_16x16_kernel[NT, B * H](
-            A=A,
-            Ad=Ad,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            BT=BT,
-            LARGE_BLOCK_T=LARGE_BLOCK_T,
-            EXTRACT_SLICE_STRIDE_1=extract_slice_stride_1,
-            num_warps=1,
-            num_stages=4,
-        )
-
-        return Ad
 
     @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
@@ -1831,63 +1771,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 sparse_mode=3,
             )
         return topk_indices
-
-    @staticmethod
-    def chunk_scaled_dot_kkt_fwd(
-        num_core, bh_step, task_num, k, beta, g_cumsum, A, cu_seqlens, chunk_indices, T, B, H, Hg, K, BT, BK
-    ):
-        chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
-            k=k,
-            beta=beta,
-            g_cumsum=g_cumsum,
-            A=A,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            B=B,
-            H=H,
-            Hg=Hg,
-            K=K,
-            BT=BT,
-            BK=BK,
-            bh_step=bh_step,
-            task_num=task_num,
-            num_core=num_core,
-            num_warps=8,
-            num_stages=3,
-            multibuffer=True,
-            disable_tightly_coupled_buffer_reuse=True,
-        )
-        return A
-
-    @staticmethod
-    def solve_tril_16x16(
-        A,
-        Ad,
-        cu_seqlens,
-        chunk_indices,
-        T,
-        H,
-        BT,
-        LARGE_BLOCK_T,
-        NT,
-        B,
-    ):
-        solve_tril_16x16_kernel[NT, B * H](
-            A=A,
-            Ad=Ad,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            BT=BT,
-            LARGE_BLOCK_T=LARGE_BLOCK_T,
-            EXTRACT_SLICE_STRIDE_1=1,
-            num_warps=1,
-            num_stages=4,
-        )
-
-        return Ad
 
     @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):

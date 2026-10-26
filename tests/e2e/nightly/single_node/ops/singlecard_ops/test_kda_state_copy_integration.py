@@ -165,14 +165,14 @@ def test_real_prefill_with_native_chunk_matches_existing_path(monkeypatch):
         cu_seqlens_host=(0, 8, 16), cu_seqlens_kern=None, keep_meta=None, chunk_indices_chunk64_host=(0, 0, 1, 0)
     )
     reference = state.clone()
-    from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 
     class ReferencePlan:
         """Exercise the previous indexing/clearing path on valid indices."""
 
         def gather(self, cache, selected, initial_flags):
             packed = cache[selected].contiguous()
-            clear_ssm_states(packed, initial_flags)
+            # Sequences without an initial state must start from a zero state.
+            packed[~initial_flags.to(device=packed.device, dtype=torch.bool)] = 0
             return packed
 
         def scatter(self, cache, packed, selected):

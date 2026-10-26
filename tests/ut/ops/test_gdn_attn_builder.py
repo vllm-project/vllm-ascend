@@ -31,12 +31,6 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_offsets as runtime_prepare_chunk_offsets,
 )
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_final_chunk_indices as runtime_prepare_final_chunk_indices,
-)
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
-)
 
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
@@ -276,23 +270,7 @@ def _build_attn_metadata(
     return builder, common_attn_metadata, attn_metadata
 
 
-def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
-    hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-    linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
-    if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
-        gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
-    elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-        gdn_num_heads = (
-            hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-        )
-    else:
-        gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(builder.vllm_config.parallel_config)
-    cumsum_chunks = max(
-        1,
-        ascend_gdn_attn_builder._GDN_CUMSUM_WORKING_SET // (gdn_num_heads * ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
-    )
-    cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
-
+def _assert_chunk_meta_matches_runtime(chunk_meta, cu_seqlens: torch.Tensor) -> None:
     assert torch.equal(
         chunk_meta.chunk_indices_chunk64,
         runtime_prepare_chunk_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
@@ -300,34 +278,6 @@ def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Te
     assert torch.equal(
         chunk_meta.chunk_offsets_chunk64,
         runtime_prepare_chunk_offsets(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE),
-    )
-    assert torch.equal(
-        chunk_meta.update_chunk_offsets_chunk64,
-        runtime_prepare_update_chunk_offsets(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.final_chunk_indices_chunk64,
-        runtime_prepare_final_chunk_indices(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_CHUNK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.chunk_indices_large_block,
-        runtime_prepare_chunk_indices(
-            cu_seqlens,
-            ascend_gdn_attn_builder._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
-        ),
-    )
-    assert torch.equal(
-        chunk_meta.block_indices_cumsum,
-        runtime_prepare_chunk_indices(
-            cu_seqlens,
-            cumsum_chunk_size,
-        ),
     )
 
 
@@ -342,24 +292,15 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=128,
-        num_speculative_tokens=0,
-    )
-    builder.vllm_config.model_config.hf_text_config = SimpleNamespace(
-        linear_attn_config={"num_heads": 32},
-    )
-    cu_seqlens = torch.tensor([0, 130], dtype=torch.int32)
-
+@pytest.mark.parametrize("cu_seqlens", [[0, 130], [0, 0, 64, 129]])
+def test_chunk_metadata_preserves_request_boundaries(cu_seqlens) -> None:
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
     chunk_meta = ascend_gdn_attn_builder._build_non_spec_chunked_prefill_metadata(
-        builder,
         cu_seqlens,
         torch.device("cpu"),
     )
-
-    _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens)
+    _assert_chunk_meta_matches_runtime(chunk_meta, cu_seqlens)
+    assert chunk_meta.cu_seqlens_host == tuple(cu_seqlens.tolist())
 
 
 def test_ascend_gdn_attention_uses_ascend_backend():
@@ -420,23 +361,12 @@ def test_fla_prefill_supports_host_metadata(monkeypatch):
 
 
 def test_host_metadata_skips_unused_chunk_helpers(monkeypatch):
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=0,
-        builder_cls=AscendGDNHostMetadataBuilder,
-    )
     cu_seqlens = torch.tensor([0, 130], dtype=torch.int32)
-    for helper_name in (
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
         "prepare_chunk_offsets",
-        "prepare_update_chunk_offsets",
-        "prepare_final_chunk_indices",
-    ):
-        monkeypatch.setattr(
-            ascend_gdn_attn_builder,
-            helper_name,
-            lambda *args, _name=helper_name, **kwargs: pytest.fail(f"unexpected {_name} call"),
-        )
+        lambda *args: pytest.fail("unexpected prepare_chunk_offsets call"),
+    )
     original_prepare_indices = ascend_gdn_attn_builder.prepare_chunk_indices
 
     def prepare_indices_once(cu, chunk_size):
@@ -445,7 +375,6 @@ def test_host_metadata_skips_unused_chunk_helpers(monkeypatch):
 
     monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_chunk_indices", prepare_indices_once)
     chunk_meta = ascend_gdn_attn_builder._build_non_spec_chunked_prefill_metadata(
-        builder,
         cu_seqlens,
         torch.device("cpu"),
         build_device_metadata=False,
@@ -453,10 +382,6 @@ def test_host_metadata_skips_unused_chunk_helpers(monkeypatch):
 
     assert chunk_meta.chunk_indices_chunk64 is None
     assert chunk_meta.chunk_offsets_chunk64 is None
-    assert chunk_meta.update_chunk_offsets_chunk64 is None
-    assert chunk_meta.final_chunk_indices_chunk64 is None
-    assert chunk_meta.chunk_indices_large_block is None
-    assert chunk_meta.block_indices_cumsum is None
     expected = original_prepare_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE)
     assert chunk_meta.chunk_indices_chunk64_host == tuple(expected.to(torch.int64).flatten().tolist())
 
@@ -592,7 +517,6 @@ def test_non_spec_prefill_metadata_matches_original_inputs_and_runtime_helpers(
     _assert_non_spec_conv1d_args_match_metadata(attn_metadata)
 
     _assert_chunk_meta_matches_runtime(
-        builder,
         prefill_metadata.chunk,
         attn_metadata.prefill_query_start_loc,
     )
@@ -645,7 +569,6 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
     assert torch.equal(_cache_index_first_column(conv1d_meta.cache_indices), torch.tensor([0, 1, 2], dtype=torch.int32))
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([True, True, True]))
     _assert_chunk_meta_matches_runtime(
-        builder,
         prefill_metadata.chunk,
         attn_metadata.prefill_query_start_loc,
     )
@@ -962,7 +885,6 @@ def test_builder_builds_prebuilt_chunk_metadata_with_prefill_query_start_loc(mon
     assert chunk_meta.chunk_indices_chunk64 is attn_metadata.chunk_indices
     assert chunk_meta.chunk_offsets_chunk64 is attn_metadata.chunk_offsets
     _assert_chunk_meta_matches_runtime(
-        builder,
         chunk_meta,
         attn_metadata.prefill_query_start_loc,
     )
@@ -1053,7 +975,6 @@ def test_mixed_spec_prefill_chunk_metadata_preserves_single_token_count(
     )
     chunk_metadata = attn_metadata.non_spec_prefill_metadata.chunk
     _assert_chunk_meta_matches_runtime(
-        builder,
         chunk_metadata,
         attn_metadata.prefill_query_start_loc,
     )

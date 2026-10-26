@@ -31,7 +31,7 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 def test_npu_connector_observes_updated_gdn_state_after_compile():
     device = torch.device("npu")
     model = _GDNForwardWrapper().to(device)
-    hidden_states = torch.arange(4, dtype=torch.float32, device=device).reshape(2, 2)
+    hidden_states = torch.arange(4, dtype=torch.bfloat16, device=device).reshape(2, 2)
     output = torch.empty_like(hidden_states)
     metadata = _make_prefill_metadata(device)
     forward_context = ForwardContext(
@@ -55,7 +55,7 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         model.conv_state.add_(1)
         return mixed_qkv.clone()
 
-    def chunk_attention(**kwargs):
+    def fla_prefill(**kwargs):
         initial_state = kwargs["initial_state"]
         value = kwargs["v"]
         return value + 1, initial_state + 1
@@ -69,11 +69,26 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         inductor_config.patch(compile_threads=1),
         override_forward_context(forward_context),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
-        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=object()),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch(
+            "vllm_ascend.ops.gdn.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda _: True),
+        ),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
-        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch(
+            "vllm_ascend.ops.gdn.gather_ssm_states",
+            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
+                0, indices.to(torch.long)
+            ),
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.scatter_ssm_states_",
+            side_effect=lambda state, indices, values: state.index_copy_(
+                0, indices.to(torch.long), values.to(state.dtype)
+            ),
+        ),
+        patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill),
         patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
         patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
