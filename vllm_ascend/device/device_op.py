@@ -964,7 +964,11 @@ class BaseDeviceAdaptor:
             or q.shape[0] > _MAX_FUSED_GDN_DECODE_TOKENS
             or v.shape[-1] != _FUSED_GDN_DECODE_HEAD_DIM
             or state.dtype not in (torch.float32, torch.bfloat16)
-            or not state.is_contiguous()
+            or state.ndim != 4
+            or state.stride(1) != state.shape[2] * state.shape[3]
+            or state.stride(2) != state.shape[3]
+            or state.stride(3) != 1
+            or state.stride(0) < state.shape[1] * state.shape[2] * state.shape[3]
         ):
             return None
         return fused_gdn_decode(q, k, v, a, b, A_log, dt_bias, state, state_indices, query_start_loc)

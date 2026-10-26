@@ -5,8 +5,8 @@ sigmoid beta, recurrent state update, and attention output reduction into one Tr
 launch. It avoids materializing normalized Q/K and the two gate tensors.
 
 `BaseDeviceAdaptor.try_fused_gdn_decode` selects this path for BF16 inputs,
-128-dimensional key/value heads, contiguous FP32/BF16 state, and at most 32
-decode tokens. Other hardware, larger batches, non-contiguous state, prefill,
+128-dimensional key/value heads, FP32/BF16 state with contiguous head/value/key dimensions, and at most 32
+decode tokens. Other hardware, larger batches, unsupported state strides, prefill,
 mixed batches, and speculative verification retain their existing paths.
 
 State has layout `[pool, value_heads, value_dim, key_dim]`. Distinct live
@@ -43,3 +43,8 @@ overhead; reported latency is per call, using the median of five samples.
 Extra allocator bytes refer to the complete captured graph, not a single call.
 Batch 128 is included as a diagnostic even though the default dispatch keeps
 the FLA implementation above 32 tokens.
+
+Hybrid KV-cache pages may have padding between state slots. The kernel uses the
+state slot stride directly and accepts non-overlapping padded pages; it does not
+copy the state pool or write the padding. Inner head/value/key strides must
+remain contiguous.

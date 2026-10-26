@@ -19,14 +19,21 @@ def test_fused_decode_is_limited_to_validated_hardware(device_type):
     assert profile.supports(HardwareCapability.GDN_FUSED_DECODE) == (device_type == AscendDeviceType.A3)
 
 
-@pytest.mark.parametrize("fallback", [None, "hardware", "dtype", "dimension", "batch", "state_stride", "cpu"])
+@pytest.mark.parametrize(
+    "fallback",
+    [None, "padded_state", "hardware", "dtype", "dimension", "batch", "state_stride", "overlapping_state", "cpu"],
+)
 def test_adaptor_dispatch_and_fallback(fallback):
     q = Mock(dtype=torch.bfloat16, shape=(1, 2, 128), device=SimpleNamespace(type="npu"))
     k = Mock(dtype=torch.bfloat16)
     v = Mock(dtype=torch.bfloat16, shape=(1, 4, 128))
     a, b = Mock(dtype=torch.bfloat16), Mock(dtype=torch.bfloat16)
     state = torch.empty(2, 4, 128, 128)
-    if fallback == "dtype":
+    if fallback == "padded_state":
+        state = torch.empty(2, 4 * 128 * 128 + 256)[:, 128:-128].view(2, 4, 128, 128)
+    elif fallback == "overlapping_state":
+        state = state.as_strided(state.shape, (1, 128 * 128, 128, 1))
+    elif fallback == "dtype":
         q.dtype = torch.float16
     elif fallback == "dimension":
         q.shape = (1, 2, 64)
@@ -43,7 +50,7 @@ def test_adaptor_dispatch_and_fallback(fallback):
     ):
         profile.return_value.supports.return_value = fallback != "hardware"
         result = BaseDeviceAdaptor.try_fused_gdn_decode(*args)
-    if fallback is None:
+    if fallback in (None, "padded_state"):
         kernel.assert_called_once_with(*args)
         assert result is kernel.return_value
     else:

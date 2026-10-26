@@ -138,8 +138,13 @@ def fused_gdn_decode(
         raise ValueError("Incompatible GDN query/key/value shapes")
     if a.shape != (num_tokens, value_heads) or b.shape != a.shape:
         raise ValueError("GDN gates must have shape [tokens, value_heads]")
-    if state.shape[1:] != (value_heads, value_dim, key_dim) or not state.is_contiguous():
-        raise ValueError("GDN state must be contiguous [pool, value_heads, value_dim, key_dim]")
+    if state.shape[1:] != (value_heads, value_dim, key_dim) or (
+        state.stride(1) != value_dim * key_dim
+        or state.stride(2) != key_dim
+        or state.stride(3) != 1
+        or state.stride(0) < value_heads * value_dim * key_dim
+    ):
+        raise ValueError("GDN state must have non-overlapping slots with contiguous [value_heads, value_dim, key_dim]")
     if state_indices.ndim != 1 or state_indices.numel() != num_tokens:
         raise ValueError("GDN decode requires one state index per token")
     if (

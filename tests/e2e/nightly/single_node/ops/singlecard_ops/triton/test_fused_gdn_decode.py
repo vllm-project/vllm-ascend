@@ -134,3 +134,22 @@ def test_decode_empty():
     initial = inputs[7].clone()
     assert fused_gdn_decode(*inputs).shape == (0, 4, 128)
     torch.testing.assert_close(inputs[7], initial)
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch", [1, 8, 32])
+def test_decode_padded_state_pages(batch, state_dtype):
+    inputs = make_inputs(batch, heads=4, value_heads=8, strided=True, state_dtype=state_dtype)
+    slot_elements = 8 * 128 * 128
+    padding = 256
+    storage = torch.full((batch + 3, slot_elements + 2 * padding), 17, device="npu", dtype=state_dtype)
+    state = storage[:, padding:-padding].view(batch + 3, 8, 128, 128)
+    state.copy_(inputs[7])
+    inputs[7] = state
+    assert not state.is_contiguous()
+    expected, expected_state = reference_step(inputs)
+    actual = fused_gdn_decode(*inputs)
+    torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=1e-2)
+    torch.testing.assert_close(state.cpu(), expected_state, atol=1e-3, rtol=1e-2)
+    assert torch.all(storage[:, :padding] == 17)
+    assert torch.all(storage[:, -padding:] == 17)
