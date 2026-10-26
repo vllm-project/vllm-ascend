@@ -1039,9 +1039,11 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     # Optional state fields differ between supported vLLM revisions.
     state_kwargs: dict = {
         field: None
-        for field in ("dp_sync", "cudagraph_stats", "routed_experts")
+        for field in ("dp_sync", "dp_sync_state", "cudagraph_stats", "routed_experts")
         if field in vllm_model_runner.ExecuteModelState._fields
     }
+    if "num_spec_tokens_to_schedule" in vllm_model_runner.ExecuteModelState._fields:
+        state_kwargs["num_spec_tokens_to_schedule"] = 0
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
