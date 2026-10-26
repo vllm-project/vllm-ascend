@@ -33,9 +33,11 @@ try:
     if os.environ.get("R194_CEPROF", "0") == "1":
         import cProfile as _cp194m
         import threading as _th194m
+
         _prof194 = _cp194m.Profile()
         _prof194.enable()
         _prof194_n = [0]
+
         def _r194_dump():
             while True:
                 time.sleep(30)
@@ -46,6 +48,7 @@ try:
                     _prof194.enable()
                 except Exception:
                     pass
+
         _th194m.Thread(target=_r194_dump, daemon=True).start()
 except Exception:
     pass
@@ -68,6 +71,7 @@ try:
     _R195_CPROF_WARM = int(os.environ.get("R195_CPROF_WARM", "0") or 0)
     _R195_CPROF_LEN = int(os.environ.get("R195_CPROF_LEN", "24") or 24)
     _R195_ST: dict = {"n": 0, "small": 0, "prof": None, "prof_n": 0, "path": None}
+
     def _r195_mark(tag, ntp=0):
         if not _R195_HP:
             return
@@ -80,6 +84,7 @@ try:
                 )
         except Exception:
             pass
+
     def _r195_maybe_cprof(ntp):
         # decode-gated cProfile: enable after WARM consecutive small steps.
         # R195_CPROF_BIG=1 inverts the gate: profile BIG prefill-class steps
@@ -95,16 +100,16 @@ try:
             _R195_ST["small"] += 1
         else:
             _R195_ST["small"] = 0
-        if (_R195_ST["small"] >= _R195_CPROF_WARM
-                and _R195_ST["prof"] is None and _R195_ST["prof_n"] == 0):
+        if _R195_ST["small"] >= _R195_CPROF_WARM and _R195_ST["prof"] is None and _R195_ST["prof_n"] == 0:
             import cProfile as _cp195
+
             _pf195 = _cp195.Profile()
             _R195_ST["prof"] = _pf195
             _pf195.enable()
             _R195_ST["prof_n"] = _R195_ST["n"]
+
     def _r195_maybe_cprof_stop():
-        if (_R195_ST["prof"] is not None
-                and _R195_ST["n"] - _R195_ST["prof_n"] >= _R195_CPROF_LEN):
+        if _R195_ST["prof"] is not None and _R195_ST["n"] - _R195_ST["prof_n"] >= _R195_CPROF_LEN:
             try:
                 _R195_ST["prof"].disable()
                 _R195_ST["prof"].dump_stats("/tmp/r195_cprof.pstats")
