@@ -96,7 +96,8 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
 | `o_proj` / `mlp` | **Cannot be combined — rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
-| `embedding` / LM head | **Can be combined.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — replacing the standard TP sharding of these modules instead of composing with it. Scenario 1 shows a stacked example. |
+| LM head | **Can be combined — the sharding composes.** The vocabulary is sharded over the combined grid of the fine-grained group and the standard TP group (`finegrained_size × tensor_parallel_size` shards, TP-outer / fine-grained-inner), so every TP rank holds a distinct `vocab / (finegrained_size × tp_size)` slice with no replication across the TP dimension. At logits time the fine-grained spans are reconstructed first (token all-gather → sharded GEMM → all-to-all), then the remaining vocabulary spans are gathered over the TP group. Scenario 1 shows a stacked example. |
+| `embedding` | **Can be combined, but the sharding does not compose.** The embedding table is sharded solely by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — replacing the standard TP sharding of this module instead of composing with it (the TP dimension keeps a replicated copy). |
 
 ## Feature Usage
 
@@ -118,7 +119,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
     }'
 ```
 
-embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)); stacking them with standard TP splits the dense weights across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
+embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)). With standard TP stacked on, the LM head shards its vocabulary over the combined `finegrained_size × tp_size` grid — each rank holds `vocab / 16` in this example instead of replicating `vocab / 4` across the TP dimension — cutting per-card LM-head weight memory and per-step weight reads by the TP factor at the cost of one vocabulary-dimension TP all-gather per logits step. The dense weights split across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
 
 #### Scenario 2 — all four knobs on a P/D-disaggregated decode node
 
