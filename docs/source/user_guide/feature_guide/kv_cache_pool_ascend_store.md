@@ -1590,7 +1590,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
 
-**NOTE:** When using `AscendStoreConnector` together with `MooncakeConnectorV2`, the current scheduler control-port allocation may still overlap ports reserved by some workers. Distinct DP indices do not guarantee disjoint scheduler and worker TCP port ranges; check both allocations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
+**NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
