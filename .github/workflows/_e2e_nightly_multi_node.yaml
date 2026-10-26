@@ -181,8 +181,6 @@ jobs:
         KUBECONFIG: /tmp/kubeconfig
         NAMESPACE: vllm-project
         OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-      volumes:
-        - /mnt/share:/root/.cache
     steps:
       - name: Decode kubeconfig
         run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
