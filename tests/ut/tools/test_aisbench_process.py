@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from tools import aisbench
 
@@ -276,6 +276,25 @@ class TestAisbenchProcess(unittest.TestCase):
         with patch.object(proc, "wait", short_grace_period), deadline():
             self.runner.__exit__(None, None, None)
         self.assertEqual(proc.returncode, -signal.SIGKILL)
+
+    def test_sigkill_timeout_preserves_handle_for_later_reaping(self):
+        # Simulate a child that remains alive after both termination signals.
+        proc = Mock(pid=123)
+        self.runner.proc = proc
+        self.addCleanup(setattr, self.runner, "proc", None)
+        proc.wait.side_effect = aisbench.subprocess.TimeoutExpired("ais_bench", 8)
+        with patch.object(aisbench.os, "killpg") as killpg, self.assertRaises(aisbench.subprocess.TimeoutExpired):
+            self.runner._stop_aisbench_task()
+        self.assertEqual(proc.wait.call_args_list, [call(timeout=8), call(timeout=8)])
+        self.assertEqual(killpg.call_args_list, [call(proc.pid, signal.SIGTERM), call(proc.pid, signal.SIGKILL)])
+        self.assertIs(self.runner.proc, proc)
+
+        # A later cleanup can still reap the same child once it becomes ready.
+        proc.wait.side_effect = None
+        proc.wait.return_value = -signal.SIGKILL
+        with patch.object(aisbench.os, "killpg"):
+            self.runner._stop_aisbench_task()
+        self.assertIsNone(self.runner.proc)
 
 
 if __name__ == "__main__":

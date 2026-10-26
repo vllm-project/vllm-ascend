@@ -338,7 +338,7 @@ class AisbenchRunner:
             # even when waiting for the leader did not time out.
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            proc.wait(timeout=8)
         self.proc = None
 
     def _check_process_exit(self, returncode, line, expected_message):
