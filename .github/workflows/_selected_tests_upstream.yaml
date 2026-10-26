@@ -100,7 +100,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.0_20261025172600-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.image_tag }}
