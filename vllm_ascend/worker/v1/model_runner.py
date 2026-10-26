@@ -6251,7 +6251,7 @@ class NPUModelRunner(GPUModelRunner):
                                 current_kv_cache_spec.head_size,
                             ),
                             storage_offset=slot_offset + region.offset,
-                        )
+                        ).transpose(1, 2)
                         continue
                     if owner.role == PLE:
                         assert isinstance(current_kv_cache_spec, MambaSpec)

@@ -496,11 +496,11 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert torch.count_nonzero(ssm[:2]) == 0
 
     raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
-    assert raw_qsa.shape == (3, 1, 8, 32)
+    assert raw_qsa.shape == (3, 8, 1, 32)
     assert raw_qsa.is_contiguous()
 
     compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
-    assert compressed.shape == (3, 1, 32, 32)
+    assert compressed.shape == (3, 32, 1, 32)
     assert compressed.is_contiguous()
 
 
@@ -885,7 +885,32 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         compress_ratio=4,
         vllm_config=runtime_config,
     )
-    layer.bind_kv_cache(caches[name])
+    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache, bind_kv_cache_to_layers
+
+    if runner_kind == "v1":
+        runner_caches = []
+        bind_kv_cache({name: caches[name]}, {name: layer}, runner_caches)
+        assert any(cache is caches[name] for cache in runner_caches)
+    else:
+        bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
+    assert layer.kv_cache is caches[name]
+    raw_name = groups[1].layer_names[0]
+    raw_layer = qsa.qsa_cache.QSAKeyStateCache(
+        head_size=20,
+        dtype=spec.dtype,
+        prefix=raw_name,
+        cache_config=runtime_config.cache_config,
+        compress_ratio=4,
+        cache_rope_positions=True,
+        vllm_config=runtime_config,
+    )
+    bind_kv_cache_to_layers({raw_name: caches[raw_name]}, {raw_name: raw_layer})
+    assert raw_layer.key_cache.shape == (3, 8, 1, 20)
+    assert raw_layer.rope_position_cache.shape == (3, 8, 1, 3)
+    assert raw_layer.key_cache.untyped_storage().data_ptr() == raw[raw_name].untyped_storage().data_ptr()
+    positions = torch.tensor([2**40, 2**40 + 1, 2**40 + 2], dtype=torch.int64)
+    raw_layer.rope_position_cache[2, 7, 0] = positions
+    torch.testing.assert_close(raw_layer.rope_position_cache[2, 7, 0], positions)
     keys_per_page = (128 if runner_kind == "v2" else manager_block_size) // 4
     factor = manager_block_size // 128
     assert layer.kv_cache.shape == (3 * (factor if runner_kind == "v2" else 1), keys_per_page, 1, spec.head_size)

@@ -1771,7 +1771,7 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.head_size,
                         ),
                         storage_offset=slot_offset + region.offset,
-                    )
+                    ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
                     assert isinstance(kv_cache_spec, MambaSpec)
