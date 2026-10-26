@@ -1,0 +1,5 @@
+pr: 19775
+entries:
+  - category: bugfix
+    text: Fixed an A5 ScatterNdUpdateSk host-tiling divide-by-zero crash by evaluating the SIMD sort decision after core-count initialization.
+    hardware: [A5]
