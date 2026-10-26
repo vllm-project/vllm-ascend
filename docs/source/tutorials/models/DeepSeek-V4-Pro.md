@@ -36,7 +36,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 | `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
 | `DeepSeek-V4-Pro-0813` | 950DT products | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) |
 
-- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantization): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
 - `DeepSeek-V4-Pro-0813`: For Ascend 950DT products, use the original [`DeepSeek-V4-Pro-0813`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the 2P1D example in Section 5.2.3 use Ascend 950DT products (96GB × 8) with this checkpoint.
 
@@ -2727,7 +2727,7 @@ Select the tab that matches the deployment hardware.
 
 Once your server is started, you can query the model with input prompts:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+At `<node0_ip>:<port>`, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \

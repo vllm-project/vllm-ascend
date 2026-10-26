@@ -5,8 +5,8 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
-    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM Ascend is recommended.**
 
 [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 is a native multimodal Mixture-of-Experts (MoE) model with 552B backbone
@@ -569,7 +569,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       throughput, while Decode uses `512` and `72` respectively to favor decode
       concurrency. Tune these role-specific scheduler limits independently.
     - `MooncakeHybridConnector` transfers KV cache between the two roles.
-      `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode;
+      `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       `kv_port` must be reachable and must not conflict with another service.
     - `kv_connector_extra_config` must match the actual global layouts on both
       sides: Prefill DP4/TP4 and Decode DP8/TP2. Keep the values identical in the
@@ -630,7 +630,7 @@ and use the `main` branch with the matching vLLM revision recorded in
       Wait until every engine finishes loading weights and Decode finishes graph
       capture. A successful startup includes output similar to:
 
-      ```text
+      ```output
       INFO:     Started server process
       INFO:     Waiting for application startup.
       INFO:     Application startup complete.
@@ -855,7 +855,7 @@ and use the `main` branch with the matching vLLM revision recorded in
 
     ```shell
     #!/usr/bin/env bash
-    
+
     set -euo pipefail
     unset https_proxy
     unset http_proxy
@@ -1014,7 +1014,7 @@ and use the `main` branch with the matching vLLM revision recorded in
     Wait until every engine finishes loading weights and Decode finishes graph
     capture. A successful startup includes output similar to:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -1736,7 +1736,7 @@ curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
 
 Expected output:
 
-```text
+```output
 HTTP 200
 ```
 
@@ -1770,7 +1770,7 @@ curl -sS "$SERVICE_URL/v1/chat/completions" \
 
 Expected output:
 
-```text
+```output
 true
 ```
 
@@ -1801,7 +1801,7 @@ curl -sS "$SERVICE_URL/v1/chat/completions" \
 
 Expected output:
 
-```text
+```output
 true
 ```
 
@@ -1831,7 +1831,7 @@ alternative configuration has been validated.
 
 ## 10 FAQ
 
-### How do I enable tool calling and reasoning parsing?
+### 10.1 How do I enable tool calling and reasoning parsing?
 
 Keep the following options in the serving command:
 
