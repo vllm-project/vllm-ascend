@@ -1602,16 +1602,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
         self._layer_name = layer.layer_name
 
-        # R144 DIAG: outer-forward file probe (first 3 calls only)
-        _r144of_n = globals().setdefault("_R144_OUT_FWD_N", [0])
-        if _r144of_n[0] < 3:
-            _r144of_n[0] += 1
-            try:
-                with open("/tmp/r144_out_fwd_probe.log", "a") as _pf:
-                    _pf.write(f"[R144-OUT-FWD] call#{_r144of_n[0]} pid={os.getpid()} num_tok={query.shape[0]}\n")
-            except Exception:
-                pass
-
         # INT2 KV cache dispatch: if cache is uint8 (packed INT2), use INT2 forward
         if kv_cache is not None and len(kv_cache) >= 2:
             k_cache = kv_cache[0]
