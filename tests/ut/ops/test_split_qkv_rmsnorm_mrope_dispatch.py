@@ -102,6 +102,22 @@ def _tensor(shape, **kwargs):
     return _Tensor(shape, **kwargs)
 
 
+def _t1_args(hq, hkv):
+    """Keep the packed layout valid while varying the head geometry."""
+    return (
+        _tensor((1, 2 * (hq + hkv) * 256)),
+        _tensor((256,)),
+        _tensor((256,)),
+        _tensor((3, 1, 64)),
+        hq,
+        hkv,
+        256,
+        1e-6,
+        [11, 11, 10],
+        True,
+    )
+
+
 def _decision(
     policy,
     *,
@@ -219,7 +235,7 @@ def _insert(values, source, offsets, sizes, strides):
 
 
 class SplitQKVMRoPEBodyTests(unittest.TestCase):
-    def _check_body(self, hq, hkv, *, tokens=1, cores=None, block_m=1, grouped=False):
+    def _check_body(self, hq, hkv, *, tokens=1, cores=None, block_m=1, grouped=False, launch=None):
         tree = ast.parse(OP_PATH.read_text())
         body = next(
             node
@@ -248,6 +264,37 @@ class SplitQKVMRoPEBodyTests(unittest.TestCase):
         jobs = tokens * max(hq, hkv) if grouped else tokens
         cores = jobs if cores is None else cores
         base, extra = divmod(jobs, cores)
+        scalar_args = (
+            tokens,
+            extra,
+            base + 1,
+            base,
+            hq,
+            hkv,
+            256,
+            hq * 256,
+            hkv * 256,
+            1e-6,
+            11,
+            11,
+            10,
+            False,
+            True,
+            64,
+            32,
+            True,
+            hq * 256,
+            block_m,
+        )
+        options = {"HEAD_GROUPED": grouped}
+        if launch is not None:
+            grid, args, options = launch
+            cores = grid[0]
+            self.assertEqual(grid, (jobs,))
+            self.assertEqual(args[10], tokens)
+            self.assertEqual(args[14:16], (hq, hkv))
+            self.assertEqual(options, {"HEAD_GROUPED": grouped})
+            scalar_args = args[10:]
         for core in range(cores):
             tl.core = core
             cast(Callable[..., None], namespace["split_qkv_rmsnorm_mrope_kernel"])(
@@ -258,27 +305,8 @@ class SplitQKVMRoPEBodyTests(unittest.TestCase):
                 None,
                 pointers[3],
                 *pointers[4:],
-                tokens,
-                extra,
-                base + 1,
-                base,
-                hq,
-                hkv,
-                256,
-                hq * 256,
-                hkv * 256,
-                1e-6,
-                11,
-                11,
-                10,
-                False,
-                True,
-                64,
-                32,
-                True,
-                hq * 256,
-                block_m,
-                HEAD_GROUPED=grouped,
+                *scalar_args,
+                **options,
             )
         np.testing.assert_array_equal(pointers[0].counts, 1)
         for pointer in pointers[4:]:
@@ -301,6 +329,21 @@ class SplitQKVMRoPEBodyTests(unittest.TestCase):
         for hq, hkv in ((4, 1), (6, 1), (24, 4), (1, 3)):
             with self.subTest(heads=(hq, hkv)):
                 self._check_body(hq, hkv, grouped=True)
+
+    def test_t1_head_boundaries_real_wrapper_to_body(self):
+        package = ModuleType("test_split_qkv_head_boundary")
+        package.__path__ = [str(OP_DIR)]
+        sys.modules[package.__name__] = package
+        policy = _load_source_module(package.__name__ + ".ac_dispatch_policy", OP_DIR / "ac_dispatch_policy.py")
+        for hq, hkv in ((2, 1), (1, 2), (40, 1), (1, 40)):
+            with self.subTest(heads=(hq, hkv)):
+                helper = mock.Mock(return_value=196608)
+                wrapper, m1, m2 = _wrapper_namespace(policy, helper)
+                wrapper["triton_split_qkv_rmsnorm_mrope"](*_t1_args(hq, hkv), rope_dim=64, has_gate=True)
+                self.assertEqual(len(m1.calls), 1)
+                self.assertEqual(m2.calls, [])
+                helper.assert_called_once_with()
+                self._check_body(hq, hkv, grouped=True, launch=(*m1.calls[0], m1.options[0]))
 
     def test_actual_m2_full_tiles_and_odd_token_tail(self):
         for hq, hkv, tokens, cores in ((6, 1, 4, 1), (24, 4, 5, 2)):
@@ -844,7 +887,6 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
             (14, 48),
             (14, None),
             (14, True),
-            (4, 41),
             (4, True),
             (5, 0),
             (6, 128),
@@ -870,9 +912,44 @@ class SplitQKVMRoPEDispatchTests(unittest.TestCase):
                 args = defaults.copy()
                 args[index] = value
                 self.assertFalse(eligible(*args))
-        args = defaults.copy()
-        args[4:6] = [1, 1]
-        self.assertFalse(eligible(*args))
+
+    def test_grouped_head_boundaries_have_valid_layout(self):
+        for hq, hkv, grouped in (
+            (2, 1, True),
+            (1, 2, True),
+            (40, 1, True),
+            (1, 40, True),
+            (1, 1, False),
+            (41, 41, False),
+        ):
+            with self.subTest(heads=(hq, hkv)):
+                helper = mock.Mock(return_value=196608)
+                namespace, m1, m2 = _wrapper_namespace(self.policy, helper)
+                args = _t1_args(hq, hkv)
+                self.assertTrue(
+                    self.policy.layout_valid(*args[:4], None, None, 1, hq * 256, hq * 256, hkv * 256, 256, 64)
+                )
+                layout = mock.Mock(wraps=self.policy.layout_valid)
+                namespace["layout_valid"] = layout
+                self.assertIs(namespace["_t1_grouped_eligible"](*args, 64, None, None, True, 40), grouped)
+                if grouped:
+                    layout.assert_called_once()
+                else:
+                    # Valid layout must not hide removal of a head eligibility guard.
+                    layout.assert_not_called()
+                outputs = namespace["triton_split_qkv_rmsnorm_mrope"](*args, rope_dim=64, has_gate=True)
+                self.assertEqual(len(m1.calls), 1)
+                self.assertEqual(m2.calls, [])
+                self.assertEqual(m1.calls[0][0], (max(hq, hkv) if grouped else 1,))
+                self.assertEqual(
+                    m1.calls[0][1][10:14], (1, max(hq, hkv) if grouped else 1, 1, max(hq, hkv) // 40 if grouped else 0)
+                )
+                self.assertEqual(m1.options, [{"HEAD_GROUPED": grouped}])
+                helper.assert_called_once_with()
+                self.assertEqual(
+                    [output.shape for output in outputs],
+                    [(1, hq * 256), (1, hkv * 256), (1, hkv * 256), (1, hq * 256)],
+                )
 
     def test_t1_unknown_capacity_and_p48_keep_legacy_launch(self):
         for capacity, cores in ((None, 40), (True, 40), (65535, 40), (1048577, 40), (196608, 48)):

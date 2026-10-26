@@ -65,6 +65,8 @@
 
 - Host-only checks cover shared-helper detection/defaults, ignored legacy UB overrides, invalid capacity, exact-fit rejection, tensor layout, semantic constraints, the centralized BLOCK_M opt-out and real wrapper selection/launch wiring. They cover the three measured T1 geometries, asymmetric head counts, P48 fallback and the unchanged fake ABI. A small NumPy fixture executes the actual grouped and M2 JIT function bodies, including complete Q-head tiles and odd token tails, checking mathematical results, exactly-once input/output ownership and V/Gate byte copies including signed zero. Forced M2 head remainders are rejected while the same M1 geometries remain supported. This FP32 CPU fixture does not emulate BF16 rounding, compilation, NPU timing or device accuracy. The historical four-route ablation below applies to the earlier WP1 source, not the new grouped route.
 
+- Head-boundary contracts additionally connect the real wrapper to the CPU kernel-body fixture for 2/1, 1/2, 40/1 and 1/40 Q/KV heads. Valid-layout 1/1 and 41/41 inputs are excluded from grouping and retain ordinary M1; their rejection is not hidden by a mismatched packed shape. These checks establish host mapping and ownership, not device or compiler qualification for these six shapes.
+
 - The pre-existing single-card accuracy suite covers bf16/fp16, gate/no-gate, interleaved/contiguous MRoPE, two token counts, and two head configurations. It was not run on the exact current PR head in this work:
 
   ```bash
@@ -72,6 +74,21 @@
   ```
 
 ## Bounded offline validation
+
+### Wide-head executability
+
+For eligible single-token bf16 inputs, head grouping bounds the explicit per-program head tiles. The integrated implementation passes device numerical checks on Ascend910B3 for three tested, shape-valid wide-head inputs whose frozen baseline is rejected for insufficient UB during default B3-target compilation. An 8/32 case additionally checks the reverse asymmetric mask, without a BASE comparison.
+
+| Q/KV heads | Frozen BASE default B3-target compilation | Integrated public AUTO on B3 |
+| --- | --- | --- |
+| 32/32 | UB required 303,264 B > 196,608 B | Three numerical calls and identity canary pass |
+| 40/40 | UB required 378,112 B > 196,608 B | Three numerical calls and identity canary pass |
+| 32/16 | UB required 233,632 B > 196,608 B | Three numerical calls and identity canary pass |
+| 8/32 | Not tested | Three numerical calls and identity canary pass |
+
+These are synthetic operator-contract inputs, not confirmed model deployments: T1, D256/R64, gate, no bias, bf16, eps=1e-6 and interleaved sections (11,11,10), within the grouped conditions above. Q/K pass finite and atol/rtol 0.02 checks; V/gate are byte-exact and repeated calls are deterministic. Device reports identify the current operator SHA `ccacdcb6f7e428d89cc2b37be8175b623813ed5650f9cd4489e213af582b2c24`; the performance tables below retain their earlier source attribution.
+
+The 40/40 and 32/16 BASE/current compilation comparisons used the same fixed rc1-a3 image targeting B3, with backend-default multibuffer, stages 1 and warps 32. Their candidate objects and metadata match the device-reported identities from the rc1 image; this is not a claim that both images contain identical toolchains. The 32/32 BASE rejection and earlier grouped compilation remain historical evidence, separately attributed from the current device run. Results are report-level, not a local rehash of all target artifacts. They support bounded executability coverage, not an all-shape UB guarantee, measured UB-peak reduction, isolated attribution to grouping, or a speedup for a baseline that cannot compile. Ordinary M1 outside the grouped domain is not a general UB-safe fallback.
 
 ### Same-run main-baseline ablation
 
