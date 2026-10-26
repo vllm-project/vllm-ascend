@@ -739,16 +739,8 @@ if vllm_version_is("0.32.0"):
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(
-                owner.spec.page_size_bytes
-                for owner in six_region_layout.owners
-                if owner.role == HIDDEN
-            )
-            bytes_per_pool_block = (
-                six_region_layout.slot_count
-                * six_region_layout.slot_backing_size
-                + hidden_bytes
-            )
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            bytes_per_pool_block = six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
             required_pool_blocks = sum(
                 cdiv(
                     group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
@@ -801,16 +793,8 @@ else:
             num_blocks=1,
         )
         if six_region_layout is not None:
-            hidden_bytes = sum(
-                owner.spec.page_size_bytes
-                for owner in six_region_layout.owners
-                if owner.role == HIDDEN
-            )
-            bytes_per_pool_block = (
-                six_region_layout.slot_count
-                * six_region_layout.slot_backing_size
-                + hidden_bytes
-            )
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            bytes_per_pool_block = six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
             required_pool_blocks = sum(
                 cdiv(
                     group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
