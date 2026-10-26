@@ -1,4 +1,9 @@
+import importlib
+
 import pytest
+
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
@@ -9,9 +14,6 @@ if not hasattr(torch, "npu") or not torch.npu.is_available():
     pytest.skip("Trace replay kernel test requires an available Ascend NPU", allow_module_level=True)
 
 from vllm.v1.worker.gpu.sample import trace_replay as upstream_trace_replay  # noqa: E402
-
-upstream_apply_trace_tokens = upstream_trace_replay.apply_trace_tokens
-upstream_trace_replay_kernel = upstream_trace_replay._trace_replay_kernel
 
 import vllm_ascend.patch.worker  # noqa: E402,F401
 from vllm_ascend.worker.v2.sample.trace_replay import (  # noqa: E402
@@ -25,12 +27,27 @@ def _tensor(values, dtype):
     return torch.tensor(values, dtype=dtype, device=DEVICE)
 
 
-def test_trace_replay_patches_only_outer_call():
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_trace_replay_patches_only_outer_call(monkeypatch):
+    from vllm_ascend.patch.worker.patch_v2 import patch_triton
+
+    upstream_trace_replay_kernel = upstream_trace_replay._trace_replay_kernel
+    unpatched_apply_trace_tokens = object()
+    monkeypatch.setattr(upstream_trace_replay, "apply_trace_tokens", unpatched_apply_trace_tokens)
+    importlib.reload(patch_triton)
+
     assert upstream_trace_replay.apply_trace_tokens is apply_trace_tokens
-    assert upstream_trace_replay.apply_trace_tokens is not upstream_apply_trace_tokens
+    assert upstream_trace_replay.apply_trace_tokens is not unpatched_apply_trace_tokens
     assert upstream_trace_replay._trace_replay_kernel is upstream_trace_replay_kernel
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_trace_replay_empty_batch_is_a_noop():
     sampled = torch.empty(0, dtype=torch.int64, device=DEVICE)
     idx_mapping = torch.empty(0, dtype=torch.int32, device=DEVICE)
@@ -52,6 +69,10 @@ def test_trace_replay_empty_batch_is_a_noop():
     assert sampled.numel() == 0
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_trace_replay_uses_request_state_step_and_idx_mapping():
     sampled = _tensor([99, 98], torch.int64)
     idx_mapping = _tensor([1, 0], torch.int32)
@@ -81,6 +102,10 @@ def test_trace_replay_uses_request_state_step_and_idx_mapping():
     assert torch.equal(sampled.cpu(), torch.tensor([23, 12], dtype=torch.int64))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_trace_replay_guards_padding_empty_and_finished_rows():
     sampled = _tensor([90, 91, 92, 93, 94], torch.int64)
     idx_mapping = _tensor([0, 1, -1, 2, 1], torch.int32)

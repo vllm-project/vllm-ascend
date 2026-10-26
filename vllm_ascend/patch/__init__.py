@@ -1154,21 +1154,6 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
 #
-# ** 18. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       Let vLLM support triton ops dispatch.
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
-#
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`

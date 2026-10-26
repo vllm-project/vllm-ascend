@@ -10,6 +10,8 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 TOPK = 2048
@@ -92,6 +94,10 @@ def test_compaction_ignores_graph_padding_rows():
 
 
 @pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Copy-SFA native kernels are supported only on Ascend A2/A3",
+)
 def test_later_draft_reuses_compacted_selection_without_copy(graph):
     enable_custom_op()
     torch.manual_seed(37)
@@ -147,6 +153,10 @@ def test_later_draft_reuses_compacted_selection_without_copy(graph):
 
 @pytest.mark.parametrize("query_count", [1, 4])
 @pytest.mark.parametrize("first_fill", [False, True])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Copy-SFA native kernels are supported only on Ascend A2/A3",
+)
 def test_copy_sfa_graph_zero_lengths_follow_replay_and_preserve_inactive_cache(query_count, first_fill):
     """Exercise native output zeroing with MTP3 widths and both copy paths."""
     enable_custom_op()

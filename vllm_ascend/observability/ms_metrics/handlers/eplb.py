@@ -5,12 +5,16 @@
 import logging
 from typing import Any
 
-from ms_service_metric.provider_api import (  # type: ignore[import-not-found]
+from vllm_ascend.observability.ms_metrics.handlers.common import (
+    MetricSpec,
     MetricType,
-    get_metric_recorder,
+    register_metrics,
+    safe_recording,
 )
 
 logger = logging.getLogger(__name__)
+
+_eplb_metrics_recorders: dict[str, Any] = {}
 
 _HOTNESS_SUMMARY_METRICS = (
     "eplb:expert_hotness:current_mean",
@@ -19,36 +23,28 @@ _HOTNESS_SUMMARY_METRICS = (
     "eplb:expert_hotness:update_max",
 )
 _IMBALANCE_METRIC = "eplb:expert_hotness:imbalance"
-_eplb_metrics_recorder = None
+
+_EPLB_METRIC_SPECS = (
+    *[MetricSpec(name, MetricType.GAUGE, ("rank", "phase")) for name in _HOTNESS_SUMMARY_METRICS],
+    MetricSpec(_IMBALANCE_METRIC, MetricType.GAUGE, ("rank", "phase", "layer")),
+)
+
+_eplb_hotness_key = "eplb_hotness"
 
 
 def _register_eplb_metrics():
-    global _eplb_metrics_recorder
-
-    metrics = get_metric_recorder()
-    if metrics is _eplb_metrics_recorder:
-        return metrics
-
-    for metric_name in _HOTNESS_SUMMARY_METRICS:
-        metrics.get_or_create_metric(
-            metric_name,
-            metric_type=MetricType.GAUGE,
-            label_names=["rank", "phase"],
-        )
-    metrics.get_or_create_metric(
-        _IMBALANCE_METRIC,
-        metric_type=MetricType.GAUGE,
-        label_names=["rank", "phase", "layer"],
+    return register_metrics(
+        _EPLB_METRIC_SPECS,
+        _eplb_metrics_recorders,
+        _eplb_hotness_key,
     )
-    _eplb_metrics_recorder = metrics
-    return metrics
 
 
 def eplb_do_update_hotness_handler(original_func, worker, *args, **kwargs):
     """Record the aggregated expert hotness exposed by the EPLB rank-0 worker."""
     result = original_func(worker, *args, **kwargs)
 
-    try:
+    with safe_recording("expert_hotness"):
         rank_id = getattr(worker, "rank_id", -1)
         if rank_id != 0:
             return result
@@ -59,6 +55,9 @@ def eplb_do_update_hotness_handler(original_func, worker, *args, **kwargs):
             return result
 
         metrics = _register_eplb_metrics()
+        if metrics is None:
+            logger.debug("Skip EPLB hotness metrics because the metric recorder is unavailable")
+            return result
         rank_labels = {"rank": str(rank_id), "phase": "all"}
         for suffix in ("current_mean", "current_max", "update_mean", "update_max"):
             value = hotness.get(suffix)
@@ -86,10 +85,4 @@ def eplb_do_update_hotness_handler(original_func, worker, *args, **kwargs):
                         "layer": str(layer_index),
                     },
                 )
-    except Exception:
-        logger.warning(
-            "Failed to record EPLB hotness metrics; inference result is preserved",
-            exc_info=True,
-        )
-
     return result
