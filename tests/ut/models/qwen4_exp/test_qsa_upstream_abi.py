@@ -159,6 +159,7 @@ def test_compressed_metadata_recovers_manager_pages_for_drafting(manager_block_s
     )
     builder = qsa.AscendQSAStateMetadataBuilder.__new__(qsa.AscendQSAStateMetadataBuilder)
     builder.kv_cache_spec = spec
+    builder.vllm_config = SimpleNamespace(use_v2_model_runner=False)
     builder.is_circular_buffer = False
     builder._manager_table = None
     builder._manager_table_rows = 2

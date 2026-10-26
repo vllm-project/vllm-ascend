@@ -1754,10 +1754,17 @@ def _reshape_kv_cache_v2(
                             f"view={expected_page_bytes}, "
                             f"region={region.page_size_bytes}."
                         )
+                    num_view_blocks = kv_cache_config.num_blocks
+                    if owner.role == QSA_COMPRESSED:
+                        # Match MRV2's virtual block table and builder spec:
+                        # each kernel page owns kernel_block_size / ratio keys.
+                        kernel_pages = kv_cache_spec.block_size // kernel_block_size
+                        num_view_blocks *= kernel_pages
+                        storage_block_size = kv_cache_spec.get_num_kernel_states(kernel_block_size)
                     kv_caches[layer_name] = make_slab_view(
                         raw_slab,
                         dtype=kv_cache_spec.dtype,
-                        num_blocks=kv_cache_config.num_blocks,
+                        num_blocks=num_view_blocks,
                         item_shape=(
                             kv_cache_spec.num_kv_heads,
                             storage_block_size,
