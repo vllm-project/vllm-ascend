@@ -1870,13 +1870,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     This section extends [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment) with a Memcache-backed KV Cache Pool on a single 950DT products node. Prefill uses NPUs `0,1,2,3`, while Decode uses NPUs `4,5,6,7`. The existing external DP load balancing, API ports, DP RPC ports, and proxy configuration remain unchanged.
 
-    - `MooncakeConnectorV2` transfers KV Cache from Prefill to Decode for ongoing requests.
-    - `AscendStoreConnector` integrates with the Memcache KV Cache Pool to support external KV Cache storage and reuse.
-    - In this example, the Prefill instance is configured for pool lookup, loading, and storage, while Decode continues to receive KV Cache from Prefill.
-
     Reuse the shared `launch_online_dp.py` from [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment). Save the pooled templates below as `run_prefill_memcache.sh` and `run_decode_memcache.sh`, and select them with `--script`. These templates use `MultiConnector` and the required Memcache environment variables.
-
-    Keep `export VLLM_USE_V2_MODEL_RUNNER=1` in both pooled templates. PCP requires Model Runner V2. DSA-CP is unsupported with V2, so do not set `enable_dsa_cp` in `--additional-config`.
 
     For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
