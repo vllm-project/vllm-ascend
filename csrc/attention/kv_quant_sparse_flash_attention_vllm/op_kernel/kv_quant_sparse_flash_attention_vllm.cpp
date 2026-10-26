@@ -67,8 +67,9 @@ using namespace AscendC;
 #endif
 
 #if (__CCE_AICORE__ == 310)
-template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G>
-__aicore__ inline void DispatchKernelDtype310(
+template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G,
+    bool NO_ROPE, bool IS_VEC_S2PHYADDR>
+__aicore__ inline void DispatchKernelDtype310Impl(
     __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
     __gm__ uint8_t *sparseIndices, __gm__ uint8_t *keyScale, __gm__ uint8_t *valueScale,
     __gm__ uint8_t *blocktable, __gm__ uint8_t *actualSeqLengthsQuery,
@@ -80,38 +81,81 @@ __aicore__ inline void DispatchKernelDtype310(
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, fp8_e4m3fn_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_HIFLOAT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, hifloat8_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_INT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             bfloat16_t, int8_t, float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_FLOAT8_E4M3FN &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, fp8_e4m3fn_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_HIFLOAT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, hifloat8_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     } else if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16 && ORIG_DTYPE_KEY == DT_INT8 &&
                          ORIG_DTYPE_ATTENTION_OUT == DT_FLOAT16) {
         QSFA_OP_IMPL(BaseApi::KvQuantSparseFlashAttentionVllmMla, KvQuantSparseFlashAttentionVllmTilingDataMla,
             half, int8_t, float, half, FLASH_DECODE, PAGE_ATTENTION,
             static_cast<QSFA_LAYOUT>(LAYOUT_T), static_cast<QSFA_LAYOUT>(KV_LAYOUT_T),
-            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G);
+            static_cast<QSFATemplateMode>(TEMPLATE_MODE), IS_SPLIT_G, NO_ROPE, IS_VEC_S2PHYADDR);
     }
+}
+
+template<int FLASH_DECODE, int PAGE_ATTENTION, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int IS_SPLIT_G>
+__aicore__ inline void DispatchKernelDtype310(
+    __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+    __gm__ uint8_t *sparseIndices, __gm__ uint8_t *keyScale, __gm__ uint8_t *valueScale,
+    __gm__ uint8_t *blocktable, __gm__ uint8_t *actualSeqLengthsQuery,
+    __gm__ uint8_t *actualSeqLengthsKV, __gm__ uint8_t *attentionOut,
+    __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum, __gm__ uint8_t *user, __gm__ uint8_t *tiling, TPipe &tPipe)
+{
+    __gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *meta =
+        reinterpret_cast<__gm__ const KvQuantSparseFlashAttentionVllmTilingDataMla *>(tiling);
+    if constexpr (ORIG_DTYPE_KEY == DT_INT8 && PAGE_ATTENTION) {
+        if (qsfa_a5::CanPrecomputeAddresses(meta->baseParams.blockSize, meta->baseParams.maxBlockNumPerBatch,
+                meta->baseParams.sparseBlockCount, meta->baseParams.sparseMode,
+                IS_SPLIT_G, meta->baseParams.dSizeVInput == 528)) {
+            if (meta->baseParams.dSizeVInput == 528) {
+                DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
+                    IS_SPLIT_G, true, true>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
+                    actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
+                    tPipe);
+            } else {
+                DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
+                    IS_SPLIT_G, false, true>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
+                    actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
+                    tPipe);
+            }
+            return;
+        }
+    }
+    if constexpr (ORIG_DTYPE_KEY == DT_INT8 || ORIG_DTYPE_KEY == DT_FLOAT8_E4M3FN) {
+        if (meta->baseParams.dSizeVInput == 528) {
+            DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
+                IS_SPLIT_G, true, false>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
+                    actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
+                    tPipe);
+            return;
+        }
+    }
+    DispatchKernelDtype310Impl<FLASH_DECODE, PAGE_ATTENTION, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE,
+        IS_SPLIT_G, false, false>(query, key, value, sparseIndices, keyScale, valueScale, blocktable,
+                    actualSeqLengthsQuery, actualSeqLengthsKV, attentionOut, softmaxMax, softmaxSum, user, tiling,
+                    tPipe);
 }
 #endif
 

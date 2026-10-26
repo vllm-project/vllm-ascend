@@ -72,12 +72,11 @@ public:
     /* =================编译期常量的基本块信息================= */
     static constexpr uint32_t s1BaseSize = 64;
     static constexpr uint32_t s2BaseSize = 128;
-    static constexpr uint32_t dBaseSize = 576;
     static constexpr uint32_t dBaseMatmulSize = 128;
 
     __aicore__ inline QSFAMatmulService() {};
     __aicore__ inline void InitCubeBlock(TPipe *pipe, BufferManager<BufferType::L1> *qsfaL1BufferManagerPtr,
-        __gm__ uint8_t *query);
+        __gm__ uint8_t *query, uint32_t headDim);
     __aicore__ inline void InitCubeInput(__gm__ uint8_t *cuSeqlensQ, const ConstInfo& constInfo);
     __aicore__ inline void IterateBmm1(Buffer<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH> &output,
         Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &inputRightBuf,
@@ -90,7 +89,7 @@ public:
         ConstInfo &constInfo);
 
 private:
-    __aicore__ inline void InitLocalBuffer();
+    __aicore__ inline void InitLocalBuffer(uint32_t headDim);
     __aicore__ inline void InitGmTensor(__gm__ uint8_t *cuSeqlensQ, const ConstInfo& constInfo);
     __aicore__ inline void CalcS1Coord(RunInfo &runInfo, ConstInfo &constInfo);
 
@@ -133,13 +132,13 @@ private:
 };
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAMatmulService<TEMPLATE_ARGS>::InitCubeBlock(
-    TPipe *pipe, BufferManager<BufferType::L1> *qsfaL1BuffMgr, __gm__ uint8_t *query)
+    TPipe *pipe, BufferManager<BufferType::L1> *qsfaL1BuffMgr, __gm__ uint8_t *query, uint32_t headDim)
 {
     if ASCEND_IS_AIC {
         tPipe = pipe;
         qsfaL1BufferManagerPtr = qsfaL1BuffMgr;
         this->queryGm.gmTensor.SetGlobalBuffer((__gm__ Q_T *)query);
-        InitLocalBuffer();
+        InitLocalBuffer(headDim);
     }
 }
 
@@ -162,9 +161,9 @@ QSFAMatmulService<TEMPLATE_ARGS>::InitCubeInput(__gm__ uint8_t *qsfaActualSeqLen
 
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void
-QSFAMatmulService<TEMPLATE_ARGS>::InitLocalBuffer()
+QSFAMatmulService<TEMPLATE_ARGS>::InitLocalBuffer(uint32_t headDim)
 {
-    constexpr uint32_t mm1LeftSize = s1BaseSize * dBaseSize * sizeof(Q_T);
+    uint32_t mm1LeftSize = s1BaseSize * headDim * sizeof(Q_T);
     l1QBuffers.Init((*qsfaL1BufferManagerPtr), mm1LeftSize);
 
     // L0A B C 当前写死，能否通过基础api获取
@@ -183,11 +182,11 @@ QSFAMatmulService<TEMPLATE_ARGS>::InitGmTensor(__gm__ uint8_t *qsfaActualSeqLeng
 {
     if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) {
         this->queryGm.offsetCalculator.Init(constInfo.bSize, constInfo.n2Size, constInfo.gSize,
-            constInfo.s1Size, QueryInputDim(constInfo));
+            constInfo.s1Size, NO_ROPE ? 512 : 576);
     } else {  // QSFA_LAYOUT::TND
         GlobalTensor<int32_t> actualSeqQLen;
         actualSeqQLen.SetGlobalBuffer((__gm__ int32_t *)qsfaActualSeqLengthsQ);
-        this->queryGm.offsetCalculator.Init(constInfo.n2Size, constInfo.gSize, QueryInputDim(constInfo),
+        this->queryGm.offsetCalculator.Init(constInfo.n2Size, constInfo.gSize, NO_ROPE ? 512 : 576,
             actualSeqQLen, constInfo.actualSeqLenSize);
     }
 }
@@ -247,7 +246,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAMatmulService<TEMPLATE_ARGS>
 
     MMParam param = {static_cast<uint32_t>(runInfo.mRealSize),  // singleM
                      static_cast<uint32_t>(runInfo.s2RealSize), // singleN
-                     static_cast<uint32_t>(constInfo.dSize),    // singleK
+                     static_cast<uint32_t>(NO_ROPE ? 512 : 576), // singleK
                      0,    // isLeftTranspose
                      1     // isRightTranspose
                     };
@@ -291,18 +290,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAMatmulService<TEMPLATE_ARGS>
         LocalTensor<Q_T> inputLeftTensor = inputLeftBuf.GetTensor<Q_T>();
         uint64_t gmOffset = this->queryGm.offsetCalculator.GetOffset(runInfo.boIdx, runInfo.n2oIdx, runInfo.goIdx,
             coordInfo[runInfo.taskIdMod3].s1Coord, 0);
-        const uint32_t inputDim = QueryInputDim(constInfo);
-        if (inputDim == QSFA_NOPE_DIM) {
-            // Refresh the entire NZ buffer on reuse, including absent RoPE lanes.
-            auto zeroTensor = inputLeftTensor.template ReinterpretCast<half>();
-            InitConstValueParams<half> zeroParams;
-            zeroParams.repeatTimes = 1;
-            zeroParams.blockNum = Align16Func(runInfo.mRealSize) * constInfo.dSize * sizeof(Q_T) / BLOCK_BYTE;
-            zeroParams.dstGap = 0;
-            zeroParams.initValue = static_cast<half>(0);
-            InitConstValue(zeroTensor, zeroParams);
-            PipeBarrier<PIPE_MTE2>();
-        }
+        constexpr uint32_t inputDim = NO_ROPE ? 512 : 576;
         CopyToL1Nd2Nz<Q_T>(inputLeftTensor, this->queryGm.gmTensor[gmOffset], runInfo.mRealSize, inputDim,
             constInfo.mm1Ka);
 
@@ -362,7 +350,7 @@ class QSFAMatmulServiceDummy {
 public:
     __aicore__ inline QSFAMatmulServiceDummy() {};
     __aicore__ inline void InitCubeBlock(TPipe *pipe, BufferManager<BufferType::L1> *qsfaL1BufferManagerPtr,
-        __gm__ uint8_t *query) {}
+        __gm__ uint8_t *query, uint32_t headDim) {}
     __aicore__ inline void InitCubeInput(__gm__ uint8_t *cuSeqlensQ, const ConstInfo& constInfo) {}
     __aicore__ inline void IterateBmm1(Buffer<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH> &outputBuf,
         Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &inputRightBuf, RunInfo &runInfo,
