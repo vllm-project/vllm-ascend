@@ -55,6 +55,10 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-PD-no-prefix.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/DeepSeek
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD_weekly.yaml
         config_base_path: tests/e2e/cases/models/configs/DeepSeek

@@ -28,6 +28,7 @@ deployment:
         --host 0.0.0.0
         --port $SERVER_PORT
         --quantization ascend
+        --safetensors-load-strategy prefetch
         --allowed-local-media-path /
         --trust-remote-code
         --tokenizer-mode kimi_k3
@@ -39,11 +40,12 @@ deployment:
         --data-parallel-rpc-port 13389
         --enable-expert-parallel
         --enable-prefix-caching
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32,64,128,256],"max_cudagraph_capture_size":256}'
+        --speculative-config '{"method":"dspark","model":"/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":false}'
         --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
@@ -59,6 +61,7 @@ deployment:
         --host 0.0.0.0
         --port $SERVER_PORT
         --quantization ascend
+        --safetensors-load-strategy prefetch
         --allowed-local-media-path /
         --trust-remote-code
         --tokenizer-mode kimi_k3
@@ -70,11 +73,12 @@ deployment:
         --data-parallel-rpc-port 13389
         --enable-expert-parallel
         --enable-prefix-caching
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32,64,128,256],"max_cudagraph_capture_size":256}'
+        --speculative-config '{"method":"dspark","model":"/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":false}'
         --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
@@ -90,6 +94,7 @@ deployment:
         --host 0.0.0.0
         --port $SERVER_PORT
         --quantization ascend
+        --safetensors-load-strategy prefetch
         --allowed-local-media-path /
         --trust-remote-code
         --tokenizer-mode kimi_k3
@@ -101,11 +106,12 @@ deployment:
         --data-parallel-rpc-port 13389
         --enable-expert-parallel
         --enable-prefix-caching
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32,64,128,256],"max_cudagraph_capture_size":256}'
+        --speculative-config '{"method":"dspark","model":"/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":false}'
         --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
@@ -121,6 +127,7 @@ deployment:
         --host 0.0.0.0
         --port $SERVER_PORT
         --quantization ascend
+        --safetensors-load-strategy prefetch
         --allowed-local-media-path /
         --trust-remote-code
         --tokenizer-mode kimi_k3
@@ -132,11 +139,12 @@ deployment:
         --data-parallel-rpc-port 13389
         --enable-expert-parallel
         --enable-prefix-caching
-        --max-num-seqs 16
+        --max-num-seqs 32
         --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32,64,128,256],"max_cudagraph_capture_size":256}'
+        --speculative-config '{"method":"dspark","model":"/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K3-DSpark-MLA-NPU","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"draft_sample_method":"greedy","enforce_eager":false}'
         --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
@@ -152,14 +160,13 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     num_prompts: 30
-    max_out_len: 32768
+    max_out_len: 24576
     batch_size: 32
     thinking: true
     temperature: 1.0
     top_p: 0.95
-    # Temporary permissive gate; tighten after the first stable MRV2 result.
-    baseline: 0
-    threshold: 100
+    baseline: 93
+    threshold: 3
   perf_16k_prefix0:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_kimi
@@ -169,7 +176,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 0
-    # MRV2 performance baseline and tolerance are intentionally disabled for now.
-    # Fill these values after the first stable run: baseline / threshold / tpot_threshold.
-    baseline: 0
-    threshold: 0
+    baseline: 100
+    threshold: 0.95
