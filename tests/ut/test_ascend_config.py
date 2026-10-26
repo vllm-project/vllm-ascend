@@ -128,6 +128,25 @@ class TestAscendConfig(TestBase):
 
         return wrapper
 
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_lmhead_tp_conflicts_with_batch_sharded_sampling_only_when_sharding(self, mock_fix_incompatible_config):
+        for lmhead_size in (0, 1, 2):
+            with self.subTest(lmhead_size=lmhead_size):
+                clear_ascend_config()
+                config = VllmConfig()
+                config.model_config.is_moe = True
+                config.parallel_config.enable_batch_sharded_sampling = True
+                config.additional_config = {
+                    "finegrained_tp_config": {"lmhead_tensor_parallel_size": lmhead_size},
+                }
+                if lmhead_size > 1:
+                    with self.assertRaisesRegex(ValueError, "enable_batch_sharded_sampling is incompatible"):
+                        init_ascend_config(config)
+                else:
+                    result = init_ascend_config(config)
+                    self.assertEqual(result.finegrained_tp_config.lmhead_tensor_parallel_size, lmhead_size)
+
     @staticmethod
     def _make_model_config(
         total_num_attention_heads: int = 32,
@@ -161,7 +180,7 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_oproj_recompute_scheduler_required_only_for_sharding(self, mock_fix_incompatible_config):
-        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (1, 1)):
+        for otp_size, mlp_size in ((0, 0), (1, 0), (2, 0), (8, 0), (0, 1), (1, 1)):
             with self.subTest(otp_size=otp_size, mlp_size=mlp_size):
                 clear_ascend_config()
                 config = VllmConfig()
@@ -173,13 +192,14 @@ class TestAscendConfig(TestBase):
                     },
                     "scheduler_config": {"recompute_scheduler_enable": False},
                 }
-                if otp_size > 1 or mlp_size > 0:
+                if otp_size > 1 or mlp_size > 1:
                     with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
                         init_ascend_config(config)
                 else:
                     result = init_ascend_config(config)
                     self.assertFalse(result.scheduler_config.recompute_scheduler_enable)
                     self.assertEqual(result.finegrained_tp_config.oproj_tensor_parallel_size, otp_size)
+                    self.assertEqual(result.finegrained_tp_config.mlp_tensor_parallel_size, mlp_size)
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
         config = self._make_sparse_li_c8_config(
@@ -1322,6 +1342,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         cudagraph_capture_sizes=None,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
         prefill_context_parallel_size=1,
+        is_moe=True,
     ):
         speculative_config = None
         if num_speculative_tokens:
@@ -1340,7 +1361,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=max_num_seqs),
             speculative_config=speculative_config,
             kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
-            model_config=SimpleNamespace(is_moe=True),
+            model_config=SimpleNamespace(is_moe=is_moe),
         )
 
     def test_oproj_tp_requires_graph_mode(self):
@@ -1360,6 +1381,25 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=1)
         config._validate_preconditions(self._oproj_tp_vllm_config(cudagraph_mode=CUDAGraphMode.NONE))
         self.assertEqual(config.oproj_tensor_parallel_size, 1)
+
+    def test_finegrained_tp_disabled_sizes_allowed_for_dense_models(self):
+        # 0 and 1 both mean "disabled", so a dense model may keep any knob at 1.
+        for knob in (
+            "oproj_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+        ):
+            config = FinegrainedTPConfig(**{knob: 1})
+            config._validate_preconditions(self._oproj_tp_vllm_config(is_moe=False))
+            self.assertEqual(getattr(config, knob), 1)
+
+    def test_finegrained_tp_sharding_rejected_for_dense_models(self):
+        # Only a real split needs expert/data parallel groups, which dense models do not have.
+        for knob in ("lmhead_tensor_parallel_size", "embedding_tensor_parallel_size"):
+            config = FinegrainedTPConfig(**{knob: 2})
+            with self.assertRaisesRegex(AssertionError, "only for MOE models"):
+                config._validate_preconditions(self._oproj_tp_vllm_config(is_moe=False))
 
     def test_oproj_tp_capture_bound_check(self):
         config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)

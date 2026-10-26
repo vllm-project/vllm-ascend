@@ -217,10 +217,12 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
-| `oproj_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `mlp_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `lmhead_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the LM head (shards the vocabulary dimension). |
-| `embedding_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `oproj_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` that is > 1 | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `mlp_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` that is > 1 | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `lmhead_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` that is > 1 | TP size of the LM head (shards the vocabulary dimension). |
+| `embedding_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` that is > 1 | TP size of the token embedding table. |
+
+All four knobs share one convention: `0` and `1` both mean disabled (a size-1 group shards nothing), matching `tensor_parallel_size` semantics in vLLM. A value of `1` therefore never creates a group, never takes the fine-grained path, and never triggers the preconditions above.
 
 ## Experimental Results
 

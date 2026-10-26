@@ -1,0 +1,4 @@
+pr: 15076
+entries:
+  - category: bugfix
+    text: Treat fine-grained tensor parallel sizes of 0 and 1 consistently as disabled in configuration validation, enable checks, and communication group initialization.

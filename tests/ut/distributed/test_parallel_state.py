@@ -83,6 +83,46 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size)
         assert _P_TP is None
 
 
+@pytest.mark.parametrize("disabled_size", [0, 1])
+def test_finegrained_tp_size_one_creates_no_group(mock_distributed, parallel_config, disabled_size):
+    """`0` and `1` both mean disabled, so no size-1 lmheadtp/emtp/mlptp group is created."""
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_LMTP", "_EMBED_TP", "_MLP_TP"):
+        setattr(parallel_state, name, None)
+    mock_ascend_config = MagicMock()
+    mock_ascend_config.kvpp_config.size = 1
+    mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = disabled_size
+    mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
+    mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = disabled_size
+    mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = disabled_size
+    mock_ascend_config.pd_tp_ratio = 2
+    mock_ascend_config.num_head_replica = 0
+    mock_ascend_config.pd_head_ratio = 2
+    mock_ascend_config.enable_context_parallel = False
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.kv_transfer_config.is_kv_producer = True
+    with (
+        patch("vllm_ascend.distributed.parallel_state.model_parallel_initialized", return_value=False),
+        patch("vllm_ascend.distributed.parallel_state.init_model_parallel_group"),
+        patch("vllm_ascend.distributed.parallel_state.get_current_vllm_config", return_value=mock_vllm_config),
+        patch("vllm_ascend.distributed.parallel_state.get_ascend_config", return_value=mock_ascend_config),
+        patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config),
+    ):
+        init_ascend_model_parallel(parallel_config)
+
+        assert parallel_state._LMTP is None
+        assert parallel_state._EMBED_TP is None
+        assert parallel_state._MLP_TP is None
+        with pytest.raises(AssertionError, match="lm head tensor parallel group is not initialized"):
+            get_lmhead_tp_group()
+
+        destroy_ascend_model_parallel()
+        assert parallel_state._LMTP is None
+        assert parallel_state._EMBED_TP is None
+        assert parallel_state._MLP_TP is None
+
+
 def _build_parallel_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,

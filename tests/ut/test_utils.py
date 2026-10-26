@@ -969,3 +969,19 @@ def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
         assert utils.oproj_tp_enable() is enabled
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+@pytest.mark.parametrize(
+    "helper,field",
+    [
+        ("lmhead_tp_enable", "lmhead_tensor_parallel_size"),
+        ("embedding_tp_enable", "embedding_tensor_parallel_size"),
+        ("mlp_tp_enable", "mlp_tensor_parallel_size"),
+    ],
+)
+def test_finegrained_tp_enable_uses_one_disabled_convention(helper, field, size, enabled):
+    """All four fine-grained knobs treat 0 and 1 as disabled; only >1 shards."""
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{field: size}))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert getattr(utils, helper)() is enabled
