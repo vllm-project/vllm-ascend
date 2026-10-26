@@ -245,6 +245,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+        self.scheme.use_expert_weight_list = True
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()
@@ -254,6 +255,105 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mega_moe = patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
         self.addCleanup(mega_moe.stop)
         mega_moe.start()
+
+    def test_expert_lists_follow_v1_and_v2_eplb_configuration(self):
+        for use_v2, dynamic_eplb, enable_eplb, expected in (
+            (False, False, False, False),
+            (False, True, False, True),
+            (True, False, True, True),
+            (True, True, False, False),
+        ):
+            with self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb):
+                config = create_mock_vllm_config()
+                config.use_v2_model_runner = use_v2
+                config.parallel_config.enable_eplb = enable_eplb
+                ascend_config = create_mock_ascend_config()
+                ascend_config.eplb_config.dynamic_eplb = dynamic_eplb
+                with (
+                    patch(
+                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                        return_value=config,
+                    ),
+                    patch(
+                        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
+                        return_value=ascend_config,
+                    ),
+                ):
+                    scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+                self.assertEqual(scheme.use_expert_weight_list, expected)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    def test_non_eplb_keeps_batched_weights_and_stable_reload_buffers(self, mock_vllm):
+        self.scheme.use_expert_weight_list = False
+        names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        for nz_enabled in (False, True):
+            with (
+                self.subTest(nz_enabled=nz_enabled),
+                patch("vllm_ascend.utils._should_trans_nz", return_value=nz_enabled),
+            ):
+                layer = create_mxfp_moe_layer(
+                    num_experts=self.num_experts,
+                    hidden_size=self.hidden_size,
+                    intermediate_size=self.intermediate_size,
+                )
+                loaded = {name: getattr(layer, name).detach().clone() for name in names}
+                self.scheme.process_weights_after_loading(layer)
+                captured = {name: getattr(layer, name).data for name in names}
+                pointers = {name: tensor.data_ptr() for name, tensor in captured.items()}
+                for name in names:
+                    self.assertFalse(hasattr(layer, f"{name}_list"))
+                    weights = self.scheme._get_weights(layer, name)
+                    self.assertEqual(len(weights), 1)
+                    self.assertIs(weights[0], getattr(layer, name))
+                fused = self.scheme.get_fused_mc2_weights(layer)
+                self.assertIs(fused.w1, layer.w13_weight)
+                self.assertIs(fused.w2_scale, layer.w2_weight_scale)
+                for _ in range(3):
+                    self.scheme.restore_weights_for_rl_loading(layer)
+                    for name in names:
+                        parameter = getattr(layer, name)
+                        torch.testing.assert_close(parameter.float(), loaded[name].float(), rtol=0, atol=0)
+                        loaded[name] = torch.randint(0, 16, parameter.shape, dtype=torch.uint8).to(parameter.dtype)
+                        parameter.data.copy_(loaded[name])
+                    self.scheme.process_weights_after_loading(layer)
+                    for name in names:
+                        actual = getattr(layer, name)
+                        self.assertEqual(actual.data_ptr(), pointers[name])
+                        expected = loaded[name]
+                        if name.endswith("scale"):
+                            groups, channels, scale_size = expected.shape
+                            expected = expected.reshape(groups, channels, scale_size // 2, 2)
+                        expected = expected.transpose(1, 2)
+                        torch.testing.assert_close(actual.float(), expected.float(), rtol=0, atol=0)
+                        torch.testing.assert_close(captured[name].float(), expected.float(), rtol=0, atol=0)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    def test_non_eplb_batched_weights_allow_more_than_128_experts(self, mock_vllm):
+        self.scheme.use_expert_weight_list = False
+        layer = create_mxfp_moe_layer(num_experts=129, hidden_size=64, intermediate_size=64)
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.w13_weight.shape[0], 129)
+        self.assertFalse(hasattr(layer, "w13_weight_list"))
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    def test_non_eplb_preserves_mega_moe_expert_lists(self, mock_vllm):
+        self.scheme.use_expert_weight_list = False
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+        original = layer.w13_weight.detach().clone()
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=True):
+            self.scheme.process_weights_after_loading(layer)
+        self.assertFalse(hasattr(layer, "w13_weight_list"))
+        weights = self.scheme.get_fused_mc2_weights(layer)
+        self.assertIs(weights.w1, layer.cann_mega_moe_w13_weight_list)
+        self.assertEqual(weights.w1[0].shape, original.shape[1:])
+        for actual, expected in zip(weights.w1, original):
+            torch.testing.assert_close(actual.float(), expected.float(), rtol=0, atol=0)
+        self.scheme.restore_weights_for_rl_loading(layer)
+        torch.testing.assert_close(layer.w13_weight.float(), original.float(), rtol=0, atol=0)
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
