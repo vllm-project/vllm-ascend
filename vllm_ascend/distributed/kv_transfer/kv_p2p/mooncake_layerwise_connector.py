@@ -276,12 +276,19 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        self.startup_error: BaseException | None = None
 
     def run(self):
-        local_rank = get_world_group().local_rank
-        visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
-        device = torch.device(f"npu:{visible_device_index}")
-        torch.npu.set_device(device)
+        try:
+            local_rank = get_world_group().local_rank
+            visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
+            device = torch.device(f"npu:{visible_device_index}")
+            torch.npu.set_device(device)
+        except BaseException as error:
+            self.startup_error = error
+            logger.error("KVCacheSendingLayerThread failed to initialize its NPU device: %s", error)
+            self.ready_event.set()
+            return
         self.ready_event.set()
         while True:
             send_task = self.send_queue.get()
@@ -1566,6 +1573,10 @@ class MooncakeLayerwiseConnectorWorker:
             )
             self.kv_send_layer_thread.start()
             ready_event.wait()
+            if self.kv_send_layer_thread.startup_error is not None:
+                raise RuntimeError("Mooncake KV sending thread failed to initialize its NPU device") from (
+                    self.kv_send_layer_thread.startup_error
+                )
 
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             ready_event = threading.Event()
