@@ -81,6 +81,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
+            HardwareCapability.S8S4_GROUPED_MATMUL,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
