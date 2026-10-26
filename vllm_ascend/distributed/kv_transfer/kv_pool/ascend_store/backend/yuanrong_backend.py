@@ -6,6 +6,7 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
@@ -105,7 +106,8 @@ class YuanrongBackend(Backend):
 
     def set_device(self):
         local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(local_rank)
+        device = torch.device(f"npu:{visible_device_index}")
         torch.npu.set_device(device)
 
     @classmethod
