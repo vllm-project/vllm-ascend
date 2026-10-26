@@ -43,6 +43,31 @@ class DirectPrefixSource:
 
 
 @dataclass(frozen=True)
+class NativeSWASource:
+    """Canonical logical table for an unchanged causal native-SWA consumer.
+
+    Old columns may be null/evicted. Only the consumer's native band is
+    certified resident; an extra Window intersects that band, never extends it.
+    valid_columns is the logical table extent, not a resident Full prefix.
+    """
+
+    table: torch.Tensor
+    request_rows: tuple[int, ...]
+    valid_columns: tuple[int, ...]
+    block_span: int
+    native_window: int
+
+    @classmethod
+    def from_block_tables(cls, owner: Any, gid: int, request_rows: np.ndarray, native_window: int):
+        rows = tuple(int(row) for row in request_rows)
+        table = owner.block_tables[gid].gpu
+        if native_window <= 0 or any(row < 0 or row >= table.shape[0] for row in rows):
+            raise ValueError("Native SWA requires a valid current canonical mapping and positive window")
+        counts = tuple(int(owner.num_blocks.np[gid, row]) for row in rows)
+        return cls(table, rows, counts, int(owner.kernel_block_sizes[gid]), native_window)
+
+
+@dataclass(frozen=True)
 class DraftReadView:
     """Owned read operands; deliberately carries no positions or write slots."""
 
@@ -75,8 +100,8 @@ class DraftReadView:
         return self.seq_lens_cpu
 
 
-def materialize_direct_prefix(
-    source: DirectPrefixSource,
+def _materialize_canonical_read(
+    source: DirectPrefixSource | NativeSWASource,
     *,
     exact_cpu: torch.Tensor,
     exact_device: torch.Tensor,
@@ -184,4 +209,67 @@ def materialize_direct_prefix(
         upper_out,
         starts.clone(),
         int(upper_out.max()) if padded_rows else 0,
+    )
+
+
+def materialize_direct_prefix(
+    source: DirectPrefixSource,
+    *,
+    exact_cpu: torch.Tensor,
+    exact_device: torch.Tensor,
+    upper_cpu: torch.Tensor,
+    starts_cpu: torch.Tensor,
+    padded_rows: int,
+    row_indices: torch.Tensor | None = None,
+    retain: Callable[..., None] | None = None,
+) -> DraftReadView:
+    """Project a resident Full prefix using the existing canonical copy path."""
+    if not isinstance(source, DirectPrefixSource):
+        raise ValueError("Full-prefix projection requires its resident-prefix source")
+    return _materialize_canonical_read(
+        source,
+        exact_cpu=exact_cpu,
+        exact_device=exact_device,
+        upper_cpu=upper_cpu,
+        starts_cpu=starts_cpu,
+        padded_rows=padded_rows,
+        row_indices=row_indices,
+        retain=retain,
+    )
+
+
+def materialize_native_swa_intersection(
+    source: NativeSWASource,
+    *,
+    exact_cpu: torch.Tensor,
+    exact_device: torch.Tensor,
+    upper_cpu: torch.Tensor,
+    starts_cpu: torch.Tensor,
+    padded_rows: int,
+    query_width: int,
+    row_indices: torch.Tensor | None = None,
+    retain: Callable[..., None] | None = None,
+) -> DraftReadView:
+    """Rebase a causal native band without claiming its evicted prefix.
+
+    After cropping at S, native right-aligned q coordinates move by -S and
+    native pre_tokens=P is unchanged. Mapping back yields original band
+    intersected with [S,E). Thus no newly required resident key is introduced.
+    The caller must keep that actual causal native consumer and its P.
+    """
+    if not isinstance(source, NativeSWASource) or source.native_window <= 0 or query_width <= 0:
+        raise ValueError("Native SWA projection requires its typed positive band")
+    if exact_cpu.device.type != "cpu" or starts_cpu.device.type != "cpu":
+        raise ValueError("Native SWA planning reuses the completed native builder CPU snapshot")
+    if bool((exact_cpu - starts_cpu < query_width).any()):
+        raise ValueError("Extra Window must cover every native query")
+    return _materialize_canonical_read(
+        source,
+        exact_cpu=exact_cpu,
+        exact_device=exact_device,
+        upper_cpu=upper_cpu,
+        starts_cpu=starts_cpu,
+        padded_rows=padded_rows,
+        row_indices=row_indices,
+        retain=retain,
     )

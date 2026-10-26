@@ -482,3 +482,38 @@ and unprofiled timing. Native operation schemas or a few trace samples alone
 do not establish copy elimination for every fallback. Compare fixed-source OFF
 and ON with matching warmup, cache state, request arrival and sampling settings;
 report acceptance changes and low-load regressions alongside throughput.
+
+## DFlash native SWA and an extra Draft Window
+
+A mixed DFlash draft can contain ordinary causal `SlidingWindowSpec` groups
+and a Full-attention group. A native SWA group is not a resident Full-prefix
+provider: its older logical table entries may point at null or evicted pages.
+The ordinary ND GQA route therefore keeps its native band and Full KV writes.
+It does not convert a native SWA group to dense Full attention.
+
+When the requested Window covers the complete native band for every supported
+query, that native reader remains unchanged and only the Full group receives
+a Window projection. Otherwise a proposal-local adapter calls the original
+concrete metadata builder first. The adapter reuses the native length list
+that this invocation has already obtained from current device exact lengths.
+The field named `seq_lens_cpu` alone does not certify a CPU snapshot: on the
+parallel-Draft path it may still refer to the device tensor. No second D2H
+length copy is introduced by the adapter. The original builder's list
+conversion and its existing synchronization remain explicit.
+
+For each native group, its actual kernel table column span B defines
+`S = floor(max(E - W, 0) / B) * B`. Only the newly built Draft read metadata
+receives the table starting at S and lengths E-S. The native causal window P
+is unchanged. Its right-aligned query coordinates rebase by -S, so the
+absolute read set is the original native band intersected with `[S, E)`.
+Continuing prompt rows retain their original native read. Query positions,
+write slots, canonical tables and Target metadata retain their original
+coordinates and identities. Original metadata, DMA sources, private table
+and length destinations remain owned until the existing native reader
+completion releases the proposal.
+
+This provider is limited to the concrete ordinary causal ND GQA consumer,
+with no sinks, compression, offload or CP-sharded Draft layout. It requires
+a Full group alongside the native groups and an unpadded current request
+extent. Unsupported consumers and padding are rejected explicitly. This
+Draft-eager extension does not select the Target Graph builders.

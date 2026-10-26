@@ -78,6 +78,7 @@ class DraftWindowRuntime:
         self.sfa_layer_names: tuple[str, ...] = ()
         self.dsa_layer_names: tuple[str, ...] = ()
         self.dsa_native_windows: dict[int, int] = {}
+        self.native_swa_intersections: dict[int, int] = {}
         self._dsa_builders = None
         self._dense_device_reads = False
         self.gids = self._validate_route(speculator)
@@ -131,6 +132,15 @@ class DraftWindowRuntime:
         # padding and Full write coordinates; actual CP builders are excluded
         # by the provider inventory rather than a target-global CP switch.
         routes = require_direct_prefix_routes(speculator, window_size=self.window_size)
+        self.native_swa_intersections = {
+            route.gid: route.native_window
+            for route in routes
+            if route.status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+        }
+        if self.native_swa_intersections:
+            if self.window_size < speculator.num_query_per_req:
+                raise ValueError("DFlash draft_window_size must cover its query width")
+            routes = tuple(route for route in routes if route.gid not in self.native_swa_intersections)
         if self.method in ("eagle3", "dflash", "dspark") and all(
             route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes
         ):
@@ -808,14 +818,22 @@ class DraftWindowRuntime:
         return apply
 
     def metadata_builder_callback(self, step: int):
-        """Select a complete private DSA builder before any derived-state write."""
-        if self._bypass or self._dsa_builders is None:
+        """Select a proposal-owned builder at the existing metadata extension point."""
+        if self._bypass or (self._dsa_builders is None and not self.native_swa_intersections):
             return None
         owner = self._owner
         if owner is None:
             raise RuntimeError("Draft Window builder has no active proposal")
 
         def select(gid, builder, layer_names):
+            if gid in self.native_swa_intersections:
+                from vllm_ascend.worker.v2.spec_decode.draft_window_swa import NativeSWABuilder
+
+                if self._owner is not owner:
+                    raise RuntimeError("Native SWA builder selection belongs to a stale proposal")
+                owned = NativeSWABuilder(builder, self, owner, gid, self.native_swa_intersections[gid])
+                self.pool.retain(owner, owned)
+                return owned
             if gid not in self.dsa_native_windows or not set(layer_names).issubset(self.dsa_layer_names):
                 return builder
             if self._owner is not owner:

@@ -16,6 +16,7 @@ from typing import Any
 class DraftWindowProviderStatus(str, Enum):
     DIRECT_DENSE = "DIRECT_DENSE"
     NATIVE_SWA_CANDIDATE = "NATIVE_SWA_CANDIDATE"
+    NATIVE_SWA_INTERSECTION = "NATIVE_SWA_INTERSECTION"
     DIRECT_MLA = "DIRECT_MLA"
     DIRECT_DSA = "DIRECT_DSA"
     DIRECT_SFA = "DIRECT_SFA"
@@ -459,8 +460,13 @@ def require_compatible_direct_prefix_routes(routes: Sequence[DraftWindowGroupRou
     failing after an ordinary request crosses a block boundary.
     """
     require_draft_window_providers(routes)
-    anchor_span = routes[0].table_column_span
-    for route in routes:
+    prefix_routes = tuple(
+        route for route in routes if route.status is not DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+    )
+    if not prefix_routes:
+        raise NotImplementedError("Native SWA intersection requires a projected Full group")
+    anchor_span = prefix_routes[0].table_column_span
+    for route in prefix_routes:
         if anchor_span % route.table_column_span:
             raise NotImplementedError(
                 "Draft Window provider missing: "
@@ -482,9 +488,9 @@ def select_native_swa_subset_routes(
 
     S <= max(E+f-W, 0). A native P-window's earliest query reads no
     earlier than max(E-Q-P, 0). W >= P+Q+f proves that its complete
-    existing read set lies inside the requested extra Window. Only the
-    remaining Full groups receive a private Window projection. Smaller W
-    still needs an intersection provider; it must not silently use native P.
+    existing read set lies inside the requested extra Window. Smaller W
+    selects a typed native-band intersection, whose original builder exact
+    pair is reused after build. Neither route claims a resident Full prefix.
     """
     if max_query_tokens < 1 or future_offset_bound < 0:
         raise ValueError("Native SWA coverage requires a positive query bound")
@@ -494,8 +500,8 @@ def select_native_swa_subset_routes(
             projected.append(route)
             continue
         native_window = route.native_window
-        if native_window is None or window_size < native_window + max_query_tokens + future_offset_bound:
-            raise NotImplementedError(f"Draft Window gid={route.gid} needs a native-SWA intersection provider")
+        if native_window is None or native_window <= 0:
+            raise NotImplementedError(f"Draft Window gid={route.gid} has no native-SWA geometry")
         for name in route.layers:
             impl = getattr(context.get(name), "impl", None)
             if (
@@ -505,7 +511,15 @@ def select_native_swa_subset_routes(
                 or impl.use_bnsd_kv_cache
             ):
                 raise NotImplementedError(f"Draft Window native SWA consumer {name} has no coverage certificate")
-    if not projected:
+        if window_size < native_window + max_query_tokens + future_offset_bound:
+            projected.append(
+                replace(
+                    route,
+                    status=DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION,
+                    reason="Typed causal native band intersected using its builder's current exact pair",
+                )
+            )
+    if not any(route.status is not DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION for route in projected):
         raise NotImplementedError("Draft Window requires a projected Full group alongside covered native SWA")
     return tuple(projected)
 

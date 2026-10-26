@@ -151,17 +151,20 @@ def test_covered_swa_keeps_only_full_group_projection(types, topology):
     assert context["draft.layers.0"].impl.sliding_window == 4096
 
 
-def test_smaller_extra_window_is_not_silently_ignored(types, topology):
+def test_smaller_extra_window_selects_native_intersection(types, topology):
     routes, _, context = native_swa_bundle(types, topology)
-    with pytest.raises(NotImplementedError, match="intersection provider"):
-        select_native_swa_subset_routes(
-            routes,
-            window_size=1024,
-            max_query_tokens=8,
-            future_offset_bound=7,
-            context=context,
-            dense_impl_type=DenseBuilder,
-        )
+    selected = select_native_swa_subset_routes(
+        routes,
+        window_size=1024,
+        max_query_tokens=8,
+        future_offset_bound=7,
+        context=context,
+        dense_impl_type=DenseBuilder,
+    )
+    assert len(selected) == 2
+    assert selected[0].status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+    assert selected[1] == routes[1]
+    require_compatible_direct_prefix_routes(selected)
 
 
 @pytest.mark.parametrize("change", [{"sliding_window": 1024}, {"sinks": object()}, {"use_bnsd_kv_cache": True}])
@@ -541,3 +544,18 @@ def test_deferred_dsa_producer_requires_separate_completion_contract(types, topo
     (route,) = inventory(dsa_types(types), topology, specs=[DSASpec()], builders=[builder])
     assert route.status is DraftWindowProviderStatus.PROVIDER_MISSING
     assert "executor completion" in route.reason
+
+
+def test_small_window_native_intersection_gap(types, topology):
+    routes, _, context = native_swa_bundle(types, topology)
+    selected = select_native_swa_subset_routes(
+        routes,
+        window_size=1024,
+        max_query_tokens=8,
+        future_offset_bound=7,
+        context=context,
+        dense_impl_type=DenseBuilder,
+    )
+    assert len(selected) == 2
+    assert selected[0].status is DraftWindowProviderStatus.NATIVE_SWA_INTERSECTION
+    assert selected[1].gid == routes[1].gid
