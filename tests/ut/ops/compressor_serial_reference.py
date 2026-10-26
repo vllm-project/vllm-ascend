@@ -69,7 +69,7 @@ def compressor_reference(args, *, ratio, coff, eps=1e-6, rotary=2, cache_mode=1)
                 output.reshape(-1, dim)[row] = normed
             packed_row += 1
         end = start + n
-        tail_start = max(start, (end // ratio - (coff - 1)) * ratio)
+        tail_start = start
         for pos in range(tail_start, end):
             location = cache_location(b, pos)
             if location is not None:

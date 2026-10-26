@@ -6,10 +6,10 @@ manufacture an iteration history or count environment/build failures as rounds.
 """
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
-import copy
 import statistics
 import subprocess
 import sys
@@ -21,6 +21,7 @@ import torch
 import torch_npu  # noqa: F401
 
 from tests.ut.ops.compressor_serial_reference import compressor_reference
+
 
 def load_serial_module():
     # A standalone extension build does not generate vLLM's _build_info.
@@ -50,7 +51,7 @@ def make_case(case, device):
 
     x, wk, wg = [random(s, torch.bfloat16) for s in shapes[:3]]
     state, ape, gamma, sin, cos = [random(s) for s in shapes[3:8]]
-    # TND may contain padded tokens. Match the traced output capacity exactly.
+    # TND may contain padded tokens. Preserve the exported valid-row workload.
     if case["phase"] == "prefill":
         total = min(shapes[0][0], case["inputs"][6][0] * ratio)
         lengths = [total // batch // ratio * ratio] * batch
@@ -80,9 +81,7 @@ def make_case(case, device):
 
 
 def fused_call(args, case):
-    return torch.ops._C_ascend.compressor(
-        *args, 64, case["ratio"], case["coff"], 1e-6, 2, 1
-    )
+    return torch.ops._C_ascend.compressor(*args, 64, case["ratio"], case["coff"], 1e-6, 2, 1)
 
 
 def capture(fn):
@@ -131,11 +130,13 @@ def check_case(args, case, plan):
 
 def profile_sequence(graph):
     # Ten adjacent warmup -> complete target sequences; retain every sample.
-    marker = torch.arange(8, device="npu", dtype=torch.float32)
+    marker = torch.empty((128, 1024, 1024), device="npu", dtype=torch.float16)
+    assert marker.numel() * marker.element_size() == 256 * 1024 * 1024
     for _ in range(10):
         torch.argmax(marker)
+        torch.npu.synchronize()
         graph.replay()
-    torch.npu.synchronize()
+        torch.npu.synchronize()
 
 
 def main():
@@ -168,12 +169,16 @@ def main():
         opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads
     )
     result = {
-        "iteration": opts.iteration, "hypothesis": opts.hypothesis,
+        "iteration": opts.iteration,
+        "hypothesis": opts.hypothesis,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "library_sha256": hashlib.sha256(opts.serial_library.read_bytes()).hexdigest(),
         "fused_library_sha256": hashlib.sha256(opts.fused_library.read_bytes()).hexdigest(),
-        "torch": torch.__version__, "hf32": opts.hf32, "config": asdict(config),
-        "metadata": "synthetic; exported shapes preserved", "cases": [],
+        "torch": torch.__version__,
+        "hf32": opts.hf32,
+        "config": asdict(config),
+        "metadata": "synthetic; exported shapes preserved",
+        "cases": [],
     }
     for case in cases:
         if opts.case not in ("all", case["id"]):
@@ -199,16 +204,24 @@ def main():
         torch.testing.assert_close(graph_state, args[3], rtol=1e-4, atol=3e-4)
         if opts.profile:
             profile_sequence(serial_graph if opts.profile == "serial" else fused_graph)
-            result["cases"].append({"id": case["id"], "profile": opts.profile,
-                                    "expected_target_samples": 10, "precision_passed": True})
+            result["cases"].append(
+                {"id": case["id"], "profile": opts.profile, "expected_target_samples": 10, "precision_passed": True}
+            )
             continue
         fused_us = graph_times(fused_graph)
         serial_us = graph_times(serial_graph)
         speed = statistics.median(fused_us) / statistics.median(serial_us)
-        result["cases"].append({"id": case["id"], "fused_us": fused_us, "serial_us": serial_us,
-                                "ratio": speed, "target_met": speed >= 0.8,
-                                "runtime_shapes": [None if t is None else list(t.shape) for t in args],
-                                "reference_shapes": case["inputs"]})
+        result["cases"].append(
+            {
+                "id": case["id"],
+                "fused_us": fused_us,
+                "serial_us": serial_us,
+                "ratio": speed,
+                "target_met": speed >= 0.8,
+                "runtime_shapes": [None if t is None else list(t.shape) for t in args],
+                "reference_shapes": case["inputs"],
+            }
+        )
         print(json.dumps(result["cases"][-1]), flush=True)
     if not result["cases"]:
         raise ValueError("no case selected")

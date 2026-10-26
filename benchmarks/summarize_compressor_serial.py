@@ -51,18 +51,25 @@ def summarize(path, mode, cube_pattern, vector_pattern):
     totals = [sum(t["duration_us"] for t in sample) for sample in samples]
     result = {
         "raw_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "raw_file": str(path), "mode": mode, "samples": samples,
-        "total_us": totals, "median_total_us": statistics.median(totals),
-        "sample_count": 10, "tasks_per_sample": len(samples[0]),
+        "raw_file": str(path),
+        "mode": mode,
+        "samples": samples,
+        "total_us": totals,
+        "median_total_us": statistics.median(totals),
+        "sample_count": 10,
+        "tasks_per_sample": len(samples[0]),
     }
     if mode == "serial":
         cube = [sum(t["duration_us"] for t in sample if t["stage"] == "cube") for sample in samples]
         vector = [total - c for total, c in zip(totals, cube)]
         if min(cube) <= 0 or min(vector) <= 0:
             raise ValueError("every replay must include Cube and Vector tasks")
-        result.update(cube_us=cube, vector_us=vector,
-                      cube_share=[c / total for c, total in zip(cube, totals)],
-                      median_cube_share=statistics.median(c / total for c, total in zip(cube, totals)))
+        result.update(
+            cube_us=cube,
+            vector_us=vector,
+            cube_share=[c / total for c, total in zip(cube, totals)],
+            median_cube_share=statistics.median(c / total for c, total in zip(cube, totals)),
+        )
     return result
 
 

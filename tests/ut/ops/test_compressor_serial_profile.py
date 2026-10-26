@@ -12,8 +12,13 @@ def write_trace(path, *, unknown=False, samples=10):
         writer.writerow(["Task Start Time(us)", "Task Duration(us)", "Op Name"])
         clock = 0
         for _ in range(samples):
-            for name, duration in [("ArgMax", 1), ("serial_cast", 2), ("MatMul", 6),
-                                   ("serial_pool", 1), ("unknown" if unknown else "serial_finalize", 1)]:
+            for name, duration in [
+                ("ArgMax", 1),
+                ("serial_cast", 2),
+                ("MatMul", 6),
+                ("serial_pool", 1),
+                ("unknown" if unknown else "serial_finalize", 1),
+            ]:
                 writer.writerow([clock, duration, name])
                 clock += duration
 

@@ -23,7 +23,7 @@ def test_exported_shapes_are_preserved():
 
 @pytest.mark.parametrize("coff", [1, 2])
 @pytest.mark.parametrize("rotary", [1, 2])
-def test_constant_groups_and_cache_tail(coff, rotary):
+def test_constant_groups_and_full_cache_write(coff, rotary):
     # Constant values and zero scores give an analytic softmax/RMSNorm answer.
     dim, ratio = 128, 4
     x = torch.ones(8, 1)
@@ -31,29 +31,43 @@ def test_constant_groups_and_cache_tail(coff, rotary):
     wg = torch.zeros_like(wk)
     state = torch.full((2, 32, 2 * coff * dim), -7.0)
     args = (
-        x, wk, wg, state, torch.zeros(ratio, coff * dim), torch.ones(dim),
-        torch.zeros(3, 64), torch.ones(3, 64), torch.tensor([[1]]),
-        torch.tensor([0, 8]), None, torch.tensor([0]),
+        x,
+        wk,
+        wg,
+        state,
+        torch.zeros(ratio, coff * dim),
+        torch.ones(dim),
+        torch.zeros(3, 64),
+        torch.ones(3, 64),
+        torch.tensor([[1]]),
+        torch.tensor([0, 8]),
+        None,
+        torch.tensor([0]),
     )
     out, updated = compressor_reference(args, ratio=ratio, coff=coff, rotary=rotary)
     torch.testing.assert_close(out[:2], torch.full((2, dim), (1 + 1e-6) ** -0.5))
     assert out[2].count_nonzero() == 0
     assert torch.equal(updated[0], state[0])
-    if coff == 1:
-        assert torch.equal(updated, state)
-    else:
-        assert torch.equal(updated[1, :4], state[1, :4])
-        assert torch.equal(updated[1, 4:8, : coff * dim], torch.ones(4, coff * dim))
-        assert updated[1, 4:8, coff * dim :].count_nonzero() == 0
+    assert torch.equal(updated[1, :8, : coff * dim], torch.ones(8, coff * dim))
+    assert updated[1, :8, coff * dim :].count_nonzero() == 0
+    assert torch.equal(updated[1, 8:], state[1, 8:])
 
 
 def test_huge_scores_remain_finite():
     dim = 128
     args = (
-        torch.tensor([[1.0], [2.0]]), torch.ones(dim, 1), torch.full((dim, 1), 1e4),
-        torch.zeros(1, 8, 2 * dim), torch.zeros(2, dim), torch.ones(dim),
-        torch.zeros(1, 64), torch.ones(1, 64), None, torch.tensor([0, 2]),
-        None, None,
+        torch.tensor([[1.0], [2.0]]),
+        torch.ones(dim, 1),
+        torch.full((dim, 1), 1e4),
+        torch.zeros(1, 8, 2 * dim),
+        torch.zeros(2, dim),
+        torch.ones(dim),
+        torch.zeros(1, 64),
+        torch.ones(1, 64),
+        None,
+        torch.tensor([0, 2]),
+        None,
+        None,
     )
     out, _ = compressor_reference(args, ratio=2, coff=1)
     assert out.isfinite().all()

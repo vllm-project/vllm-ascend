@@ -62,9 +62,7 @@ class CompressorSerialPlan:
         self.pooled = torch.empty_like(self.output, dtype=torch.float32)
 
     def cast(self, x):
-        torch.ops._C_ascend.compressor_serial_cast(
-            x, self.x_float, self.config.cast_blocks
-        )
+        torch.ops._C_ascend.compressor_serial_cast(x, self.x_float, self.config.cast_blocks)
 
     def matmul(self):
         torch.matmul(
@@ -179,9 +177,7 @@ class CompressorSerialPlan:
         flags = sum(1 << i for i, tensor in enumerate(optionals) if tensor is not None)
         for tensor in optionals:
             if tensor is not None and (
-                tensor.dtype != torch.int32
-                or tensor.device != x.device
-                or not tensor.is_contiguous()
+                tensor.dtype != torch.int32 or tensor.device != x.device or not tensor.is_contiguous()
             ):
                 raise ValueError("metadata must be contiguous INT32 on the same NPU")
         for tensor in (seqused, start_pos):
@@ -189,9 +185,7 @@ class CompressorSerialPlan:
                 raise ValueError("seqused/start_pos must have shape [B]")
         table_width = state_block_table.shape[-1] if state_block_table is not None else 1
         if state_block_table is not None:
-            if cache_mode == 1 and (
-                state_block_table.ndim != 2 or state_block_table.shape[0] != batch
-            ):
+            if cache_mode == 1 and (state_block_table.ndim != 2 or state_block_table.shape[0] != batch):
                 raise ValueError("paged mode requires block_table[B,pages]")
             if cache_mode == 2 and state_block_table.shape != (batch,):
                 raise ValueError("ring mode requires block_table[B]")
@@ -203,12 +197,24 @@ class CompressorSerialPlan:
         metadata = tuple(dummy if tensor is None else tensor for tensor in optionals)
         params = torch.tensor(
             [
-                batch, sequence, x.numel() // hidden, dim, cmp_ratio, coff,
-                cache_mode, state_cache.shape[1], state_cache.stride(0),
-                state_cache.shape[0], table_width, rope_sin.numel() // 64,
-                x.ndim, rotary_mode, flags,
+                batch,
+                sequence,
+                x.numel() // hidden,
+                dim,
+                cmp_ratio,
+                coff,
+                cache_mode,
+                state_cache.shape[1],
+                state_cache.stride(0),
+                state_cache.shape[0],
+                table_width,
+                rope_sin.numel() // 64,
+                x.ndim,
+                rotary_mode,
+                flags,
                 struct.unpack("I", struct.pack("f", norm_eps))[0],
-                2 * coff * dim, coff * dim,
+                2 * coff * dim,
+                coff * dim,
             ],
             dtype=torch.int64,
             device=x.device,

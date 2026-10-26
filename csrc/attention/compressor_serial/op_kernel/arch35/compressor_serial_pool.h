@@ -106,9 +106,9 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Update(
     for (int64_t idx = first; idx < p->batch * width; idx += step) {
         int64_t b = idx / width, col = idx % width;
         int64_t st = Start(start, b, p), n = Used(cu, used, b, p), end = st + n;
-        // Only history needed by the next invocation is persisted.
-        int64_t tail = (end / p->ratio - (p->coff - 1)) * p->ratio;
-        if (tail < st) tail = st;
+        // Persist every valid token, including groups already consumed.
+        // This observable cache side effect is checked against the black box.
+        int64_t tail = st;
         int64_t begin = Begin(cu, b, p);
         for (int64_t pos = tail; pos < end; ++pos) {
             int64_t dst = CacheRow(table, b, pos, p);
