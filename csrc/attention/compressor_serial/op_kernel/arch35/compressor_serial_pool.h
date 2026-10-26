@@ -66,6 +66,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
         int64_t groupEnd = (st / p->ratio + local + 1) * p->ratio;
         int64_t begin = Begin(cu, b, p);
         float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
+        for (int pass = 0; pass < 2; ++pass) {
         for (int64_t q = 0; q < p->coff * p->ratio; ++q) {
             int64_t pos = groupEnd - p->coff * p->ratio + q;
             if (pos < 0) continue;
@@ -83,12 +84,14 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
                 kv = state[row + col];
                 score = state[row + p->coff * p->dim + col];
             }
-            float next = score > maximum ? score : maximum;
-            float oldScale = expf(maximum - next);
-            float weight = expf(score - next);
-            numerator = numerator * oldScale + weight * kv;
-            denominator = denominator * oldScale + weight;
-            maximum = next;
+            if (pass == 0) {
+                maximum = score > maximum ? score : maximum;
+            } else {
+                float weight = expf(score - maximum);
+                numerator += weight * kv;
+                denominator += weight;
+            }
+        }
         }
         pooled[idx] = denominator == 0 ? 0 : numerator / denominator;
     }
