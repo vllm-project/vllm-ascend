@@ -112,7 +112,7 @@ def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
     # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
     incompatible_ops = [
         "TopKV2",  # minimax-m3 910C
-        "GenericBlockSparseAttn",  # minimax-m3 910C
+        "GenericBlockSparseAttention",  # minimax-m3 910C
         "QuantBatchMatmulV3",  # glm5.2 910C
         "TransposeQuantBatchMatMul",  # dsv4 950
         "QuantLightningIndexer",  # glm5.2 950
@@ -144,24 +144,6 @@ def _configure_backend(
             "clone_output": False,
         }
         if ascend_compilation_config.enable_static_kernel:
-            # Backport the static-kernel exclusion used by upstream PR #19317.
-            # Keep the import lazy so the torchair fallback does not require npugraph_ex.
-            from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
-
-            incompatible_ops = [
-                "TopKV2",  # minimax-m3 910C
-                # Match the GE op / JSON name, including the bundled _C_ascend GBSA.
-                "GenericBlockSparseAttention",  # minimax-m3 910C
-                "QuantBatchMatmulV3",  # glm5.2 910C
-                "TransposeQuantBatchMatMul",  # dsv4 950
-                "QuantLightningIndexer",  # glm5.2 950
-            ]
-            logger.info_once(
-                "Skipping static kernel compilation for incompatible ops: %s.",
-                ",".join(incompatible_ops),
-                scope="global",
-            )
-            _set_static_kernel_blacklist(incompatible_ops)
             logger.info_once(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
                 scope="global",
