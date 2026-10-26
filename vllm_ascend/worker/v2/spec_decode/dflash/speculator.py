@@ -15,8 +15,10 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, prepare_flash_attn_metadata
 from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
@@ -189,6 +191,42 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
+        self.flash_attn_layers: dict[str, Any] = {}
+        self.flash_attn_metadata_executor: DeviceMetadataExecutor | None = None
+        self._pending_context_kv: tuple[int, int, bool] | None = None
+
+    def _precompute_context_kv(self, start: int, end: int, dummy_run: bool = False) -> None:
+        if getattr(self, "flash_attn_metadata_executor", None) is not None and self.speculative_config.enforce_eager:
+            if self._pending_context_kv is not None:
+                raise RuntimeError("Previous DFlash context KV was not consumed")
+            # Eager propose builds metadata after this hook. Keep the same cache
+            # update, but submit metadata first once _run_model receives it.
+            self._pending_context_kv = start, end, dummy_run
+            return
+        super()._precompute_context_kv(start, end, dummy_run)
+
+    @torch.inference_mode()
+    def _run_model(
+        self,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> torch.Tensor:
+        pending = getattr(self, "_pending_context_kv", None)
+        self._pending_context_kv = None
+        with prepare_flash_attn_metadata(
+            attn_metadata,
+            getattr(self, "flash_attn_layers", {}),
+            getattr(self, "flash_attn_metadata_executor", None),
+            num_tokens,
+        ):
+            if pending is not None:
+                super()._precompute_context_kv(*pending)
+            return super()._run_model(
+                num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+            )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -223,6 +261,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         )
         # npu needs attn_backends to update full graph params in run_fullgraph.
         attn_backends: dict[str, type[AttentionBackend]] = {}
+        self.flash_attn_layers = {}
         active_layer_names = self.draft_attn_layer_names
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             layer_names = kv_cache_group_spec.layer_names
@@ -234,8 +273,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
 
             for layer_name in layer_names:
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                if attn_backends[layer_name] is AscendFlashAttentionBackend:
+                    self.flash_attn_layers[layer_name] = attn_layers[layer_name].impl
 
         self.attn_backends = attn_backends
+        self.flash_attn_metadata_executor = (
+            DeviceMetadataExecutor(capture_producers=True) if self.flash_attn_layers else None
+        )
         if vllm_version_is("0.31.0"):
             dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(
                 self.vllm_config.cache_config.block_size

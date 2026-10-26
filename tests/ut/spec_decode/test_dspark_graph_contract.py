@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -16,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -25,6 +27,50 @@ class _BackendA:
     @staticmethod
     def get_impl_cls():
         return object
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("early", [False, True])
+@pytest.mark.parametrize("has_callback", [False, True])
+def test_metadata_capture_preserves_prepare_callback_once(monkeypatch, legacy, early, has_callback):
+    calls = []
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(flash_attn_metadata_executor=object() if early else None, flash_attn_layers={})
+    key = "precompute_context_kv" if legacy else "prepare_forward"
+
+    @contextmanager
+    def prepare(*_args):
+        calls.append("metadata")
+        yield
+        calls.append("retire")
+
+    def capture(_self, forward, *_args, **kwargs):
+        assert key in kwargs
+        other = "prepare_forward" if legacy else "precompute_context_kv"
+        assert other not in kwargs
+        if kwargs[key] is not None:
+            kwargs[key](3) if legacy else kwargs[key](3, {})
+        forward(3, 24, {}, None, None, CUDAGraphMode.FULL)
+
+    monkeypatch.setattr(aclgraph_module, "prepare_flash_attn_metadata", prepare)
+    monkeypatch.setattr(aclgraph_module, "vllm_version_is", lambda _version: legacy)
+    monkeypatch.setattr(aclgraph_module, "communicator_switch", nullcontext)
+    monkeypatch.setattr(aclgraph_module, "model_capture_wrapper", lambda *_: nullcontext())
+    monkeypatch.setattr(DFlashCudaGraphManager, "capture", capture)
+    prepare_options: dict[str, Any] = {key: (lambda *_: calls.append("context_kv")) if has_callback else None}
+    manager.capture(
+        lambda *_: calls.append("forward"),
+        None,
+        None,
+        [],
+        None,
+        16384,
+        **prepare_options,
+    )
+    expected = ["context_kv", "forward"] if has_callback else ["forward"]
+    if early and has_callback:
+        expected = ["metadata", "context_kv", "forward", "retire"]
+    assert calls == expected
 
 
 def _speculator(**attributes):
@@ -312,3 +358,18 @@ def test_dflash_updatable_replay_resolves_current_metadata_before_replay(monkeyp
     manager.speculator.build_draft_attn_metadatas.assert_called_once_with(
         2, manager.speculator.input_batch.seq_lens_cpu_upper_bound
     )
+
+
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(
+        attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
+        build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("unexpected host metadata rebuild")),
+    )
+    replay = MagicMock(return_value=object())
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()

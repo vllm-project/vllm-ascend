@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, prepare_flash_attn_metadata
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -83,9 +84,28 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             if vllm_version_is("0.31.0")
             else {"prepare_forward": prepare_forward}
         )
+        capture_forward = forward_fn
+        executor = getattr(self.speculator, "flash_attn_metadata_executor", None)
+        prepare_callback = next(iter(prepare_kwargs.values()))
+        if executor is not None and prepare_callback is not None:
+
+            def forward_with_metadata(num_reqs, num_tokens, attn_metadata, *args):
+                with prepare_flash_attn_metadata(
+                    attn_metadata, self.speculator.flash_attn_layers, executor, num_tokens
+                ):
+                    # Tiling consumes device lengths independently of context K/V.
+                    if "precompute_context_kv" in prepare_kwargs:
+                        prepare_callback(num_reqs)
+                    else:
+                        prepare_callback(num_reqs, attn_metadata)
+                    return forward_fn(num_reqs, num_tokens, attn_metadata, *args)
+
+            capture_forward = forward_with_metadata
+            # The wrapped forward owns the original callback exactly once.
+            prepare_kwargs = {key: lambda *_args: None for key in prepare_kwargs}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
-                forward_fn,
+                capture_forward,
                 input_buffers,
                 block_tables,
                 attn_groups,
@@ -100,6 +120,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
+            # Producers, device-length reads and waits are captured together.
+            return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,

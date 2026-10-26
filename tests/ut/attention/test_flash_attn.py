@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
 import sys
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,7 +11,12 @@ import torch
 from vllm.compilation.backends import set_model_tag
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl
+from vllm_ascend.attention.fa_v1 import (
+    AscendFlashAttentionImpl,
+    AscendFlashAttentionMetadata,
+    prepare_flash_attn_metadata,
+)
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 
 
 @pytest.fixture
@@ -30,6 +36,7 @@ def dflash2_config():
 def make_impl(query, *, num_kv_heads=1, window=None, layout="PA_BBND", sinks=None):
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.num_heads, impl.num_kv_heads = query.shape[1], num_kv_heads
+    impl.head_size = query.shape[-1]
     impl.scale, impl.sliding_window = query.shape[-1] ** -0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", sinks
     impl.key_cache = impl.value_cache = None
@@ -280,3 +287,103 @@ def test_distinct_attention_geometries_do_not_share_plans(monkeypatch):
             impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
     assert ops.flash_attn_metadata.call_count == len(geometries)
     assert ops.flash_attn.call_count == 2 * len(geometries)
+
+
+@pytest.fixture
+def metadata_streams(monkeypatch):
+    calls = []
+    current = ["main"]
+
+    class Stream:
+        def wait_event(self, _event):
+            calls.append((current[0], "wait"))
+
+        def wait_stream(self, _stream):
+            calls.append((current[0], "join"))
+
+    class Event:
+        def record(self, _stream):
+            calls.append((current[0], "record"))
+
+    @contextmanager
+    def stream_scope(_stream):
+        current[0] = "metadata"
+        try:
+            yield
+        finally:
+            current[0] = "main"
+
+    monkeypatch.setattr(torch.npu, "Stream", Stream)
+    monkeypatch.setattr(torch.npu, "Event", Event)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: Stream())
+    monkeypatch.setattr(torch.npu, "stream", stream_scope)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *_: calls.append((current[0], "lifetime")))
+    return DeviceMetadataExecutor(capture_producers=True), calls, current
+
+
+@pytest.mark.parametrize("failure", [None, "producer", "consumer"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_flash_metadata_precedes_projections_refreshes_lengths_and_retires(
+    metadata_streams, monkeypatch, failure, nested
+):
+    executor, calls, current = metadata_streams
+    query = torch.zeros(16, 4, 128, dtype=torch.bfloat16)
+    impl = make_impl(query, window=1024)
+    metadata = AscendFlashAttentionMetadata(
+        query_start_loc_gpu=torch.tensor([0, 8, 16], dtype=torch.int32),
+        block_tables=torch.zeros(2, 2, dtype=torch.int32),
+        seq_lens_gpu=torch.tensor([256, 254], dtype=torch.int32),
+        max_query_len=8,
+        causal=False,
+    )
+
+    def tiling(*_args, **_kwargs):
+        calls.append((current[0], "tiling"))
+        if failure == "producer":
+            raise RuntimeError("producer")
+        return torch.empty(16, dtype=torch.int32)
+
+    def attention(*_args, **_kwargs):
+        calls.append((current[0], "attention"))
+        return query, None
+
+    ops = SimpleNamespace(flash_attn_metadata=Mock(side_effect=tiling), flash_attn=attention)
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    layers = {f"draft.{i}": impl for i in range(6)}
+    for step in range(2):
+        calls.clear()
+        metadata.seq_lens_gpu.sub_(step)
+
+        def run():
+            with (
+                (
+                    prepare_flash_attn_metadata(dict.fromkeys(layers, metadata), layers, executor, 16)
+                    if nested
+                    else nullcontext()
+                ),
+                prepare_flash_attn_metadata(dict.fromkeys(layers, metadata), layers, executor, 16),
+            ):
+                calls.append((current[0], "projection"))
+                if failure == "consumer":
+                    raise RuntimeError("consumer")
+                for _ in layers:
+                    impl.forward_impl(query, None, None, None, metadata, torch.empty_like(query))
+
+        if failure:
+            with pytest.raises(RuntimeError, match=failure):
+                run()
+        else:
+            run()
+            assert calls.index(("metadata", "tiling")) < calls.index(("main", "projection"))
+            assert calls.index(("main", "projection")) < calls.index(("main", "wait"))
+            assert calls.index(("main", "wait")) < calls.index(("main", "attention"))
+            assert calls.count(("main", "wait")) == 1
+            assert ops.flash_attn_metadata.call_count == step + 1
+            assert metadata.flash_attn_lengths is not None
+            torch.testing.assert_close(metadata.flash_attn_lengths[1], metadata.seq_lens_gpu)
+        assert not executor.submission_in_flight
+        assert metadata.flash_attn_executor is None
+        assert ("main", "lifetime") in calls
+        assert len(executor._stage_ready) == 1  # No per-step event accumulation.
+        if failure == "producer":
+            assert ("main", "join") in calls

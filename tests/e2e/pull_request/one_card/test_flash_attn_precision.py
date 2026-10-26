@@ -9,7 +9,12 @@ import torch
 import torch_npu  # noqa: F401
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.fa_v1 import AscendFlashAttentionImpl, AscendFlashAttentionMetadataBuilder
+from vllm_ascend.attention.fa_v1 import (
+    AscendFlashAttentionImpl,
+    AscendFlashAttentionMetadataBuilder,
+    prepare_flash_attn_metadata,
+)
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 
 
 def golden(query, key, value, block_table, lengths, window, query_len, causal):
@@ -40,7 +45,9 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 @pytest.mark.parametrize("window", [None, 2048])
 @pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
 @pytest.mark.parametrize("causal", [False, True])
-def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
+@pytest.mark.parametrize("capture", [False, True], ids=["eager", "graph"])
+@pytest.mark.parametrize("overlap_metadata", [False, True], ids=["serial", "overlap"])
+def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, capture, overlap_metadata):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
@@ -66,6 +73,7 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
         get_splitfuse_attn_mask=lambda: mask,
     )
     common = SimpleNamespace(
+        seq_lens=optimistic - rejected,
         num_reqs=3,
         num_actual_tokens=query.shape[0],
         query_start_loc=torch.tensor([0, 6, 12, 12], dtype=torch.int32, device=device),
@@ -79,21 +87,36 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal):
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.key_cache, impl.value_cache = k_view, v_view
     impl.num_heads, impl.num_kv_heads = 8, 1
+    impl.head_size = head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
     output = torch.empty_like(query)
+    executor = DeviceMetadataExecutor(capture_producers=True) if overlap_metadata else None
 
     def run():
-        common.seq_lens = optimistic - rejected
         metadata = builder.build(0, common)
-        for _ in range(6):
-            result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
+        with prepare_flash_attn_metadata({"draft": metadata}, {"draft": impl}, executor, query.shape[0]):
+            for _ in range(6):
+                result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
         return result
 
-    result = run()
+    replay = run
+    if capture:
+        run()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            captured_result = run()
+
+        def replay():
+            graph.replay()
+            return captured_result
+
+    result = replay()
     reference = golden(query, key, value, block_table, [4096, 3070], window, query_len, causal)
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
     rejected.copy_(torch.tensor([3, 5, 0], dtype=torch.int32, device=device))
-    result = run()
+    common.seq_lens.copy_(optimistic - rejected)
+    result = replay()
     reference = golden(query, key, value, block_table, [4093, 3067], window, query_len, causal)
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
