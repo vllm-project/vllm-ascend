@@ -4,7 +4,7 @@
 
 KVPP (KV pipeline parallelism) distributes historical KV caches that would otherwise be replicated across TP ranks by layer for non-hybrid MLA/SFA models. This reduces persistent cache storage per rank, allowing the same HBM capacity to accommodate more context tokens or concurrent requests.
 
-KVPP can be combined with TP, EP, and PP. With Model Runner V2, it can also be combined with PCP.
+KVPP can be combined with TP, EP, PP, and PCP.
 
 The pipeline parallelism in KVPP refers to KV cache storage and communication, while model computation keeps the parallel configuration described above. For the underlying layer-wise KV storage concept, see **LayerSplit** in Z.ai's [Scaling Pain of Coding Agent Serving: Lessons from Debugging GLM-5 at Scale](https://z.ai/blog/scaling-pain).
 
@@ -18,7 +18,7 @@ On 950DT Products, the measured KV cache capacity was **6.25×** with GLM-5.2-W4
 
 ### Supported Models
 
-KVPP supports non-hybrid MLA and SFA models with Model Runner V2. Model Runner V1 is no longer supported.
+KVPP supports non-hybrid MLA and SFA models.
 
 | Attention backend | KVPP support | Model scope |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
 | Speculative decoding | ✅ Supported | All speculative decoding methods with fixed K; dynamic K has not been validated. |
-| PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
+| PCP | ✅ Supported | Caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
@@ -85,7 +85,7 @@ vllm serve <model-path> \
 
 Adjust the token budget and maximum number of sequences to device capacity and workload.
 
-For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks.
+For PCP, add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks.
 
 For PP, add `enable_kvpp` to the existing PP launch configuration.
 
@@ -137,7 +137,7 @@ Configure Mooncake as described in the [Mooncake layerwise guide](mooncake_layer
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":true,"load_async":false}}'
 ```
 
-Mooncake layerwise pooling requires `load_async=false` (loads are submitted layer by layer) and does not enable cross-layer reuse of persistent owner caches. It was validated on a single node with TP8, Model Runner V2, and eager execution; PP, PCP, and DCP were not part of that validation.
+Mooncake layerwise pooling requires `load_async=false` (loads are submitted layer by layer) and does not enable cross-layer reuse of persistent owner caches. It was validated on a single node with TP8 and eager execution; PP, PCP, and DCP were not part of that validation.
 
 ### Combining Connectors
 
@@ -183,7 +183,7 @@ The following measurements of GLM-5.2 on 950DT Products show the impact on cache
 | Hardware | One node with 8 950DT Products | Two nodes with 8 950DT Products per node |
 | Model | GLM-5.2-W4A8C8 | GLM-5.2-W8A8C8-mxfp8 |
 | Parallelism | TP8 + EP | TP8 + PP2 + EP, 38/40 layer split |
-| Common settings | chunked prefill, prefix caching, asynchronous scheduling, LI-C8, Model Runner V1, eager mode | Same as single node |
+| Common settings | chunked prefill, prefix caching, asynchronous scheduling, LI-C8, eager mode | Same as single node |
 | Scheduling and memory | `max_num_batched_tokens=32768`, `max_num_seqs=12`, `gpu_memory_utilization=0.90` | Same as single node |
 
 MTP and SFA-C8 were not enabled. All measurements below use a 32K scheduling token budget.

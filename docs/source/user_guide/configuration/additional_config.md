@@ -382,7 +382,7 @@ KV-cache layers across TP and PCP ranks within the same
 DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
 TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
 
-KVPP requires Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`), eager execution and
+KVPP requires eager execution and
 non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
 prefill KV before cache writes; layer broadcasts restore prior-forward cache
 contents before attention. The broadcast decision uses the global scheduled
