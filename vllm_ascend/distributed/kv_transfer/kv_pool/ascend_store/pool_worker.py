@@ -1628,12 +1628,11 @@ class KVPoolWorker:
                 save_start_block = max(save_start_block, hit_full_blocks)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
-            block_ids = (
-                request.block_ids_by_group_np[group_id]
+            num_allocated_blocks = (
+                len(request.block_ids_by_group_np[group_id])
                 if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
-                else request.block_ids_by_group[group_id]
+                else len(request.block_ids_by_group[group_id])
             )
-            num_allocated_blocks = len(block_ids)
             save_end_block = min(save_end_block, num_allocated_blocks)
             save_start_block = min(save_start_block, save_end_block)
             if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
