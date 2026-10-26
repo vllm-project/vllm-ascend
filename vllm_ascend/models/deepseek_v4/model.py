@@ -399,6 +399,8 @@ class DeepseekV4MoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
             hash_indices_table=self.gate.tid2eid,
+            # DSpark draft experts retain their native, fully resident weights.
+            routed_experts_args={"expert_offload_enabled": not is_draft_layer},
         )
 
     def forward(
