@@ -43,45 +43,49 @@ __simt_callee__ inline int32_t CacheRow(__gm__ const int32_t* table, int32_t b, 
 }
 
 // One thread computes one output channel. Softmax is stable even for large logits.
-template<int Threads>
+template<int Threads, int Ratio = 0, int Dim = 0, int Coff = 0>
 __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
     __gm__ const float* projection, __gm__ const float* state, __gm__ const float* ape,
     __gm__ const int32_t* table, __gm__ const int32_t* cu, __gm__ const int32_t* used,
     __gm__ const int32_t* start, __gm__ float* pooled,
     __gm__ const CompressorSerialParams* p)
 {
+    const int32_t ratio = Ratio ? Ratio : p->ratio;
+    const int32_t dim = Dim ? Dim : p->dim;
+    const int32_t coff = Coff ? Coff : p->coff;
     int32_t first = Simt::GetBlockIdx() * Threads + Simt::GetThreadIdx();
     int32_t step = Simt::GetBlockNum() * Threads;
-    for (int32_t idx = first; idx < p->outputRows * p->dim; idx += step) {
-        int32_t outRow = idx / p->dim, channel = idx % p->dim;
+    for (int32_t idx = first; idx < p->outputRows * dim; idx += step) {
+        int32_t outRow = idx / dim, channel = idx % dim;
         int32_t b = 0, local = outRow, st = 0, count = 0;
         for (; b < p->batch; ++b) {
             st = Start(start, b, p);
-            count = (st + Used(cu, used, b, p)) / p->ratio - st / p->ratio;
-            int32_t capacity = p->layout == 3 ? (p->sequence + p->ratio - 1) / p->ratio : count;
+            count = (st + Used(cu, used, b, p)) / ratio - st / ratio;
+            int32_t capacity = p->layout == 3 ? (p->sequence + ratio - 1) / ratio : count;
             if (local < capacity) break;
             local -= capacity;
         }
         if (b >= p->batch || local >= count) { pooled[idx] = 0; continue; }
-        int32_t groupEnd = (st / p->ratio + local + 1) * p->ratio;
+        int32_t groupEnd = (st / ratio + local + 1) * ratio;
         int32_t begin = Begin(cu, b, p);
         float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
-        for (int32_t q = 0; q < p->coff * p->ratio; ++q) {
-            int32_t pos = groupEnd - p->coff * p->ratio + q;
+        #pragma unroll
+        for (int32_t q = 0; q < coff * ratio; ++q) {
+            int32_t pos = groupEnd - coff * ratio + q;
             if (pos < 0) continue;
-            int32_t half = p->coff == 2 && q >= p->ratio ? 1 : 0;
-            int32_t col = half * p->dim + channel;
+            int32_t half = coff == 2 && q >= ratio ? 1 : 0;
+            int32_t col = half * dim + channel;
             float kv, score;
             if (pos >= st) {
                 int32_t row = begin + pos - st;
                 kv = projection[row * p->projectionStride + col];
                 score = projection[row * p->projectionStride + p->gateOffset + col]
-                        + ape[(pos % p->ratio) * p->coff * p->dim + col];
+                        + ape[(pos % ratio) * coff * dim + col];
             } else {
                 int32_t row = CacheRow(table, b, pos, p);
                 if (row < 0) continue;
                 kv = state[row + col];
-                score = state[row + p->coff * p->dim + col];
+                score = state[row + coff * dim + col];
             }
             float next = score > maximum ? score : maximum;
             float oldScale = expf(maximum - next);
@@ -94,46 +98,50 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
     }
 }
 
-template<int Threads>
+template<int Threads, int Ratio = 0, int Dim = 0, int Coff = 0>
 __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void PoolWarp(
     __gm__ const float* projection, __gm__ const float* state, __gm__ const float* ape,
     __gm__ const int32_t* table, __gm__ const int32_t* cu, __gm__ const int32_t* used,
     __gm__ const int32_t* start, __gm__ float* pooled,
     __gm__ const CompressorSerialParams* p)
 {
+    const int32_t ratio = Ratio ? Ratio : p->ratio;
+    const int32_t dim = Dim ? Dim : p->dim;
+    const int32_t coff = Coff ? Coff : p->coff;
     int32_t lane = Simt::GetThreadIdx() % 32;
     int32_t first = Simt::GetBlockIdx() * (Threads / 32) + Simt::GetThreadIdx() / 32;
     int32_t step = Simt::GetBlockNum() * (Threads / 32);
-    for (int32_t idx = first; idx < p->outputRows * p->dim; idx += step) {
-        int32_t outRow = idx / p->dim, channel = idx % p->dim;
+    for (int32_t idx = first; idx < p->outputRows * dim; idx += step) {
+        int32_t outRow = idx / dim, channel = idx % dim;
         int32_t b = 0, local = outRow, st = 0, count = 0;
         for (; b < p->batch; ++b) {
             st = Start(start, b, p);
-            count = (st + Used(cu, used, b, p)) / p->ratio - st / p->ratio;
-            int32_t capacity = p->layout == 3 ? (p->sequence + p->ratio - 1) / p->ratio : count;
+            count = (st + Used(cu, used, b, p)) / ratio - st / ratio;
+            int32_t capacity = p->layout == 3 ? (p->sequence + ratio - 1) / ratio : count;
             if (local < capacity) break;
             local -= capacity;
         }
         if (b >= p->batch || local >= count) { pooled[idx] = 0; continue; }
-        int32_t groupEnd = (st / p->ratio + local + 1) * p->ratio;
+        int32_t groupEnd = (st / ratio + local + 1) * ratio;
         int32_t begin = Begin(cu, b, p);
         float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
-        for (int32_t q = lane; q < p->coff * p->ratio; q += 32) {
-            int32_t pos = groupEnd - p->coff * p->ratio + q;
+        #pragma unroll
+        for (int32_t q = lane; q < coff * ratio; q += 32) {
+            int32_t pos = groupEnd - coff * ratio + q;
             if (pos < 0) continue;
-            int32_t half = p->coff == 2 && q >= p->ratio ? 1 : 0;
-            int32_t col = half * p->dim + channel;
+            int32_t half = coff == 2 && q >= ratio ? 1 : 0;
+            int32_t col = half * dim + channel;
             float kv, score;
             if (pos >= st) {
                 int32_t row = begin + pos - st;
                 kv = projection[row * p->projectionStride + col];
                 score = projection[row * p->projectionStride + p->gateOffset + col]
-                        + ape[(pos % p->ratio) * p->coff * p->dim + col];
+                        + ape[(pos % ratio) * coff * dim + col];
             } else {
                 int32_t row = CacheRow(table, b, pos, p);
                 if (row < 0) continue;
                 kv = state[row + col];
-                score = state[row + p->coff * p->dim + col];
+                score = state[row + coff * dim + col];
             }
             float next = score > maximum ? score : maximum;
             float oldScale = expf(maximum - next);
