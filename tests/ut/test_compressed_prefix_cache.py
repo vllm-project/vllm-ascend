@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
-    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -32,6 +31,14 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_stor
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.31.0 lane still ships it in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+else:
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 
 pytestmark = pytest.mark.cpu_test
 

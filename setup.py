@@ -496,7 +496,7 @@ setup(
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
-        "vllm_ascend.observability": ["config/*.yaml"],
+        "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),
@@ -512,7 +512,7 @@ setup(
             "ascend_model = vllm_ascend:register_model",
         ],
         "ms_service_metric.providers": [
-            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
+            "vllm-ascend = vllm_ascend.observability.ms_metrics:get_metric_provider",
         ],
     },
 )

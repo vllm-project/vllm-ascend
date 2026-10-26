@@ -54,30 +54,29 @@ on:
         required: false
         default: ''
         type: string
+      vllm_ref:
+        description: 'vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
         default: false
         type: boolean
-      build_type:
-        description: 'Build type: daily or release.'
-        required: false
-        default: 'release'
-        type: choice
-        options:
-          - release
-          - daily
-      base_image_tag:
-        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
-        required: false
-        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
+      profile_options_json:
+        description: 'JSON profiling options: enabled, start_after or start_after_requests, duration, with_stack, output, benchmark_names'
         type: string
-      bisect_good_commit:
-        description: 'explicit good commit for bisect (overrides good_table lookup)'
+        default: '{}'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
         default: '{}'
+        type: string
+      download_path:
+        description: 'File or directory in the test container to upload as a GitHub artifact'
+        required: false
+        default: ''
         type: string
 permissions:
   contents: read
@@ -145,6 +144,8 @@ jobs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
+      profile_options: ${{ steps.profile-options.outputs.value }}
+      profile_parse: ${{ steps.profile-options.outputs.parse }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_node: ${{ steps.set-matrix.outputs.multi_node }}
     steps:
@@ -176,6 +177,22 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Checkout profiling tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: profile-source
+          sparse-checkout: tools/profiling
+
+      - name: Normalize profiling options
+        id: profile-options
+        working-directory: profile-source
+        env:
+          PROFILE_OPTIONS_JSON: ${{ inputs.profile_options_json || '{}' }}
+        run: |
+          python3 -m tools.profiling.capture configure \
+            --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT"
+
       - name: Read A2 test matrix config
         id: set-matrix
         env:
@@ -197,15 +214,11 @@ jobs:
     with:
       target: a2
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '910b'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   multi-node-tests:
     name: multi-node
@@ -228,13 +241,16 @@ jobs:
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
       bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
@@ -252,6 +268,8 @@ jobs:
           )
         }}
     secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
@@ -277,9 +295,128 @@ jobs:
         run: |
           kubectl taint nodes ${{ vars.A2_TAINT_NODES }} dedicated- || true
 
+  wait-multi-node-pods-ready:
+    name: Wait multi-node pods launched
+    # A2-only gate: does NOT wait for multi-node-tests to finish. It polls the
+    # HK001 cluster until ALL enabled multi-node leader pods are Ready, then
+    # releases single-node / accuracy jobs while multi-node Stream logs keep
+    # running. Leaders are matched by this run's own config-stem pod-name prefix,
+    # so concurrent nightly/PR runs are not counted. No shared reusable workflow
+    # or jinja2 is modified by this job.
+    needs: [setup-vars, parse-trigger, build-image]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+        NAMESPACE: vllm-project
+    steps:
+      - name: Decode kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}" | base64 -d > "$KUBECONFIG"
+
+      - name: Count enabled multi-node cases and wait for leader pods ready
+        id: gate
+        env:
+          MATRIX_JSON: ${{ needs.setup-vars.outputs.multi_node }}
+          FILTER: ${{ needs.parse-trigger.outputs.filter }}
+        run: |
+          set -euo pipefail
+
+          MATRIX_JSON="${MATRIX_JSON:-[]}"
+          FILTER="${FILTER:-}"
+
+          # Pure shell, no JSON parser: pull each multi-node case's `name` and
+          # `config_file_path` in JSON order (the matrix emits them as adjacent
+          # keys per case). A leader pod is named vllm-<config-stem>-<rand>-0, so
+          # we derive the per-case stem from config_file_path and count only OUR
+          # enabled cases' leaders; other concurrent nightly/PR runs are excluded.
+          mapfile -t ALL_NAMES < <(printf '%s' "$MATRIX_JSON" \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+          mapfile -t ALL_CFGS < <(printf '%s' "$MATRIX_JSON" \
+            | grep -oE '"config_file_path"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | sed -E 's/.*"config_file_path"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+
+          # Build the enabled config stems from the active filter (all, or the
+          # comma-wrapped name list). EXPECTED is the number of leaders to wait for.
+          STEMS=()
+          for i in "${!ALL_NAMES[@]}"; do
+            name="${ALL_NAMES[$i]}"
+            if [ -z "$name" ]; then continue; fi
+            if [ "$FILTER" != "all" ]; then
+              case "$FILTER" in
+                *",${name},"*) ;;
+                *) continue ;;
+              esac
+            fi
+            cfg="${ALL_CFGS[$i]:-}"
+            if [ -z "$cfg" ]; then continue; fi
+            # Mirror _e2e_nightly_multi_node exactly: drop trailing .yaml, lower,
+            # ./_ -> -, cap 43 chars (no basename, so directory-bearing paths match LWS).
+            stem=$(printf '%s' "${cfg%.yaml}" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+            if [ -z "$stem" ]; then continue; fi
+            STEMS+=("$stem")
+          done
+          EXPECTED=${#STEMS[@]}
+
+          # No enabled multi-node case: release single-node immediately.
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "No enabled multi-node case; proceeding to single-node without waiting."
+            exit 0
+          fi
+
+          echo "Waiting for ${EXPECTED} leader pod stem(s): ${STEMS[*]}"
+
+          # Poll role=leader pods but count ONLY our enabled config stems, so a
+          # concurrent run's leader never inflates READY. Lenient by design: a
+          # failed/slow launch must not block the independent single-node jobs;
+          # worker readiness follows once the leader joins the LWS.
+          TIMEOUT=3600
+          INTERVAL=10
+          ELAPSED=0
+          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+            mapfile -t ROWS < <(kubectl get pods -n "$NAMESPACE" -l role=leader \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null || true)
+
+            READY=0
+            for stem in "${STEMS[@]}"; do
+              for row in "${ROWS[@]}"; do
+                if [ -z "$row" ]; then continue; fi
+                pname=$(printf '%s' "$row" | cut -f1)
+                pphase=$(printf '%s' "$row" | cut -f2)
+                pready=$(printf '%s' "$row" | cut -f3)
+                # Match the exact leader pod name vllm-<stem>-<6-hex-rand>-0, not a
+                # loose prefix, so stems in a parent/child relation cannot double-count.
+                if [[ "$pname" =~ ^vllm-${stem}-[0-9a-f]{6}-0$ ]]; then
+                  if [ "$pphase" = "Running" ] && printf '%s' "$pready" | grep -q 'true'; then
+                    READY=$((READY + 1))
+                    echo "  matched leader [$pname] ready for stem [$stem]"
+                    break
+                  fi
+                fi
+              done
+            done
+
+            echo "[$(date -u +%FT%TZ)] ready leaders=${READY}/${EXPECTED} (${ELAPSED}s)"
+            if [ "$READY" -ge "$EXPECTED" ]; then
+              echo "All ${EXPECTED} enabled multi-node leaders Ready; releasing single-node."
+              exit 0
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          # Lenient fallback: do not fail the whole pipeline if not every
+          # multi-node launch becomes Ready in time; single-node runs independently.
+          echo "::warning::Timed out after ${TIMEOUT}s waiting for ${EXPECTED} ready leader pods (${READY:-0} seen); releasing single-node anyway."
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -300,8 +437,11 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
       bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
@@ -319,10 +459,63 @@ jobs:
           )
         }}
     secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
+
+  parse-multi-node-profiles:
+    name: Parse multi-node profiles
+    needs: [setup-vars, parse-trigger, multi-node-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.multi-node-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
+
+  parse-single-node-profiles:
+    name: Parse single-node profiles
+    needs: [setup-vars, parse-trigger, single-node-tests]
+    if: >-
+      always() &&
+      needs.setup-vars.result == 'success' &&
+      needs.single-node-tests.result != 'skipped' &&
+      needs.setup-vars.outputs.profile_parse == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
+    uses: ./.github/workflows/_e2e_profile_parse.yaml
+    with:
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
+      ref: ${{ github.sha }}
+      should_run: >-
+        ${{ matrix.test_config.config_file_path != '' &&
+            (needs.parse-trigger.outputs.filter == 'all' ||
+             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))) }}
+    secrets:
+      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
+      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -364,7 +557,7 @@ jobs:
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -390,11 +583,13 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, multi-node-tests, remove-taints]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -420,7 +615,9 @@ jobs:
           contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
       request_id: ${{ inputs.request_id || '' }}
+      download_path: ${{ inputs.download_path }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
       upload: false
 
   clear-pre-logs:

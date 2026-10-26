@@ -46,6 +46,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
@@ -145,6 +146,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def supports_pcp(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
+        return not vllm_version_is("0.31.0")
+
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_INDEXER"
@@ -213,7 +220,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # non-replicated token across the CP group, DSA-CP all-gathers the
         # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
-        self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
 
@@ -365,7 +372,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k across the TP group (its padded slot mapping already covers the
         gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
-        if self._pcp_active:
+        if self.use_pcp:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
             num_replicated_tokens = get_pcp_num_replicated_tokens(
                 indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
@@ -523,7 +530,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     """
 
     reorder_batch_threshold = None
-    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -945,17 +951,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             # Speculative decoding prepares multiple step metadata objects
             # up front, so each step still needs independent RoPE storage.
             copy_rope=self.speculative_config is not None,
-            **kwargs,
-        )
-
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        **kwargs,
-    ) -> AscendSFAIndexerMetadata:
-        return self.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            pcp_context=common_attn_metadata.pcp_context,
+            pcp_cache_group_idx=common_attn_metadata.pcp_cache_group_idx,
             **kwargs,
         )
 

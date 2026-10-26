@@ -55,9 +55,7 @@ def initialize_kv_cache(
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
         # vLLM main lets each cache type report whether it is DCP-sharded;
-        # v0.30.0 has no such field and always treats caches as sharded.
-        if not vllm_version_is("0.30.0"):
-            dcp_sharded.append(spec.dcp_sharded)
+        dcp_sharded.append(spec.dcp_sharded)
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
@@ -105,12 +103,10 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
-        **({"attn_cg_support": attn_cg_support} if vllm_version_is("0.30.0") else {}),
     )
 
     block_tables_kwargs = {}
-    if not vllm_version_is("0.30.0"):
-        block_tables_kwargs["dcp_sharded"] = dcp_sharded
+    block_tables_kwargs["dcp_sharded"] = dcp_sharded
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,
@@ -154,16 +150,17 @@ def initialize_kv_cache(
             self.compilation_config.cudagraph_mode,
             piecewise_capture_available=piecewise_capture_available,
         )
+    # vLLM #60517 removed the `tensor_parallel_size` parameter on main.
     cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
         use_v2_model_runner=True,
-        tensor_parallel_size=self.parallel_config.tensor_parallel_size,
         kv_cache_config=self.kv_cache_config,
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,
         piecewise_capture_available=piecewise_capture_available,
+        **({"tensor_parallel_size": self.parallel_config.tensor_parallel_size} if vllm_version_is("0.31.0") else {}),
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,
@@ -217,8 +214,7 @@ def initialize_kv_cache(
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
-        # v0.30.0 has no aux_output_config and still uses the legacy capturer.
-        if not vllm_version_is("0.30.0") and self.vllm_config.aux_output_config.enabled:
+        if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = upstream.get_aux_output_connector(self.model, self.vllm_config, kv_cache_config)
 
 

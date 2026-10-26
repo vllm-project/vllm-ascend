@@ -26,6 +26,7 @@ from tests.e2e.common.multi_node.external_dp.runtime import (
     create_kv_pool_manager,
     format_http_status,
     master_rank_health_url,
+    profile_instance_for_rank,
     proxy_server_health_url,
     wait_master_rank_stopped,
     wait_ranks_ready,
@@ -36,6 +37,7 @@ from tests.e2e.common.multi_node.external_dp.utils import (
 )
 from tests.e2e.common.multi_node.utils import ProxyServer
 from tools.aisbench import run_aisbench_cases
+from tools.profiling.capture import ProfileSpec, ServeManifest, profile_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,7 +95,7 @@ def _heartbeat(
 
 
 def _format_benchmark_cases(config: ExternalDPConfig) -> str:
-    names = [str(case.get("case_name", "<unnamed>")) for case in config.benchmark_cases]
+    names = [str(case.get("benchmark_name", "<unnamed>")) for case in config.benchmark_cases]
     return ", ".join(names) if names else "<none>"
 
 
@@ -195,7 +197,7 @@ def _run_spec_decode_acceptance_ext(
     first_server_cmd: list[str],
     baseline: tuple[int, list[int]] | None = None,
 ) -> None:
-    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
 
     spec_config = _parse_json_flag_ext(first_server_cmd, "--speculative-config")
     num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
@@ -212,7 +214,7 @@ def _run_spec_decode_acceptance_ext(
         baseline = (0, [0] * num_speculative_tokens)
 
     _, all_rates = measure_acceptance_rate(metrics_server, num_speculative_tokens, baseline)
-    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
+    validate_acceptance_rates(all_rates, baseline_val, float(tolerance))
 
 
 def test_external_dp() -> None:
@@ -223,6 +225,11 @@ def test_external_dp() -> None:
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
     max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "5400"))
     is_master = current_node_index == 0
+    profile_spec = ProfileSpec.from_env()
+    if is_master and profile_spec.enabled:
+        ServeManifest(tuple(profile_instance_for_rank(rank) for rank in ranks)).write(
+            profile_root() / "serve_manifest.json"
+        )
 
     kv_pool_manager = create_kv_pool_manager(
         config=config,

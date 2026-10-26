@@ -11,8 +11,6 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class Ascend310PBlockTables(BlockTables):
     """CPU-owned MRV2 block tables for Ascend 310P."""
@@ -20,157 +18,82 @@ class Ascend310PBlockTables(BlockTables):
     # TODO: Refactor block-table operations to register 310P implementations
     # through Triton Dispatcher after vLLM RFC #45133 lands.
 
-    if vllm_version_is("0.30.0"):
+    def __init__(
+        self,
+        block_sizes: list[int],
+        max_num_reqs: int,
+        max_num_batched_tokens: int,
+        max_num_blocks_per_group: list[int],
+        device: torch.device,
+        kernel_block_sizes: list[int] | None = None,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
+    ) -> None:
+        if kernel_block_sizes is None:
+            kernel_block_sizes = block_sizes
+        if cp_size != 1:
+            raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
+        if len(max_num_blocks_per_group) != len(block_sizes):
+            raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
 
-        def __init__(
-            self,
-            block_sizes: list[int],
-            max_num_reqs: int,
-            max_num_batched_tokens: int,
-            max_num_blocks_per_group: list[int],
-            device: torch.device,
-            kernel_block_sizes: list[int] | None = None,
-            cp_size: int = 1,
-            cp_rank: int = 0,
-            cp_interleave: int = 1,
-            slot_mapping_enabled: list[bool] | None = None,
-        ) -> None:
-            if kernel_block_sizes is None:
-                kernel_block_sizes = block_sizes
-            if cp_size != 1:
-                raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
-            if len(max_num_blocks_per_group) != len(block_sizes):
-                raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
+        self.block_sizes = block_sizes
+        self.kernel_block_sizes = kernel_block_sizes
+        self.max_num_reqs = max_num_reqs
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.device = device
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
+        self.cp_interleave = cp_interleave
+        self.num_kv_cache_groups = len(block_sizes)
+        if slot_mapping_enabled is None:
+            slot_mapping_enabled = [True] * self.num_kv_cache_groups
+        if len(slot_mapping_enabled) != self.num_kv_cache_groups:
+            raise ValueError("slot_mapping_enabled must match the number of KV cache groups.")
+        self._slot_mapping_enabled = slot_mapping_enabled
+        # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
+        # expose it for upstream readers when the caller supplies it. 310P
+        # never passes it (it builds the tables directly), so this is a guard.
+        if dcp_sharded is not None:
+            if len(dcp_sharded) != self.num_kv_cache_groups:
+                raise ValueError("dcp_sharded must match the number of KV cache groups.")
+            self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
+        self.blocks_per_kv_block = [
+            block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
+        ]
 
-            self.block_sizes = block_sizes
-            self.kernel_block_sizes = kernel_block_sizes
-            self.max_num_reqs = max_num_reqs
-            self.max_num_batched_tokens = max_num_batched_tokens
-            self.device = device
-            self.cp_size = cp_size
-            self.cp_rank = cp_rank
-            self.cp_interleave = cp_interleave
-            self.num_kv_cache_groups = len(block_sizes)
-            if slot_mapping_enabled is None:
-                slot_mapping_enabled = [True] * self.num_kv_cache_groups
-            if len(slot_mapping_enabled) != self.num_kv_cache_groups:
-                raise ValueError("slot_mapping_enabled must match the number of KV cache groups.")
-            self._slot_mapping_enabled = slot_mapping_enabled
-            self.blocks_per_kv_block = [
-                block_size // kernel_block_size
-                for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
-            ]
-
-            table_shapes = [
-                (max_num_reqs, max_num_blocks * blocks_per_kv_block)
-                for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
-            ]
-            pin_memory = is_pin_memory_available()
-            self._block_tables_cpu_tensors = [
-                torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
-            ]
-            self._input_block_tables_cpu_tensors = [
-                torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
-            ]
-            self.block_tables_cpu = [tensor.numpy() for tensor in self._block_tables_cpu_tensors]
-            self.input_block_tables_cpu = [tensor.numpy() for tensor in self._input_block_tables_cpu_tensors]
-            self.input_block_tables = [torch.zeros(shape, dtype=torch.int32, device=device) for shape in table_shapes]
-            self.num_blocks_np = np.zeros((self.num_kv_cache_groups, max_num_reqs), dtype=np.int32)
-            self._slot_mappings_cpu_tensor = torch.full(
-                (self.num_kv_cache_groups, max_num_batched_tokens),
-                PAD_SLOT_ID,
-                dtype=torch.int32,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
-            self.slot_mappings_cpu = self._slot_mappings_cpu_tensor.numpy()
-            # Persistent device buffers are reused by eager execution and ACLGraph.
-            self.slot_mappings = torch.full(
-                self.slot_mappings_cpu.shape,
-                PAD_SLOT_ID,
-                dtype=torch.int32,
-                device=device,
-            )
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            block_sizes: list[int],
-            max_num_reqs: int,
-            max_num_batched_tokens: int,
-            max_num_blocks_per_group: list[int],
-            device: torch.device,
-            kernel_block_sizes: list[int] | None = None,
-            cp_size: int = 1,
-            cp_rank: int = 0,
-            cp_interleave: int = 1,
-            slot_mapping_enabled: list[bool] | None = None,
-            dcp_sharded: list[bool] | None = None,
-        ) -> None:
-            if kernel_block_sizes is None:
-                kernel_block_sizes = block_sizes
-            if cp_size != 1:
-                raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
-            if len(max_num_blocks_per_group) != len(block_sizes):
-                raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
-
-            self.block_sizes = block_sizes
-            self.kernel_block_sizes = kernel_block_sizes
-            self.max_num_reqs = max_num_reqs
-            self.max_num_batched_tokens = max_num_batched_tokens
-            self.device = device
-            self.cp_size = cp_size
-            self.cp_rank = cp_rank
-            self.cp_interleave = cp_interleave
-            self.num_kv_cache_groups = len(block_sizes)
-            if slot_mapping_enabled is None:
-                slot_mapping_enabled = [True] * self.num_kv_cache_groups
-            if len(slot_mapping_enabled) != self.num_kv_cache_groups:
-                raise ValueError("slot_mapping_enabled must match the number of KV cache groups.")
-            self._slot_mapping_enabled = slot_mapping_enabled
-            # vLLM main added a per-group ``dcp_sharded`` flag to BlockTables;
-            # expose it for upstream readers when the caller supplies it. 310P
-            # never passes it (it builds the tables directly), so this is a guard.
-            if dcp_sharded is not None:
-                if len(dcp_sharded) != self.num_kv_cache_groups:
-                    raise ValueError("dcp_sharded must match the number of KV cache groups.")
-                self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
-            self.blocks_per_kv_block = [
-                block_size // kernel_block_size
-                for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
-            ]
-
-            table_shapes = [
-                (max_num_reqs, max_num_blocks * blocks_per_kv_block)
-                for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
-            ]
-            pin_memory = is_pin_memory_available()
-            self._block_tables_cpu_tensors = [
-                torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
-            ]
-            self._input_block_tables_cpu_tensors = [
-                torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
-            ]
-            self.block_tables_cpu = [tensor.numpy() for tensor in self._block_tables_cpu_tensors]
-            self.input_block_tables_cpu = [tensor.numpy() for tensor in self._input_block_tables_cpu_tensors]
-            self.input_block_tables = [torch.zeros(shape, dtype=torch.int32, device=device) for shape in table_shapes]
-            self.num_blocks_np = np.zeros((self.num_kv_cache_groups, max_num_reqs), dtype=np.int32)
-            self._slot_mappings_cpu_tensor = torch.full(
-                (self.num_kv_cache_groups, max_num_batched_tokens),
-                PAD_SLOT_ID,
-                dtype=torch.int32,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
-            self.slot_mappings_cpu = self._slot_mappings_cpu_tensor.numpy()
-            # Persistent device buffers are reused by eager execution and ACLGraph.
-            self.slot_mappings = torch.full(
-                self.slot_mappings_cpu.shape,
-                PAD_SLOT_ID,
-                dtype=torch.int32,
-                device=device,
-            )
+        table_shapes = [
+            (max_num_reqs, max_num_blocks * blocks_per_kv_block)
+            for max_num_blocks, blocks_per_kv_block in zip(max_num_blocks_per_group, self.blocks_per_kv_block)
+        ]
+        pin_memory = is_pin_memory_available()
+        self._block_tables_cpu_tensors = [
+            torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
+        ]
+        self._input_block_tables_cpu_tensors = [
+            torch.zeros(shape, dtype=torch.int32, device="cpu", pin_memory=pin_memory) for shape in table_shapes
+        ]
+        self.block_tables_cpu = [tensor.numpy() for tensor in self._block_tables_cpu_tensors]
+        self.input_block_tables_cpu = [tensor.numpy() for tensor in self._input_block_tables_cpu_tensors]
+        self.input_block_tables = [torch.zeros(shape, dtype=torch.int32, device=device) for shape in table_shapes]
+        self.num_blocks_np = np.zeros((self.num_kv_cache_groups, max_num_reqs), dtype=np.int32)
+        self._slot_mappings_cpu_tensor = torch.full(
+            (self.num_kv_cache_groups, max_num_batched_tokens),
+            PAD_SLOT_ID,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        self.slot_mappings_cpu = self._slot_mappings_cpu_tensor.numpy()
+        # Persistent device buffers are reused by eager execution and ACLGraph.
+        self.slot_mappings = torch.full(
+            self.slot_mappings_cpu.shape,
+            PAD_SLOT_ID,
+            dtype=torch.int32,
+            device=device,
+        )
 
     def init_block_table_layout_tensors(self) -> None:
         """310P does not use Triton pointer tables."""
@@ -261,7 +184,7 @@ class Ascend310PBlockTables(BlockTables):
             for batch_idx, req_idx in enumerate(idx_mapping_np):
                 # vLLM #56734: dummy draft decode runs use idx_mapping == -1.
                 # Leave the pre-filled PAD for rows that own no blocks.
-                if not vllm_version_is("0.30.0") and req_idx < 0:
+                if req_idx < 0:
                     continue
                 start = int(query_start_loc_np[batch_idx])
                 end = int(query_start_loc_np[batch_idx + 1])

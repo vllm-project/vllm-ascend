@@ -192,7 +192,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
 
 
 def test_offline_flash_source_does_not_require_a_transformers_model():
-    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    case = utils.glm53flash_ipc_case()
     with (
         patch.object(utils.AutoConfig, "from_pretrained", side_effect=AssertionError("unexpected config download")),
         patch.object(utils.AutoModelForCausalLM, "from_config", side_effect=AssertionError("unexpected meta model")),
@@ -205,7 +205,7 @@ def test_offline_flash_source_does_not_require_a_transformers_model():
 
 
 def test_offline_flash_checkpoint_and_transfer_use_identical_tensors(tmp_path, monkeypatch):
-    case = next(case for case in MODEL_CASES if case.id == "glm-5.3-flash-kda-sfa-mhc")
+    case = utils.glm53flash_ipc_case()
     source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
     # Keep this a serialization-contract check without allocating a 4.64 GiB
     # payload on CPU. Retain actual shapes for recurrent and mHC parameters.
@@ -227,3 +227,33 @@ def test_offline_flash_checkpoint_and_transfer_use_identical_tensors(tmp_path, m
     for name in selected:
         assert torch.equal(checkpoint[name], first_round[name])
         assert torch.equal(first_round[name], second_round[name])
+
+
+def test_flash_is_added_only_to_ipc_unpacked():
+    shared = utils.pytest_model_cases()
+    ipc = utils.pytest_ipc_model_cases()
+    flash_id = utils.glm53flash_ipc_case().id
+    assert all(parameter.values[0].id != flash_id for parameter in shared)
+    flash = [parameter for parameter in ipc if parameter.values[0].id == flash_id]
+    assert len(flash) == 1
+    assert flash[0].values[1] is False
+    assert flash[0].id == f"unpacked-{flash_id}"
+    assert not flash[0].marks
+    # Existing test IDs, packed flags, and downloader markers remain identical.
+    assert len(ipc) == len(shared) * 2 + 1
+    for packed in (False, True):
+        for parameter in shared:
+            test_id = f"{'packed' if packed else 'unpacked'}-{parameter.id}"
+            retained = next(case for case in ipc if case.id == test_id)
+            assert retained.values == (parameter.values[0], packed)
+            assert retained.marks == parameter.marks
+
+
+def test_flash_ipc_reference_and_live_lane_share_conditions():
+    case = utils.glm53flash_ipc_case()
+    lane = _flag_map(live_update_serve_args(case, backend="npu_ipc", port=PORT, gpu_memory_utilization=0.45))
+    reference = _flag_map(reference_serve_args(case, port=PORT, gpu_memory_utilization=0.45))
+    assert lane.pop("--load-format") == "dummy"
+    assert lane.pop("--weight-transfer-config") == '{"backend": "npu_ipc"}'
+    assert reference.pop("--tokenizer") == reference.pop("--served-model-name") == case.model
+    assert lane == reference

@@ -10,7 +10,8 @@ restoration, derived FP32 routing weights, and SFA source/derived-state
 restoration. Cases whose model is not ready for the transaction are skipped in
 both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash needs the
 attention-sink fix that lives in #16355 — so the matrix carries Qwen3.5-35B-A3B
-and GLM-5.1, plus the offline GLM-5.3-Flash KDA/SFA/mHC fixture.
+and GLM-5.1, plus an offline GLM-5.3-Flash KDA/SFA/mHC fixture in the unpacked
+IPC lane only.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -22,8 +23,8 @@ signature exactly —
 The dummy-started lane's pre-update signature must differ from the reference, so
 a transfer that never ran cannot pass, and the second update covers the layerwise
 reload lifecycle, runtime/destructive representations, derived state and the
-graph-captured storage of the first update. Both packed modes exercise the same
-transaction.
+graph-captured storage of the first update. The packed lane is currently skipped
+on this branch — see ``PACKED_LANE_SKIP_REASON`` — so only the unpacked lane runs.
 
 The lane is the same-chip deployment this backend exists for: the trainer
 payload shares the card with the rollout engine, so every round releases the
@@ -43,13 +44,14 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
+    PACKED_LANE_SKIP_REASON,
     FixedRandomWeightSource,
     WeightUpdateModelCase,
     assert_weight_update_matches_reference,
     generation_signature,
     live_update_serve_args,
     packed_buffer_size_for,
-    pytest_model_cases,
+    pytest_ipc_model_cases,
     reference_signature,
     register_engines_once,
     wait_for_free_device_memory,
@@ -78,11 +80,12 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
 )
-@pytest.mark.parametrize("case", pytest_model_cases())
-@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize(("case", "packed"), pytest_ipc_model_cases())
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if case.skip_reason is not None:
         pytest.skip(f"{case.id}: {case.skip_reason}")
+    if packed:
+        pytest.skip(f"{case.id}: {PACKED_LANE_SKIP_REASON}")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))

@@ -5,11 +5,12 @@ num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
 env_common: &env_common
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   VLLM_USE_MODELSCOPE: "true"
   OMP_NUM_THREADS: "1"
-  HCCL_BUFFSIZE: "400"
+  HCCL_BUFFSIZE: "768"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
@@ -27,7 +28,8 @@ deployment:
       --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12980
-      --tensor-parallel-size 4
+      --tensor-parallel-size 1
+      --prefill-context-parallel-size 4
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
@@ -45,7 +47,7 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
@@ -61,7 +63,8 @@ deployment:
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12980
-      --tensor-parallel-size 4
+      --tensor-parallel-size 1
+      --prefill-context-parallel-size 4
       --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
       --seed 1024
       --tool-call-parser glm47
@@ -79,7 +82,7 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   acc_aime2025:

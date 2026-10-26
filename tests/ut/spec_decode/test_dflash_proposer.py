@@ -25,9 +25,9 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.dflash2_proposer import AscendDflash2Proposer
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Proposer
+from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
 
 _MAX_NUM_TOKENS = 256
 _NUM_SPECULATIVE_TOKENS = 3
@@ -69,7 +69,7 @@ def test_query_buffers_cover_execution_shape(proposer_cls, max_num_seqs, max_cap
     with (
         patch.object(AscendEagleProposer, "__init__", init_base),
         patch(
-            "vllm_ascend.spec_decode.dflash_proposer.get_ascend_config",
+            "vllm_ascend.worker.v1.spec_decode.dflash_proposer.get_ascend_config",
             return_value=SimpleNamespace(dynamic_spec_config=SimpleNamespace(method=None)),
         ),
     ):
@@ -106,9 +106,11 @@ class TestDummySlotMappingCleanup:
             assert torch.all(proposer._slot_mapping_buffer == -1)
             assert torch.all(proposer._context_slot_mapping_buffers == -1)
 
-        monkeypatch.setattr("vllm_ascend.spec_decode.dflash_proposer.set_ascend_forward_context", forward_context)
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dflash_proposer.get_forward_context",
+            "vllm_ascend.worker.v1.spec_decode.dflash_proposer.set_ascend_forward_context", forward_context
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.worker.v1.spec_decode.dflash_proposer.get_forward_context",
             lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE),
         )
         proposer.max_query_tokens = 8

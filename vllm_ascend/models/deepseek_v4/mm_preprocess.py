@@ -46,7 +46,16 @@ from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
+# main; the v0.31.0 lane still ships it under
+# `vllm.transformers_utils.configs.deepseek_v4`.
+if vllm_version_is("0.31.0"):
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
+else:
+    from transformers import DeepseekV4Config
 
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
