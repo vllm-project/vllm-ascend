@@ -1,0 +1,118 @@
+# GLM-5.3-Flash single-node MRV2 accuracy and performance coverage.
+# CI uses shared checkpoints and dynamic service ports.
+# The existing single-node harness manages the local Memcache service/config.
+# GSM8K-lite baseline 90 / threshold 10 is an initial gate, pending MRV2 calibration.
+test_cases:
+- name: GLM-5.3-Flash-W8A8-A3-MRV2
+  model: /root/.cache/modelscope/hub/models/Eco-Tech/GLM-5.3-Flash-w8a8
+  envs:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+    PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    HCCL_BUFFSIZE: '1000'
+    HCCL_EXEC_TIMEOUT: '3600'
+    HCCL_CONNECT_TIMEOUT: '3600'
+    ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    SERVER_PORT: DEFAULT_PORT
+    PYTHONUNBUFFERED: '1'
+    PYTHONHASHSEED: '0'
+    ACL_OP_INIT_MODE: '1'
+    ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+  server_cmd:
+  - --host
+  - 0.0.0.0
+  - --port
+  - $SERVER_PORT
+  - --max-model-len
+  - '1048576'
+  - --data-parallel-size
+  - '8'
+  - --tensor-parallel-size
+  - '2'
+  - --enable-expert-parallel
+  - --seed
+  - '1024'
+  - --quantization
+  - ascend
+  - --safetensors-load-strategy
+  - prefetch
+  - --max-num-seqs
+  - '32'
+  - --max-num-batched-tokens
+  - '8192'
+  - --trust-remote-code
+  - --gpu-memory-utilization
+  - '0.92'
+  - --limit-mm-per-prompt
+  - '{"image": 1, "video": 0}'
+  - --kv-cache-dtype
+  - auto
+  - --attention-config
+  - '{"indexer_kv_dtype": "bf16"}'
+  - --compilation-config
+  - '{"cudagraph_mode": "PIECEWISE"}'
+  - --speculative-config
+  - '{"num_speculative_tokens": 5, "method": "mtp", "enforce_eager": true}'
+  - --enable-prefix-caching
+  - --async-scheduling
+  - --kv-transfer-config
+  - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port":
+    "0", "use_layerwise": false}}'
+  # PIECEWISE disables npugraph_ex/static/super kernels in the platform config.
+  - --additional-config
+  - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "enable_flashcomm1": true, "enable_cpu_binding":
+    true, "weight_nz_mode": 1, "ascend_compilation_config": {"enable_static_kernel": false, "enable_super_kernel": false}}'
+  prompts:
+  - Reply with one short sentence confirming the service is healthy.
+  test_content:
+  - chat_completion
+  api_keyword_args:
+    max_tokens: 16
+    temperature: 0.0
+  benchmarks:
+    # Shared-prefix workload reused from the GLM-5.3-Flash PD nightly.
+    perf_warmup:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 8
+      max_out_len: 1024
+      batch_size: 1
+      request_rate: 0
+      baseline: 0
+      threshold: 0.97
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 128
+      max_out_len: 1024
+      batch_size: 32
+      request_rate: 0
+      # TODO: Replace 0 with the measured A3 single-node MRV2 throughput baseline.
+      # Until calibrated, this records throughput without a regression floor.
+      baseline: 0
+      threshold: 0.97
+    accuracy_placeholder_gsm8k:
+      case_type: accuracy
+      dataset_path: vllm-ascend/gsm8k-lite
+      request_conf: vllm_api_general_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+      max_out_len: 4096
+      batch_size: 4
+      temperature: 0
+      baseline: 90
+      threshold: 10
+  kv_pool:
+    type: memcache
+    meta_service_port: 5000
+    config_store_port: 6000
+    config:
+      meta:
+        ock.mmc.log_level: info
+      local:
+        ock.mmc.log_level: info
+        ock.mmc.local_service.world_size: 256
+        ock.mmc.local_service.protocol: device_sdma
+        ock.mmc.local_service.dram.size: 10GB
