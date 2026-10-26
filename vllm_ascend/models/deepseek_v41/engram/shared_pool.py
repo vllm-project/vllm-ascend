@@ -17,9 +17,9 @@ from pathlib import Path
 
 import torch
 
-from .shared_host import MappedHostBuffer
+from .shared_host import MappedHostBuffer, MemfabricRuntime
 
-SCHEMA = 1
+SCHEMA = 2
 DTYPES = {"int8": torch.int8, "float32": torch.float32}
 MAX_CONTROL_BYTES = 1 << 20
 
@@ -73,11 +73,18 @@ def owner_alive(root):
 
 
 class SharedPoolOwner:
-    def __init__(self, root, identity, *, device, library_path=None, host="127.0.0.1", port=0):
+    def __init__(self, root, identity, *, device, host="127.0.0.1", port=0, store_url=None, world_size=65):
+        if not 2 <= world_size <= 1024:
+            raise ValueError("MemFabric world size must include the owner and consumers")
         self.root = Path(root)
         self.root.mkdir(mode=0o700)
         _private(self.root)
-        self.device, self.library_path = device, library_path
+        self.device = device
+        self.runtime = None
+        if store_url is None:
+            with socket.socket() as reservation:
+                reservation.bind((host, 0))
+                store_url = f"tcp://{host}:{reservation.getsockname()[1]}"
         self.buffers = {}
         self.closed = False
         self._condition = threading.Condition()
@@ -91,6 +98,8 @@ class SharedPoolOwner:
             identity=identity,
             state="loading",
             tensors={},
+            backend="memfabric_bm",
+            memfabric=dict(store_url=store_url, world_size=world_size),
             endpoint=[host, self._listener.getsockname()[1]],
             token=secrets.token_hex(32),
         )
@@ -162,12 +171,17 @@ class SharedPoolOwner:
         name = str(dtype).removeprefix("torch.")
         if name not in DTYPES:
             raise ValueError("Only INT8 codes and FP32 scales are supported")
-        descriptor = hashlib.sha256(key.encode()).hexdigest()
-        buffer = MappedHostBuffer(
-            self.root / descriptor, rows, width, dtype, owner=True, device=self.device, library_path=self.library_path
-        )
+        if self.runtime is None:
+            settings = self.manifest["memfabric"]
+            self.runtime = MemfabricRuntime.acquire(
+                self.root, settings["store_url"], settings["world_size"], self.device, owner=True
+            )
+        object_id = len(self.buffers)
+        buffer = MappedHostBuffer(self.runtime, object_id, rows, width, dtype, owner=True)
         self.buffers[key] = buffer
-        self.manifest["tensors"][key] = dict(rows=rows, width=width, dtype=name, descriptor=descriptor)
+        self.manifest["tensors"][key] = dict(
+            rows=rows, width=width, dtype=name, object_id=object_id, owner_rank=self.runtime.rank
+        )
         return buffer
 
     def ready(self):
@@ -191,6 +205,9 @@ class SharedPoolOwner:
                 self._condition.wait(remaining)
             for buffer in reversed(list(self.buffers.values())):
                 buffer.close()
+            if self.runtime is not None:
+                self.runtime.close()
+                self.runtime = None
             self.manifest["state"] = "closed"
             self._publish_manifest()
             self.closed = True
@@ -199,13 +216,14 @@ class SharedPoolOwner:
 
 
 class SharedPoolClient:
-    def __init__(self, root, identity, *, device, library_path=None):
+    def __init__(self, root, identity, *, device):
         self.root = Path(root)
         _private(self.root)
         discovery = json.loads((self.root / "manifest.json").read_text())
         self.buffers, self.views = {}, []
         self.closed = False
-        self.device, self.library_path = device, library_path
+        self.device = device
+        self.runtime = None
         self._conn = socket.create_connection(tuple(discovery["endpoint"]), timeout=30)
         self._wire = self._conn.makefile("rwb", buffering=0)
         try:
@@ -214,7 +232,11 @@ class SharedPoolClient:
             if "error" in response:
                 raise ValueError(response["error"])
             self.manifest = response["manifest"]
-            if self.manifest.get("schema") != SCHEMA or self.manifest.get("identity") != identity:
+            if (
+                self.manifest.get("schema") != SCHEMA
+                or self.manifest.get("identity") != identity
+                or self.manifest.get("backend") != "memfabric_bm"
+            ):
                 _send(self._wire, dict(op="release"))
                 _receive(self._wire)
                 raise ValueError("Incompatible shared Engram manifest")
@@ -229,18 +251,22 @@ class SharedPoolClient:
         metadata = self.manifest["tensors"][key]
         if (metadata["rows"], metadata["width"], metadata["dtype"]) != (rows, width, str(dtype).removeprefix("torch.")):
             raise ValueError("Shared Engram tensor layout mismatch")
-        descriptor = hashlib.sha256(key.encode()).hexdigest()
-        if metadata["descriptor"] != descriptor:
-            raise ValueError("Invalid Engram descriptor name")
+        if not isinstance(metadata["object_id"], int) or not 0 <= metadata["object_id"] < 64:
+            raise ValueError("Invalid MemFabric Engram object id")
+        if self.runtime is None:
+            settings = self.manifest["memfabric"]
+            self.runtime = MemfabricRuntime.acquire(
+                self.root, settings["store_url"], settings["world_size"], self.device, owner=False
+            )
         if key not in self.buffers:
             self.buffers[key] = MappedHostBuffer(
-                self.root / descriptor,
+                self.runtime,
+                metadata["object_id"],
                 rows,
                 width,
                 dtype,
                 owner=False,
-                device=self.device,
-                library_path=self.library_path,
+                owner_rank=metadata["owner_rank"],
             )
         view = self.buffers[key].view(start, end)
         self.views.append(view)
@@ -253,6 +279,9 @@ class SharedPoolClient:
             view.close()
         for buffer in reversed(list(self.buffers.values())):
             buffer.close()
+        if self.runtime is not None:
+            self.runtime.close()
+            self.runtime = None
         _send(self._wire, dict(op="release"))
         if _receive(self._wire) != {"released": True}:
             raise RuntimeError("Shared Engram release was not acknowledged")

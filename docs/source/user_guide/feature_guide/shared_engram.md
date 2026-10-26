@@ -2,7 +2,7 @@
 
 This opt-in path lets independent DeepSeek V4.1 instances map the same
 read-only INT8 Engram tables on supported A3 systems. A separate owner loads
-the tables into host DRAM. Consumers import the physical allocations and use
+the tables into MemFabric BM host DRAM. Consumers join the BM group and use
 the existing NPU gather/dequantization kernel; only selected BF16 results are
 materialized in HBM. This does not remove model collectives or KV transfer.
 
@@ -13,8 +13,13 @@ HBM and host-offload paths retain their normal behavior.
 
 - A3 devices with CANN Fabric-handle support and working cross-node host-memory
   imports. Same-supernode placement alone is not sufficient proof of support.
-- The optional `libengram_host_vmm.so` build target, enabled when CANN exposes
-  the required APIs on an `ascend910_93` build.
+- MemFabric BM with `create2`, dynamic membership and `gva_to_va` support.
+  No custom VMM library or additional CMake target is required.
+- A correctly packaged MemFabric wheel containing the upstream duplicate-library
+  loading fix (memfabric_hybrid commit `cafd1251`). Older wheels can load two
+  copies of native libraries and abort during process teardown. Check clean
+  startup/shutdown before using a new image; the version string alone does not
+  establish that the packaging fix is included.
 - An immutable, identical checkpoint on every instance. Supported tables use
   INT8 codes of width256 and group32 scales; the owner converts scales to FP32.
 - A private shared-filesystem directory accessible under the same UID by the
@@ -24,7 +29,7 @@ HBM and host-offload paths retain their normal behavior.
 
 The identity check hashes checkpoint configuration and index metadata, not all
 weight payloads. Pin an immutable model revision independently. Generation
-files contain capabilities: do not publish them, include them in bug reports,
+files contain control credentials: do not publish them, include them in bug reports,
 or expose the directory to other users. Control traffic is authenticated but
 not encrypted; it carries no table rows.
 
@@ -42,7 +47,15 @@ python -m vllm_ascend.shared_engram \
 ```
 
 Wait for `POOL_READY`. The owner must remain alive independently of all model
-servers. Add these options to each server's otherwise unchanged launch:
+servers. The BM store uses an available port on `--listen-host` by default;
+use `--store-url tcp://OWNER_ADDRESS:PORT` when an explicit port is needed.
+`--max-consumers 64` reserves room for the owner plus 64 worker processes,
+enough for three DP4/TP4 prefills and one DP8/TP2 decoder. Two Engram layers in
+one worker share a process-wide BM session and use separate BM objects.
+Another subsystem in that process must not initialize the BM singleton with a
+different store; MemFabric TransferEngine has a separate API.
+
+Add these options to each server's otherwise unchanged launch:
 
 ```bash
 --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -51,7 +64,12 @@ servers. Add these options to each server's otherwise unchanged launch:
 
 Merge this key into any existing additional configuration; do not replace
 other model settings. Consumers validate identity and layout, import their TP
-row views, and skip reloading shared table parameters. Different TP layouts
+row views, and skip reloading shared table parameters. Consumers contribute zero
+local DRAM/HBM table capacity. MemFabric handles allocation, membership and
+mapping; a one-time `gva_to_va(..., LOCAL_DEVICE)` resolution supplies the NPU
+pointer table. Runtime lookup is still a direct load plus dequantization into
+selected BF16 HBM rows, with no BM copy/staging call or per-request GVA query.
+Different TP layouts
 can use the same physical backing. Request scheduling, token IDs, and KV state
 remain independent. Dummy loading and sleep mode are not supported.
 
@@ -74,13 +92,47 @@ To fall back, restart consumers without `engram_shared_host_dir`. Budget for
 the original per-instance table replicas before doing so. Preserve the owner
 until all shared consumers are gone.
 
-## Validation scope
+## Current MemFabric validation
+
+CPU protocol and storage tests use fake BM allocation and real control sockets.
+They cover publication bounds, zero-consumer allocation requests, metadata-only
+views, live-view release rejection and retry after a failed leave. Real A3
+component tests exercised a persistent owner, two layers/four BM objects,
+two per-layer clients sharing one BM session, native gather/dequantization,
+graph replay and continued reads after one layer's client detached.
+The tested 1.2.0 wheel required a process-local single-load packaging overlay;
+native binaries were unchanged. That experimental packaging adjustment is not
+part of this feature. Four independent consumer processes across two pods on
+one host passed exact lookup, graph and detach/reattach checks. Each consumer's
+BM contribution was zero DRAM and zero HBM; this excludes explicitly allocated
+HBM reference tables in the benchmark. The four small owner objects used 4GiB
+after allocation rounding. Cross-node and full-model 3P1D validation of the
+MemFabric backend remain pending, separately from historical VMM results below.
+
+The component benchmark can be reproduced with the following two commands in
+separate terminals on a supported, correctly packaged A3 environment. Choose a
+fresh private shared root, wait for `POOL_READY`, then start consumers:
+
+```bash
+python benchmarks/benchmark_shared_engram.py owner \
+    --root /shared/private/engram-bm-smoke --host OWNER_ADDRESS --device 0
+python benchmarks/benchmark_shared_engram.py consumer \
+    --root /shared/private/engram-bm-smoke --device 1 --tag consumer-1
+```
+
+Repeat the consumer command with distinct tags to exercise fresh processes.
+Stop all consumers before creating `/shared/private/engram-bm-smoke/stop` to
+shut down this benchmark owner. This uses small warm tables; its HBM/GVA lookup
+timings are not full-model throughput or DRAM bandwidth-ceiling measurements.
+The real model owner remains `python -m vllm_ascend.shared_engram` above.
+
+## Historical VMM validation
 
 CPU protocol tests are in `tests/ut/models/test_engram_shared_pool.py`. They
 exercise real control sockets with a fake allocator; they do not establish
 hardware correctness. A3 validation has exercised remote native lookup,
 independent detach/reattach, actual checkpoint rows, and embedding graph replay.
-Full-model P/D was tested on four A3 nodes in one physical supernode, with
+The previous raw-VMM backend's full-model P/D was tested on four A3 nodes in one physical supernode, with
 CANN9.2 and torch-npu2.10. The pinned deployment used three DP4/TP4 prefills
 and one DP8/TP2 decoder, native INT8 lookup and the same KV connector for both
 placements. Both runs completed1440/1440 requests without errors. Physical

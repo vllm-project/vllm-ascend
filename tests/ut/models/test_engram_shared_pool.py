@@ -31,6 +31,13 @@ def pool_module(monkeypatch):
             self.closed = True
 
     monkeypatch.setattr(module, "MappedHostBuffer", Buffer)
+
+    class Runtime:
+        @staticmethod
+        def acquire(*args, **kwargs):
+            return types.SimpleNamespace(rank=0, close=lambda: None)
+
+    monkeypatch.setattr(module, "MemfabricRuntime", Runtime)
     yield module
     for name in list(sys.modules):
         if name.startswith("_shared_pool_ut."):
@@ -108,3 +115,23 @@ def test_private_directory_required(pool_module, owner):
     with pytest.raises(ValueError, match="mode0700"):
         pool_module.SharedPoolClient(owner.root, "model-a", device="npu:0")
     owner.root.chmod(0o700)
+
+
+def test_old_schema_rejected_and_lease_released(pool_module, owner):
+    owner.manifest["schema"] = 1
+    with pytest.raises(ValueError, match="manifest"):
+        pool_module.SharedPoolClient(owner.root, "model-a", device="npu:0")
+    owner.close(timeout=1)
+    assert owner.closed
+
+
+def test_invalid_bm_object_rejected_before_mapping(pool_module, owner):
+    owner.manifest["tensors"]["codes"]["object_id"] = -1
+    client = pool_module.SharedPoolClient(owner.root, "model-a", device="npu:0")
+    try:
+        with pytest.raises(ValueError, match="object id"):
+            client.view("codes", 0, 16, rows=32, width=256, dtype=torch.int8)
+        assert not client.buffers
+        assert client.runtime is None
+    finally:
+        client.close()

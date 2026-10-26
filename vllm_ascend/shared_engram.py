@@ -57,7 +57,8 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--pool-dir", required=True)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--library-path")
+    parser.add_argument("--store-url", help="MemFabric BM store URL; default: an available port on listen-host")
+    parser.add_argument("--max-consumers", type=int, default=64, help="Maximum simultaneous consumer workers")
     parser.add_argument("--listen-host", default="127.0.0.1", help="Reachable owner address for cross-node consumers")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
@@ -69,9 +70,10 @@ def main():
         args.pool_dir,
         checkpoint_identity(args.model),
         device=f"npu:{args.device}",
-        library_path=args.library_path,
         host=args.listen_host,
         port=args.port,
+        store_url=args.store_url,
+        world_size=args.max_consumers + 1,
     )
     try:
         load_tables(owner, args.model, stop)
