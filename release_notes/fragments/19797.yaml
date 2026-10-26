@@ -1,0 +1,4 @@
+pr: 19797
+entries:
+  - category: feature
+    text: Added bundled GBSA attention and metadata operators with FP8 precision compatibility and causal sparse block ordering fixes.
