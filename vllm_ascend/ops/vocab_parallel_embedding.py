@@ -18,6 +18,7 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from math import lcm
 
 import torch
 import torch.distributed as dist
@@ -136,10 +137,24 @@ def _resolve_vocab_parallel_plan(
 
     if is_lm_head and lmhead_tp_enable():
         group = get_lmhead_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # Compose with standard TP when both are active: shard the vocabulary
+        # over the combined TP x lmhead-TP grid (TP outer, fine-grained inner),
+        # matching the PCP_X_TP linearization. The all-to-all reconstructs the
+        # fine-grained inner shards first (each TP rank ends up with its own
+        # [tp_rank * V/T, (tp_rank + 1) * V/T) span); the TP all-gather in
+        # AscendLogitsProcessor._get_logits_lmheadtp then appends the outer
+        # spans in TP-rank order, so the group-order concatenation equals the
+        # full vocabulary order.
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
+            shard_rank,
+            shard_world_size,
         )
 
     if is_token_embedding and embedding_tp_enable():
@@ -203,7 +218,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
 
         self.num_embeddings = num_embeddings
-        self.padding_size = padding_size
+        # The padded vocabulary must divide evenly across the full shard count
+        # (finegrained x standard TP when composed); raising the padding
+        # granularity to its lcm keeps exotic products (e.g. 96) loadable
+        # instead of tripping the divide() assert below.
+        self.padding_size = lcm(padding_size, self.tp_size)
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size, self.padding_size)
@@ -517,8 +536,9 @@ def gather_lm_head_outputs(output: torch.Tensor, parallel_mode: VocabParallelMod
     """
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         group = get_lmhead_tp_group()
-        exchanged = lmhead_all_to_all(output.flatten(1), group)
-        return exchanged.reshape(
+        # No early return: with standard TP composed in, the trailing
+        # TP all-gather joins the vocabulary spans this exchange misses.
+        output = lmhead_all_to_all(output.flatten(1), group).reshape(
             output.shape[0] // group.world_size, output.shape[1] * group.world_size, *output.shape[2:]
         )
     # Use the same vocabulary/candidate axis for [rows, vocab] logits and
