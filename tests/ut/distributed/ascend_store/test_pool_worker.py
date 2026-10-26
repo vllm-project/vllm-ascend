@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     SharedBlockData,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import LAYERWISE_READ_LEASE_TTL_MS
 
 
 class TestKVPoolWorkerHelpers(unittest.TestCase):
@@ -1857,9 +1858,16 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
         )
 
-        worker._prepare_load_gvas([request])
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.record_failed_load"
+        ) as record_failed_load:
+            worker._prepare_load_gvas([request])
 
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0])
+        self.assertIsNone(request.load_spec)
+        self.assertIsNone(request.load_block_gvas_by_group_np)
+        self.assertIsNone(request.load_block_gvas_np)
+        self.assertFalse(request.can_save)
+        record_failed_load.assert_called_once_with((request.req_id,))
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
@@ -1958,7 +1966,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker._alloc_gvas_for_save([request])
 
-        worker.m_store.batch_alloc.assert_called_once_with([key], [64])
+        worker.m_store.batch_alloc.assert_called_once_with([key], [64], LAYERWISE_READ_LEASE_TTL_MS)
         self.assertEqual(worker._allocated_gvas[key], 202)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
 
