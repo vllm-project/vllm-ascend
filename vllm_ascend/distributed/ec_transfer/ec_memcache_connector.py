@@ -11,7 +11,7 @@ Integrate with vLLM through the ec_connector framework without modifying vLLM:
             "similarity_cache": {
                 "enabled": true,
                 "matcher": "phash_ssim",
-                "max_hamming": 5,
+                "max_hamming": 3,
                 "ssim_threshold": 0.99,
                 "resized_image_recv_buffer_size": 16384
             }

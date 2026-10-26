@@ -29,18 +29,25 @@ _SSIM_K1 = 0.01
 _SSIM_K2 = 0.03
 _SSIM_WIN = 7       # 高斯窗边长; 实际取 min(win, gh, gw), 不足 3 放弃
 _SSIM_SIGMA = 1.5
+_KERNEL_CACHE_SIZE = 64
 
 # 归一化 pixel_values 的单通道理论值域 1/std (CLIP std ≈ 0.26~0.28)
 DEFAULT_DATA_RANGE = 3.7
 
 
-@lru_cache(maxsize=8)
-def _gaussian_kernel(win: int) -> torch.Tensor:
-    """win x win 二维高斯核 (float32, 按边长缓存)。"""
-    coords = torch.arange(win, dtype=torch.float32) - (win - 1) / 2
+@lru_cache(maxsize=_KERNEL_CACHE_SIZE)
+def _gaussian_kernel(win: int, device: torch.device | None = None) -> torch.Tensor:
+    """win x win 二维高斯核 (float32, 按边长和设备缓存)。"""
+    if device is None:
+        device = torch.device("cpu")
+    coords = torch.arange(win, dtype=torch.float32, device="cpu") - (win - 1) / 2
     g = torch.exp(-(coords**2) / (2 * _SSIM_SIGMA**2))
     g = g / g.sum()
-    return (g.unsqueeze(1) @ g.unsqueeze(0)).reshape(1, 1, win, win)
+    kernel = (g.unsqueeze(1) @ g.unsqueeze(0)).reshape(1, 1, win, win).to(device=device)
+    if device.type == "npu":
+        # Ensure other streams can safely reuse the cached constant.
+        torch.npu.current_stream(device).synchronize()
+    return kernel
 
 
 def build_patch_gray_plane(
@@ -63,11 +70,14 @@ def build_patch_gray_plane(
         return None
     if resized.numel() == 0 or resized.shape[0] != t * gh * gw:
         return None
-    x = resized.reshape(t, gh // merge_size, gw // merge_size,
-                  merge_size, merge_size, -1)
+    x = (
+        resized.detach()
+        .to(dtype=torch.float32)
+        .reshape(t, gh // merge_size, gw // merge_size, merge_size, merge_size, -1)
+    )
     x = x.permute(0, 1, 3, 2, 4, 5).reshape(t, gh, gw, -1)
-    gray = x.mean(dim=-1)     # (t, gh, gw) patch 均值 → 灰度
-    img = gray.mean(dim=0)    # 视频多帧按帧均值 → (gh, gw)
+    gray = x.mean(dim=-1)  # (t, gh, gw) patch 均值 → 灰度
+    img = gray.mean(dim=0)  # 视频多帧按帧均值 → (gh, gw)
     return img.unsqueeze(0).unsqueeze(0)
 
 
@@ -82,7 +92,7 @@ def ssim_score(
     形状不一致 (grid 不同, 逐窗口比较无意义) 或平面边长不足 3 时
     返回 None。窗口卷积取 valid 区域 (边缘裁剪, 与 skimage 默认一致)。
     """
-    if a.shape != b.shape:
+    if a.shape != b.shape or a.device != b.device:
         return None
     h, w = a.shape[-2], a.shape[-1]
     win = min(win, h, w)
@@ -91,7 +101,9 @@ def ssim_score(
 
     c1 = (_SSIM_K1 * data_range) ** 2
     c2 = (_SSIM_K2 * data_range) ** 2
-    kernel = _gaussian_kernel(win)
+    a = a.detach().to(dtype=torch.float32)
+    b = b.detach().to(dtype=torch.float32)
+    kernel = _gaussian_kernel(win, a.device)
 
     mu_a = F.conv2d(a, kernel)
     mu_b = F.conv2d(b, kernel)
@@ -100,6 +112,5 @@ def ssim_score(
     sigma_b = F.conv2d(b * b, kernel) - mu_b_sq
     sigma_ab = F.conv2d(a * b, kernel) - mu_ab
 
-    ssim_map = ((2 * mu_ab + c1) * (2 * sigma_ab + c2)) / (
-        (mu_a_sq + mu_b_sq + c1) * (sigma_a + sigma_b + c2))
+    ssim_map = ((2 * mu_ab + c1) * (2 * sigma_ab + c2)) / ((mu_a_sq + mu_b_sq + c1) * (sigma_a + sigma_b + c2))
     return float(ssim_map.mean().item())

@@ -119,7 +119,7 @@ def test_similarity_cache_config_accepts_nested_settings() -> None:
     vllm_config.ec_transfer_config.get_from_extra_config.return_value = {
         "enabled": True,
         "matcher": "phash_ssim",
-        "max_hamming": 5,
+        "max_hamming": 3,
         "ssim_threshold": 0.99,
         "resized_image_recv_buffer_size": 16384,
     }
@@ -128,7 +128,7 @@ def test_similarity_cache_config_accepts_nested_settings() -> None:
 
     assert config.enabled is True
     assert config.matcher == "phash_ssim"
-    assert config.max_hamming == 5
+    assert config.max_hamming == 3
     assert config.ssim_threshold == 0.99
     assert config.resized_image_recv_buffer_size == 16384
 
@@ -139,10 +139,7 @@ def test_similarity_cache_config_uses_default_resized_recv_buffer_size() -> None
 
     config = SimilarityCacheConfig.from_vllm_config(vllm_config)
 
-    assert (
-        config.resized_image_recv_buffer_size
-        == DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE
-    )
+    assert config.resized_image_recv_buffer_size == DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE
 
 
 @pytest.mark.parametrize(
@@ -152,6 +149,11 @@ def test_similarity_cache_config_uses_default_resized_recv_buffer_size() -> None
         ({"matcher": "phash"}, "matcher must be one of"),
         ({"matcher": "ssim"}, "matcher must be one of"),
         ({"matcher": "unknown"}, "matcher must be one of"),
+        ({"max_hamming": -1}, "max_hamming must be between"),
+        ({"max_hamming": 4}, "max_hamming must be between"),
+        ({"max_hamming": 5}, "max_hamming must be between"),
+        ({"max_hamming": 6}, "max_hamming must be between"),
+        ({"max_hamming": 7}, "max_hamming must be between"),
         ({"max_hamming": 8}, "max_hamming must be between"),
         ({"ssim_threshold": 1.01}, "ssim_threshold must be between"),
         (
@@ -159,19 +161,11 @@ def test_similarity_cache_config_uses_default_resized_recv_buffer_size() -> None
             "resized_image_recv_buffer_size must be an integer",
         ),
         (
-            {
-                "resized_image_recv_buffer_size": (
-                    MIN_RESIZED_IMAGE_RECV_BUFFER_SIZE - 1
-                )
-            },
+            {"resized_image_recv_buffer_size": (MIN_RESIZED_IMAGE_RECV_BUFFER_SIZE - 1)},
             "resized_image_recv_buffer_size must be between",
         ),
         (
-            {
-                "resized_image_recv_buffer_size": (
-                    MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE + 1
-                )
-            },
+            {"resized_image_recv_buffer_size": (MAX_RESIZED_IMAGE_RECV_BUFFER_SIZE + 1)},
             "resized_image_recv_buffer_size must be between",
         ),
     ],
@@ -225,9 +219,7 @@ def _make_scheduler_connector() -> ECMemcacheConnector:
 def test_update_state_after_alloc_uses_cached_ssim_match() -> None:
     connector = _make_scheduler_connector()
     connector._cache_matcher.get_cached_similarity_match.return_value = "candidate"
-    request = MagicMock(
-        mm_features=[MagicMock(identifier="query", data="query-data")]
-    )
+    request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
 
     connector.update_state_after_alloc(request, 0)
 
@@ -241,15 +233,15 @@ def test_update_state_after_alloc_uses_cached_ssim_match() -> None:
     ("image_phash", "resized_mm_hashes", "match_result", "expected_reason"),
     [
         (None, None, None, "phash_unavailable"),
-        (123, [], None, "no_hamming_candidate"),
-        (123, ["resized_candidate"], (None, True), "resized_tensor_backend_failure"),
-        (123, ["resized_candidate"], (None, False), "ssim_threshold_not_met"),
+        (123, None, None, "no_hamming_candidate"),
+        (123, ["resized_candidate"], RuntimeError("backend failed"), "similarity_match_exception"),
+        (123, ["resized_candidate"], None, "ssim_threshold_not_met"),
     ],
 )
 def test_update_state_after_alloc_records_similarity_miss(
     image_phash: int | None,
     resized_mm_hashes: list[str] | None,
-    match_result: tuple[str | None, bool] | None,
+    match_result: str | Exception | None,
     expected_reason: str,
 ) -> None:
     connector = _make_scheduler_connector()
@@ -257,11 +249,11 @@ def test_update_state_after_alloc_records_similarity_miss(
     matcher.get_cached_similarity_match.return_value = None
     matcher.get_cached_phash.return_value = image_phash
     matcher.find_resized_mm_hashes_by_hamming.return_value = resized_mm_hashes
-    if match_result is not None:
-        matcher.find_and_cache_similarity_match.return_value = match_result
-    request = MagicMock(
-        mm_features=[MagicMock(identifier="query", data="query-data")]
-    )
+    if isinstance(match_result, Exception):
+        matcher.find_and_cache_matched_ssim.side_effect = match_result
+    else:
+        matcher.find_and_cache_matched_ssim.return_value = match_result
+    request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
 
     with patch.object(connector, "_record_similarity_miss", wraps=connector._record_similarity_miss) as record:
         connector.update_state_after_alloc(request, 0)
@@ -285,19 +277,15 @@ def test_update_state_after_alloc_verifies_best_ssim_embedding_exists(
     matcher.get_cached_similarity_match.return_value = None
     matcher.get_cached_phash.return_value = 123
     matcher.find_resized_mm_hashes_by_hamming.return_value = ["resized_candidate"]
-    matcher.find_and_cache_similarity_match.return_value = ("candidate", False)
+    matcher.find_and_cache_matched_ssim.return_value = "candidate"
     connector._backend.exists.return_value = exists_result
-    request = MagicMock(
-        mm_features=[MagicMock(identifier="query", data="query-data")]
-    )
+    request = MagicMock(mm_features=[MagicMock(identifier="query", data="query-data")])
 
     connector.update_state_after_alloc(request, 0)
 
     connector._backend.exists.assert_called_once_with(["candidate"])
     assert connector._mm_hashes_need_loads == expected_loads
-    assert connector._mm_hash_to_store_key == (
-        {"query": "candidate"} if expected_loads else {}
-    )
+    assert connector._mm_hash_to_store_key == ({"query": "candidate"} if expected_loads else {})
     assert connector._mm_hashes_need_saves == expected_saves
 
 
@@ -327,7 +315,7 @@ def test_scheduler_selects_data_client_before_constructing_similarity_matcher() 
         {
             "enabled": True,
             "matcher": "phash_ssim",
-            "max_hamming": 5,
+            "max_hamming": 3,
             "ssim_threshold": 0.99,
         }
         if key == "similarity_cache"
@@ -636,3 +624,17 @@ def test_shutdown_waits_unregisters_and_releases_receive_buffer() -> None:
 
     connector.shutdown()
     connector._backend.unregister_buffer.assert_called_once_with([recv_buffer_ptr], [recv_buffer_nbytes])
+
+
+
+def test_similarity_cache_defaults_to_three_bit_hamming_distance():
+    vllm_config = MagicMock()
+    vllm_config.ec_transfer_config.get_from_extra_config.return_value = {}
+    assert SimilarityCacheConfig().max_hamming == 3
+    assert SimilarityCacheConfig.from_vllm_config(vllm_config).max_hamming == 3
+
+
+@pytest.mark.parametrize("max_hamming", [-1, 4, 5, 6, 7, 8, True, 1.5])
+def test_similarity_cache_constructor_rejects_invalid_hamming_distance(max_hamming):
+    with pytest.raises(ValueError, match="max_hamming"):
+        SimilarityCacheConfig(max_hamming=max_hamming)
