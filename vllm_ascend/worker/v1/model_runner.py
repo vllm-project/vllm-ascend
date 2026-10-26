@@ -1129,8 +1129,8 @@ class NPUModelRunner(GPUModelRunner):
                 # R172 FIX: bind_slots sets _r166_alloc/_r164_slotmap on the
                 # INT2 SUBCLASS (type(self) at bind); reading them off the
                 # BASE class returned None -> releases were a silent no-op
-                # (B32 churn exhausted cap with zero frees, rid-122 determin-
-                # istic). Resolve base-then-subclass like the migrator does.
+                # (B32 churn exhausted cap with zero frees, rid-122 was
+                # deterministic). Resolve base-then-subclass like the migrator does.
                 _sub167 = getattr(
                     __import__("vllm_ascend.attention.attention_int2",
                                fromlist=["AscendINT2AttentionBackendImpl"]),
