@@ -30,6 +30,10 @@ from vllm.logger import logger
 from vllm.models.qwen4_exp.amd import (
     indexer_qsa as upstream_indexer,
 )
+
+# Upstream model and QSA import each other; initialize the model first when
+# this submodule is imported directly, independently of lazy package exports.
+from vllm.models.qwen4_exp.amd import model as _upstream_model  # noqa: F401
 from vllm.models.qwen4_exp.amd import qsa as upstream_qsa
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import (

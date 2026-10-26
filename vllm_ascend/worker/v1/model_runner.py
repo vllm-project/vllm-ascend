@@ -159,16 +159,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.six_region_kv_cache_layout import (
-    GDN,
-    HIDDEN,
-    PLE,
-    QSA_COMPRESSED,
-    QSA_MAIN,
-    QSA_RAW,
-    build_six_region_kv_cache_layout,
-    make_slab_view,
-)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
@@ -191,12 +181,23 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    GDN,
+    HIDDEN,
+    PLE,
+    QSA_COMPRESSED,
+    QSA_MAIN,
+    QSA_RAW,
+    build_qwen4_kv_cache_layout,
+    make_slab_view,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -331,6 +332,7 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+graph_logger = init_logger_ascend("vllm_ascend.graph_execution")
 
 @dataclass
 class GraphCaptureContext:
@@ -3712,6 +3714,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
+        local_cudagraph_mode = cudagraph_mode
+        synced_cudagraph_mode = None
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -3738,6 +3742,23 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+        if graph_logger.isEnabledFor(logging.DEBUG):
+            # Use existing CPU scheduling arrays; diagnostics must not add NPU syncs.
+            prefill_reqs = int(np.count_nonzero(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                < self.input_batch.num_prompt_tokens[:num_reqs]
+            ))
+            graph_logger.debug(
+                "graph_dispatch local=%s dp_synced=%s final=%s requests=%d "
+                "tokens=%d padded=%d prefill_requests=%d uniform_decode=%s "
+                "scheduled_tokens=%s expected_decode_query_len=%d "
+                "force_eager=%s forced_uniform=%s disable_full=%s batch=%s",
+                local_cudagraph_mode, synced_cudagraph_mode, cudagraph_mode,
+                num_reqs, num_tokens, batch_descriptor.num_tokens, prefill_reqs,
+                uniform_decode, num_scheduled_tokens_np[:num_reqs].tolist(),
+                self.uniform_decode_query_len, force_eager, force_uniform_decode,
+                use_cascade_attn or has_encoder_output, batch_descriptor,
+            )
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -5529,7 +5550,7 @@ class NPUModelRunner(GPUModelRunner):
         six_region_layout = (
             None
             if use_legacy_shared_by_layout
-            else build_six_region_kv_cache_layout(
+            else build_qwen4_kv_cache_layout(
                 kv_cache_config.kv_cache_groups,
                 kv_cache_config.num_blocks,
             )
@@ -5564,7 +5585,13 @@ class NPUModelRunner(GPUModelRunner):
                 alignment,
             )
             for owner in six_region_layout.owners:
-                if owner.role != HIDDEN:
+                if owner.role == PLE:
+                    assert isinstance(owner.spec, MambaSpec)
+                    kv_cache_raw_tensors[owner.layer_name] = self._allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * owner.spec.state_content_size_bytes,
+                        alignment,
+                    )
+                elif owner.role != HIDDEN:
                     kv_cache_raw_tensors[owner.layer_name] = backing
 
         if uses_page_strided_shared_backing:
@@ -6152,11 +6179,22 @@ class NPUModelRunner(GPUModelRunner):
                             storage_offset=slot_offset + region.offset,
                         )
                         continue
-                    if owner.role in (GDN, PLE):
+                    if owner.role == PLE:
+                        assert isinstance(current_kv_cache_spec, MambaSpec)
+                        # Indexed PLE updates must see dense blocks. Sharing r2's
+                        # larger page stride makes torch-npu materialize the pool.
+                        kv_caches[layer_name] = [make_slab_view(
+                            raw_slab,
+                            dtype=current_kv_cache_spec.dtypes[0],
+                            num_blocks=kv_cache_config.num_blocks,
+                            item_shape=tuple(current_kv_cache_spec.shapes[0]),
+                            storage_offset=0,
+                        )]
+                        continue
+                    if owner.role == GDN:
                         assert isinstance(current_kv_cache_spec, MambaSpec)
                         region_names = {
                             GDN: ("r1", "r2"),
-                            PLE: ("r2",),
                         }[owner.role]
                         if len(region_names) != len(
                             current_kv_cache_spec.shapes
