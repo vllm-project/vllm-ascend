@@ -1,8 +1,10 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.model_executor.models import ModelRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -19,7 +21,7 @@ from vllm_ascend.core.six_region_kv_cache_layout import (
     HIDDEN,
     PLE,
     build_six_region_kv_cache_layout,
-    make_contiguous_slab_view,
+    make_slab_view,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_max_memory_usage_bytes_from_groups,
@@ -28,6 +30,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _merge_qsa_composite_groups,
     _prepare_qsa_composite_groups,
 )
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.v1 import model_runner as model_runner_v1
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
@@ -39,7 +42,7 @@ def _groups() -> list[KVCacheGroupSpec]:
         "model.mtp.layers.48.self_attn",
     ]
     main = FullAttentionSpec(
-        block_size=256,
+        block_size=128,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
@@ -53,25 +56,25 @@ def _groups() -> list[KVCacheGroupSpec]:
         dtype=torch.bfloat16,
     )
     compressed = MLAAttentionSpec(
-        block_size=256,
+        block_size=128,
         num_kv_heads=1,
         head_size=32,
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
     gdn = MambaSpec(
-        block_size=256,
+        block_size=128,
         shapes=((64, 4), (128, 128)),
         dtypes=(torch.bfloat16, torch.bfloat16),
     )
     ple = MambaSpec(
-        block_size=256,
+        block_size=128,
         shapes=((128, 5),),
         dtypes=(torch.bfloat16,),
         tp_replicated=True,
     )
     hidden = HiddenStateCacheSpec(
-        block_size=256,
+        block_size=128,
         num_kv_heads=1,
         head_size=64,
         dtype=torch.bfloat16,
@@ -105,7 +108,7 @@ def _groups() -> list[KVCacheGroupSpec]:
 
 def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     main = FullAttentionSpec(
-        block_size=256,
+        block_size=128,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
@@ -119,21 +122,21 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         dtype=torch.bfloat16,
     )
     compressed = MLAAttentionSpec(
-        block_size=256,
+        block_size=128,
         num_kv_heads=1,
         head_size=32,
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
     gdn = MambaSpec(
-        block_size=256,
+        block_size=128,
         shapes=((64, 4), (128, 128)),
         dtypes=(torch.bfloat16, torch.bfloat16),
         mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
     ple = MambaSpec(
-        block_size=256,
+        block_size=128,
         shapes=((128, 5),),
         dtypes=(torch.bfloat16,),
         mamba_cache_mode="align",
@@ -162,12 +165,10 @@ def test_six_region_offsets_are_contiguous_non_overlapping_slabs() -> None:
     assert [(region.name, region.offset, region.page_size_bytes, region.size) for region in layout.regions] == [
         ("r1", 0, 512, 1536),
         ("r2", 1536, 32768, 98304),
-        ("r3", 99840, 32768, 98304),
-        ("r4", 198144, 512, 1536),
-        ("r5", 199680, 4096, 12288),
-        ("r6", 211968, 1280, 3840),
+        ("r4", 99840, 512, 1536),
+        ("r5", 101376, 2048, 6144),
     ]
-    assert layout.slot_backing_size == 215808
+    assert layout.slot_backing_size == 107520
     for left, right in zip(layout.regions, layout.regions[1:]):
         assert right.offset >= left.end
         assert right.offset % layout.alignment == 0
@@ -197,54 +198,60 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
     backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
 
     def view(region_name: str, shape: tuple[int, ...]) -> torch.Tensor:
-        return make_contiguous_slab_view(
+        return make_slab_view(
             backing,
             dtype=torch.bfloat16,
             num_blocks=num_blocks,
             item_shape=shape,
             storage_offset=layout.region(region_name).offset,
+            block_stride=layout.region(region_name).page_size_bytes,
         )
 
     views = {
-        "k": view("r2", (256, 1, 64)),
-        "v": view("r3", (256, 1, 64)),
         "raw": view("r4", (8, 1, 32)),
-        "compressed": view("r5", (64, 1, 32)),
+        "compressed": view("r5", (32, 1, 32)),
         "gdn_conv": view("r1", (64, 4)),
         "gdn_ssm": view("r2", (128, 128)),
-        "ple": view("r6", (128, 5)),
+        "ple": view("r2", (128, 5)),
     }
     region_for_view = {
-        "k": "r2",
-        "v": "r3",
         "raw": "r4",
         "compressed": "r5",
         "gdn_conv": "r1",
         "gdn_ssm": "r2",
-        "ple": "r6",
+        "ple": "r2",
     }
     storage_ptr = backing.untyped_storage().data_ptr()
     for name, slab in views.items():
         region = layout.region(region_for_view[name])
-        storage_span = (
-            sum(
-                (size - 1) * stride
-                for size, stride in zip(
-                    slab.shape,
-                    slab.stride(),
-                    strict=True,
-                )
-            )
-            + 1
-        ) * slab.element_size()
         assert slab.untyped_storage().data_ptr() == storage_ptr
-        assert slab.is_contiguous()
-        assert slab.stride() == torch.empty_like(slab).stride()
+        assert slab[0].is_contiguous()
+        assert slab.is_contiguous() == (name != "ple")
         assert slab.storage_offset() * slab.element_size() == region.offset
         assert slab.stride(0) * slab.element_size() == region.page_size_bytes
-        assert storage_span == slab.numel() * slab.element_size()
-        assert storage_span == region.size
-        assert region.offset + storage_span <= region.end
+        assert slab[0].numel() * slab.element_size() <= region.page_size_bytes
+
+    packed = [
+        make_slab_view(
+            backing,
+            dtype=torch.bfloat16,
+            num_blocks=num_blocks,
+            item_shape=(128, 1, 64),
+            storage_offset=layout.region("r2").offset + offset,
+            block_stride=layout.region("r2").page_size_bytes,
+        )
+        for offset in (0, 16384)
+    ]
+    keys, values = packed
+    assert not keys.is_contiguous() and not values.is_contiguous()
+    assert keys.stride(0) * keys.element_size() == 32768
+    keys[1].fill_(7)
+    values[1].fill_(11)
+    ssm = views["gdn_ssm"]
+    assert torch.all(ssm[1].flatten()[:8192] == 7)
+    assert torch.all(ssm[1].flatten()[8192:] == 11)
+    assert torch.count_nonzero(ssm[[0, 2]]) == 0
+    ssm.zero_()
 
     views["gdn_ssm"][:, 0, 0] = torch.tensor(
         [1, 2, 3],
@@ -288,11 +295,11 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
     expected_backing_size = layout.slot_count * layout.slot_backing_size
     assert all(tensor.size == expected_backing_size for tensor in role_tensors)
     assert [tensor.offset for tensor in role_tensors] == [
-        layout.region(name).offset for name in ("r2", "r4", "r5", "r1", "r6")
+        layout.region(name).offset for name in ("r2", "r4", "r5", "r1", "r2")
     ]
     assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
     assert hidden_tensor.layers == ["model.cache_only_layers.0"]
-    assert hidden_tensor.size == 98304
+    assert hidden_tensor.size == 49152
 
 
 @pytest.mark.parametrize("kv_transfer_config", [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")])
@@ -332,18 +339,7 @@ def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_
     runner._uses_page_strided_shared_backing.assert_not_called()
 
 
-def test_runner_materializes_contiguous_six_region_views() -> None:
-    config = _get_qwen4_exp_six_region_kv_cache_config(
-        SimpleNamespace(
-            cache_config=SimpleNamespace(
-                num_gpu_blocks_override=3,
-                prefix_cache_retention_interval=None,
-            )
-        ),
-        _groups(),
-        10**9,
-    )
-    assert config is not None
+def _cpu_runner(config):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.ascend_config = SimpleNamespace(
@@ -371,6 +367,23 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
         for group in config.kv_cache_groups
     ]
 
+    return runner
+
+
+def test_runner_materializes_packed_kv_and_contiguous_ssm_views() -> None:
+    config = _get_qwen4_exp_six_region_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        _groups(),
+        10**9,
+    )
+    assert config is not None
+    runner = _cpu_runner(config)
+
     raw = runner._allocate_kv_cache_tensors(config)
     caches = runner._reshape_kv_cache_tensors(config, raw)
     layout = runner._six_region_kv_cache_layout
@@ -385,7 +398,7 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
     expected_regions = {
         "model.layers.0.linear_attn": ("r1", "r2"),
         "model.layers.1.linear_attn": ("r1", "r2"),
-        "model.ple": ("r6",),
+        "model.ple": ("r2",),
     }
     for layer_name, region_names in expected_regions.items():
         owner = layout.owner(layer_name)
@@ -398,20 +411,33 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
             strict=True,
         ):
             region = layout.region(region_name)
-            assert state.is_contiguous()
+            assert state[0].is_contiguous()
+            assert state.is_contiguous() == (layer_name != "model.ple")
             assert state.storage_offset() * state.element_size() == (
                 owner.slot * layout.slot_backing_size + region.offset
             )
-            assert state.stride() == torch.empty_like(state).stride()
+            assert state.stride(0) * state.element_size() == region.page_size_bytes
             assert state.untyped_storage().data_ptr() == (backing.untyped_storage().data_ptr())
-            assert state.numel() * state.element_size() == region.size
+            assert state[0].numel() * state.element_size() <= region.page_size_bytes
+
+    k, v = caches["model.layers.11.self_attn.attn"]
+    ssm = caches["model.layers.0.linear_attn"][1]
+    assert k.shape == v.shape == (3, 128, 1, 64)
+    assert k.stride() == v.stride() == (16384, 64, 64, 1)
+    assert v.data_ptr() - k.data_ptr() == 16384
+    assert k.data_ptr() == ssm.data_ptr()
+    k[2].fill_(5)
+    v[2].fill_(9)
+    torch.testing.assert_close(ssm[2].flatten()[:8192], torch.full((8192,), 5, dtype=ssm.dtype))
+    torch.testing.assert_close(ssm[2].flatten()[8192:], torch.full((8192,), 9, dtype=ssm.dtype))
+    assert torch.count_nonzero(ssm[:2]) == 0
 
     raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
     assert raw_qsa.shape == (3, 1, 8, 32)
     assert raw_qsa.is_contiguous()
 
     compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
-    assert compressed.shape == (3, 1, 64, 32)
+    assert compressed.shape == (3, 1, 32, 32)
     assert compressed.is_contiguous()
 
 
@@ -500,18 +526,12 @@ def test_six_region_admission_matches_shared_planner_allocation() -> None:
         num_blocks=required_blocks,
     )
     assert layout is not None
-    assert layout.slot_count == 36
+    assert layout.slot_count == 13
     assert layout.slot_count * layout.slot_backing_size == required_bytes
 
 
 def test_mamba_state_groups_merge_shares_one_block_table() -> None:
-    """36 per-layer GDN groups must merge into one group sharing a block table.
-
-    Regression for the on-machine 910B2 finding: with per-layer GDN groups the
-    admission formula charges each layer's state blocks at the full 36-slot
-    pool-block price, inflating the minimum KV memory by tens of times and
-    preventing TP4 startup on 64GB cards.
-    """
+    """36 GDN layers use three block tables over 13 shared slots."""
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
     assert owners is not None
@@ -551,24 +571,163 @@ def test_mamba_state_groups_merge_shares_one_block_table() -> None:
     blocks_before = required_blocks(groups)
     bytes_before = _ascend_max_memory_usage_bytes_from_groups(vllm_config, groups)
 
-    merged = _merge_mamba_state_groups(groups)
+    merged = _merge_mamba_state_groups(groups, 13)
 
     gdn_merged = [g for g in merged if is_gdn_group(g)]
-    assert len(gdn_merged) == 1
-    assert len(gdn_merged[0].layer_names) == 36
+    assert [len(group.layer_names) for group in gdn_merged] == [13, 13, 10]
     # PLE (single-shape MambaSpec) keeps its own group.
     ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
     assert len(ple_groups) == 1
-    assert len(merged) == len(groups) - 35
+    assert len(merged) == len(groups) - 33
 
     blocks_after = required_blocks(merged)
-    assert blocks_before - blocks_after == 35 * gdn_blocks_each
+    assert blocks_before - blocks_after == 33 * gdn_blocks_each
 
     probe = build_six_region_kv_cache_layout(merged, num_blocks=1)
     assert probe is not None
-    assert probe.slot_count == 36
+    assert probe.slot_count == 13
     pool_block_bytes = probe.slot_count * probe.slot_backing_size
 
     bytes_after = _ascend_max_memory_usage_bytes_from_groups(vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
-    assert bytes_before - bytes_after == 35 * gdn_blocks_each * pool_block_bytes
+    assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
+
+    # Every group reuses the same 13-slot backing, but its block table owns
+    # distinct live IDs. Verify both the alias and the non-overlapping writes.
+    layout = build_six_region_kv_cache_layout(merged, num_blocks=3)
+    assert layout is not None
+    backing = torch.zeros(layout.slot_count * layout.slot_backing_size, dtype=torch.int8)
+    views = []
+    for group in gdn_merged:
+        slots = [layout.owner(name).slot for name in group.layer_names]
+        assert slots == list(range(len(group.layer_names)))
+        owner = layout.owner(group.layer_names[0])
+        region = layout.region("r2")
+        views.append(
+            make_slab_view(
+                backing,
+                storage_offset=owner.slot * layout.slot_backing_size + region.offset,
+                num_blocks=3,
+                item_shape=owner.spec.shapes[1],
+                dtype=owner.spec.dtypes[1],
+            )
+        )
+    assert len({view.data_ptr() for view in views}) == 1
+    for block_id, view in enumerate(views):
+        view[block_id].fill_(block_id + 1)
+    for view in views:
+        for block_id in range(3):
+            torch.testing.assert_close(view[block_id], torch.full_like(view[block_id], block_id + 1))
+    config = _get_qwen4_exp_six_region_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        merged,
+        10**9,
+    )
+    assert config is not None
+    gdn_names = {name for group in gdn_merged for name in group.layer_names}
+    descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
+    assert [len(tensor.layers) for tensor in descriptors] == [13, 13, 10]
+    for tensor in descriptors:
+        assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
+
+    runner = _cpu_runner(config)
+    raw = runner._allocate_kv_cache_tensors(config)
+    caches = runner._reshape_kv_cache_tensors(config, raw)
+    names = [group.layer_names[0] for group in gdn_merged]
+    assert all(raw[name] is raw[names[0]] for name in names)
+    assert raw[names[0]].numel() == 13 * layout.slot_backing_size
+    states = [caches[name][1] for name in names]
+    assert all(state.is_contiguous() for state in states)
+    for block_id, state in enumerate(states):
+        state[block_id].fill_(block_id + 1)
+    for state in states:
+        for block_id in range(3):
+            torch.testing.assert_close(state[block_id], torch.full_like(state[block_id], block_id + 1))
+
+
+def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
+    spec = next(spec for name, spec in _ungrouped_qwen_specs().items() if name.endswith("linear_attn"))
+    groups = [
+        KVCacheGroupSpec(["target.0"], spec),
+        KVCacheGroupSpec(["draft.0"], spec, is_eagle_group=True),
+        KVCacheGroupSpec(["checkpoint.0"], replace(spec, num_prefill_checkpoint_blocks=1)),
+        KVCacheGroupSpec(["target.1"], spec),
+    ]
+    packed = _merge_mamba_state_groups(groups, 13)
+    assert [group.layer_names for group in packed] == [
+        ["target.0", "target.1"],
+        ["draft.0"],
+        ["checkpoint.0"],
+    ]
+    assert [group.is_eagle_group for group in packed] == [False, True, False]
+    assert _merge_mamba_state_groups(packed, 13) == packed
+
+
+@pytest.mark.parametrize("cache_mode", ["align", "all"])
+def test_qsa_block_alignment_uses_kv_pair_without_convolution_bytes(monkeypatch, cache_mode):
+    # 192 KiB SSM / (128 K + 128 V BF16 elements per token) = 384 tokens.
+    # Convolution has its own slab and must not force a second 384-token chunk.
+    model_class = SimpleNamespace(
+        get_mamba_specs_from_config=lambda config: [
+            MambaSpec(block_size=128, shapes=((256, 4), (6, 128, 128)), dtypes=(torch.bfloat16, torch.bfloat16))
+        ]
+    )
+    monkeypatch.setattr(ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_class, "test"))
+    cache = SimpleNamespace(
+        cache_dtype="auto",
+        block_size=128,
+        mamba_cache_mode=cache_mode,
+        mamba_block_size=None,
+        user_specified_mamba_block_size=False,
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            use_mla=False,
+            hf_text_config=SimpleNamespace(indexer_compress_ratio=4),
+            architecture="Qwen4ExpForConditionalGeneration",
+            dtype=torch.bfloat16,
+            get_num_kv_heads=lambda config: 1,
+            get_head_size=lambda: 128,
+            get_mamba_chunk_size=lambda: 64,
+        ),
+        cache_config=cache,
+        parallel_config=SimpleNamespace(tensor_parallel_size=8),
+    )
+    NPUPlatform._align_hybrid_block_size(config, None)
+    assert cache.block_size == 384
+    assert cache.mamba_block_size == 384
+
+
+def test_ple_reuses_r2_stride_without_overwriting_other_owned_blocks() -> None:
+    groups = _groups()
+    # Deliberately larger than K+V and not aligned to a GBSA subpage.
+    groups[4] = KVCacheGroupSpec(["model.ple"], replace(groups[4].kv_cache_spec, shapes=((20001,),)))
+    layout = build_six_region_kv_cache_layout(groups, num_blocks=3)
+    assert layout is not None
+    r2 = layout.region("r2")
+    assert r2.page_size_bytes == 49152
+    backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
+    ple = make_slab_view(
+        backing,
+        dtype=torch.bfloat16,
+        num_blocks=3,
+        item_shape=(20001,),
+        storage_offset=r2.offset,
+        block_stride=r2.page_size_bytes,
+    )
+    keys = make_slab_view(
+        backing,
+        dtype=torch.bfloat16,
+        num_blocks=3,
+        item_shape=(128, 1, 64),
+        storage_offset=r2.offset,
+        block_stride=r2.page_size_bytes,
+    )
+    keys[1].fill_(7)
+    ple[0].fill_(3)
+    ple[2].fill_(5)
+    assert torch.all(keys[1] == 7)
+    assert torch.all(keys[0] == 3)
+    assert torch.all(keys[2] == 5)
+    assert ple.stride(0) * ple.element_size() == r2.page_size_bytes
+    assert ple[-1].data_ptr() + ple[-1].numel() * ple.element_size() <= backing.data_ptr() + r2.end

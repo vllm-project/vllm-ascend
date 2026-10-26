@@ -15,6 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
+# [Role] Ascend platform configuration and execution integration.
+# [Invariants] QSA K+V share one physical page with GDN SSM state.
+# [Timeouts & Locks] Existing worker lifecycle owns device waits and locks.
+# [Side-Effect Policy] Configuration and cache views follow the active model config.
+
 from __future__ import annotations
 
 import math
@@ -491,16 +496,30 @@ class NPUPlatform(Platform):
                 if cache_config.cache_dtype == "auto"
                 else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
             )
-            k_token_bytes = (
+            # QSA stores K and V together in the page shared with one SSM state.
+            kv_token_bytes = (
                 model_config.get_num_kv_heads(vllm_config.parallel_config)
-                * model_config.get_head_size()
+                * (2 * model_config.get_head_size())
                 * get_dtype_size(kv_dtype)
             )
             alignment = cls._get_indexer_block_alignment(vllm_config)
-            min_tokens = (ssm_bytes + k_token_bytes - 1) // k_token_bytes
+            if cache_config.mamba_cache_mode == "all":
+                chunk_size = (
+                    cache_config.mamba_block_size
+                    if cache_config.user_specified_mamba_block_size
+                    else model_config.get_mamba_chunk_size()
+                )
+                alignment = math.lcm(alignment, chunk_size)
+            min_tokens = (ssm_bytes + kv_token_bytes - 1) // kv_token_bytes
             cache_config.block_size = max(
                 cache_config.block_size, ((min_tokens + alignment - 1) // alignment) * alignment
             )
+            if cache_config.mamba_cache_mode in ("align", "all"):
+                cache_config.mamba_block_size = cache_config.block_size
+            # The QSA planner gives convolution state its own slab. The generic
+            # aligner includes convolution bytes in the Mamba page and would
+            # unnecessarily grow an exact K+V/SSM fit by another block multiple.
+            return
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 

@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-from vllm_ascend.utils import vllm_version_is
+# [Role] Adapt vLLM cache grouping, admission and physical allocation planning.
+# [Invariants] Shared cache backing is charged once, including packed K+V/SSM pages.
+# [Timeouts & Locks] Synchronous CPU calculations; no waits or locks.
+# [Side-Effect Policy] Installs planner patches; does not allocate device memory.
+
 import math
 from collections import defaultdict
 from dataclasses import replace
@@ -36,6 +40,7 @@ from vllm_ascend.core.six_region_kv_cache_layout import (
     QSA_COMPRESSED,
     QSA_MAIN,
     QSA_RAW,
+    CacheOwner,
     build_six_region_kv_cache_layout,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -957,52 +962,49 @@ def _merge_qsa_composite_groups(
 
 def _merge_mamba_state_groups(
     groups: list[KVCacheGroupSpec],
+    slot_count: int,
 ) -> list[KVCacheGroupSpec]:
-    """Merge same-shape MambaSpec groups so state layers share one block table.
+    """Pack compatible state layers into groups bounded by the QSA slot count.
 
-    In the six-region backing every GDN/PLE layer owns a slot within the same
-    physical blocks, so all state layers of one geometry must share a block
-    table. Upstream grouping leaves them as per-layer groups here; each group
-    then allocates its own blocks and uses only its own slot's worth of every
-    block, while admission charges the full packed pool-block price for each.
-    On a 48-layer Qwen4Exp that inflated the admission floor by tens of times
-    (36 GDN groups x 2 blocks each charged at the 36-slot pool-block size).
-
-    Draft (eagle) groups keep their own block tables: merging across the
-    is_eagle_group boundary would corrupt the draft/target accounting.
+    Each group gets a separate scheduler block table and reuses slot ordinals.
+    Geometry and draft/target boundaries remain separate allocation domains.
     """
-    buckets: dict[tuple, list[int]] = {}
+    buckets: dict[tuple, list[tuple[int, str, MambaSpec]]] = {}
     for index, group in enumerate(groups):
         spec = group.kv_cache_spec
-        if isinstance(spec, MambaSpec) and not isinstance(spec, UniformTypeKVCacheSpecs):
-            key = (
-                spec.page_size_bytes,
-                tuple(tuple(shape) for shape in spec.shapes),
-                tuple(str(dtype) for dtype in spec.dtypes),
-                group.is_eagle_group,
-            )
-            buckets.setdefault(key, []).append(index)
+        members = (
+            spec.kv_cache_specs
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else {name: spec for name in group.layer_names}
+        )
+        if not all(isinstance(member, MambaSpec) for member in members.values()):
+            continue
+        for name, member in members.items():
+            key = (member, group.is_eagle_group)
+            buckets.setdefault(key, []).append((index, name, member))
+    replacements: dict[int, list[KVCacheGroupSpec]] = {}
     drop: set[int] = set()
-    replacements: dict[int, KVCacheGroupSpec] = {}
-    for indices in buckets.values():
-        if len(indices) < 2:
-            continue
-        names = [name for index in indices for name in groups[index].layer_names]
-        uniform = UniformTypeKVCacheSpecs.from_specs(
-            {name: groups[idx].kv_cache_spec for idx in indices for name in groups[idx].layer_names}
-        )
-        if uniform is None:
-            continue
-        first = indices[0]
-        replacements[first] = KVCacheGroupSpec(
-            names,
-            uniform,
-            is_eagle_group=groups[first].is_eagle_group,
-        )
-        drop.update(indices[1:])
-    if not replacements:
-        return groups
-    return [replacements.get(index, group) for index, group in enumerate(groups) if index not in drop]
+    for members in buckets.values():
+        first = members[0][0]
+        drop.update(index for index, _, _ in members)
+        for start in range(0, len(members), slot_count):
+            chunk = members[start : start + slot_count]
+            specs = {name: spec for _, name, spec in chunk}
+            uniform = UniformTypeKVCacheSpecs.from_specs(specs)
+            assert uniform is not None
+            replacements.setdefault(first, []).append(
+                KVCacheGroupSpec(
+                    list(specs),
+                    chunk[0][2] if len(chunk) == 1 else uniform,
+                    is_eagle_group=groups[first].is_eagle_group,
+                )
+            )
+    result: list[KVCacheGroupSpec] = []
+    for index, group in enumerate(groups):
+        result.extend(replacements.get(index, []))
+        if index not in drop:
+            result.append(group)
+    return result
 
 
 def _get_ascend_kv_cache_groups(
@@ -1020,7 +1022,7 @@ def _get_ascend_kv_cache_groups(
         kv_cache_spec,
         *qsa_owners,
     )
-    merged = _merge_mamba_state_groups(merged)
+    merged = _merge_mamba_state_groups(merged, len(qsa_owners[0]))
     logger.info(
         "Using QSA six-region grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
         len(qsa_owners[0]) + len(qsa_owners[1]),
@@ -1035,7 +1037,7 @@ def _get_qwen4_exp_six_region_kv_cache_config(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig | None:
-    """Plan QSA hybrid storage as six contiguous slabs per ordinal slot.
+    """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
 
     The main descriptor API cannot express that one logical QSA/GDN owner has
     two disjoint physical regions.  Descriptors therefore publish the anchor
@@ -1081,26 +1083,26 @@ def _get_qwen4_exp_six_region_kv_cache_config(
         QSA_RAW: "r4",
         QSA_COMPRESSED: "r5",
         GDN: "r1",
-        PLE: "r6",
+        PLE: "r2",
     }
     tensors: list[KVCacheTensor] = []
     for role, region_name in region_by_role.items():
-        owners = sorted(
-            (owner for owner in layout.owners if owner.role == role),
-            key=lambda owner: owner.slot,
-        )
-        if not owners:
-            continue
+        owners_by_group: dict[int, list[CacheOwner]] = {}
+        for owner in layout.owners:
+            if owner.role == role:
+                owners_by_group.setdefault(owner.group_id, []).append(owner)
         region = layout.region(region_name)
-        tensors.append(
-            KVCacheTensor(
-                size=backing_size,
-                layers=[owner.layer_name for owner in owners],
-                layer_stride=layout.slot_backing_size,
-                block_stride=region.page_size_bytes,
-                offset=region.offset,
+        for group_owners in owners_by_group.values():
+            owners = sorted(group_owners, key=lambda owner: owner.slot)
+            tensors.append(
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[owner.layer_name for owner in owners],
+                    layer_stride=layout.slot_backing_size,
+                    block_stride=region.page_size_bytes,
+                    offset=region.offset + owners[0].slot * layout.slot_backing_size,
+                )
             )
-        )
     tensors.extend(
         KVCacheTensor(
             size=owner.spec.page_size_bytes * num_blocks,
