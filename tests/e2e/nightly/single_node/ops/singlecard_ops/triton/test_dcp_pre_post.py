@@ -91,28 +91,28 @@ def test_local_lengths_changed_graph_inputs(world, interleave, requests):
 
 
 @pytest.mark.parametrize(
-    "tokens,heads,world,scatter_dim,dtype",
+    "tokens,heads,world,dtype",
     [
-        (1, 96, 8, 1, torch.bfloat16),
-        (16, 96, 8, 1, torch.bfloat16),
-        (256, 96, 2, 1, torch.bfloat16),
-        (8, 12, 2, 0, torch.float16),
-        (17, 96, 2, 1, torch.float32),
+        (1, 96, 8, torch.bfloat16),
+        (16, 96, 8, torch.bfloat16),
+        (256, 96, 2, torch.bfloat16),
+        (8, 12, 2, torch.float16),
+        (17, 96, 2, torch.float32),
     ],
 )
-def test_pack_from_softmax_statistics(tokens, heads, world, scatter_dim, dtype):
+def test_pack_from_softmax_statistics(tokens, heads, world, dtype):
     torch.manual_seed(29)
     output = torch.randn(tokens, heads, 512, dtype=dtype, device="npu")
     maxima = torch.randn(heads, tokens, 1, device="npu").transpose(0, 1)
     totals = torch.rand(tokens, heads, 2, device="npu")[..., :1] + 0.01
     totals[0, 0] = 0
     maxima[0, 0] = -torch.inf
-    expected = pack_dcp_output_lse(output, maxima + totals.log(), world, scatter_dim)
-    actual = pack_dcp_output_lse(output, maxima, world, scatter_dim, softmax_sum=totals)
+    expected = pack_dcp_output_lse(output, maxima + totals.log(), world)
+    actual = pack_dcp_output_lse(output, maxima, world, softmax_sum=totals)
     # The encoded mantissa is not numerically ordered. Compare its decoded
     # result through the real merge, allowing only normal FP32 log rounding.
-    expected_out = fused_dcp_lse_combine(expected, 512, scatter_dim)
-    actual_out = fused_dcp_lse_combine(actual, 512, scatter_dim)
+    expected_out = fused_dcp_lse_combine(expected, 512)
+    actual_out = fused_dcp_lse_combine(actual, 512)
     assert_dcp_close(actual_out, expected_out)
 
 
@@ -212,10 +212,10 @@ def test_output_pack_and_combine_changed_graph_inputs(tokens, world, heads, with
     sums = torch.rand(world * heads, tokens, 2, device="npu").transpose(0, 1)[..., :1] + 0.25
 
     def forward():
-        packed = pack_dcp_output_lse(partial, maxima, world, 1, softmax_sum=sums)
+        packed = pack_dcp_output_lse(partial, maxima, world, softmax_sum=sums)
         local_output = partial[:, :heads] if with_local else None
         local_lse = maxima[:, :heads] + sums[:, :heads].log() if with_local else None
-        return packed, fused_dcp_lse_combine(packed, 512, 1, local_output=local_output, local_lse=local_lse)
+        return packed, fused_dcp_lse_combine(packed, 512, local_output=local_output, local_lse=local_lse)
 
     for _ in range(3):
         forward()
@@ -348,8 +348,8 @@ def test_dcp_registry_warmup_prevents_runtime_compile_and_replays(monkeypatch, m
                 exchanged = sfa_dcp_exchange.exchange(partial, lse, group, softmax_sum=sums)
                 if not mla:
                     return exchanged, None
-                packed = pack_dcp_output_lse(partial, lse, 2, 1)
-                combined = fused_dcp_lse_combine(packed, 512, 1, local_output=local, local_lse=local_lse)
+                packed = pack_dcp_output_lse(partial, lse, 2)
+                combined = fused_dcp_lse_combine(packed, 512, local_output=local, local_lse=local_lse)
                 return exchanged, combined
 
             # Every eager call and capture is already behind the compile guard.

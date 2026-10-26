@@ -160,7 +160,7 @@ def _record_dcp_layout(
     heads = local_heads * scatter_size
     partial, lse = _output_and_lse(dtype, tokens, heads, head_dim, layout)
     softmax_sum = lse if from_stats else None
-    if _use_fast_exchange(partial, lse, scatter_size, 1, None if pcp_size == 1 else True, False, False):
+    if _use_fast_exchange(partial, lse, scatter_size, None if pcp_size == 1 else True, False, False):
         _record_exchange(partial, lse, softmax_sum, scatter_size, vector_cores, record)
         if not mla:
             return
@@ -168,13 +168,13 @@ def _record_dcp_layout(
     # history always packs, including shapes eligible for fast exchange.
     packed_dim = head_dim + _lse_pack_dim(dtype)
     send = _Tensor(dtype, shape=(scatter_size, local_heads, tokens, packed_dim))
-    _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, 1, vector_cores, record)
+    _launch_pack_dcp_output_lse(partial, lse, softmax_sum, send, vector_cores, record)
     recv = _Tensor(dtype, shape=(scatter_size * pcp_size, local_heads, tokens, packed_dim))
     output = _Tensor(dtype, shape=(tokens, local_heads, head_dim))
-    _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, None, None, vector_cores, record)
+    _launch_fused_dcp_lse_combine(recv, output, head_dim, False, None, None, vector_cores, record)
     if mla:
         local_output, local_lse = _output_and_lse(dtype, tokens, local_heads, head_dim, layout)
-        _launch_fused_dcp_lse_combine(recv, output, head_dim, 1, False, local_output, local_lse, vector_cores, record)
+        _launch_fused_dcp_lse_combine(recv, output, head_dim, False, local_output, local_lse, vector_cores, record)
 
 
 def register_dcp_warmup(*, dtype, local_heads, head_dim, scatter_size, pcp_size, max_tokens, from_stats, mla=False):

@@ -140,7 +140,7 @@ def test_registered_exchange_group_sizes_against_fp64(context, local_heads, toke
 
     def invoke():
         fp32 = exchange(output, lse, group.device_group, softmax_sum=sums) if optimized else None
-        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name, softmax_sum=sums)
+        return fp32, torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name, softmax_sum=sums)
 
     for _ in range(3):
         invoke()
@@ -190,7 +190,7 @@ def test_exchange_t1_singleton_stride_graph(context, layout):
     output.copy_(base + rank / 16)
 
     def invoke():
-        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name)
 
     for _ in range(3):
         invoke()
@@ -219,7 +219,7 @@ def test_exchange_tiled_resource_graph(context, tokens, local_heads, head_dim):
     assert can_exchange(output, lse, RANKS)
 
     def invoke():
-        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, 1, group.unique_name)
+        return torch.ops.vllm.dcp_a2a_fused(output, lse, RANKS, group.unique_name)
 
     output.fill_(rank / 16)
     for _ in range(3):

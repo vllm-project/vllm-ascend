@@ -532,7 +532,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         return fused_dcp_lse_combine(
             history_recv,
             self.head_size,
-            scatter_dim=1,
             local_output=current_output,
             local_lse=current_lse,
         )
@@ -712,7 +711,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             current_output = fused_dcp_lse_combine(
                 history_recv,
                 self.head_size,
-                scatter_dim=1,
                 local_output=current_output,
                 local_lse=current_lse,
             )

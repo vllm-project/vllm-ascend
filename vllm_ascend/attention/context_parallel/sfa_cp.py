@@ -776,7 +776,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 sfa_output,
                 softmax_lse,
                 tp_size,
-                1,
                 tp_group.unique_name,
                 pcp_group.unique_name,
                 softmax_sum=softmax_sum,
@@ -787,7 +786,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sfa_output,
             softmax_lse,
             self.dcp_size,
-            1,
             self.dcp_group.unique_name,
             softmax_sum=softmax_sum,
         )

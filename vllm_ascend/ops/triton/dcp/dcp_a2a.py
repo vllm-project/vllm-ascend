@@ -33,14 +33,13 @@ def _pack_dcp_output_lse_kernel(
     sum_stride_t,
     sum_stride_h,
     send_stride_rank,
-    send_stride_scatter,
-    send_stride_replicated,
+    send_stride_h,
+    send_stride_t,
     send_stride_d,
-    local_scatter_size,
+    local_heads,
     head_dim,
     num_heads,
     total_rows,
-    SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     FROM_STATS: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -53,18 +52,10 @@ def _pack_dcp_output_lse_kernel(
         token_idx = (linear_idx // num_heads).to(tl.int64)
         head_idx = (linear_idx % num_heads).to(tl.int64)
 
-        if SCATTER_TOKENS:
-            rank_idx = token_idx // local_scatter_size
-            scatter_idx = token_idx % local_scatter_size
-            replicated_idx = head_idx
-        else:
-            rank_idx = head_idx // local_scatter_size
-            scatter_idx = head_idx % local_scatter_size
-            replicated_idx = token_idx
+        rank_idx = head_idx // local_heads
+        local_head_idx = head_idx % local_heads
 
-        send_base = (
-            rank_idx * send_stride_rank + scatter_idx * send_stride_scatter + replicated_idx * send_stride_replicated
-        )
+        send_base = rank_idx * send_stride_rank + local_head_idx * send_stride_h + token_idx * send_stride_t
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = d_offsets < head_dim
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
@@ -111,8 +102,8 @@ def _fused_dcp_lse_combine_kernel(
     local_lse_stride_t,
     local_lse_stride_h,
     recv_stride_rank,
-    recv_stride_scatter,
-    recv_stride_replicated,
+    recv_stride_h,
+    recv_stride_t,
     recv_stride_d,
     output_stride_t,
     output_stride_h,
@@ -121,7 +112,6 @@ def _fused_dcp_lse_combine_kernel(
     num_heads,
     total_rows,
     DCP_SIZE: tl.constexpr,
-    SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     RETURN_LSE: tl.constexpr = False,
@@ -135,13 +125,6 @@ def _fused_dcp_lse_combine_kernel(
         token_idx = (linear_idx // num_heads).to(tl.int64)
         head_idx = (linear_idx % num_heads).to(tl.int64)
 
-        if SCATTER_TOKENS:
-            scatter_idx = token_idx
-            replicated_idx = head_idx
-        else:
-            scatter_idx = head_idx
-            replicated_idx = token_idx
-
         # Keep only scalar LSE state and one D-vector accumulator live. A
         # [DCP_SIZE, BLOCK_D] reduction causes excessive register/UB pressure
         # on Ascend for the GLM-5.2 D=256 path.
@@ -153,11 +136,7 @@ def _fused_dcp_lse_combine_kernel(
             local_valid = (local_lse == local_lse) & (local_lse != float("inf")) & (local_lse != -float("inf"))
             lse_max = tl.where(local_valid, local_lse, -float("inf"))
         for rank_idx in tl.static_range(DCP_SIZE):
-            recv_base = (
-                rank_idx * recv_stride_rank
-                + scatter_idx * recv_stride_scatter
-                + replicated_idx * recv_stride_replicated
-            )
+            recv_base = rank_idx * recv_stride_rank + head_idx * recv_stride_h + token_idx * recv_stride_t
             if LSE_PACK_DIM == 1:
                 lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
                 valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
@@ -181,11 +160,7 @@ def _fused_dcp_lse_combine_kernel(
         merged = tl.zeros([BLOCK_D], dtype=tl.float32)
         d_mask = d_offsets < head_dim
         for rank_idx in tl.static_range(DCP_SIZE):
-            recv_base = (
-                rank_idx * recv_stride_rank
-                + scatter_idx * recv_stride_scatter
-                + replicated_idx * recv_stride_replicated
-            )
+            recv_base = rank_idx * recv_stride_rank + head_idx * recv_stride_h + token_idx * recv_stride_t
             if LSE_PACK_DIM == 1:
                 lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
                 valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
@@ -244,8 +219,7 @@ def _validate_dcp_inputs(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
-    scatter_dim: int,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int]:
     if partial_output.ndim != 3:
         raise RuntimeError(
             f"DCP output/LSE pack expects output [tokens, heads, head_dim], got {tuple(partial_output.shape)}."
@@ -266,35 +240,25 @@ def _validate_dcp_inputs(
         raise RuntimeError(f"DCP output/LSE pack requires an NPU tensor, got {partial_output.device}.")
     if not isinstance(dcp_size, int) or isinstance(dcp_size, bool) or dcp_size <= 0:
         raise ValueError(f"DCP output/LSE pack requires a positive integer dcp_size, got {dcp_size}.")
-    if scatter_dim not in (0, 1):
-        raise ValueError(f"DCP output/LSE pack scatter_dim must be 0 or 1, got {scatter_dim}.")
-
     num_tokens, num_heads, head_dim = partial_output.shape
     if num_tokens <= 0 or num_heads <= 0 or head_dim <= 0:
         raise RuntimeError(f"DCP output/LSE pack requires non-empty dimensions, got {tuple(partial_output.shape)}.")
-    scatter_size = partial_output.shape[scatter_dim]
-    if scatter_size % dcp_size != 0:
+    if num_heads % dcp_size != 0:
         raise RuntimeError(
-            "DCP output/LSE pack requires the scatter dimension to be divisible "
-            f"by dcp_size, got shape={tuple(partial_output.shape)}, "
-            f"scatter_dim={scatter_dim}, and dcp_size={dcp_size}."
+            "DCP output/LSE pack requires num_heads to be divisible by dcp_size, "
+            f"got num_heads={num_heads} and dcp_size={dcp_size}."
         )
-    local_scatter_size = scatter_size // dcp_size
-    replicated_size = num_heads if scatter_dim == 0 else num_tokens
-    return num_tokens, num_heads, head_dim, local_scatter_size, replicated_size
+    return num_tokens, num_heads, head_dim, num_heads // dcp_size
 
 
 def pack_dcp_output_lse(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
-    scatter_dim: int,
     softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack output and LSE, or compute LSE from max/sum during packing."""
-    _, _, head_dim, local_scatter_size, replicated_size = _validate_dcp_inputs(
-        partial_output, softmax_lse, dcp_size, scatter_dim
-    )
+    num_tokens, num_heads, head_dim, local_heads = _validate_dcp_inputs(partial_output, softmax_lse, dcp_size)
     if softmax_sum is not None:
         if (
             softmax_sum.shape != softmax_lse.shape
@@ -304,21 +268,19 @@ def pack_dcp_output_lse(
             raise ValueError("softmax_sum must match the FP32 softmax_max shape and device")
     lse_pack_dim = _lse_pack_dim(partial_output.dtype)
     send = torch.empty(
-        (dcp_size, local_scatter_size, replicated_size, head_dim + lse_pack_dim),
+        (dcp_size, local_heads, num_tokens, head_dim + lse_pack_dim),
         dtype=partial_output.dtype,
         device=partial_output.device,
     )
     init_device_properties_triton()
-    _launch_pack_dcp_output_lse(
-        partial_output, softmax_lse, softmax_sum, send, scatter_dim, get_vectorcore_num(), _launch_kernel
-    )
+    _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, get_vectorcore_num(), _launch_kernel)
     return send
 
 
-def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, scatter_dim, vector_cores, launch):
+def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, vector_cores, launch):
     """Shared runtime/warmup launch construction; no allocation or collective."""
     num_tokens, num_heads, head_dim = partial_output.shape
-    local_scatter_size = send.shape[1]
+    local_heads = send.shape[1]
     sum_input = softmax_lse if softmax_sum is None else softmax_sum
     lse_pack_dim = _lse_pack_dim(partial_output.dtype)
     total_rows = num_tokens * num_heads
@@ -327,7 +289,6 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
     # loads can regress with batching, especially for wide heads.
     batched = (
         partial_output.dtype == torch.bfloat16
-        and scatter_dim == 1
         and head_dim <= 2048
         and total_rows >= 8 * vector_cores
         and (partial_output.stride(-1) == 1 or (head_dim == 512 and num_tokens >= 128))
@@ -346,11 +307,10 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
             sum_input.stride(0),
             sum_input.stride(1),
             *send.stride(),
-            local_scatter_size,
+            local_heads,
             head_dim,
             num_heads,
             total_rows,
-            SCATTER_TOKENS=scatter_dim == 0,
             LSE_PACK_DIM=lse_pack_dim,
             FROM_STATS=softmax_sum is not None,
             BLOCK_D=triton.next_power_of_2(head_dim),
@@ -371,11 +331,10 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
         sum_input.stride(0),
         sum_input.stride(1),
         *send.stride(),
-        local_scatter_size,
+        local_heads,
         head_dim,
         num_heads,
         total_rows,
-        SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
         FROM_STATS=softmax_sum is not None,
         BLOCK_D=triton.next_power_of_2(head_dim),
@@ -386,15 +345,15 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
 def fused_dcp_lse_combine(
     recv: torch.Tensor,
     head_dim: int,
-    scatter_dim: int,
     return_lse: bool = False,
     local_output: torch.Tensor | None = None,
     local_lse: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Merge rank outputs and an optional local FIA contribution in one pass.
 
-    Local tensors use [tokens, heads, D/1] layout and may be strided. The local
-    contribution is counted once, with FP32 weights shared by all ranks.
+    The receive buffer uses [rank, heads, tokens, packed D] layout. Local tensors
+    use [tokens, heads, D/1] layout and may be strided. Their contribution is
+    counted once, with FP32 weights shared by all ranks.
     """
     # Appended LSE must retain FP32 precision.
     if return_lse and recv.dtype != torch.float32:
@@ -405,25 +364,20 @@ def fused_dcp_lse_combine(
         raise RuntimeError("DCP fused combine requires a contiguous HCCL receive buffer.")
     if recv.device.type != "npu":
         raise RuntimeError(f"DCP fused combine requires an NPU tensor, got {recv.device}.")
-    if scatter_dim not in (0, 1):
-        raise ValueError(f"DCP fused combine scatter_dim must be 0 or 1, got {scatter_dim}.")
     if not isinstance(head_dim, int) or isinstance(head_dim, bool) or head_dim <= 0:
         raise ValueError(f"DCP fused combine requires a positive integer head_dim, got {head_dim}.")
 
-    _, local_scatter_size, replicated_size, packed_dim = recv.shape
+    dcp_size, num_heads, num_tokens, packed_dim = recv.shape
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     if packed_dim != head_dim + lse_pack_dim:
         raise RuntimeError(
             "DCP fused combine received an invalid packed dimension: "
             f"expected {head_dim + lse_pack_dim}, got {packed_dim}."
         )
-    num_tokens, num_heads = (
-        (local_scatter_size, replicated_size) if scatter_dim == 0 else (replicated_size, local_scatter_size)
-    )
     if (local_output is None) != (local_lse is None):
         raise ValueError("Local output and LSE must be supplied together.")
     if local_output is not None:
-        _validate_dcp_inputs(local_output, local_lse, 1, scatter_dim)
+        _validate_dcp_inputs(local_output, local_lse, 1)
         if local_output.shape != (num_tokens, num_heads, head_dim):
             raise RuntimeError("Local output must match the post-scatter token, head and feature dimensions.")
         if local_output.device != recv.device:
@@ -436,14 +390,12 @@ def fused_dcp_lse_combine(
     )
     init_device_properties_triton()
     _launch_fused_dcp_lse_combine(
-        recv, output, head_dim, scatter_dim, return_lse, local_output, local_lse, get_vectorcore_num(), _launch_kernel
+        recv, output, head_dim, return_lse, local_output, local_lse, get_vectorcore_num(), _launch_kernel
     )
     return output
 
 
-def _launch_fused_dcp_lse_combine(
-    recv, output, head_dim, scatter_dim, return_lse, local_output, local_lse, vector_cores, launch
-):
+def _launch_fused_dcp_lse_combine(recv, output, head_dim, return_lse, local_output, local_lse, vector_cores, launch):
     """Shared runtime/warmup launch construction for the packed receive layout."""
     num_tokens, num_heads = output.shape[:2]
     dcp_size = recv.shape[0]
@@ -455,7 +407,6 @@ def _launch_fused_dcp_lse_combine(
     # scalar path. No chip model, token/head list or DCP whitelist is required.
     batched = (
         recv.dtype == torch.bfloat16
-        and scatter_dim == 1
         and head_dim <= 512
         and total_rows >= 4 * vector_cores
         # Feature-strided code exceeds 192 KiB UB on the measured A3;
@@ -512,7 +463,6 @@ def _launch_fused_dcp_lse_combine(
         num_heads,
         total_rows,
         DCP_SIZE=dcp_size,
-        SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
         RETURN_LSE=return_lse,
@@ -521,12 +471,11 @@ def _launch_fused_dcp_lse_combine(
     return
 
 
-def _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):
+def _use_fast_exchange(partial_output, softmax_lse, scatter_size, pcp_group, return_lse, defer_combine):
     return (
         pcp_group is None
         and not return_lse
         and not defer_combine
-        and scatter_dim == 1
         and can_exchange(partial_output, softmax_lse, scatter_size)
     )
 
@@ -535,7 +484,6 @@ def dcp_a2a_fused_combine(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     scatter_size: int,
-    scatter_dim: int,
     scatter_group: dist.ProcessGroup | None,
     pcp_group: GroupCoordinator | None = None,
     return_lse: bool = False,
@@ -547,8 +495,8 @@ def dcp_a2a_fused_combine(
     scatter_size is the All2All group size, not the unified DCP size when
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
-    # Keep PCP composition and token-scatter paths on the upstream implementation.
-    if _use_fast_exchange(partial_output, softmax_lse, scatter_size, scatter_dim, pcp_group, return_lse, defer_combine):
+    # Keep PCP composition and staged/LSE merges on the upstream implementation.
+    if _use_fast_exchange(partial_output, softmax_lse, scatter_size, pcp_group, return_lse, defer_combine):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
         return exchange(partial_output, softmax_lse, scatter_group, softmax_sum=softmax_sum).to(partial_output.dtype)
@@ -557,7 +505,6 @@ def dcp_a2a_fused_combine(
         partial_output,
         softmax_lse,
         scatter_size,
-        scatter_dim=scatter_dim,
         softmax_sum=softmax_sum,
     )
     if scatter_size > 1:
@@ -577,21 +524,20 @@ def dcp_a2a_fused_combine(
         recv = pcp_group.all_gather(recv, dim=0)
     if defer_combine:
         return recv
-    return fused_dcp_lse_combine(recv, partial_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
+    return fused_dcp_lse_combine(recv, partial_output.shape[-1], return_lse=return_lse)
 
 
 def dcp_a2a_fused(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
-    scatter_dim: int,
     group_name: str,
     pcp_group_name: str | None = None,
     return_lse: bool = False,
     defer_combine: bool = False,
     softmax_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Fused DCP output merge, optionally gathering contributions across PCP.
+    """Fused DCP head-scatter merge, optionally gathering contributions across PCP.
 
     With PCP enabled, dcp_size/group_name describe the TP scatter group,
     not the unified DCP group. A size of 1 skips scatter-group lookup and All2All.
@@ -628,7 +574,6 @@ def dcp_a2a_fused(
         partial_output,
         softmax_lse,
         dcp_size,
-        scatter_dim,
         scatter_group=scatter_group,
         pcp_group=pcp_group,
         return_lse=return_lse,
@@ -641,7 +586,6 @@ def dcp_a2a_fused_fake(
     partial_output: torch.Tensor,
     softmax_lse: torch.Tensor,
     dcp_size: int,
-    scatter_dim: int,
     group_name: str,
     pcp_group_name: str | None = None,
     return_lse: bool = False,
@@ -668,8 +612,8 @@ def dcp_a2a_fused_fake(
         return torch.empty(
             (
                 rank_count,
-                partial_output.shape[scatter_dim] // dcp_size,
-                partial_output.shape[1 - scatter_dim],
+                partial_output.shape[1] // dcp_size,
+                partial_output.shape[0],
                 partial_output.shape[-1] + _lse_pack_dim(partial_output.dtype),
             ),
             dtype=partial_output.dtype,
@@ -678,7 +622,7 @@ def dcp_a2a_fused_fake(
     if return_lse and partial_output.dtype != torch.float32:
         raise TypeError("Returning merged LSE requires FP32 attention output.")
     output_shape = list(partial_output.shape)
-    output_shape[scatter_dim] //= dcp_size
+    output_shape[1] //= dcp_size
     output_shape[-1] += int(return_lse)
     return torch.empty(output_shape, dtype=partial_output.dtype, device=partial_output.device)
 
