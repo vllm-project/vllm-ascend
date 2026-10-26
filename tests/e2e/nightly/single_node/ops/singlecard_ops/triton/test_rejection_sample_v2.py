@@ -13,9 +13,9 @@ from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
 from tests.ut.worker.v2.rejection_verify_reference import accepted_prefix, entropy_thresholds
 from vllm_ascend.ascend_config import RejectionSamplerConfig
-from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
