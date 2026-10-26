@@ -1,0 +1,5 @@
+pr: 19870
+entries:
+  - category: bugfix
+    text: Fixed Kimi K3 attention residual shape errors when fused O-projection already returns a sequence shard.
+    model: kimi-k3
