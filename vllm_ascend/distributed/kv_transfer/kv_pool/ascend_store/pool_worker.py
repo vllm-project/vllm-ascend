@@ -666,6 +666,17 @@ class KVPoolWorker:
             [global_to_local[layer] for layer in independent_layers],
         )
 
+    def _group_pp_byte_offset(self, group_id: int) -> int:
+        """Keep GVA allocation and transfer origins on the same PP layout."""
+        if getattr(self, "pp_size", 1) == 1 or getattr(self, "use_block_key_layerwise", False):
+            return 0
+        block_lens = self.group_block_len.get(group_id) or []
+        num_layers = int(self.group_num_layers.get(group_id, 0))
+        if not block_lens or num_layers <= 0:
+            return 0
+        per_layer = sum(block_lens) // num_layers
+        return int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
+
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
         builders = []
         # Sync layerwise_key_layers with the (possibly updated) num_layers.
@@ -699,12 +710,9 @@ class KVPoolWorker:
             #       size (unaligned strides yield misaligned GVA addresses).
             #       With put_step == 1 every rank owns a distinct region key
             #       and no shard separation is needed.
-            layer_byte_offset = 0
+            layer_byte_offset = self._group_pp_byte_offset(group_id)
             gbl = self.group_block_len.get(group_id) or []
             if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
-                per_layer = sum(gbl) // group_num_layers
-                if getattr(self, "pp_size", 1) > 1:
-                    layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
                 if self.dcp_size > 1 and self.put_step > 1:
                     # Use the GLOBAL region size (PP-aware) as the basis for
                     # the per-shard stride; under PP>1 the local sum(gbl) only
@@ -1077,6 +1085,10 @@ class KVPoolWorker:
             return sum(gbl)
         per_layer = (sum(gbl) + n_local - 1) // n_local
         n_global = max(total_layers, int(self.num_layers), n_local)
+        # Physical cache layers (for example MTP) can extend past the target
+        # model's last layer. Preserve the existing byte origin, but cover the
+        # complete local payload instead of sizing from target layers alone.
+        shard_bytes = max(per_layer * n_global, self._group_pp_byte_offset(group_id) + sum(gbl))
         # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
         # e.g. MLA) hold different context shards of the same logical block
         # and share ONE region, so the region must cover all shards. The
@@ -1087,9 +1099,9 @@ class KVPoolWorker:
         # key and no shard separation is needed.
         if self.put_step > 1 and self.dcp_size > 1:
             gva_align = 2 * 1024 * 1024
-            shard_stride = (per_layer * n_global + gva_align - 1) // gva_align * gva_align
+            shard_stride = (shard_bytes + gva_align - 1) // gva_align * gva_align
             return shard_stride * self.dcp_size
-        return per_layer * n_global
+        return shard_bytes
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
