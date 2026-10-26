@@ -93,6 +93,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.expert_offload.lifecycle import (
+    close_expert_offload_on_shutdown,
+    finalize_expert_offload_loading,
+    guard_expert_offload_loading,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -145,10 +151,14 @@ class NPUModelRunner(GPUModelRunner):
     execute_model_state: ExecuteModelState | None
     kv_connector: KVConnector
     max_num_reqs: int
+    expert_offload_manager: ExpertOffloadManager | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        offload_config = getattr(self.ascend_config, "expert_offload_config", None)
+        if offload_config is not None and offload_config.enabled:
+            self.expert_offload_manager = ExpertOffloadManager()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -290,6 +300,7 @@ class NPUModelRunner(GPUModelRunner):
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
 
+    @guard_expert_offload_loading
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
@@ -308,6 +319,8 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        finalize_expert_offload_loading(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -577,6 +590,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._c8_mxfp_v_scale_caches.append((layer.v_cache_scale, value_scale_cache, kernel_blocks_per_page))
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
+    @close_expert_offload_on_shutdown
     def shutdown(self) -> None:
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
@@ -680,6 +694,9 @@ class NPUModelRunner(GPUModelRunner):
         )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        offload_manager = self.expert_offload_manager
+        if offload_manager is not None:
+            offload_manager.begin_execution(is_profile=is_profile or dummy_run)
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -694,6 +711,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 forward_failed = False
             finally:
+                if offload_manager is not None:
+                    offload_manager.finish_execution(failed=forward_failed)
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
@@ -808,6 +827,8 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.expert_offload_manager is not None and batch_state is not None:
+            self.expert_offload_manager.has_prefill = batch_state.has_prefill
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

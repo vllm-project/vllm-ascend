@@ -118,7 +118,8 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
         moe(torch.randn(2, config.hidden_size))
 
 
-def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch):
+@pytest.mark.parametrize("is_draft_layer", [False, True])
+def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch, is_draft_layer):
     gate = _FakeGate()
     fused_moe = MagicMock(return_value=_FakeMoERunner(MagicMock()))
     ep_group = SimpleNamespace(
@@ -166,9 +167,14 @@ def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch):
         config=config,
         parallel_config=parallel_config,
         prefix="model.layers.0.mlp",
+        is_draft_layer=is_draft_layer,
     )
 
+    assert fused_moe.call_args.kwargs["routed_experts_args"] == {"expert_offload_enabled": not is_draft_layer}
     tid2eid = moe.gate.tid2eid
+    if is_draft_layer:
+        assert tid2eid is None
+        return
     assert tid2eid is not None
     assert tid2eid.dtype == torch.int32
     assert tid2eid.shape == (config.vocab_size, config.num_experts_per_tok)

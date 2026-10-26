@@ -1,0 +1,4 @@
+pr: 18604
+entries:
+  - category: feature
+    text: Added opt-in exact MoE expert offload for Model Runner V2 eager execution and bounded decode ACL graphs, with capability checks for W4A8 MXFP routed experts and checkpoint-native DeepSeek V4 DSpark drafting whose experts stay fully resident on the NPU.

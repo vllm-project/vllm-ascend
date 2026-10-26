@@ -34,6 +34,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.expert_offload.quantization import maybe_offload_quant_method
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -424,9 +425,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         *args,
         tid2eid=None,
         n_shared_experts: int = 0,
+        expert_offload_enabled: bool = True,
         **kwargs,
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
+        # Quant-method selection happens inside the upstream constructor.
+        object.__setattr__(self, "_expert_offload_enabled", expert_offload_enabled)
         super().__init__(*args, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
@@ -598,8 +602,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         if quant_config is None:
-            return super()._get_quant_method(prefix, quant_config, moe_config)
-        return quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+            method = super()._get_quant_method(prefix, quant_config, moe_config)
+        else:
+            method = quant_config.get_quant_method(self, prefix, tid2eid=self.tid2eid)
+        return maybe_offload_quant_method(self, method)
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""
