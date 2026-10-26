@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-# [Role] Adapt vLLM cache grouping, admission and physical allocation planning.
-# [Invariants] Shared cache backing is charged once, including packed K+V/SSM pages.
-# [Timeouts & Locks] Synchronous CPU calculations; no waits or locks.
-# [Side-Effect Policy] Installs planner patches; does not allocate device memory.
 
 import math
 from collections import defaultdict

@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Ascend QSA owner for Qwen3.8-Flash-Next.
-
-[Role] Adapt upstream QSA attention and indexer metadata to Ascend kernels.
-[Invariants] GBSA tables use 128-token IDs; compressed states use manager IDs.
-[Timeouts & Locks] No waits or locks; buffers persist across graph replay.
-[Side-Effect Policy] Cache updates write only scheduler-assigned physical pages.
-"""
+"""Ascend QSA owner for Qwen3.8-Flash-Next."""
 
 from copy import copy
 from dataclasses import replace

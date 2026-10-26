@@ -1,10 +1,4 @@
-"""QSA hybrid cache storage.
-
-[Role] Own Qwen4 grouping, admission, physical layout and cache views.
-[Invariants] Pool block IDs have one group owner; K+V and SSM alias r2; each PLE layer has one private contiguous bank.
-[Timeouts & Locks] Pure layout arithmetic; no waits or locks.
-[Side-Effect Policy] View construction aliases caller-owned storage without copies.
-"""
+"""QSA hybrid cache storage."""
 
 from __future__ import annotations
 

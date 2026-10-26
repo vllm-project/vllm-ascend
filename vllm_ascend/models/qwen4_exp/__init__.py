@@ -1,12 +1,6 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend Qwen4 exports.
-
-[Role] Resolve model registry exports without loading models during cache planning.
-[Invariants] Cache configuration imports must not register model custom operators.
-[Timeouts & Locks] Import machinery only; no waits or locks.
-[Side-Effect Policy] Model adaptation is imported only when a model export is requested.
-"""
+"""Ascend Qwen4 exports."""
 
 from importlib import import_module
 

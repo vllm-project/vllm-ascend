@@ -17,10 +17,6 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-# [Role] Ascend platform configuration and execution integration.
-# [Invariants] QSA K+V share one physical page with GDN SSM state.
-# [Timeouts & Locks] Existing worker lifecycle owns device waits and locks.
-# [Side-Effect Policy] Configuration and cache views follow the active model config.
 
 import logging
 import math
@@ -182,7 +178,6 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
-from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
@@ -341,7 +336,6 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
-graph_logger = init_logger_ascend("vllm_ascend.graph_execution")
 
 
 @dataclass
@@ -3809,8 +3803,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
-        local_cudagraph_mode = cudagraph_mode
-        synced_cudagraph_mode = None
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -3837,23 +3829,6 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
-        if graph_logger.isEnabledFor(logging.DEBUG):
-            # Use existing CPU scheduling arrays; diagnostics must not add NPU syncs.
-            prefill_reqs = int(np.count_nonzero(
-                self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                < self.input_batch.num_prompt_tokens[:num_reqs]
-            ))
-            graph_logger.debug(
-                "graph_dispatch local=%s dp_synced=%s final=%s requests=%d "
-                "tokens=%d padded=%d prefill_requests=%d uniform_decode=%s "
-                "scheduled_tokens=%s expected_decode_query_len=%d "
-                "force_eager=%s forced_uniform=%s disable_full=%s batch=%s",
-                local_cudagraph_mode, synced_cudagraph_mode, cudagraph_mode,
-                num_reqs, num_tokens, batch_descriptor.num_tokens, prefill_reqs,
-                uniform_decode, num_scheduled_tokens_np[:num_reqs].tolist(),
-                self.uniform_decode_query_len, force_eager, force_uniform_decode,
-                use_cascade_attn or has_encoder_output, batch_descriptor,
-            )
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
