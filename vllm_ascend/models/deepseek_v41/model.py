@@ -1072,16 +1072,17 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         )
         rotation_path = get_rotation_path(vllm_config)
         self.engram_rotated = rotation_path is not None
-        self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
+        engram_rotation = torch.eye(32, device=self.device)
         if self.has_engram:
             if self.engram_rotated and vllm_config.load_config.load_format != "dummy":
                 with torch.device("cpu"):
-                    block = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
-                self.engram_rotation.copy_(block)
+                    engram_rotation = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
+                engram_rotation = engram_rotation.to(device=self.device)
             # Upstream owns the n-gram history; the adapter only hands it the
             # Ascend SWA slot metadata (see engram/hash_state.py).
             swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
             self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
+        self.register_buffer("engram_rotation", engram_rotation, persistent=False)
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(

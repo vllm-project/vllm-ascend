@@ -24,7 +24,7 @@ from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
-from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
+from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
@@ -151,6 +151,38 @@ def test_bf16_gate_without_rotation():
     # Normalized dot is sqrt(64) = 8; the gate applies signed sqrt, then sigmoid.
     expected = (1 + 0.25 * torch.sigmoid(torch.tensor(8.0).sqrt())).bfloat16()
     assert torch.all(result[0] == expected)
+    assert torch.equal(result[1], hidden[1])
+
+
+def test_loader_accepts_distinct_block_diagonal_rotation(tmp_path):
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    rotation = torch.block_diag(first, second)
+    rotation_path = tmp_path / "quarot.safetensors"
+    save_file({"global_rotation": rotation}, rotation_path)
+
+    blocks = load_engram_rotation_block(str(tmp_path), 64, rotation_path)
+
+    assert blocks.shape == (2, 32, 32)
+    torch.testing.assert_close(blocks[0], first)
+    torch.testing.assert_close(blocks[1], second)
+
+
+def test_gate_accepts_distinct_rotation_blocks():
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    blocks = torch.stack((first, second))
+    hidden = torch.arange(2 * 3 * 64, dtype=torch.float32).reshape(2, 3, 64).bfloat16()
+    key = torch.linspace(-1.0, 1.0, 2 * 3 * 64).reshape(2, 3, 64).bfloat16()
+    value = torch.full((2, 64), 0.25, dtype=torch.bfloat16)
+    channel_weight = torch.linspace(0.5, 1.5, 3 * 64).reshape(3, 64)
+    mask = torch.tensor([True, False])
+
+    result = engram_gate(hidden, key, value, channel_weight, blocks, mask, 1e-6)
+
+    assert result.shape == hidden.shape
+    assert result.dtype == hidden.dtype
+    assert not torch.equal(result[0], hidden[0])
     assert torch.equal(result[1], hidden[1])
 
 
