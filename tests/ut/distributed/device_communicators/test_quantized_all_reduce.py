@@ -31,8 +31,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm_ascend.device.hardware import AscendDeviceType
 
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
