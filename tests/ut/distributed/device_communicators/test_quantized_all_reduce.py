@@ -27,13 +27,12 @@ This needs no clamp kernel at all (int8 clamp_/clamp/hardtanh are ~250x
 slower than minimum/maximum on Ascend).
 """
 
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from vllm_ascend.device.hardware import AscendDeviceType
+
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
@@ -45,23 +44,20 @@ def _make(
     device_type: AscendDeviceType = AscendDeviceType.A2,
 ) -> QuantizedAllReduce:
     """Build a wrapper; raises RuntimeError on unvalidated configs."""
-    with (
-        patch.dict(os.environ, {"VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": str(min_numel)}),
-        patch(
-            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
-            return_value=device_type,
-        ),
+    with patch(
+        "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
+        return_value=device_type,
     ):
         group = MagicMock()
         with patch(
             "vllm_ascend.distributed.device_communicators.quantized_all_reduce.dist.get_world_size",
             return_value=world_size,
         ):
-            return QuantizedAllReduce(group)
+            return QuantizedAllReduce(group, min_numel=min_numel)
 
 
 class TestQuantizedAllReduce(unittest.TestCase):
-    def test_min_numel_from_env(self):
+    def test_min_numel_from_config(self):
         wrapper = _make(min_numel=12345)
         self.assertEqual(wrapper.min_numel, 12345)
 

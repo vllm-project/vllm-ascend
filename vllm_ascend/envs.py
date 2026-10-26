@@ -72,15 +72,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Opt-in int8 quantized all-reduce for large bf16 TP collectives
-    # ("1": on, default 0). Atlas A2/A3, 1 < TP <= 8; only messages above the
-    # payload threshold below are quantized.
-    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_QUANTIZED_ALL_REDUCE", "0"))),
-    # Payload threshold for the above, in elements (bf16 payload = value * 2
-    # bytes). Default 33554432 == 64 MiB == 16384 tokens at hidden_size 2048;
-    # smaller messages stay on bf16 because they are latency-bound. See
-    # quantized_all_reduce.py for the sizing table.
-    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL": lambda: os.getenv("VLLM_ASCEND_QUANTIZED_ALL_REDUCE_MIN_NUMEL", None),
 }
 
 # end-env-vars-definition

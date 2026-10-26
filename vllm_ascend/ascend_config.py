@@ -393,6 +393,27 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+@config(config=ConfigDict(frozen=True))
+class QuantizedAllReduceConfig:
+    """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
+
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2/A3,
+    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
+    33,554,432 elements is 64 MiB, the measured break-even rounded up.
+    """
+
+    enable: bool = False
+    min_numel: int = 33554432
+
+    @field_validator("min_numel")
+    @classmethod
+    def _check_min_numel(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
+        return value
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -485,6 +506,10 @@ class AscendConfig:
                 "sleep_mode_extra_cleanup": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
+            },
+            "quantized_all_reduce_config": {
+                "enable": false,
+                "min_numel": 33554432
             },
             "xlite_graph_config": {
                 "enabled": false,
@@ -627,6 +652,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.

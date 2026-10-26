@@ -28,6 +28,9 @@ from unittest.mock import PropertyMock, patch
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 from tests.ut.base import TestBase
 from tests.ut.kvpp_utils import make_kvpp_config
@@ -42,6 +45,7 @@ from vllm_ascend.ascend_config import (
     FinegrainedTPConfig,
     KVPPConfig,
     ProfilingChunkConfig,
+    QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
@@ -52,9 +56,6 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_mega_moe_supported,
 )
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
@@ -112,6 +113,27 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestQuantizedAllReduceConfig(TestBase):
+    def test_defaults(self):
+        config = QuantizedAllReduceConfig()
+        self.assertFalse(config.enable)
+        self.assertEqual(config.min_numel, 33554432)
+
+    def test_explicit_values_and_lax_bool(self):
+        config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
+        self.assertTrue(config.enable)
+        self.assertEqual(config.min_numel, 2097152)
+
+    def test_rejects_unknown_key(self):
+        with self.assertRaises(ValueError):
+            QuantizedAllReduceConfig(enable=True, min_numels=1)  # type: ignore[call-arg]
+
+    def test_rejects_non_positive_min_numel(self):
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(min_numel=value)
 
 
 class TestAscendConfig(TestBase):
@@ -361,6 +383,23 @@ class TestAscendConfig(TestBase):
         for name in ("z_score", "use_covariance", "hysteresis_enabled"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "min_numel": 2097152}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.quantized_all_reduce_config.enable)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 2097152)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_bad_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -2238,9 +2277,10 @@ class TestKVPPConfig(TestBase):
             KVPPConfig.from_vllm_config(config)
 
     def test_supported_configuration_and_restrictions(self):
+        from vllm_ascend.platform import _validate_parallel_config
+
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
-        from vllm_ascend.platform import _validate_parallel_config
 
         config = make_kvpp_config()
         KVPPConfig.from_vllm_config(config).validate(config)
