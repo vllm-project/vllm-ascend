@@ -1,4 +1,13 @@
+import importlib.util
+
 from vllm import ModelRegistry
+
+
+def _upstream_has_module(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def register_model():
@@ -59,6 +68,17 @@ def register_model():
         "MiniMaxM3SparseForConditionalGeneration",
         "vllm_ascend.models.minimax_m3:MiniMaxM3SparseForConditionalGeneration",
     )
+    # Muse Spark landed in vLLM main after the pinned release; register it only
+    # where upstream ships the model package the Ascend adapter builds on.
+    if _upstream_has_module("vllm.models.muse_spark"):
+        ModelRegistry.register_model(
+            "MuseSpark1xForCausalLM",
+            "vllm_ascend.models.muse_spark:AscendMuseSpark1xForCausalLM",
+        )
+        ModelRegistry.register_model(
+            "MuseSparkForConditionalGeneration",
+            "vllm_ascend.models.muse_spark:AscendMuseSparkForConditionalGeneration",
+        )
     ModelRegistry.register_model("DeepSeekV4MTPModel", "vllm_ascend.models.deepseek_v4.mtp:DeepSeekV4MTP")
     ModelRegistry.register_model(
         "DSparkDraftModel",
