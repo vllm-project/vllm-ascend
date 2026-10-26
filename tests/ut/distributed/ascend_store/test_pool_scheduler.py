@@ -1283,7 +1283,7 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         scheduler.use_layerwise = True
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
         scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
-        self.assertFalse(scheduler.load_specs["r1"].can_load)
+        self.assertTrue(scheduler.load_specs["r1"].can_load)
 
 
 class _PrefixHitManager:
@@ -1531,3 +1531,28 @@ def test_lookup_early_return_discards_stale_load_spec(early_return):
         local_tokens = 32
     assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (0, False)
     assert request.request_id not in scheduler.load_specs
+
+
+@pytest.mark.parametrize("pool_hit_tokens", [832, 896])
+def test_layerwise_partial_tail_preserves_zero_external_load(pool_hit_tokens):
+    scheduler = KVPoolScheduler(make_config(block_size=256, extra_config={"backend": "memcache"}), use_layerwise=True)
+    scheduler._get_layerwise_hit_tokens = MagicMock(return_value=pool_hit_tokens)
+    request = SimpleNamespace(
+        request_id="partial-tail", prompt_token_ids=list(range(2048)), num_tokens=2048, block_hashes=[b"h"] * 8
+    )
+    actual_local_tokens = 896
+    partial_tail = actual_local_tokens % 256
+    aligned_local_tokens = actual_local_tokens - partial_tail
+    external_tokens, load_async = scheduler.get_num_new_matched_tokens(request, aligned_local_tokens)
+    assert external_tokens == pool_hit_tokens - aligned_local_tokens
+    assert 0 < external_tokens <= partial_tail
+    assert not load_async
+
+    # The scheduler keeps the longer/equal local partial tail and adopts no
+    # external tokens. Layerwise loading must retain its original semantics.
+    admitted_external_tokens = 0 if external_tokens <= partial_tail else external_tokens
+    scheduler.update_state_after_alloc(request, MagicMock(), admitted_external_tokens)
+    load_spec = scheduler.load_specs[request.request_id]
+    assert load_spec.vllm_cached_tokens == aligned_local_tokens
+    assert load_spec.kvpool_cached_tokens == pool_hit_tokens
+    assert load_spec.can_load
