@@ -115,6 +115,19 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 Yes, vllm-ascend supports Prefill-Decode Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
+If Mooncake reports `TransferEngine initialization previously failed`, inspect the
+first initialization error, correct its cause, and restart the affected process.
+The shared transfer engine is published only after initialization succeeds. Once
+native construction or initialization fails, further attempts in that process
+are rejected because Mooncake `0.3.11.post1` can leak native transport resources
+on failure. This guard prevents repeated failures from accumulating resources;
+it does not reclaim resources leaked by the first failure.
+
+The upstream cleanup fix, [Mooncake #2332](https://github.com/kvcache-ai/Mooncake/pull/2332),
+is included in the `v0.3.12` source. Retrying remains disabled until the minimum
+supported dependency includes the fix and repeated-failure cleanup is validated
+on Ascend. Installing a newer Mooncake package alone does not disable this guard.
+
 ### 9. Does vllm-ascend support quantization method?
 
 Currently, w8a8, w4a8, and w4a4 quantization methods are already supported by vllm-ascend.

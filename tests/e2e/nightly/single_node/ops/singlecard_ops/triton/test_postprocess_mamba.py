@@ -24,6 +24,8 @@ from vllm.v1.worker.mamba_utils import (
 )
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.patch.worker.patch_mamba_utils import _reset_layerwise_copy_meta
 
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
@@ -241,6 +243,10 @@ def _run_gpu_postprocess(
     torch.accelerator.synchronize()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
 def test_matches_python_postprocess_mamba():
     cfg = _TestConfig()

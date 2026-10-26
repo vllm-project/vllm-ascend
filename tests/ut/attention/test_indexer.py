@@ -450,7 +450,7 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     slots = torch.arange(2)
     metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
     indexer = SimpleNamespace(
-        _pcp_active=False,
+        use_pcp=False,
         _dsa_cp_active=True,
         enable_sparse_li_c8=quantized,
         enable_sparse_li_quant=quantized,

@@ -50,8 +50,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
-    enable_dcp,
     enabling_mlapo,
+    is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
     merge_prefill_chunks,
     notify_kv_cache_written,
@@ -117,8 +117,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = is_dcp_enabled()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
             return AscendMlaDCPMetadataBuilder
@@ -136,8 +136,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
+        use_dcp = is_dcp_enabled()
+        if use_dcp:
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 
             return AscendMlaDCPImpl
@@ -308,9 +308,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             supports_dcp_with_varlen,
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_enabled = self.pcp_size > 1
+        self.use_pcp = self.pcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
-        self.dcp_enabled = enable_dcp()
+        self.use_dcp = is_dcp_enabled()
 
         scheduler_config = vllm_config.scheduler_config
 
@@ -585,7 +585,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         if self.flashmla_state is not None:
             return self._build_external_flashmla(common_prefix_len, common_attn_metadata)
-        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+        expanded_slot_mapping = common_attn_metadata.slot_mapping if self.use_pcp else None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -595,10 +595,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.pcp_enabled or self.dcp_enabled)
+                    not (self.use_pcp or self.use_dcp)
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
-                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
+                    or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 ),
             )
         )
@@ -650,7 +650,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
-        if self.pcp_enabled:
+        if self.use_pcp:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
             if self.is_pcp_decode_sharded:
@@ -900,7 +900,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         capture_metadata = copy(common_attn_metadata)
         if capture_metadata.attn_state is None:
             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        if (self.dcp_enabled or self.flashmla_state is not None) and capture_metadata.is_prefilling is None:
+        if (self.use_dcp or self.flashmla_state is not None) and capture_metadata.is_prefilling is None:
             capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
         if self.flashmla_state is not None:
             assert capture_metadata.num_reqs <= capture_metadata.num_actual_tokens * self.reorder_batch_threshold
@@ -1003,8 +1003,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_output_gate = self.g_proj is not None
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
-        self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.use_dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1055,7 +1055,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
         # History sees all Q heads in the DCP group; current uses local heads.
-        if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
             return False
@@ -1334,7 +1334,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # captured tensor addresses remain valid while the values follow
             # the reloaded source weights and scales.
             self._refresh_prolog_v3_weights()
-        elif not getattr(self, "dcp_enabled", False):
+        elif not getattr(self, "use_dcp", False):
             self._prepare_prolog_v3_weights_after_loading()
         self._prepare_strided_kv_workspace()
         if self.use_flashmla and self.supports_prolog_v3_writer():
@@ -1457,7 +1457,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             # DCP causal decode needs the unfused projections for current KV.
-            and not enable_dcp()
+            and not self.use_dcp
             # Sharded PCP uses the unfused projections to gather current KV.
             and not self.is_pcp_decode_sharded
             and self.vllm_config.kv_transfer_config is not None
@@ -1907,8 +1907,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and input_size not in PROLOG_V3_SUPPORTED_INPUT_SIZES
             and self.support_fp8_attention
             and self.is_draft_model
-            and not self.pcp_enabled
-            and not self.dcp_enabled
+            and not self.use_pcp
+            and not self.use_dcp
             and self.num_kv_heads == 1
             and self._supports_strided_mla_projection()
         )
@@ -2612,7 +2612,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: AscendMLAMetadata | None = None,
     ):
         pcp_local_range = None
-        if self.pcp_enabled:
+        if self.use_pcp:
             assert attn_metadata is not None
             # Gather before any RoPE-specific writer. use_mla_rope=False used
             # to return first and store rank-local KV with the expanded slots.
@@ -2661,7 +2661,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.qk_rope_head_dim == 0:
                 # The PCP gather carries rank padding with slot -1.
                 k_pe, k_nope = self._exec_kv_mla_nope(
-                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.pcp_enabled
+                    kv_no_split, kv_cache, slots, is_prefill=True, skip_padding_slots=self.use_pcp
                 )
             else:
                 cache_mode = "PA"
@@ -3118,7 +3118,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         attn_metadata: AscendMLAMetadata,
     ) -> int:
-        if self.pcp_enabled:
+        if self.use_pcp:
             prefill_metadata = attn_metadata.prefill
             assert prefill_metadata is not None
             local_num_input_tokens = prefill_metadata.pcp_local_num_input_tokens
@@ -3349,12 +3349,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_prefill_tokens = max(num_actual_tokens - num_decode_tokens, 0)
         use_prolog_v3_strided_cache = (
             self._cache_requires_prolog_v3_writer(kv_cache)
-            and not self.pcp_enabled
+            and not self.use_pcp
             and not self.is_pcp_decode_sharded
-            and (not decode_requires_current_kv or self.dcp_enabled)
-            and (not prefill_requires_current_kv or self.dcp_enabled)
+            and (not decode_requires_current_kv or self.use_dcp)
+            and (not prefill_requires_current_kv or self.use_dcp)
             and (
-                not self.dcp_enabled
+                not self.use_dcp
                 or (
                     dcp_current_kv_buffers is not None
                     and num_decode_tokens <= dcp_current_kv_buffers[2].numel()
