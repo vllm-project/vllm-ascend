@@ -182,13 +182,9 @@ Current hardware verification uses an Ascend A3 device:
   `SPEC_DECODE_DSPARK_MODEL`, and the corresponding `*_DRAFT_MODEL` variables.
 
 The special `MULTI_KV_CACHE_GROUP_MTP` family is exercised by unit tests in this
-change. The 16-card GLM5.2 MTP-V2 nightly job now runs the family with
-`FULL_DECODE_ONLY`, while the GLM5.2 MRV1 job pins
-`VLLM_USE_V2_MODEL_RUNNER=0` for eager fallback coverage. Public 3-layer GLM5.2
-test checkpoints are backbone-only and explicitly omit the MTP layer, so they are
-not valid substitutes for that runtime case. DFlash remains family-specific CI
-coverage. CPU-only unit tests are not acceptance evidence for NPU attention
-layouts or graph replay.
+change and is not claimed as a single-NPU runtime validation case. DFlash remains
+family-specific CI coverage. CPU-only unit tests are not acceptance evidence for
+NPU attention layouts or graph replay.
 
 The nightly refactor gate runs the same fixed prompts against the target model and
 the speculative family in eager and `FULL_DECODE_ONLY` modes. Both paths must
@@ -286,5 +282,5 @@ Serving measurements used `vllm bench serve`, eight random prompts, one warmup,
 
 The eager/Graph correctness gate, same-mode baseline/candidate benchmark, and
 all candidate regression runs passed for MTP, EAGLE3, and DSpark. The special
-`MULTI_KV_CACHE_GROUP_MTP` path remains covered by its 16-card nightly lane and
-is not claimed as a single-NPU local run.
+`MULTI_KV_CACHE_GROUP_MTP` path is covered by unit tests and is not claimed as a
+single-NPU local run.
