@@ -243,9 +243,9 @@ def test_generic_dense_backend_keeps_128_for_m3(hardware):
         assert AscendAttentionBackend.get_supported_kernel_block_sizes() == [128]
 
 
-@pytest.mark.parametrize("enable_dcp", [False, True])
-def test_model_dense_backend_reuses_generic_implementation(enable_dcp):
-    with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=enable_dcp):
+@pytest.mark.parametrize("is_dcp_enabled", [False, True])
+def test_model_dense_backend_reuses_generic_implementation(is_dcp_enabled):
+    with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=is_dcp_enabled):
         assert AscendMiniMaxM3DenseBackend.get_impl_cls() is AscendAttentionBackend.get_impl_cls()
         assert AscendMiniMaxM3DenseBackend.get_builder_cls() is AscendAttentionBackend.get_builder_cls()
         assert AscendMiniMaxM3DenseBackend.supports_pcp() == AscendAttentionBackend.supports_pcp()
