@@ -34,16 +34,16 @@ class Int2MiddleExecMixin:
     # cache-interface, loader, and sibling-builder names are owned by the
     # assembled backend / sibling mixins (bare annotations only - no runtime
     # attributes, so no MRO shadowing at assembly).
-    _r113_warmed: Any = None
+    _r113_warmed: Any
     _r115_mu_calls: int = 0
     _r144_qshadow_n: int = 0
-    _r146_dummy_blob: Any = None
+    _r146_dummy_blob: Any
     _r146_mirror: Any = None
     _r147_shared: Any = None
     _r147_stage: Any = None
     _r185c_dumped: Any = None
     _r189_fill_probed: Any = None
-    _r189_mod: Any = None
+    _r189_mod: Any
     _r189_real_probed: Any = None
     _r189_v3_probed: Any = None
     _r190_probed: Any = None
@@ -143,7 +143,7 @@ class Int2MiddleExecMixin:
             type(self)._r190_probed = True
             _odiag_w("r190_probe.log", "[R190] probe entry reached, loading module if needed\n")
             # Load the launcher module if not already loaded (self-contained, no dependency on R189 L0 probe)
-            if not hasattr(type(self), "_r189_mod"):
+            if getattr(type(self), "_r189_mod", None) is None:
                 import torch.utils.cpp_extension as _ce190
 
                 _R152 = _os.environ.get("R152_LAUNCHER_DIR", "")
@@ -293,7 +293,7 @@ class Int2MiddleExecMixin:
         # askv=561).
         if (
             not _EXTRA_CTX.capturing
-            and not hasattr(type(self), "_r113_warmed")
+            and getattr(type(self), "_r113_warmed", None) is None
             and _os.environ.get("R112_LSE_FAST", "0") == "1"
         ):
             if self._r112_ensure_fast(query.device):
@@ -787,7 +787,7 @@ class Int2MiddleExecMixin:
             if _R145T and not _R146F and _os.environ.get("R146_PERTURB", "0") == "2":
                 # allocation-footprint probe: ONCE, allocate a carrier-sized blob (~MBs) and
                 # hold it on the impl; never used. If tokens flip => layout/address sensitivity.
-                if not hasattr(type(self), "_r146_dummy_blob"):
+                if getattr(type(self), "_r146_dummy_blob", None) is None:
                     _blob = torch.zeros(3 * 1024 * 1024, dtype=torch.uint8, device=query.device)
                     type(self)._r146_dummy_blob = _blob
             if _R145T and not _R146F:
@@ -893,7 +893,7 @@ class Int2MiddleExecMixin:
                         type(self)._r191_p2 = True
                         _A191 = _odiag_p("r191_audit.log")
                         try:
-                            if not hasattr(type(self), "_r189_mod"):
+                            if getattr(type(self), "_r189_mod", None) is None:
                                 import torch.utils.cpp_extension as _ce191
 
                                 _R152 = _os.environ.get("R152_LAUNCHER_DIR", "")
@@ -1261,7 +1261,7 @@ class Int2MiddleExecMixin:
                             # R189 PROBE: before real middle LSE
                             if (
                                 os.environ.get("R189_PROBE") == "1"
-                                and hasattr(type(self), "_r189_mod")
+                                and getattr(type(self), "_r189_mod", None) is not None
                                 and not getattr(type(self), "_r189_real_probed", False)
                             ):
                                 type(self)._r189_real_probed = True
@@ -1751,7 +1751,7 @@ class Int2MiddleExecMixin:
                         # R189 PROBE: AFTER carrier fill, BEFORE middle LSE — is cube state still GREEN?
                         if (
                             os.environ.get("R189_PROBE") == "1"
-                            and hasattr(type(self), "_r189_mod")
+                            and getattr(type(self), "_r189_mod", None) is not None
                             and not getattr(type(self), "_r189_fill_probed", False)
                         ):
                             type(self)._r189_fill_probed = True
@@ -1982,7 +1982,7 @@ class Int2MiddleExecMixin:
                         # R189 PROBE: before the V3 middle LSE — is cube state GREEN or RED?
                         if (
                             os.environ.get("R189_PROBE") == "1"
-                            and hasattr(type(self), "_r189_mod")
+                            and getattr(type(self), "_r189_mod", None) is not None
                             and not getattr(type(self), "_r189_v3_probed", False)
                         ):
                             type(self)._r189_v3_probed = True
