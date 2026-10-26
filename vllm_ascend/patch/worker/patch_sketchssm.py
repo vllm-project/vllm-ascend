@@ -40,7 +40,9 @@ def _apply() -> None:
     """Rebind the core SketchSSM layer, or no-op when #61124 is absent."""
     try:
         from vllm.model_executor.layers.mamba import mamba_mixer2
-        from vllm.model_executor.layers.mamba.sketchssm import calibration  # noqa: F401
+        from vllm.model_executor.layers.mamba.sketchssm import (  # type: ignore[import-not-found]  # noqa: F401
+            calibration,
+        )
     except ImportError:
         logger.info_once(
             "vllm.model_executor.layers.mamba.sketchssm is not available in this "

@@ -61,13 +61,13 @@ def sketch_read(s: torch.Tensor, q: torch.Tensor, m: int) -> torch.Tensor:
 def stored_read(sketch: sk.SketchArgs, meta: int, h: int, q: torch.Tensor):
     """Read of head ``h`` with ``q`` from the stored sketch row ``meta``."""
     t, m = sketch.tables, RANKS[h]
-    U = sketch.u[meta, int(t.u_offsets[h]):].cpu().double()
+    U = sketch.u[meta, int(t.u_offsets[h]) :].cpu().double()
     if m == 0:
         return U[:N].T @ q
     w_off, ag_off = int(t.w_offsets[h]), int(t.ag_offsets[h])
-    coeff = sketch.w[meta, w_off: w_off + min(m, sk.SKETCH_PIVOTS)].cpu().double() @ q
+    coeff = sketch.w[meta, w_off : w_off + min(m, sk.SKETCH_PIVOTS)].cpu().double() @ q
     if m > sk.SKETCH_PIVOTS:
-        ag = sketch.ag[meta, :, ag_off: ag_off + m].cpu().double()
+        ag = sketch.ag[meta, :, ag_off : ag_off + m].cpu().double()
         coeff = ag[0] * q[:m] + (ag[1:] * coeff[:, None]).sum(0)
     return U[:m].T @ coeff
 
@@ -131,16 +131,13 @@ class Layer:
         assert torch.equal(self.state[NULL].cpu().double(), s0[NULL])
         for row, slot in enumerate(self.slots.tolist()[:-1]):
             p, r = int(pos[row]), H // G
-            dt_cur = F.softplus(
-                dt[row].cpu().float() + self.dt_bias.cpu().float())[:, None]
+            dt_cur = F.softplus(dt[row].cpu().float() + self.dt_bias.cpu().float())[:, None]
             dts = torch.cat([self.dt_cache[slot, :, :p].cpu(), dt_cur], 1).double()
             cs, a = dts.cumsum(1), self.A.cpu().double()[:, None]
             w = dts * torch.exp(a * (cs[:, -1:] - cs))
             decay = torch.exp(a * cs[:, -1:])
-            xs = torch.cat([self.x_cache[slot, :, :p].cpu(),
-                            x[row, :, None].cpu()], 1).double()
-            ks = torch.cat([self.B_cache[slot, :, :p].cpu(),
-                            B[row, :, None].cpu()], 1).double()
+            xs = torch.cat([self.x_cache[slot, :, :p].cpu(), x[row, :, None].cpu()], 1).double()
+            ks = torch.cat([self.B_cache[slot, :, :p].cpu(), B[row, :, None].cpu()], 1).double()
             ks = torch.einsum("gtn,gnk->gtk", ks, self.rot)
             q = (C[row].cpu().double()[:, None] @ self.rot)[:, 0]
             ks, q = ks.repeat_interleave(r, 0), q.repeat_interleave(r, 0)
@@ -166,16 +163,14 @@ class Layer:
                 roundoff = (rounded - want).abs().amax(1) / want.abs().amax(1)
                 assert (err < roundoff + 5e-3).all(), (row, p, err, roundoff)
                 # ... which holds the four-pivot read up to BF16 storage.
-                read = [sketch_read(s0[slot, h], q[h], m)
-                        for h, m in enumerate(RANKS)]
+                read = [sketch_read(s0[slot, h], q[h], m) for h, m in enumerate(RANKS)]
                 want = decay * torch.stack(read) + ring + skip
                 # H=96/P=80 NPU approximation gate; upstream also uses random
                 # orthogonal frames, with H=32/P=32 and a 5% CUDA gate.
                 tol = [2e-2 if m == 0 else 1e-1 for m in RANKS]
                 assert torch.equal(self.state[slot].cpu().double(), s0[slot])
             err = (got[row] - want).abs().amax(1) / want.abs().amax(1)
-            assert torch.isfinite(err).all(), (
-                row, p, torch.nonzero(~torch.isfinite(err)).flatten())
+            assert torch.isfinite(err).all(), (row, p, torch.nonzero(~torch.isfinite(err)).flatten())
             bad = err >= torch.tensor(tol)
             assert not bad.any(), (row, p, err[bad])
 
@@ -206,14 +201,10 @@ def test_sketchssm_rotate_states_npu():
     """Prefill states rotate into the cache frame and back."""
     g = torch.Generator().manual_seed(0)
     states = torch.randn(3, H, P, N, generator=g).npu()
-    frames_t = torch.linalg.qr(torch.randn(G, N, N, generator=g))[0] \
-        .contiguous().npu()
+    frames_t = torch.linalg.qr(torch.randn(G, N, N, generator=g))[0].contiguous().npu()
     rotated = sk.sketch_rotate_states(states, frames_t)
-    want = states.cpu().double().unflatten(1, (G, -1)) \
-        @ frames_t.cpu().double()[None, :, None]
-    torch.testing.assert_close(
-        rotated.cpu(), want.flatten(1, 2).float(), rtol=1e-5, atol=1e-5
-    )
+    want = states.cpu().double().unflatten(1, (G, -1)) @ frames_t.cpu().double()[None, :, None]
+    torch.testing.assert_close(rotated.cpu(), want.flatten(1, 2).float(), rtol=1e-5, atol=1e-5)
     # The cache's initial states arrive as a key-major (transposed) view.
     key_major = rotated.transpose(-1, -2).contiguous().transpose(-1, -2)
     back = sk.sketch_rotate_states(key_major, frames_t, inverse=True)

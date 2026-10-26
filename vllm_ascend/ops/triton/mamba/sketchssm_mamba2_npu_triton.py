@@ -12,7 +12,6 @@ window keys R·B_t into the rotated state.
 import os
 
 import torch
-
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import softplus
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -48,17 +47,13 @@ def _window(
 ):
     # Window weights s_t = dt_t exp(A (sum dt - cumsum dt)_t).
     offs_k = tl.arange(0, BLOCK_K)
-    dt_all = tl.load(
-        dt_cache_ptr + offs_k * stride_dt_cache_pos, mask=offs_k < wp, other=0.0
-    ).to(tl.float32)
+    dt_all = tl.load(dt_cache_ptr + offs_k * stride_dt_cache_pos, mask=offs_k < wp, other=0.0).to(tl.float32)
     dt_all = tl.where(offs_k == wp, dt_cur, dt_all)
     total = A * tl.sum(dt_all, axis=0)
     scale = dt_all * tl.exp(total - A * tl.cumsum(dt_all, axis=0))
     scale = tl.where(offs_k <= wp, scale, 0.0)
     x_all = tl.load(
-        x_cache_ptr
-        + offs_m[:, None] * stride_x_cache_dim
-        + offs_k[None, :] * stride_x_cache_pos,
+        x_cache_ptr + offs_m[:, None] * stride_x_cache_dim + offs_k[None, :] * stride_x_cache_pos,
         mask=(offs_m[:, None] < dim) & (offs_k[None, :] < wp),
         other=0.0,
     )
@@ -197,7 +192,9 @@ def _sketch_decode_kernel(
             offs_j = j0 + tl.arange(0, BLOCK_J)
             jmask = offs_j < dstate
             q_j = tl.load(
-                C_ptr + offs_j * stride_C_dstate, mask=jmask, other=0.0,
+                C_ptr + offs_j * stride_C_dstate,
+                mask=jmask,
+                other=0.0,
             ).to(tl.float32)
             u_tile = tl.load(
                 u_base + offs_j[:, None] * dim + offs_m[None, :],
@@ -227,7 +224,9 @@ def _sketch_decode_kernel(
             offs_j = tl.arange(0, 2 * _PIVOTS)
             jmask = offs_j < m
             q_j = tl.load(
-                C_ptr + offs_j * stride_C_dstate, mask=jmask, other=0.0,
+                C_ptr + offs_j * stride_C_dstate,
+                mask=jmask,
+                other=0.0,
             ).to(tl.float32)
             a_j = tl.load(ag_base + offs_j, mask=jmask, other=0.0)
             g_j = tl.load(
@@ -247,7 +246,9 @@ def _sketch_decode_kernel(
                 offs_j = j0 + tl.arange(0, BLOCK_J)
                 jmask = offs_j < m
                 q_j = tl.load(
-                    C_ptr + offs_j * stride_C_dstate, mask=jmask, other=0.0,
+                    C_ptr + offs_j * stride_C_dstate,
+                    mask=jmask,
+                    other=0.0,
                 ).to(tl.float32)
                 a_j = tl.load(ag_base + offs_j, mask=jmask, other=0.0)
                 g_j = tl.load(
@@ -534,13 +535,13 @@ def sketch_triton_decode(
         )  # fmt: skip
         if not os.environ.get("SKETCHSSM_DEBUG_SKIP_FLUSH_BUILD"):
             sketch_build(
-            state,
-            is_flush,
-            slots,
-            meta,
-            sketch,
-            null_block_id,
-        )
+                state,
+                is_flush,
+                slots,
+                meta,
+                sketch,
+                null_block_id,
+            )
 
     if has_flush_rows and not os.environ.get("SKETCHSSM_DEBUG_DISABLE_FLUSH"):
         if os.environ.get("SKETCHSSM_DEBUG_FLUSH_SYNC"):

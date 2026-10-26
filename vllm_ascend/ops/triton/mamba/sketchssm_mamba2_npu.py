@@ -17,7 +17,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
-
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -36,9 +35,7 @@ def sketch_rows(ranks: torch.Tensor, state_size: int) -> tuple[int, int, int]:
     )
 
 
-def sketch_shapes(
-    ranks: torch.Tensor, head_dim: int, state_size: int
-) -> tuple[tuple[int, ...], ...]:
+def sketch_shapes(ranks: torch.Tensor, head_dim: int, state_size: int) -> tuple[tuple[int, ...], ...]:
     """Per-request ``(u, w, ag)`` shapes of one layer."""
     u_rows, w_rows, ag_cols = (max(n, 1) for n in sketch_rows(ranks, state_size))
     return (
@@ -69,9 +66,7 @@ class SketchTables(torch.nn.Module):
         }
         device = torch.get_default_device()
         for name, value in tables.items():
-            self.register_buffer(
-                name, value.to(torch.int32).to(device), persistent=False
-            )
+            self.register_buffer(name, value.to(torch.int32).to(device), persistent=False)
 
 
 @triton.jit(do_not_specialize=["T"])
@@ -120,9 +115,7 @@ def _rotate_groups_kernel(
         offs_c = tl.program_id(2) * BLOCK_C + tl.arange(0, BLOCK_C)
     mask = offs_t[:, None] < num_tokens
     cols = pid_g * N + offs_n[None, :]
-    x = tl.load(
-        x_ptr + offs_t[:, None] * stride_x_token + cols * stride_x_elem, mask, 0.0
-    )
+    x = tl.load(x_ptr + offs_t[:, None] * stride_x_token + cols * stride_x_elem, mask, 0.0)
     r = tl.load(frames_t_ptr + pid_g * N * N + offs_n[:, None] * N + offs_c[None, :])
     y = tl.dot(x.to(tl.float32), r, input_precision="ieee")
     cols = pid_g * N + offs_c[None, :]
@@ -158,9 +151,7 @@ def _rotate(B, C, frames_t, B_out, C_out):
         )  # fmt: skip
 
 
-def sketch_rotate(
-    B: torch.Tensor, C: torch.Tensor, frames_t: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def sketch_rotate(B: torch.Tensor, C: torch.Tensor, frames_t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """FP32 copies of grouped B and C rotated by the transposed ``frames_t``."""
     BC = torch.empty(B.shape[0], 2 * B.shape[1], dtype=torch.float32, device=B.device)
     B_out, C_out = BC.split(B.shape[1], dim=1)
@@ -218,19 +209,13 @@ def _rotate_states_kernel(
         r = tl.load(frame + offs_n[:, None] * N + offs_c[None, :])
     y = tl.dot(x, r, input_precision="ieee")
     tl.store(
-        y_ptr
-        + item * stride_y_item
-        + head * stride_y_head
-        + offs_p[:, None] * stride_y_dim
-        + offs_c[None, :],
+        y_ptr + item * stride_y_item + head * stride_y_head + offs_p[:, None] * stride_y_dim + offs_c[None, :],
         y,
         mask=mask,
     )
 
 
-def sketch_rotate_states(
-    states: torch.Tensor, frames_t: torch.Tensor, inverse: bool = False
-) -> torch.Tensor:
+def sketch_rotate_states(states: torch.Tensor, frames_t: torch.Tensor, inverse: bool = False) -> torch.Tensor:
     """States ``(items, heads, dim, N)`` FP32 in the rotated frame, ``S R^T``
     (``S R`` back to the model frame if ``inverse``).
 
@@ -311,18 +296,18 @@ def _window_keys_rows_kernel(
                   + pid_g * stride_B_group + on)  # fmt: skip
     for t0 in tl.static_range(0, W, BLOCK_T):
         if t0 <= wp:
-            ot = t0 + tl.arange(0, BLOCK_T)
+            offs_t = t0 + tl.arange(0, BLOCK_T)
             keys = tl.load(
-                ring + ot[:, None] * stride_B_cache_pos + on[None, :],
-                mask=ot[:, None] < wp,
+                ring + offs_t[:, None] * stride_B_cache_pos + on[None, :],
+                mask=offs_t[:, None] < wp,
                 other=0.0,
             )
-            keys = tl.where(ot[:, None] == wp, cur[None, :], keys)
+            keys = tl.where(offs_t[:, None] == wp, cur[None, :], keys)
             y = tl.dot(keys.to(tl.float32), r, input_precision="ieee")
             tl.store(
-                dst + ot[:, None] * stride_out_pos + oc[None, :],
+                dst + offs_t[:, None] * stride_out_pos + oc[None, :],
                 y,
-                mask=ot[:, None] <= wp,
+                mask=offs_t[:, None] <= wp,
             )
 
 
@@ -355,9 +340,7 @@ def sketch_window_keys(
 def sketch_window_scratch(B: torch.Tensor, B_cache: torch.Tensor) -> torch.Tensor:
     """Per-step scratch of ``sketch_window_keys``: ``(batch, groups, W, N)``."""
     batch, groups, n = B.shape
-    return torch.empty(
-        batch, groups, B_cache.shape[2], n, dtype=torch.float32, device=B.device
-    )
+    return torch.empty(batch, groups, B_cache.shape[2], n, dtype=torch.float32, device=B.device)
 
 
 @triton.jit
@@ -465,9 +448,7 @@ def _sketch_head(
         u1 = tl.load(base + pv * SV + SK, pv < V, 0.0).to(tl.float32)
         u2 = tl.load(base + pv * SV + 2 * SK, pv < V, 0.0).to(tl.float32)
         u3 = tl.load(base + pv * SV + 3 * SK, pv < V, 0.0).to(tl.float32)
-        n0, p10, p11, n1, p20, p21, p22, p23, n2, p30, p31, p32, p33, p34, p35, n3 = (
-            _pivot_scalars(u0, u1, u2, u3, m)
-        )
+        n0, p10, p11, n1, p20, p21, p22, p23, n2, p30, p31, p32, p33, p34, p35, n3 = _pivot_scalars(u0, u1, u2, u3, m)
         energy = tl.full((K,), 0.0, tl.float32)
         cross = tl.full((K,), 0.0, tl.float32)
         z1 = tl.full((K,), 0.0, tl.float32)
@@ -476,9 +457,7 @@ def _sketch_head(
         for c in tl.static_range(0, V, BLOCK_V):
             vc = c + tl.arange(0, BLOCK_V)
             vmask = vc < V
-            s = tl.load(
-                base + vc[:, None] * SV + j[None, :] * SK, vmask[:, None], 0.0
-            ).to(tl.float32)
+            s = tl.load(base + vc[:, None] * SV + j[None, :] * SK, vmask[:, None], 0.0).to(tl.float32)
             tl.store(
                 urow + vc[:, None],
                 s.to(u.dtype.element_ty),
@@ -503,11 +482,7 @@ def _sketch_head(
         safe_mean = tl.where(mean > 0.0, mean, 1.0)
         pivot_energy = tl.sum(tl.where(j == 0, energy, 0.0))
         e = energy / safe_mean
-        z0 = (
-            cross
-            / tl.sqrt(tl.where(pivot_energy > 0.0, pivot_energy, 1.0))
-            / tl.sqrt(safe_mean)
-        )
+        z0 = cross / tl.sqrt(tl.where(pivot_energy > 0.0, pivot_energy, 1.0)) / tl.sqrt(safe_mean)
         z0 = tl.where(pivot_energy > 0.0, z0, 0.0)
         z1 = z1 / tl.sqrt(safe_mean)
         z2 = z2 / tl.sqrt(safe_mean)
@@ -544,9 +519,7 @@ def _sketch_head(
                     l3_0 = (tl.sum(z3 * b0)) / l0_0
                     l3_1 = (tl.sum(z3 * b1) - l3_0 * l1_0) / l1_1
                     l3_2 = (tl.sum(z3 * b2) - l3_0 * l2_0 - l3_1 * l2_1) / l2_2
-                    l3_3 = tl.sqrt(
-                        1.0 + tl.sum(z3 * b3) - l3_0 * l3_0 - l3_1 * l3_1 - l3_2 * l3_2
-                    )
+                    l3_3 = tl.sqrt(1.0 + tl.sum(z3 * b3) - l3_0 * l3_0 - l3_1 * l3_1 - l3_2 * l3_2)
                     y3 = (b3 - l3_0 * y0 - l3_1 * y1 - l3_2 * y2) / l3_3
                     g3 = (y3) / l3_3
                     g2 = (y2 - l3_2 * g3) / l2_2
