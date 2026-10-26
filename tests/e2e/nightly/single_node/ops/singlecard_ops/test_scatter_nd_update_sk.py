@@ -164,6 +164,31 @@ def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize("var_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("count", [19, 128, 4096])
+@torch.inference_mode()
+def test_scatter_nd_update_sk_a5_simd_sort_initialization(var_dtype, count):
+    if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+        pytest.skip("Requires the A5 arch35 tiling path")
+
+    # Width 128 enters SIMD tiling. The old shape phase divided by the still-zero
+    # core count before GetPlatformInfo(), even for unique or small index batches.
+    rows, width = 77, 128
+    indices_cpu = torch.arange(count, dtype=torch.int32).remainder(rows).view(-1, 1)
+    updates_cpu = (
+        indices_cpu.to(torch.int64).remainder(16) * 32 + torch.arange(width, dtype=torch.int64).remainder(16)
+    ).to(var_dtype)
+    var_cpu = torch.full((rows, width), -1, dtype=var_dtype)
+    expected = scatter_nd_update_golden(var_cpu, indices_cpu, updates_cpu)
+    var_npu = var_cpu.npu()
+
+    # Repeated target rows have identical values, so both sort decisions have
+    # an unambiguous reference. Cover small batches and a sort-eligible batch.
+    torch.ops._C_ascend.npu_scatter_nd_update_sk(var_npu, indices_cpu.npu(), updates_cpu.npu())
+    torch.npu.synchronize()
+    assert torch.equal(var_npu.cpu(), expected)
+
+
 @pytest.mark.parametrize(
     "dtype", [torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn, torch.float8_e5m2]
 )
