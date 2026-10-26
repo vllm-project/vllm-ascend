@@ -264,10 +264,14 @@ class StairConfig:
 class AscendWarmupConfig:
     """Configuration for startup warmup that overlaps weight loading.
 
-    Both threads are joined at the end of ``load_model``, before memory
-    profiling, so they never touch the KV cache budget.
+    The early warmup threads are joined at the end of ``load_model``, before
+    memory profiling, so they never touch the KV cache budget.
     """
 
+    # Deprecated no-op: Triton kernels now register into the upstream
+    # JitWarmupRegistry and compile in ``kernel_warmup`` (see
+    # vllm_ascend/model_executor/warmup/kernel_warmup.py). Kept so existing
+    # additional_config JSON keeps parsing.
     enable_early_kernel_warmup: bool = False
     enable_early_nz_warmup: bool = False
 
