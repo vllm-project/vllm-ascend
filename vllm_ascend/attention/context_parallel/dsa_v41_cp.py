@@ -387,6 +387,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             if num_actual_reqs is not None:
                 kwargs["num_actual_reqs"] = num_actual_reqs
             return super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        assert pcp_context is not None
         assert pcp_cache_group_idx is not None
 
         # Use the global batch so all ranks choose the same prefill/decode path.

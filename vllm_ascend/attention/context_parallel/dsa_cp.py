@@ -2493,6 +2493,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 full_graph_mode=full_graph_mode,
                 **kwargs,
             )
+        assert pcp_context is not None
         assert pcp_cache_group_idx is not None
         has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
         # Replicated decode stays on the local metadata path. Sharded decode
