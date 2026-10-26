@@ -693,12 +693,11 @@ def _select_seq_lens(
 ) -> torch.Tensor:
     """Choose the seq_lens tensor carried by the built attention metadata.
 
-    Defaults to the CPU mirror. Cross-attention and parallel drafting use
-    device lengths, except for the existing MRV1 GLM DSpark CPU-mirror path.
-    MRV2's CPU mirror can contain an optimistic bound after rejection, so it
-    cannot replace current device lengths. The generic builder's conversion
-    to a native length list then synchronizes; a certified Window read pair
-    can reuse the exact CPU lengths it already owns.
+    Without a Window read certificate, preserve the baseline choice,
+    including the GLM DSpark CPU mirror in both runners. An enabled Window
+    supplies its current exact read pair before the builder, or uses the
+    dedicated device-exact consumer. Its continuing-prompt Full read also
+    carries a certificate; the baseline CPU mirror is never that certificate.
     """
     # Prefer _seq_lens_cpu (always available, updated during draft
     # iterations) over seq_lens_cpu (None in async spec decode mode).
@@ -720,14 +719,9 @@ def _select_seq_lens(
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
     if speculative_config is not None and speculative_config.parallel_drafting:
-        # Preserve the MRV1 optimization, whose CPU-mirror contract does not
-        # hold for MRV2's rejection-adjusted preparation.
-        legacy_glm_dspark = (
-            speculative_config.use_dspark()
-            and _is_glm_model(model_config)
-            and not getattr(vllm_config, "use_v2_model_runner", False)
-        )
-        if not legacy_glm_dspark:
+        # Keep the official OFF behavior. Window read certificates above
+        # are scoped to their prepared table/length pair, not a global flag.
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
 

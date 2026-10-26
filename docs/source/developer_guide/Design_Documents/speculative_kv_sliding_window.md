@@ -167,12 +167,17 @@ window proposal owns the metadata.
 
 ### Actual consumers and parallel execution
 
-MRV2 parallel drafting consumes the current device sequence lengths even
-with Window disabled. Its common CPU mirror can be an optimistic upper bound
-after rejection and must not supply native attention's KV lengths. The GLM
-DSpark CPU-mirror optimization is retained only for MRV1. A certified Window
-read pair can reuse its own current exact CPU snapshot; generic native-list
-consumers still synchronize when converting current device lengths.
+Window OFF and forced-OFF preserve the fixed official length selection,
+including the GLM DSpark CPU-mirror choice in both runners. The known public
+MRV2 length issue is outside this Window PR's repair scope; compatibility
+does not establish that the official choice is exact after rejection.
+
+Effective Window ON uses its current device-exact consumer or a certified
+CPU/device read pair. Continuing-prompt Full reads retain their exact producer
+and certificate; an optimistic CPU bound never authorizes a Window read.
+Generic native-list consumers can still synchronize when converting current
+device lengths. The existing ordinary MLA preparation's exact snapshot and
+Target CP adaptation are unchanged.
 
 Backend selection uses the actual backend, builder, spec, and layer names,
 not the target model's architecture. For example, a DSA target can use a dense

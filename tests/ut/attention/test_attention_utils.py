@@ -170,7 +170,7 @@ def test_select_seq_lens_cross_attention_uses_npu_seq_lens() -> None:
 
 @pytest.mark.parametrize("model_type", ["glm5_next", "glm_moe_dsa"])
 @pytest.mark.parametrize(("exact", "upper"), [(45, 48), (1151, 1152)])
-def test_select_seq_lens_mrv2_dspark_rejection_uses_current_exact(model_type: str, exact: int, upper: int) -> None:
+def test_select_seq_lens_mrv2_dspark_off_preserves_baseline_choice(model_type: str, exact: int, upper: int) -> None:
     common = _common_attn_metadata()
     common.num_reqs = 1
     common.seq_lens = torch.tensor([exact], dtype=torch.int32)
@@ -180,10 +180,12 @@ def test_select_seq_lens_mrv2_dspark_rejection_uses_current_exact(model_type: st
 
     selected = _select_seq_lens(common, None, _spec_config("dspark", True), config)
 
-    # MRV2's CPU mirror is an optimistic bound after rejection. Native
-    # attention must consume the current preparation's exact device length.
-    assert selected is common.seq_lens
-    assert selected.tolist() == [exact]
+    # Q015 scopes the public length correction out of the Window PR. OFF
+    # preserves the official choice, even when that CPU mirror is optimistic.
+    # ON exact correctness is separately covered through certified read views.
+    assert selected.data_ptr() == common._seq_lens_cpu.data_ptr()
+    assert selected.tolist() == [upper]
+    assert not hasattr(common, "_draft_window_read")
 
 
 def test_get_or_register_attention_buffer() -> None:

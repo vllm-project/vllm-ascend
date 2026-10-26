@@ -218,6 +218,46 @@ class TestCanonicalRead(unittest.TestCase):
         self.assertIs(self.select_parallel_lengths(common), common.seq_lens)
         self.assertFalse(hasattr(common, "_draft_window_read"))
 
+    def test_glm_dspark_off_retains_official_cpu_choice_without_copy(self):
+        selector = self.sequence_length_selector()
+        selector.__globals__["_is_glm_model"] = lambda config: True
+        for use_v2 in (False, True):
+            with self.subTest(use_v2=use_v2):
+                common = SimpleNamespace(
+                    num_reqs=1,
+                    seq_lens=torch.tensor([1151], dtype=torch.int32),
+                    _seq_lens_cpu=torch.tensor([1152], dtype=torch.int32),
+                    seq_lens_cpu=None,
+                )
+                with patch.object(torch.Tensor, "to", side_effect=AssertionError("OFF must not add an exact copy")):
+                    selected = selector(
+                        common,
+                        None,
+                        SimpleNamespace(parallel_drafting=True, use_dspark=lambda: True),
+                        SimpleNamespace(model_config=object(), use_v2_model_runner=use_v2),
+                    )
+                self.assertEqual(selected.data_ptr(), common._seq_lens_cpu.data_ptr())
+                self.assertEqual(selected.tolist(), [1152])
+                self.assertFalse(hasattr(common, "_draft_window_read"))
+
+    def test_glm_dspark_on_full_and_window_reads_keep_certified_exact(self):
+        selector = self.sequence_length_selector()
+        selector.__globals__["_is_glm_model"] = lambda config: True
+        for starts in ((0, 4), (12, 4)):
+            with self.subTest(starts=starts):
+                view = self.read(starts=starts)
+                common = SimpleNamespace(num_reqs=2)
+                view.apply(common)
+                selected = selector(
+                    common,
+                    None,
+                    SimpleNamespace(parallel_drafting=True, use_dspark=lambda: True),
+                    SimpleNamespace(model_config=object(), use_v2_model_runner=True),
+                )
+                self.assertEqual(selected.data_ptr(), view.seq_lens_cpu.data_ptr())
+                self.assertEqual(selected.tolist(), [21 - starts[0], 7])
+                self.assertNotEqual(selected.tolist(), view.seq_lens_cpu_upper_bound[:2].tolist())
+
     def test_replacing_a_window_read_operand_invalidates_its_cpu_certificate(self):
         for field in ("seq_lens", "_seq_lens_cpu", "seq_lens_cpu", "block_table_tensor"):
             with self.subTest(field=field):
