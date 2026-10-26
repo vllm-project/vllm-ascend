@@ -1,0 +1,8 @@
+pr: 19826
+entries:
+  - category: bugfix
+    text: >-
+      Fixed NPU selection in Mooncake layerwise, SFA Remote D2H, and Yuanrong
+      background threads when using --device-ids. Fixed overlapping CPU cache
+      partitions in non-replicated native tiering offload with non-contiguous
+      or reordered device IDs.
