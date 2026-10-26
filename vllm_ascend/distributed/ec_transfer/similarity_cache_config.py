@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from vllm_ascend.distributed.ec_transfer.phash import PHASH_NUM_BANDS
 from vllm_ascend.distributed.ec_transfer.ssim import DEFAULT_DATA_RANGE
 
 if TYPE_CHECKING:
@@ -29,10 +30,18 @@ class SimilarityCacheConfig:
 
     enabled: bool = False
     matcher: str = "phash_ssim"
-    max_hamming: int = 5
+    max_hamming: int = PHASH_NUM_BANDS - 1
     ssim_threshold: float = 0.99
     ssim_data_range: float = DEFAULT_DATA_RANGE
     resized_image_recv_buffer_size: int = DEFAULT_RESIZED_IMAGE_RECV_BUFFER_SIZE
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_hamming, bool) or not isinstance(self.max_hamming, int):
+            raise ValueError("similarity_cache.max_hamming must be an integer")
+        if not 0 <= self.max_hamming < PHASH_NUM_BANDS:
+            raise ValueError(
+                f"similarity_cache.max_hamming must be between 0 and {PHASH_NUM_BANDS - 1}"
+            )
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "SimilarityCacheConfig":
@@ -56,11 +65,7 @@ class SimilarityCacheConfig:
                 f"{sorted(_SUPPORTED_MATCHERS)}, got {matcher!r}"
             )
 
-        max_hamming = raw.get("max_hamming", 5)
-        if isinstance(max_hamming, bool) or not isinstance(max_hamming, int):
-            raise ValueError("similarity_cache.max_hamming must be an integer")
-        if not 0 <= max_hamming < 8:
-            raise ValueError("similarity_cache.max_hamming must be between 0 and 7")
+        max_hamming = raw.get("max_hamming", PHASH_NUM_BANDS - 1)
 
         ssim_threshold = raw.get("ssim_threshold", 0.99)
         if isinstance(ssim_threshold, bool) or not isinstance(ssim_threshold, (int, float)):

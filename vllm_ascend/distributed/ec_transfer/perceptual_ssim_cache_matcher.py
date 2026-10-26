@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm_ascend.distributed.ec_transfer.memcache_resized_tensor_store import (
     MemcacheResizedTensorStore,
 )
-from vllm_ascend.distributed.ec_transfer.phash import compute_phash, hamming
+from vllm_ascend.distributed.ec_transfer.phash import bands, compute_phash, hamming
 from vllm_ascend.distributed.ec_transfer.similarity_cache_config import (
     SimilarityCacheConfig,
     _MAX_SIMILARITY_COMPUTE_WORKERS,
@@ -69,8 +69,8 @@ class PhashSSIMCacheMatcher:
         # Vision patch merge factor used when converting resized patch tensors
         # into the gray planes consumed by pHash and SSIM.
         self._merge_size = merge_size
-        # Reuse CPU workers across pHash recall and SSIM scoring. The two
-        # phases are awaited sequentially, so one pool avoids idle duplicates.
+        # Pixel tensors and grids are CPU inputs; reuse workers across
+        # preprocessing batches independently of NPU encoder embeddings.
         self._similarity_compute_executor = ThreadPoolExecutor(
             max_workers=_MAX_SIMILARITY_COMPUTE_WORKERS,
             thread_name_prefix="ec-similarity-compute",
@@ -83,8 +83,11 @@ class PhashSSIMCacheMatcher:
         # key carries the original mm_hash and the per-image grid, so recalled
         # tensors no longer require a separate metadata map.
         self.phash_to_resized_mm_hashes: dict[int, list[str]] = {}
-        # Protects matcher-lifetime similarity state shared by pHash worker
-        # threads, including similarity_cache and phash_to_resized_mm_hashes.
+        # Configured equal-width bands recall pHashes without scanning the reverse
+        # map. Exact-only matching leaves this index empty for its lifetime.
+        self._phash_band_index: dict[tuple[int, int], set[int]] = {}
+        # Protect all matcher-lifetime similarity state, including the band
+        # index, because pHash workers publish these mappings together.
         self._similarity_state_lock = Lock()
         # Persistence adapter for model-, shape-, and dtype-specific resized
         # tensor keys.
@@ -118,10 +121,22 @@ class PhashSSIMCacheMatcher:
     ) -> list[str] | None:
         candidate_mm_hashes_by_hamming: list[str] = []
         with self._similarity_state_lock:
-            phash_items = list(self.phash_to_resized_mm_hashes.items())
-        for candidate_phash, candidate_mm_hashes in sorted(phash_items):
-            if hamming(query_phash, candidate_phash) <= self._config.max_hamming:
-                candidate_mm_hashes_by_hamming.extend(candidate_mm_hashes)
+            if self._config.max_hamming == 0:
+                resized_keys = self.phash_to_resized_mm_hashes.get(query_phash)
+                return list(resized_keys) if resized_keys else None
+
+            candidate_phashes: set[int] = set()
+            for band in bands(query_phash):
+                candidate_phashes.update(self._phash_band_index.get(band, ()))
+            # Fewer differing bits than bands leave at least one band unchanged.
+            # Full Hamming distance removes shared-band false hits.
+            matched_phashes = (
+                candidate_phash
+                for candidate_phash in candidate_phashes
+                if hamming(query_phash, candidate_phash) <= self._config.max_hamming
+            )
+            for candidate_phash in sorted(matched_phashes):
+                candidate_mm_hashes_by_hamming.extend(self.phash_to_resized_mm_hashes[candidate_phash])
         return candidate_mm_hashes_by_hamming or None
 
     def find_and_cache_matched_ssim(
@@ -156,15 +171,17 @@ class PhashSSIMCacheMatcher:
         self._record_similarity_score(mm_hash, ssim_score_list)
         qualified_match = ssim_score_list[0]
         score, candidate_mm_hash = qualified_match
-        if score >= self._config.ssim_threshold:
-            logger.debug(
-                "EC similarity match success: current=%s candidate=%s ssim=%.6f",
-                mm_hash,
-                candidate_mm_hash,
-                score,
-            )
-            return candidate_mm_hash
-        return None
+        # A completed batch may contain only low scores. Hash equality is
+        # still only recall; reject equality with the threshold and NaN too.
+        if not score > self._config.ssim_threshold:
+            return None
+        logger.debug(
+            "EC similarity match success: current=%s candidate=%s ssim=%.6f",
+            mm_hash,
+            candidate_mm_hash,
+            score,
+        )
+        return candidate_mm_hash
 
     def batch_ensure_similarity_cache_available(
         self,
@@ -186,9 +203,7 @@ class PhashSSIMCacheMatcher:
             phash_match_failed_mm_hash_list,
         ) = self._classify_similarity_cache_entries(exact_match_missing_mm_hashes)
 
-        mm_hash_to_feature_map = dict(
-            zip(exact_match_missing_mm_hashes, exact_match_missing_features)
-        )
+        mm_hash_to_feature_map = dict(zip(exact_match_missing_mm_hashes, exact_match_missing_features))
         # Phash match failed, calculate phash and save to memcache and cache
         if phash_match_failed_mm_hash_list:
             self._compute_and_store_missing_phashes(
@@ -202,32 +217,24 @@ class PhashSSIMCacheMatcher:
             (
                 hamming_not_match_mm_hashes,
                 candidate_resized_keys_by_hamming,
-            ) = self._collect_candidate_resized_mm_hashes_by_hamming(
-                mm_hash_to_phash_list
-            )
+            ) = self._collect_candidate_resized_mm_hashes_by_hamming(mm_hash_to_phash_list)
             prewarm_keys.extend(dict.fromkeys(candidate_resized_keys_by_hamming))
             prewarm_keys.extend(
                 dict.fromkeys(
                     candidate_mm_hash
                     for resized_key in candidate_resized_keys_by_hamming
-                    if (
-                        candidate_mm_hash
-                        := self._tensor_store.get_mm_hash_from_resized_key(
-                            resized_key
-                        )
-                    )
-                    is not None
+                    if (candidate_mm_hash := self._tensor_store.get_mm_hash_from_resized_key(resized_key)) is not None
                 )
             )
             if hamming_not_match_mm_hashes:
-                logger.debug("EC similarity batch not prewarm for they are not exist: hamming_not_match_mm_hashes=%r",
-                             hamming_not_match_mm_hashes)
+                logger.debug(
+                    "EC similarity batch not prewarm for they are not exist: hamming_not_match_mm_hashes=%r",
+                    hamming_not_match_mm_hashes,
+                )
 
         if prewarm_keys:
             self._backend.exists(prewarm_keys)
         logger.debug("EC similarity batch prewarm: ssim_hits=%r prewarm_keys=%r", ssim_exist_mm_hash_list, prewarm_keys)
-
-
 
     def _classify_similarity_cache_entries(
         self,
@@ -270,7 +277,7 @@ class PhashSSIMCacheMatcher:
         mm_hash_to_feature: dict[str, Any],
     ) -> None:
         """Compute missing pHashes, then persist their resized pixel tensors."""
-        phash_match_failed_features = [mm_hash_to_feature[phash_match_failed_mm_hash].data for phash_match_failed_mm_hash in phash_match_failed_list]
+        phash_match_failed_features = [mm_hash_to_feature[mm_hash].data for mm_hash in phash_match_failed_list]
         if len(phash_match_failed_list) <= _PARALLEL_SIMILARITY_COMPUTE_THRESHOLD:
             logger.debug(
                 "EC missing pHash compute: size=%d mode=serial",
@@ -287,15 +294,19 @@ class PhashSSIMCacheMatcher:
                     _MAX_SIMILARITY_COMPUTE_WORKERS,
                 ),
             )
-            # Parallelized for CPU-bound pHash computation. Wrapped by list to make sure all task completed.
-            list(
-                self._similarity_compute_executor.map(
+            futures = [
+                self._similarity_compute_executor.submit(
                     self._compute_phash_and_save_resized_tensors,
-                    phash_match_failed_list,
-                    phash_match_failed_features,
+                    mm_hash,
+                    feature,
                 )
-            )
-
+                for mm_hash, feature in zip(phash_match_failed_list, phash_match_failed_features)
+            ]
+            # Drain every task before propagating a worker failure so no
+            # persistence or index writes outlive this prewarming call.
+            wait(futures)
+            for future in futures:
+                future.result()
 
     def _compute_phash_and_save_resized_tensors(
         self,
@@ -322,9 +333,13 @@ class PhashSSIMCacheMatcher:
             resized_tensor.dtype,
         )
         with self._similarity_state_lock:
-            candidate_resized_keys = self.phash_to_resized_mm_hashes.setdefault(
-                image_phash, []
-            )
+            candidate_resized_keys = self.phash_to_resized_mm_hashes.get(image_phash)
+            if candidate_resized_keys is None:
+                candidate_resized_keys = []
+                self.phash_to_resized_mm_hashes[image_phash] = candidate_resized_keys
+                if self._config.max_hamming > 0:
+                    for band in bands(image_phash):
+                        self._phash_band_index.setdefault(band, set()).add(image_phash)
             if resized_key not in candidate_resized_keys:
                 candidate_resized_keys.append(resized_key)
             self.similarity_cache.setdefault(
@@ -337,27 +352,20 @@ class PhashSSIMCacheMatcher:
     ) -> tuple[list[str], list[str]]:
         hamming_not_match_mm_hashes: list[str] = []
         candidate_resized_keys_by_hamming: list[str] = []
-        with self._similarity_state_lock:
-            phash_items = list(self.phash_to_resized_mm_hashes.items())
-        for mm_hash_to_phash_tuple in mm_hash_to_phash_list:
-            current_mm_hash, current_phash = mm_hash_to_phash_tuple
-            has_hamming_match = False
-            for candidate_phash, candidate_resized_keys in sorted(phash_items):
-                if hamming(current_phash, candidate_phash) <= self._config.max_hamming:
-                    candidate_resized_keys_by_hamming.extend(
-                        candidate_resized_keys
-                    )
-                    if candidate_resized_keys:
-                        has_hamming_match = True
-            if not has_hamming_match:
+        matches_by_phash: dict[int, list[str] | None] = {}
+        for current_mm_hash, current_phash in mm_hash_to_phash_list:
+            if current_phash not in matches_by_phash:
+                matches_by_phash[current_phash] = self.find_resized_mm_hashes_by_hamming(current_phash)
+            candidate_resized_keys = matches_by_phash[current_phash]
+            if candidate_resized_keys:
+                candidate_resized_keys_by_hamming.extend(candidate_resized_keys)
+            else:
                 hamming_not_match_mm_hashes.append(current_mm_hash)
         return hamming_not_match_mm_hashes, candidate_resized_keys_by_hamming
-
 
     def shutdown(self) -> None:
         self._similarity_compute_executor.shutdown(wait=True)
         self._tensor_store.shutdown()
-
 
     def _get_ssim_score_list(
         self,
@@ -383,14 +391,10 @@ class PhashSSIMCacheMatcher:
         )
         if not exist_keys:
             return []
-        regular_requests, oversized_requests = (
-            self._tensor_store.clarify_exist_requests(exist_keys, key_infos)
-        )
-        regular_requests_batches, oversized_requests_batches = (
-            self._tensor_store.build_request_batches(
-                regular_requests,
-                oversized_requests,
-            )
+        regular_requests, oversized_requests = self._tensor_store.clarify_exist_requests(exist_keys, key_infos)
+        regular_requests_batches, oversized_requests_batches = self._tensor_store.build_request_batches(
+            regular_requests,
+            oversized_requests,
         )
         calculated_scores: list[tuple[float, str]] = []
         if regular_requests_batches:
@@ -436,9 +440,7 @@ class PhashSSIMCacheMatcher:
             current_scores = dict(current_similarity.ssim_similar_items)
             for score, candidate_mm_hash in ssim_score_list:
                 current_scores[candidate_mm_hash] = score
-            current_similarity.ssim_similar_items = self._sort_ssim_similar_items(
-                current_scores
-            )
+            current_similarity.ssim_similar_items = self._sort_ssim_similar_items(current_scores)
 
             for score, candidate_mm_hash in ssim_score_list:
                 candidate_similarity = self.similarity_cache.get(candidate_mm_hash)
@@ -446,31 +448,28 @@ class PhashSSIMCacheMatcher:
                     continue
                 candidate_scores = dict(candidate_similarity.ssim_similar_items)
                 candidate_scores[mm_hash] = score
-                candidate_similarity.ssim_similar_items = (
-                    self._sort_ssim_similar_items(candidate_scores)
-                )
+                candidate_similarity.ssim_similar_items = self._sort_ssim_similar_items(candidate_scores)
 
     @staticmethod
     def _sort_ssim_similar_items(
         scores: dict[str, float],
     ) -> OrderedDict[str, float]:
-        return OrderedDict(
-            sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        )
+        return OrderedDict(sorted(scores.items(), key=lambda item: (-item[1], item[0])))
+
 
 def extract_resized_tensor(item: MultiModalKwargsItem) -> torch.Tensor | None:
-    for field in ("pixel_values", "pixel_values_videos"):
-        if field in item:
-            data = item[field].data
+    for field_name in ("pixel_values", "pixel_values_videos"):
+        if field_name in item:
+            data = item[field_name].data
             if isinstance(data, torch.Tensor):
                 return data
     return None
 
 
 def extract_image_grid(item: MultiModalKwargsItem) -> tuple[int, ...] | None:
-    for field in ("image_grid_thw", "video_grid_thw"):
-        if field in item:
-            data = item[field].data
+    for field_name in ("image_grid_thw", "video_grid_thw"):
+        if field_name in item:
+            data = item[field_name].data
             if isinstance(data, torch.Tensor) and data.numel() >= 3:
                 return tuple(int(x) for x in data.flatten()[:3].tolist())
     return None
