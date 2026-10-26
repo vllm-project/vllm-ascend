@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, Mamb
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
+    LayerBatchBuilder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -2245,6 +2246,94 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
         self.assertEqual(len(queried_keys), 1)
+
+    def test_save_range_clamps_to_allocated_blocks(self):
+        for offload in (False, True):
+            for start_token in (768, 12288):
+                with self.subTest(offload=offload, start_token=start_token):
+                    worker = self._make_gva_worker()
+                    worker.layerwise_offload = offload
+                    worker.hash_block_size = 768
+                    worker.grouped_block_size = [768]
+                    worker.m_store.batch_alloc.side_effect = lambda keys, *args: [201] * len(keys)
+                    request = ReqMeta(
+                        req_id="save-clamp",
+                        token_len_chunk=6144,
+                        target_token_len=12672,
+                        save_start_token=start_token,
+                        save_end_token=12288,
+                        can_save=True,
+                        block_ids=list(range(1, 9)),
+                        block_ids_by_group=[list(range(1, 9))],
+                        block_ids_by_group_np=[np.arange(1, 9, dtype=np.int64)],
+                        block_hashes=[b"h" + bytes([i]) for i in range(16)],
+                        partial_block_index=16,
+                    )
+                    worker._alloc_gvas_for_save([request])
+                    worker._process_save_for_layer_batch([request], 0)
+                    if start_token == 12288:
+                        worker.m_store.batch_alloc.assert_not_called()
+                        self.assertEqual(worker.layer_save_tasks[0], [])
+                    else:
+                        self.assertEqual(len(worker.m_store.batch_alloc.call_args.args[0]), 7)
+                        ranges = worker.layer_save_tasks[0][0].block_ranges
+                        self.assertEqual([(r.start_block, r.end_block) for r in ranges], [(1, 8)])
+                        self.assertTrue(all(r.partial_block_index is None for r in ranges))
+                        self.assertEqual(request.block_gvas_by_group_np[0].shape, (8,))
+                        database = SimpleNamespace(
+                            group_block_len={0: [64]},
+                            group_kv_caches_base_addr={0: [1024]},
+                            group_block_stride={0: [64]},
+                            group_layer_cache_entry_offsets={0: [0, 1]},
+                        )
+                        builder = LayerBatchBuilder(database, page_size_bytes=64, num_layers=1)
+                        task = worker.layer_save_tasks[0][0]
+                        actual_ids, _ = builder._require_request_arrays(task.block_ranges[0], is_save=True)
+                        self.assertIs(actual_ids, request.block_ids_by_group_np[0])
+                        shared = builder.build_shared(task, is_save=True)
+                        self.assertEqual(shared.block_ids_arr.tolist(), list(range(2, 9)))
+                    self.assertEqual(request.partial_save_gva_per_group, [0])
+
+    def test_oversized_load_plan_fails_only_affected_request(self):
+        worker = self._make_gva_worker()
+        worker.layerwise_offload = False
+        worker.hash_block_size = 768
+        worker.grouped_block_size = [768]
+        bad = ReqMeta(
+            req_id="stale-plan",
+            token_len_chunk=5376,
+            target_token_len=19000,
+            block_ids=list(range(1, 9)),
+            block_ids_by_group=[list(range(1, 9))],
+            block_ids_by_group_np=[np.arange(1, 9, dtype=np.int64)],
+            block_hashes=[b"h" + bytes([i]) for i in range(25)],
+            load_spec=LoadSpec(768, 12288, True),
+        )
+        worker._prepare_load_gvas([bad])
+        self.assertFalse(bad.load_spec.can_load)
+        self.assertFalse(bad.can_save)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set(range(1, 9)))
+        worker.m_store.batch_get_key_info.assert_not_called()
+        worker._process_load_for_layer_batch([bad], 0)
+        self.assertEqual(worker.layer_load_tasks[0], [])
+
+        good = ReqMeta(
+            req_id="healthy",
+            token_len_chunk=768,
+            target_token_len=768,
+            block_ids=[777],
+            block_ids_by_group=[[777]],
+            block_ids_by_group_np=[np.asarray([777], dtype=np.int64)],
+            block_hashes=[b"healthy"],
+            load_spec=LoadSpec(0, 768, True),
+        )
+        info = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
+        worker.m_store.batch_get_key_info.return_value = [info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        worker._prepare_load_gvas([good])
+        self.assertTrue(good.load_spec.can_load)
+        self.assertEqual(good.load_block_gvas_by_group_np[0].tolist(), [201])
+        self.assertNotIn(777, worker.get_block_ids_with_load_errors())
 
     def test_layerwise_load_uses_resident_gva_queried_under_lease(self):
         worker = self._make_gva_worker()

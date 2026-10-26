@@ -1633,6 +1633,16 @@ class KVPoolWorker:
                 save_start_block = max(save_start_block, hit_full_blocks)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
+            block_ids = (
+                request.block_ids_by_group_np[group_id]
+                if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
+                else request.block_ids_by_group[group_id]
+            )
+            num_allocated_blocks = len(block_ids)
+            save_end_block = min(save_end_block, num_allocated_blocks)
+            save_start_block = min(save_start_block, save_end_block)
+            if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
+                partial_block_index = None
             group_store_mask = (
                 request.store_masks[group_id]
                 if request.store_masks is not None and group_id < len(request.store_masks)
@@ -2271,6 +2281,17 @@ class KVPoolWorker:
                         key = self._make_layerwise_partial_key(request, group_id, block_idx, snapshot_end_token)
                     keys.append(key)
                 has_partial_key = False
+                if any(block_idx >= full_len for block_idx in block_indices):
+                    logger.error(
+                        "Memcache load range exceeds allocated blocks: req=%s group=%d "
+                        "load_blocks=[%d,%d) allocated_blocks=%d",
+                        request.req_id,
+                        group_id,
+                        load_start_block,
+                        full_blocks,
+                        full_len,
+                    )
+                    return False
                 if partial_block_index is not None:
                     keys.append(
                         self._make_layerwise_partial_key(
