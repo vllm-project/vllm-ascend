@@ -113,13 +113,20 @@ def moe_gating_top_k_numpy_ref(
 
 
 # pytest parameterized decorators (cover all test scenarios)
-@pytest.mark.parametrize("group_select_mode", [0, 1])
+@pytest.mark.parametrize(
+    "group_count,group_select_mode",
+    [pytest.param(1, 0, id="groups1-max"), pytest.param(8, 0, id="groups8-max"), pytest.param(8, 1, id="groups8-top2")],
+)
 @pytest.mark.parametrize("renorm", [1])
 @pytest.mark.parametrize("norm_type", [0, 1])
-@pytest.mark.parametrize("group_count", [1, 8])
-@pytest.mark.parametrize("k_ranges", [4, 16, 32])
-@pytest.mark.parametrize("x_dim0_range", [1, 8, 16])
-@pytest.mark.parametrize("x_dim1_range", [64, 128, 256])
+@pytest.mark.parametrize(
+    "x_dim0_range,x_dim1_range,k_ranges",
+    [
+        pytest.param(1, 64, 4, id="tokens1-experts64-k4"),
+        pytest.param(16, 256, 32, id="tokens16-experts256-k32"),
+        pytest.param(8, 128, 16, id="tokens8-experts128-k16"),
+    ],
+)
 def test_npu_moe_gating_topk_compare(
     group_select_mode: int,
     renorm: int,

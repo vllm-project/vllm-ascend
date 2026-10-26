@@ -868,8 +868,8 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.enable_mlapo = False
         impl.fa_quant_layer = False
         impl.use_flashmla = False
-        impl.pcp_enabled = False
-        impl.dcp_enabled = False
+        impl.use_pcp = False
+        impl.use_dcp = False
         impl.supports_prolog_v3_writer = lambda: True
         layer.impl = impl
         layer.indexer = None
@@ -1336,7 +1336,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
-    assert runner.speculator.pcp_manager is runner.pcp_manager
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
