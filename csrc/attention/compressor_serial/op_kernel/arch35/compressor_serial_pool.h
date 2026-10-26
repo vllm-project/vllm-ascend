@@ -66,7 +66,6 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
         int64_t groupEnd = (st / p->ratio + local + 1) * p->ratio;
         int64_t begin = Begin(cu, b, p);
         float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
-        for (int pass = 0; pass < 2; ++pass) {
         for (int64_t q = 0; q < p->coff * p->ratio; ++q) {
             int64_t pos = groupEnd - p->coff * p->ratio + q;
             if (pos < 0) continue;
@@ -84,16 +83,70 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void Pool(
                 kv = state[row + col];
                 score = state[row + p->coff * p->dim + col];
             }
-            if (pass == 0) {
-                maximum = score > maximum ? score : maximum;
-            } else {
-                float weight = expf(score - maximum);
-                numerator += weight * kv;
-                denominator += weight;
-            }
-        }
+            float next = score > maximum ? score : maximum;
+            float oldScale = expf(maximum - next);
+            float weight = expf(score - next);
+            numerator = numerator * oldScale + weight * kv;
+            denominator = denominator * oldScale + weight;
+            maximum = next;
         }
         pooled[idx] = denominator == 0 ? 0 : numerator / denominator;
+    }
+}
+
+template<int Threads>
+__simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void PoolWarp(
+    __gm__ const float* projection, __gm__ const float* state, __gm__ const float* ape,
+    __gm__ const int32_t* table, __gm__ const int32_t* cu, __gm__ const int32_t* used,
+    __gm__ const int32_t* start, __gm__ float* pooled,
+    __gm__ const CompressorSerialParams* p)
+{
+    int64_t lane = Simt::GetThreadIdx() % 32;
+    int64_t first = Simt::GetBlockIdx() * (Threads / 32) + Simt::GetThreadIdx() / 32;
+    int64_t step = Simt::GetBlockNum() * (Threads / 32);
+    for (int64_t idx = first; idx < p->outputRows * p->dim; idx += step) {
+        int64_t outRow = idx / p->dim, channel = idx % p->dim;
+        int64_t b = 0, local = outRow, st = 0, count = 0;
+        for (; b < p->batch; ++b) {
+            st = Start(start, b, p);
+            count = (st + Used(cu, used, b, p)) / p->ratio - st / p->ratio;
+            int64_t capacity = p->layout == 3 ? (p->sequence + p->ratio - 1) / p->ratio : count;
+            if (local < capacity) break;
+            local -= capacity;
+        }
+        if (b >= p->batch || local >= count) { pooled[idx] = 0; continue; }
+        int64_t groupEnd = (st / p->ratio + local + 1) * p->ratio;
+        int64_t begin = Begin(cu, b, p);
+        float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
+        for (int64_t q = lane; q < p->coff * p->ratio; q += 32) {
+            int64_t pos = groupEnd - p->coff * p->ratio + q;
+            if (pos < 0) continue;
+            int64_t half = p->coff == 2 && q >= p->ratio ? 1 : 0;
+            int64_t col = half * p->dim + channel;
+            float kv, score;
+            if (pos >= st) {
+                int64_t row = begin + pos - st;
+                kv = projection[row * p->projectionStride + col];
+                score = projection[row * p->projectionStride + p->gateOffset + col]
+                        + ape[(pos % p->ratio) * p->coff * p->dim + col];
+            } else {
+                int64_t row = CacheRow(table, b, pos, p);
+                if (row < 0) continue;
+                kv = state[row + col];
+                score = state[row + p->coff * p->dim + col];
+            }
+            float next = score > maximum ? score : maximum;
+            float oldScale = expf(maximum - next);
+            float weight = expf(score - next);
+            numerator = numerator * oldScale + weight * kv;
+            denominator = denominator * oldScale + weight;
+            maximum = next;
+        }
+        float globalMaximum = asc_reduce_max(maximum);
+        float scale = expf(maximum - globalMaximum);
+        numerator = asc_reduce_add(numerator * scale);
+        denominator = asc_reduce_add(denominator * scale);
+        if (lane == 0) pooled[idx] = denominator == 0 ? 0 : numerator / denominator;
     }
 }
 
