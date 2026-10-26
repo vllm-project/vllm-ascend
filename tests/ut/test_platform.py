@@ -429,6 +429,7 @@ class TestNPUPlatform(TestBase):
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
         self.assertEqual(NPUPlatform.device_name, "npu")
+        self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.device_type, "npu")
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
@@ -472,7 +473,6 @@ class TestNPUPlatform(TestBase):
 
         draft_parallel.tensor_parallel_size = 4
         _validate_draft_decode_context_parallel_config(config)
-        self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
