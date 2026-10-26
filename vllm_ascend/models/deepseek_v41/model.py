@@ -1923,6 +1923,10 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         for _, module in self.named_modules():
             if isinstance(module, (DeepseekV41Compressor, DeepseekV41Indexer)):
                 module.process_weights_after_loading()
+        # The loader calls this after per-layer weight processing and before
+        # V2 loads its draft model. A runner-level hook runs after the draft.
+        if self.uses_elastic_engram:
+            self.initialize_engram()
 
     def set_moe_parameters(self):
         self.expert_weights = []

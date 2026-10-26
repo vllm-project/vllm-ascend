@@ -185,6 +185,47 @@ def test_elastic_automatically_derives_native_policy_and_group(native, overlap):
     native.verify.assert_called_once_with(config)
 
 
+@pytest.mark.parametrize("v2", [False, True])
+def test_elastic_disables_multithread_load_without_changing_other_loader_options(native, v2, caplog):
+    config = vc({"enabled": True, "backend": "elastic"}, v2=v2)
+    supplied = {"enable_multithread_load": True, "num_threads": 128, "enable_weights_track": True}
+    config.load_config.model_loader_extra_config = supplied
+    resolve_engram_config(config)
+    resolve_engram_config(config)
+    assert config.load_config.model_loader_extra_config == {**supplied, "enable_multithread_load": False}
+    assert supplied["enable_multithread_load"] is True
+    assert caplog.text.count("Disabling multithread checkpoint loading for Elastic Engram") == 1
+
+
+@pytest.mark.parametrize("options", [{}, {"enabled": False, "backend": "elastic"}, {"enabled": True}])
+def test_disabled_and_uva_preserve_multithread_load(native, options):
+    config = vc(options)
+    supplied = {"enable_multithread_load": True, "num_threads": 128}
+    config.load_config.model_loader_extra_config = supplied
+    resolve_engram_config(config)
+    assert config.load_config.model_loader_extra_config is supplied
+    assert supplied == {"enable_multithread_load": True, "num_threads": 128}
+
+
+@pytest.mark.parametrize("extra", [None, {}, {"num_threads": 128}, {"enable_multithread_load": False}])
+def test_elastic_does_not_add_loader_options_when_multithread_load_is_inactive(native, extra):
+    config = vc({"enabled": True, "backend": "elastic"})
+    config.load_config.model_loader_extra_config = extra
+    resolve_engram_config(config)
+    assert config.load_config.model_loader_extra_config is extra
+
+
+def test_failed_native_validation_preserves_loader_options(native):
+    config = vc({"enabled": True, "backend": "elastic"})
+    supplied = {"enable_multithread_load": True, "num_threads": 128}
+    config.load_config.model_loader_extra_config = supplied
+    native.verify.side_effect = ValueError("native validation failed")
+    with pytest.raises(ValueError, match="native validation failed"):
+        resolve_engram_config(config)
+    assert config.load_config.model_loader_extra_config is supplied
+    assert supplied["enable_multithread_load"] is True
+
+
 @pytest.mark.parametrize(
     "v2,dp,pcp,expected", [(False, 4, 1, False), (True, 4, 1, True), (True, 1, 2, True), (True, 1, 1, False)]
 )
