@@ -122,9 +122,8 @@ class TestAisbenchProcess(unittest.TestCase):
             return aisbench.AisbenchRunner("model", 8000, config, verify=False)
 
     def test_missing_executable_fails_at_launch(self):
-        with patch.dict(os.environ, {"PATH": str(self.root)}), deadline():
-            with self.assertRaises(FileNotFoundError):
-                self.runner._run_aisbench_task()
+        with patch.dict(os.environ, {"PATH": str(self.root)}), deadline(), self.assertRaises(FileNotFoundError):
+            self.runner._run_aisbench_task()
 
     def test_nonzero_exit_is_reported_without_error_keyword(self):
         for folder in ("", "print('Current exp folder: /tmp/experiment', flush=True)\n"):
@@ -239,8 +238,7 @@ class TestAisbenchProcess(unittest.TestCase):
 
     def test_context_exit_stops_worker_processes(self):
         worker = (
-            "import os, time; from pathlib import Path; "
-            "Path('worker.pid').write_text(str(os.getpid())); time.sleep(30)"
+            "import os, time; from pathlib import Path; Path('worker.pid').write_text(str(os.getpid())); time.sleep(30)"
         )
         self.executable(
             "import signal, subprocess\n"
