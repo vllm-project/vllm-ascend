@@ -432,7 +432,6 @@ class AscendConfig:
             "enable_kv_nz": false,
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
-            "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
@@ -582,7 +581,6 @@ class AscendConfig:
     enable_kv_nz: bool = False
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
-    enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
@@ -713,18 +711,6 @@ class AscendConfig:
             and vc.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
-        if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "DSA-CP and PCP cannot be enabled at the same time. "
-                "Use PCP instead: remove enable_dsa_cp from additional_config "
-                "when --prefill-context-parallel-size is greater than 1."
-            )
-        if self.enable_dsa_cp and vc.use_v2_model_runner:
-            raise ValueError(
-                "DSA-CP is not supported by Model Runner V2. "
-                "Remove enable_dsa_cp from additional_config and use "
-                "prefill context parallelism (PCP) instead."
-            )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -763,16 +749,10 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         # FlashComm remains the SP MoE switch on Ascend.
-        flashcomm_explicitly_enabled = validate_additional_config_bool(
+        effective_flashcomm = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
-        # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
-        # so users only need `enable_dsa_cp=true` in additional_config.
-        if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
-            logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
-
-        effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
 
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
@@ -783,40 +763,6 @@ class AscendConfig:
             logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
         else:
             logger.info_once("FlashComm1 is enabled.")
-
-        if self.enable_dsa_cp:
-            tp_size = vc.parallel_config.tensor_parallel_size
-            if tp_size > 1:
-                migration = (
-                    "Consider trying prefill context parallelism with "
-                    f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
-                    "to preserve the current world size. Remove enable_dsa_cp from "
-                    "additional_config when enabling PCP."
-                )
-            else:
-                migration = (
-                    "Consider trying prefill context parallelism with "
-                    "--prefill-context-parallel-size greater than 1 (requires additional ranks). "
-                    "Remove enable_dsa_cp from additional_config when enabling PCP."
-                )
-            logger.warning_once(
-                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
-                "Check PCP support for your model and deployment configuration.",
-                migration,
-            )
-
-        # DSA CP is only applicable to models with an indexer (for example,
-        # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
-        # available so runtime reads do not depend on vLLM's temporary config
-        # context.
-        has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
-            vc.model_config.hf_text_config, "index_topk"
-        )
-        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once(
-                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
-            )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
