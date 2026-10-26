@@ -5,7 +5,7 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
 DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:
@@ -328,7 +328,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 133120 \
@@ -371,7 +371,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
@@ -674,7 +674,7 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
