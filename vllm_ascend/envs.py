@@ -28,13 +28,6 @@ from typing import Any
 # begin-env-vars-definition
 
 
-def _strict_binary_env(name: str, default: str = "0") -> bool:
-    value = os.getenv(name, default)
-    if value not in {"0", "1"}:
-        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
-    return value == "1"
-
-
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -80,9 +73,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Opt-in int8 quantized all-reduce for large bf16 TP collectives
-    # ("0": off, default; "1": on). Atlas A2/A3, 1 < TP <= 8; only messages
-    # above the payload threshold below are quantized.
-    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE": lambda: _strict_binary_env("VLLM_ASCEND_QUANTIZED_ALL_REDUCE"),
+    # ("1": on, default 0). Atlas A2/A3, 1 < TP <= 8; only messages above the
+    # payload threshold below are quantized.
+    "VLLM_ASCEND_QUANTIZED_ALL_REDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_QUANTIZED_ALL_REDUCE", "0"))),
     # Payload threshold for the above, in elements (bf16 payload = value * 2
     # bytes). Default 33554432 == 64 MiB == 16384 tokens at hidden_size 2048;
     # smaller messages stay on bf16 because they are latency-bound. See
