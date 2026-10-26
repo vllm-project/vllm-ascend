@@ -1,5 +1,5 @@
 # Diagnostic only: both Decode nodes use eager; do not compare its performance with FULL_DECODE_ONLY.
-test_name: "MiniMax-M3-w8a8-PP-prefix90-PD-diag-eager"
+test_name: "MiniMax-M3-w8a8-PP-prefix90-PD-diag-eager-local-cache"
 model: "Eco-Tech/MiniMax-M3-w8a8-0626"
 num_nodes: 3
 npu_per_node: 16
@@ -43,20 +43,23 @@ config:
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
+  # Standard PyTorch JIT cache setting; no source patch is required.
+  TORCH_EXTENSIONS_DIR: "/tmp/minimax_m3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
+  MAX_JOBS: "2"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_USE_V2_MODEL_RUNNER: "1"
-  HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_MODELSCOPE: true
-  ASCEND_LAUNCH_BLOCKING: "1"
 env_prefill: &env_prefill
   <<: *env_common
   VLLM_PP_LAYER_PARTITION: "16,15,15,14"
   HCCL_IF_BASE_PORT: "51000"
+  HCCL_BUFFSIZE: "1024"
 
 env_decode: &env_decode
   <<: *env_common
+  HCCL_BUFFSIZE: "2048"
   HCCL_OP_EXPANSION_MODE: "AIV"
   HCCL_IF_BASE_PORT: "50${DP_RANK}00"
 
