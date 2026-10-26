@@ -821,3 +821,106 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
         layout.slot_count * layout.slot_backing_size
         + 7 * next(owner.spec.real_page_size_bytes for owner in layout.owners if owner.role == PLE)
     )
+
+
+@pytest.mark.parametrize("manager_block_size", [128, 384, 768])
+@pytest.mark.parametrize("runner_kind", ["v1", "v2"])
+def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size, runner_kind):
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.worker.utils import AttentionGroup
+
+    from vllm_ascend.models.qwen4_exp import qsa
+
+    groups = [
+        KVCacheGroupSpec(
+            group.layer_names,
+            group.kv_cache_spec
+            if isinstance(group.kv_cache_spec, CircularBufferSpec)
+            else replace(group.kv_cache_spec, block_size=manager_block_size),
+        )
+        for group in _groups()
+    ]
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    runtime_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=manager_block_size),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        speculative_config=None,
+        num_speculative_tokens=0,
+        use_v2_model_runner=runner_kind == "v2",
+    )
+    compressed_group = groups[2]
+    spec = compressed_group.kv_cache_spec
+    backend = qsa.qsa_cache.QSAStateBackend
+    if runner_kind == "v1":
+        runner = _cpu_runner(config)
+        raw = runner._allocate_kv_cache_tensors(config)
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        builder = backend.get_builder_cls()(spec, compressed_group.layer_names, runtime_config, torch.device("cpu"))
+    else:
+        monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
+        monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+        raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+        attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
+        caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
+        # Exercise the actual MRV2 factory, which rewrites the builder spec.
+        group = attn_groups[2]
+        group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+        builder = group.get_metadata_builder(0)
+    name = compressed_group.layer_names[0]
+    layer = qsa.qsa_cache.QSACompressedKeyCache(
+        head_size=spec.head_size,
+        dtype=spec.dtype,
+        prefix=name,
+        cache_config=runtime_config.cache_config,
+        compress_ratio=4,
+        vllm_config=runtime_config,
+    )
+    layer.bind_kv_cache(caches[name])
+    keys_per_page = (128 if runner_kind == "v2" else manager_block_size) // 4
+    factor = manager_block_size // 128
+    assert layer.kv_cache.shape == (3 * (factor if runner_kind == "v2" else 1), keys_per_page, 1, spec.head_size)
+    assert builder.storage_block_size == keys_per_page
+    assert layer.kv_cache.untyped_storage().data_ptr() == raw[name].untyped_storage().data_ptr()
+    manager = torch.tensor([[2, 0]], dtype=torch.int32)
+    virtual = (manager.unsqueeze(-1) * factor + torch.arange(factor)).flatten(1).to(torch.int32)
+    locs = torch.tensor([0, 8], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=locs,
+        query_start_loc_cpu=locs,
+        seq_lens=torch.tensor([manager_block_size + 4], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=8,
+        max_query_len=8,
+        max_seq_len=manager_block_size + 4,
+        block_table_tensor=virtual,
+        slot_mapping=torch.zeros(8, dtype=torch.int64),
+    )
+    # One real request owns all eight tokens; avoid the device-only mapping kernel.
+    common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
+    monkeypatch.setattr(qsa.qsa_cache, "build_qsa_metadata", qsa.qsa_cache._build_qsa_metadata_torch)
+    metadata = builder.build(0, common)
+    torch.testing.assert_close(metadata.block_table, virtual if runner_kind == "v2" else manager)
+    # Cross the manager-block boundary: flattened storage addresses must agree
+    # for metadata writes and PA_BSND indexer reads in both runners.
+    for token_row in (3, 7):
+        position = manager_block_size - 4 + token_row
+        logical_group = position // 4
+        page_column, row = divmod(logical_group, keys_per_page)
+        block = int(metadata.block_table[0, page_column])
+        expected_slot = 2 * (manager_block_size // 4) + logical_group if token_row == 3 else 0
+        assert int(metadata.slot_mapping[token_row]) == expected_slot
+        selected = layer.kv_cache[block, row]
+        expected = layer.kv_cache.view(-1, 1, spec.head_size)[expected_slot]
+        assert selected.data_ptr() == expected.data_ptr()
+        selected.fill_(token_row + 1)
+        torch.testing.assert_close(expected, torch.full_like(expected, token_row + 1))

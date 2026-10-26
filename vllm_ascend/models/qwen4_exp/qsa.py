@@ -475,6 +475,10 @@ class AscendQSAStateMetadataBuilder(qsa_cache.QSAMetadataBuilder):
         self._manager_table_rows = vllm_config.scheduler_config.max_num_seqs
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        if self.vllm_config.use_v2_model_runner:
+            # MRV2 exposes compressed storage as kernel pages, like GQA.
+            # Its block table and builder spec already address those views.
+            return super().build(common_prefix_len, common_attn_metadata, fast_build)
         factor = self.kv_cache_spec.block_size // GBSA_PAGE_SIZE
         if not self.is_circular_buffer and factor > 1:
             pages = common_attn_metadata.block_table_tensor[:, ::factor]
