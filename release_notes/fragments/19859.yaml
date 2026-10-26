@@ -1,0 +1,13 @@
+# Release note fragment for YOCO mask/compact prefill truncation.
+pr: 19859
+entries:
+  - category: feature
+    text: >
+      Added YOCO mask/compact prefill truncation for DeepSeek-V4.1 via
+      additional_config yoco_prefill_truncation_mode and yoco_prefill_keep_tokens,
+      reducing consumer-layer prefill work on long prompts (CP=1 compact first).
+    model: deepseek-v4.1
+  - category: documentation
+    text: >
+      Documented YOCO mask/compact prefill truncation and how it differs from
+      decoder bounded replay and draft_window_size.

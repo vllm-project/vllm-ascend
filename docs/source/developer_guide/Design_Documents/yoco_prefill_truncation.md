@@ -106,19 +106,4 @@ to the keep-tail (plus a one-token placeholder when a whole chunk is clipped).
 
 ## Release note fragment
 
-After the PR number is known, add `release_notes/fragments/<PR>.yaml`:
-
-```yaml
-pr: <PR>
-entries:
-  - category: feature
-    text: >
-      Added YOCO mask/compact prefill truncation for DeepSeek-V4.1 via
-      additional_config yoco_prefill_truncation_mode and yoco_prefill_keep_tokens,
-      reducing consumer-layer prefill work on long prompts (CP=1 compact first).
-    model: deepseek-v4.1
-  - category: documentation
-    text: >
-      Documented YOCO mask/compact prefill truncation and how it differs from
-      decoder bounded replay and draft_window_size.
-```
+See `release_notes/fragments/19859.yaml`.
