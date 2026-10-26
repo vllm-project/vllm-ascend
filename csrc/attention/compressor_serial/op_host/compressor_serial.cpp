@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <torch/library.h>
 #include <ATen/ATen.h>
+#include <initializer_list>
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 
 extern "C" void compressor_serial_cast_launch(uint32_t, void*, void*, void*, uint64_t, int);
@@ -29,11 +30,11 @@ void compressor_serial_vector(const at::Tensor& projection, at::Tensor& state, c
     TORCH_CHECK(stage == 0 || stage == 1, "stage must be pool or finalize/update");
     TORCH_CHECK(blocks > 0 && blocks <= 72, "invalid block count");
     TORCH_CHECK(threads == 128 || threads == 256 || threads == 512, "invalid thread count");
-    for (const auto* tensor : {&projection, &state, &ape, &gamma, &sin, &cos, &pooled}) {
+    for (const auto* tensor : std::initializer_list<const at::Tensor*>{&projection, &state, &ape, &gamma, &sin, &cos, &pooled}) {
         TORCH_CHECK(tensor->device() == projection.device() && tensor->scalar_type() == at::kFloat,
                     "FP32 tensors on one NPU required");
     }
-    for (const auto* tensor : {&ape, &gamma, &sin, &cos, &pooled, &output}) {
+    for (const auto* tensor : std::initializer_list<const at::Tensor*>{&ape, &gamma, &sin, &cos, &pooled, &output}) {
         TORCH_CHECK(tensor->is_contiguous(), "contiguous vector buffers required");
     }
     TORCH_CHECK(pooled.sizes() == output.sizes(), "pooled/output shape mismatch");
