@@ -123,6 +123,9 @@ class HardwareCapability(Enum):
     MLA_FLASH = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
+    # Dr=0, D=256, W8A8 + INT8 per-tile C8 MlaPrologV3 ABI on DAV_2201.
+    # Requires the separately installed Dr=0 operator and explicit opt-in.
+    NOPE_PROLOG_W8A8_C8 = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
@@ -261,6 +264,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
+        HardwareCapability.NOPE_PROLOG_W8A8_C8,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,

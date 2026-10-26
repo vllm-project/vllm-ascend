@@ -19,6 +19,8 @@ from vllm_ascend.attention.prolog_query import (
     prolog_query_unsupported_reasons,
 )
 from vllm_ascend.attention.utils import PreprocessType, mark_fused_preprocess_weights
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.quantization.methods.w8a8 import w8a8_dynamic, w8a8_mxfp8
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 
@@ -624,3 +626,191 @@ def test_real_prolog_adapter_checks_returned_query_rows(monkeypatch, returned_ro
     else:
         assert sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, *args)[-1].shape == (4, 64)
     op.assert_called_once()
+
+
+def _nope_routing_impl():
+    impl = _routing_impl("int8", rank=1536)
+    impl.qk_rope_head_dim = 0
+    impl.qk_nope_head_dim = 256
+    impl.kv_lora_rank = 512
+    impl.enable_nope_prolog = True
+    impl.enable_sparse_sfa_c8 = True
+    impl.c8_cache_dtype = torch.int8
+    impl.sfa_qsfa_tile_size = 128
+    impl.q_proj.quant_method = impl.fused_qkv_a_proj.quant_method
+    impl.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
+    )
+    return impl
+
+
+@pytest.mark.parametrize("family", list(AscendDeviceType))
+def test_nope_hardware_contract_matches_operator_tiling(family):
+    profile = get_hardware_profile(family)
+    assert profile.supports(HardwareCapability.NOPE_PROLOG_W8A8_C8) == (
+        family in (AscendDeviceType.A2, AscendDeviceType.A3)
+    )
+
+
+@pytest.mark.parametrize("family", [AscendDeviceType.A2, AscendDeviceType.A3])
+@pytest.mark.parametrize("rank", [1536, 2048])
+def test_nope_opt_in_selects_prolog_before_weight_loading(monkeypatch, family, rank):
+    monkeypatch.setattr(sfa, "get_current_hardware_profile", lambda: get_hardware_profile(family))
+    impl = _nope_routing_impl()
+    impl.q_lora_rank = impl.indexer.wq_b.input_size = rank
+    mark_fused_preprocess_weights(impl)
+    assert impl._fused_preprocess_planned_type is PreprocessType.PROLOG_V3
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed
+    assert impl.q_proj._fused_preprocess_managed
+    assert sfa.AscendSFAImpl._resolve_preprocess_type(impl, torch.bfloat16) is PreprocessType.PROLOG_V3
+    impl._process_weights_for_fused_prolog_v3.assert_called_once()
+    assert impl._get_fused_type_unsupported_reasons(PreprocessType.MLAPO)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "disabled",
+        "hardware",
+        "mx_weights",
+        "q_proj",
+        "float_cache",
+        "fp8_cache",
+        "D",
+        "kv_rank",
+        "q_rank",
+        "tile",
+        "pcp",
+        "dcp",
+    ],
+)
+def test_nope_unsupported_configuration_stays_native_before_conversion(monkeypatch, invalid):
+    impl = _nope_routing_impl()
+    family = AscendDeviceType.A5 if invalid == "hardware" else AscendDeviceType.A2
+    monkeypatch.setattr(sfa, "get_current_hardware_profile", lambda: get_hardware_profile(family))
+    if invalid == "disabled":
+        impl.enable_nope_prolog = False
+    elif invalid == "mx_weights":
+        impl.fused_qkv_a_proj.quant_method = _routing_impl("mx").fused_qkv_a_proj.quant_method
+    elif invalid == "q_proj":
+        impl.q_proj.quant_method = None
+    elif invalid == "float_cache":
+        impl.enable_sparse_sfa_c8 = False
+    elif invalid == "fp8_cache":
+        impl.c8_cache_dtype = torch.float8_e4m3fn
+    elif invalid == "D":
+        impl.qk_nope_head_dim = 128
+    elif invalid == "kv_rank":
+        impl.kv_lora_rank = 256
+    elif invalid == "q_rank":
+        impl.q_lora_rank = impl.indexer.wq_b.input_size = 64
+    elif invalid == "tile":
+        impl.sfa_qsfa_tile_size = 64
+    elif invalid in ("pcp", "dcp"):
+        field = "prefill_context_parallel_size" if invalid == "pcp" else "decode_context_parallel_size"
+        setattr(impl.vllm_config.parallel_config, field, 2)
+    assert impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+    mark_fused_preprocess_weights(impl)
+    assert impl._fused_preprocess_planned_type is None
+    assert sfa.AscendSFAImpl._resolve_preprocess_type(impl, torch.bfloat16) is PreprocessType.NATIVE
+    impl._process_weights_for_fused_prolog_v3.assert_not_called()
+
+
+def _nope_operator_case(monkeypatch, rows=4):
+    impl = _nope_routing_impl()
+    impl._quant_type = w8a8_dynamic.AscendW8A8DynamicLinearMethod
+    impl.local_num_heads = 2
+    for name in ("q_a_layernorm", "kv_a_layernorm"):
+        setattr(impl, name, SimpleNamespace(weight=torch.ones(1, dtype=torch.bfloat16), variance_epsilon=1e-5))
+    for name in (
+        "weight_dq",
+        "weight_uq_qr",
+        "W_UK_T",
+        "weight_dkv_kr",
+        "dequant_scale_w_dq",
+        "dequant_scale_w_uq_qr",
+        "dequant_scale_w_dkv_kr",
+    ):
+        setattr(impl, name, torch.ones(1))
+    impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)
+    impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, dtype=torch.bfloat16)
+    hidden = torch.randn(rows, 8, dtype=torch.bfloat16)
+    cache = torch.zeros(1, 16, 1, 528, dtype=torch.int8)
+    slots = torch.arange(rows, dtype=torch.int64)
+    if rows:
+        slots[-1] = -1
+    query = torch.zeros(rows, 2, 512, dtype=torch.bfloat16)
+    rope = torch.empty(rows, 2, 0, dtype=torch.bfloat16)
+    qc = torch.zeros(rows, 1536, dtype=torch.int8)
+    scales = torch.ones(rows, 1)
+    op = MagicMock(return_value=(query, rope, None, qc, scales))
+    quant = MagicMock(return_value=(torch.zeros_like(hidden, dtype=torch.int8), torch.ones(rows)))
+    monkeypatch.setattr(sfa.torch_npu, "npu_mla_prolog_v3", op, raising=False)
+    monkeypatch.setattr(sfa.torch_npu, "npu_dynamic_quant", quant)
+    return impl, hidden, cache, slots, op
+
+
+@pytest.mark.parametrize("rows", [0, 1, 4])
+@pytest.mark.parametrize("input_rope", [None, "empty", "legacy"])
+def test_nope_adapter_calls_operator_with_zero_width_rope_and_c8(monkeypatch, rows, input_rope):
+    impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch, rows)
+    rope = None if input_rope is None else torch.ones(rows, 0 if input_rope == "empty" else 64)
+    raw, query, qrope, (qc, scales) = sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(
+        impl, hidden, (cache,), rope, rope, slots
+    )
+    assert raw is hidden
+    assert query.shape == (rows, 2, 512)
+    assert qrope.shape == (rows, 2, 0)
+    assert qc.shape == (rows, 1536) and scales.shape == (rows,)
+    args = op.call_args.kwargs
+    assert args["rope_sin"].shape == args["rope_cos"].shape == (rows, 0)
+    assert args["rope_sin"].dtype == hidden.dtype
+    assert args["kr_cache"] is impl.sfa_qsfa_kr_cache_dummy
+    assert args["kv_cache"] is cache
+    torch.testing.assert_close(args["cache_index"], slots)
+    for key, value in {
+        "weight_quant_mode": 2,
+        "kv_cache_quant_mode": 3,
+        "query_quant_mode": 0,
+        "ckvkr_repo_mode": 1,
+        "quant_scale_repo_mode": 1,
+        "tile_size": 128,
+    }.items():
+        assert args[key] == value
+    op.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "invalid", ["q_rows", "q_width", "rope_none", "rope_rows", "rope_width", "qc_rows", "scale_rows"]
+)
+def test_nope_output_must_cover_full_bucket(monkeypatch, invalid):
+    impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch)
+    values = list(op.return_value)
+    if invalid == "q_rows":
+        values[0] = values[0][:3]
+    elif invalid == "q_width":
+        values[0] = values[0].view(4, 4, 256)
+    elif invalid == "rope_none":
+        values[1] = None
+    elif invalid == "rope_rows":
+        values[1] = values[1][:3]
+    elif invalid == "rope_width":
+        values[1] = torch.zeros(4, 2, 64)
+    elif invalid == "qc_rows":
+        values[3] = values[3][:3]
+    elif invalid == "scale_rows":
+        values[4] = values[4][:3]
+    op.return_value = tuple(values)
+    with pytest.raises(RuntimeError, match="full-bucket|graph padding|scale must cover"):
+        sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, hidden, (cache,), None, None, slots)
+    op.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "shape,dtype", [((1, 16, 1, 512), torch.int8), ((1, 16, 1, 528), torch.bfloat16), ((16, 528), torch.int8)]
+)
+def test_nope_invalid_cache_rejected_before_operator_write(monkeypatch, shape, dtype):
+    impl, hidden, _, slots, op = _nope_operator_case(monkeypatch)
+    with pytest.raises(RuntimeError, match="INT8"):
+        sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, hidden, (torch.zeros(shape, dtype=dtype),), None, None, slots)
+    op.assert_not_called()
