@@ -467,6 +467,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=_slice_reqs(self.is_prefilling),
+            replayssm_decode_base_cpu=_slice_reqs(self.replayssm_decode_base_cpu),
+            req_idx=_slice_reqs(self.req_idx),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,

@@ -1678,3 +1678,36 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 37. File: worker/patch_sketchssm.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.mamba.mamba_mixer2.Mamba2SketchSSM`
+#    Why:
+#       vLLM's Mamba-2 SketchSSM layer owns the CUDA decode kernels, while the
+#       Ascend kernels and the layer driving them live in vllm_ascend/ops.
+#       MambaMixer2 imports Mamba2SketchSSM into its own module namespace, so
+#       it would build the CUDA layer on NPU.
+#    How:
+#       Rebind that name to `Mamba2SketchSSMNPU`, which has the same
+#       `from_config` / `rotate_states` / `decode` / `prefilled` surface and
+#       reads the same key-major state shapes. The module is a no-op when
+#       `vllm.model_executor.layers.mamba.sketchssm` is absent, so importing
+#       vllm-ascend against a vLLM tree without #61124 still works.
+#    Related PR (if no, explain why):
+#       vllm-project/vllm#61124 adds the SketchSSM layer this patch replaces.
+#    Future Plan:
+#       Remove this patch once vLLM exposes a device hook for the SketchSSM
+#       layer, or once the Ascend kernels are upstreamed.
+#   2. `vllm.v1.worker.gpu.model_states.mamba_hybrid.MambaHybridAttnMetadata.get_extra_common_attn_kwargs`
+#    Why:
+#       AscendMambaHybridModelState records the persistent request indices of
+#       the step on the metadata instance, but the Ascend attention-metadata
+#       builder only forwards what this method returns. Without `req_idx` the
+#       SketchSSM row helpers cannot map rows to sketch buffers.
+#    How:
+#       Wrap the method and add `req_idx` from the recorded indices when
+#       SketchSSM is enabled; a no-op otherwise.
+#    Related PR (if no, explain why):
+#       vllm-project/vllm#61124 reads `req_idx` from the common metadata.
+#    Future Plan:
+#       Remove once the Ascend metadata path passes `req_idx` directly.
+#
