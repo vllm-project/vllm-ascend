@@ -184,7 +184,7 @@ def main():
         "cube_math_type": str(torch.npu.matmul.cube_math_type),
         "launch_policy": "adaptive" if opts.auto_launch else "explicit",
         "config": asdict(config),
-        "metadata": "synthetic; exported shapes preserved",
+        "metadata": "synthetic; original export retained; runtime TND RoPE capacity adapted",
         "cases": [],
     }
     for case in cases:

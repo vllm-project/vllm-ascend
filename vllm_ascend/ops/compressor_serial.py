@@ -10,6 +10,7 @@ after preparation. Device metadata tensors may be updated in place for replay.
 import math
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -32,6 +33,15 @@ class CompressorSerialConfig:
                 raise ValueError("block counts must be in [1, 72]")
         if self.pool_threads not in (128, 256, 512):
             raise ValueError("pool_threads must be 128, 256 or 512")
+
+
+def _ensure_extension_loaded():
+    if hasattr(torch.ops._C_ascend, "compressor_serial_cast"):
+        return
+    library = Path(__file__).resolve().parents[1] / "libcompressor_serial_ops.so"
+    if not library.is_file():
+        raise RuntimeError("Build the A5 extension with tools/build_compressor_serial.sh and install it first")
+    torch.ops.load_library(str(library))
 
 
 class CompressorSerialPlan:
@@ -123,6 +133,7 @@ class CompressorSerialPlan:
         *,
         config=None,
     ):
+        _ensure_extension_loaded()
         # Validate host-visible shape metadata only. No device reads or item().
         if config is None:
             decode = x.numel() // x.shape[-1] < 32
