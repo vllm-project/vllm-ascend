@@ -1,0 +1,4 @@
+pr: 19649
+entries:
+  - category: bugfix
+    text: Fixed Model Runner V2 startup failing when KV cache components are wrapped in a single engine slot, while preserving Tensor views and MXFP8 static scales.
