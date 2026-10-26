@@ -429,10 +429,10 @@ class TestNPUPlatform(TestBase):
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
         self.assertEqual(NPUPlatform.device_name, "npu")
-        self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.device_type, "npu")
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
+        self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
     def test_kimi_k3_gqa_dspark_uses_replicated_draft_dcp_config(self):
         target_parallel = SimpleNamespace(
