@@ -488,8 +488,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
-                if self.speculator is not None:
-                    self.speculator.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,

@@ -2,6 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
@@ -15,6 +17,9 @@ SCALE_TOLERANCES = {
     torch.float16: (5e-3, 1e-5),
     torch.bfloat16: (2e-2, 1e-4),
 }
+
+# Triton Ascend 3.6.0 does not support BF16 sigmoid/exp.
+BF16_SIGMOID_SKIP = pytest.mark.skip(reason="Triton Ascend 3.6.0 does not support BF16 sigmoid/exp")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -34,6 +39,9 @@ def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     return quantized, scale
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("shape", "dtype", "group_counts", "group_list_dtype"),
     [
@@ -43,6 +51,7 @@ def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
             torch.bfloat16,
             [0, 17, 1, 0, 31, 16],
             torch.int64,
+            marks=BF16_SIGMOID_SKIP,
             id="multi-core-bf16-empty-experts",
         ),
     ],
@@ -71,7 +80,10 @@ def test_swiglu_quant_correctness(shape, dtype, group_counts, group_list_dtype, 
     torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=0, atol=1)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, pytest.param(torch.bfloat16, marks=BF16_SIGMOID_SKIP)])
 @torch.inference_mode()
 def test_swiglu_quant_without_quantization(dtype):
     torch.manual_seed(42)
@@ -87,6 +99,9 @@ def test_swiglu_quant_without_quantization(dtype):
     torch.testing.assert_close(actual.cpu().float(), expected, rtol=rtol, atol=atol)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_swiglu_quant_rejects_invalid_group_list_type():
     x = torch.empty((1, 4096), dtype=torch.float16, device=DEVICE)
     group_list = torch.tensor([1], dtype=torch.int32, device=DEVICE)
@@ -95,6 +110,9 @@ def test_swiglu_quant_rejects_invalid_group_list_type():
         swiglu_quant(x, group_list, group_list_type=2)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_swiglu_quant_rejects_invalid_group_list_dtype():
     x = torch.empty((1, 4096), dtype=torch.float16, device=DEVICE)
     group_list = torch.tensor([1], dtype=torch.float32, device=DEVICE)

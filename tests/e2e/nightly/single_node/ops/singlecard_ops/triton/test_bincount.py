@@ -2,6 +2,8 @@ import pytest
 import torch
 from vllm.triton_utils import triton
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.worker.v2.sample.penalties import _bincount_kernel
 
 
@@ -36,6 +38,9 @@ def torch_bincount(
             output_bin_counts[req_idx, token] += 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.skip(reason="atomic_or operator hangs in current npu_ir version")
 def test_bincount_kernel():
     """
