@@ -426,6 +426,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
+            pcp_context=self.get_pcp_attention_context(input_batch, block_tables, slot_mappings, attn_groups),
             model_specific_attn_metadata=model_specific_metadata,
             for_cudagraph_capture=for_capture,
         )

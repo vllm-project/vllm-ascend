@@ -280,16 +280,3 @@ def test_dspark_local_context_validates_before_writing_kv(monkeypatch, invalid):
         assert kwargs["draft_block_ids_by_group"] == {0: (4,), 1: (7,)}
         assert kwargs["layer_group_ids"] == (1, 0)
         assert kwargs["block_sizes_by_group"] == {0: 64, 1: 128}
-
-
-@pytest.mark.parametrize("replicated_pcp", [False, True])
-def test_dspark_sampling_uses_replicated_backbone_output(monkeypatch, replicated_pcp):
-    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
-    spec.replicated_pcp = replicated_pcp
-    local, replicated = torch.ones(3, 2), torch.zeros(3, 2)
-    monkeypatch.setattr(DSparkSpeculator, "_run_model", lambda *args: local)
-    broadcast = MagicMock(return_value=(replicated, replicated))
-    monkeypatch.setattr(dspark_module.AscendPCPManager, "broadcast_replicated_hidden_states", broadcast)
-
-    assert spec._run_model(3, None, None, None) is replicated
-    broadcast.assert_called_once_with(local, local, 3, replicated_pcp=replicated_pcp)

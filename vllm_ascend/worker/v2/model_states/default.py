@@ -416,6 +416,22 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def get_pcp_attention_context(
+        self,
+        input_batch: AscendInputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+    ) -> "AscendPCPAttentionContext | None":
+        """Return the PCP context for target-shaped metadata, else None.
+
+        PCP attention builders build their target metadata from it, so every
+        model state building target metadata must pass it under PCP.
+        """
+        if self.pcp_manager is None or not self.pcp_manager.is_target_attn_groups(attn_groups):
+            return None
+        return self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -514,11 +530,7 @@ class AscendModelState(DefaultModelState):
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        pcp_context = (
-            self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-            if self.pcp_manager is not None
-            else None
-        )
+        pcp_context = self.get_pcp_attention_context(input_batch, block_tables, slot_mappings, attn_groups)
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.block_tables = block_tables
