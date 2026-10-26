@@ -70,6 +70,8 @@ def _make_builder(
 
 def _make_common_metadata() -> SimpleNamespace:
     metadata = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=2,
         num_actual_tokens=4,
         num_input_tokens=4,
@@ -422,14 +424,12 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     )
 
     builder = _make_builder(pcp_size=2, dcp_size=2)
-    build_kwargs = dict(
-        pcp_context=pcp_context,
-        pcp_cache_group_idx=0,
-    )
+    common.pcp_context = pcp_context
+    common.pcp_cache_group_idx = 0
     if for_cudagraph_capture:
-        metadata = builder.build_for_cudagraph_capture(common, **build_kwargs)
+        metadata = builder.build_for_cudagraph_capture(common)
     else:
-        metadata = builder.build(0, common, **build_kwargs)
+        metadata = builder.build(0, common)
 
     torch.testing.assert_close(
         metadata.block_table,
@@ -450,7 +450,7 @@ def test_indexer_orders_cache_gathers_after_query_dependency(with_dependency, qu
     slots = torch.arange(2)
     metadata = SimpleNamespace(cos=None, sin=None, slot_mapping=slots)
     indexer = SimpleNamespace(
-        _pcp_active=False,
+        use_pcp=False,
         _dsa_cp_active=True,
         enable_sparse_li_c8=quantized,
         enable_sparse_li_quant=quantized,

@@ -598,11 +598,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # common_prefix_len / fast_build are unused; kept for API compatibility.
         metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=kwargs.get("pcp_context")),
+            lambda: self._build(common_attn_metadata, draft_index=None, pcp_context=common_attn_metadata.pcp_context),
         )
         if (
             self.use_pcp
-            and kwargs.get("pcp_context") is not None
+            and common_attn_metadata.pcp_context is not None
             and needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded)
         ):
             assert metadata.pcp_slot_mapping is not None
@@ -1362,22 +1362,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _v_up_proj(self, x):
         if hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
-            # transpose) requires N*L < 65536 on older CANN binaries.
-            #   - If satisfied: keep x as (B, N, L) and let the operator
-            #     transpose internally, saving a contiguous copy.
-            #   - Otherwise: explicit transpose to (N, B, L) and use
-            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
-            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
-            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
-            if self.local_num_heads * self.kv_lora_rank < 65536:
-                # (B, N, L) -> operator transposes internally -> (B, N, V)
-                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            else:
-                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
-                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
-                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, L) -> operator transposes internally -> (B, N, V)
+            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
             # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:

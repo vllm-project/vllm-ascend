@@ -156,4 +156,3 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 
 - [SGLang Dynamic Chunking Blog](https://lmsys.org/blog/2026-01-15-chunked-pipeline/)
 - [User Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)
-- [Tutorial](../../tutorials/features/dynamic_chunked_pipeline_parallel.md)

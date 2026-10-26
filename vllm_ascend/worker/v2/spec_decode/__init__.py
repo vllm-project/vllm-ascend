@@ -61,11 +61,13 @@ def init_speculator(
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
-    if (
-        speculative_config.method == "mtp"
-        and not speculative_config.use_gemma4_mtp()
-        and not speculative_config.use_step3p5_mtp()
-    ):
+    if speculative_config.use_gemma4_mtp():
+        from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
+            AscendGemma4Speculator,
+        )
+
+        return AscendGemma4Speculator(vllm_config, device)
+    if speculative_config.method == "mtp" and not speculative_config.use_step3p5_mtp():
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
@@ -75,4 +77,10 @@ def init_speculator(
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
+    if speculative_config.uses_draft_model():
+        from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
+            AscendStandaloneARSpeculator,
+        )
+
+        return AscendStandaloneARSpeculator(vllm_config, device)
     raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

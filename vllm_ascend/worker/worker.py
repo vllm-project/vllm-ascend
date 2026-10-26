@@ -24,6 +24,7 @@ from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -55,7 +56,6 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups, unify_hybrid_kv_cache_specs
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -113,7 +113,22 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
+
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups,
+        unify_hybrid_kv_cache_specs,
+    )
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -760,22 +775,23 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
-        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
+        # Ascend's DSV4/V4.1 and GLM-Next planners already account for shared
+        # physical storage across all groups. Their budgets must not take the
+        # generic per-layer scale, including when the runner uses sparse SFA.
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-            if any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in specs):
+            if any(
+                getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41", "glm5_next"} for spec in specs
+            ):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
         # allocation. For the default layer/block-compact layout, Ascend can
-        # preserve that contract for hybrid attention/Mamba models while still
-        # exposing contiguous per-layer views to its existing backends. Do not
+        # preserve that contract for attention/Mamba and eligible full/sliding
+        # attention models while exposing contiguous per-layer views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -788,13 +804,20 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        shares_attention_pool = False
+        if getattr(self, "use_v2_model_runner", False):
+            # Load V2 helpers only for V2 workers; V1 retains private allocation
+            # and must keep its original multi-group budget scaling.
+            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+
+            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and (has_mamba or is_step_model)
+            and (has_mamba or is_step_model or shares_attention_pool)
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
@@ -927,11 +950,20 @@ class NPUWorker(WorkerBase):
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
-
             context = nullcontext()  # type: ignore
 
-        with context, set_current_vllm_config(self.vllm_config):
+        # vLLM #57516 reclaims cached memory inside `load_model` via
+        # `torch.accelerator.empty_cache()`. Inside the sleep-mode pluggable
+        # memory pool `torch.npu.empty_cache()` trips "captures_underway.empty()",
+        # so on main neutralize it while weights load; the pool is reclaimed by
+        # sleep()/wake_up(). The v0.31.0 lane does not reclaim inside load_model.
+        empty_cache_context: AbstractContextManager[Any]
+        if self.vllm_config.model_config.enable_sleep_mode and not vllm_version_is("0.31.0"):
+            empty_cache_context = patch("torch.npu.empty_cache", lambda: None)
+        else:
+            empty_cache_context = nullcontext()
+
+        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():

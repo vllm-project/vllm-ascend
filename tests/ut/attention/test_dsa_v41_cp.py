@@ -380,9 +380,7 @@ def _build_planes(builders, batch):
             slots = torch.where(slots >= 0, slots + 128, -1)
         result[PREFIXES[kind]] = builder.build(
             0,
-            batch.local.replace(slot_mapping=slots),
-            pcp_context=batch.context,
-            pcp_cache_group_idx=group,
+            batch.local.replace(slot_mapping=slots, pcp_context=batch.context, pcp_cache_group_idx=group),
             num_actual_reqs=1 if batch.graph else batch.local.num_reqs,
             full_graph_mode=batch.graph,
             common_v41_metadata={},
@@ -1374,7 +1372,7 @@ class TestProjectionLayout:
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
     config = {"legacy": legacy, "pcp": pcp}
     monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: config["pcp"])
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
     if legacy and pcp:
         with pytest.raises(ValueError, match="cannot be enabled"):
             dsa_v41_cp.get_v41_cp_classes()

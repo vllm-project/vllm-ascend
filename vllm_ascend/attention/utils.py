@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -36,6 +36,9 @@ from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
@@ -73,9 +76,9 @@ def supports_strided_mla_cache(
     ):
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         return False
-    if getattr(impl, "dcp_enabled", False):
+    if getattr(impl, "use_dcp", False):
         buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
         if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
             return False
@@ -318,13 +321,12 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
     )
 
 
-@lru_cache(maxsize=1)
-def enable_dcp():
+def is_dcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
 
 
-def enable_pcp():
+def is_pcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1
 
@@ -411,6 +413,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # cacheable groups -- and only the shared prefix is there. ``None`` means
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
+
+    # Global PCP view of the current target step and this cache group's index
+    # into its per-group tensors. ``None`` when the step is not PCP-partitioned.
+    pcp_context: "AscendPCPAttentionContext | None" = None
+    pcp_cache_group_idx: int | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":

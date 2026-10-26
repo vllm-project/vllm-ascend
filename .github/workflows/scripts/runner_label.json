@@ -82,6 +82,12 @@
         "npu_num": 0,
         "image_tag": "9.2.0_20260928212200-910b-ubuntu22.04-py3.12"
     },
+    "linux-aarch64-a2b1b3-1-hk-001": {
+        "chip": "a2",
+        "npu_num": 1,
+        "image_tag": "9.2.0_20260928212200-910b-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a2-arm64-ubuntu"
+    },
     "linux-aarch64-a2b3-1": {
         "chip": "a2",
         "npu_num": 1,

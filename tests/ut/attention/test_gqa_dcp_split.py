@@ -431,7 +431,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     from vllm_ascend.worker.dcp_utils import DCPManager
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.pcp_enabled = False
+    builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
     builder.speculative_config = SimpleNamespace(parallel_drafting=False)
@@ -446,6 +446,8 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
     advanced = torch.tensor([12, 13, 14, 15], dtype=torch.int32)
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=16,
         num_actual_tokens=4,
         max_query_len=1,

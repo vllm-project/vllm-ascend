@@ -327,6 +327,16 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # prefix to match.
             if name.startswith("model.language_model."):
                 name = name.replace("model.language_model.", "model.", 1)
+            # The target embedding is absent on the last PP stage. Load a
+            # local copy before filtering for MTP layers, while allowing an
+            # MTP-specific embedding to take precedence in either file order.
+            if name == "model.embed_tokens.weight":
+                if name not in loaded_params:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
+                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -406,5 +416,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 raise ValueError(f"MTP speculative decoding layer {layer_idx} weights missing from checkpoint.")
         if self.is_rot_weight_used and "rot.weight" not in loaded_params:
             raise ValueError("GLM5-Next MTP requires rot.weight when the quantization config sets is_rot_used.")
+        self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded_params
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params

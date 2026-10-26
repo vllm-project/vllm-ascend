@@ -289,9 +289,30 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
-        self.pd_dspark_aux_layer_ids = aux_layers
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            join_early_kernel_warmup,
+            start_early_kernel_warmup,
+        )
+        from vllm_ascend.model_executor.warmup.nz_warmup import (
+            join_nz_warm_thread,
+            start_nz_warm_thread,
+        )
+
+        # Overlap the one-off NZ cast and Triton compile with weight I/O.
+        # Every model goes through here.
+        start_nz_warm_thread("thread")
+        start_early_kernel_warmup()
+        try:
+            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+            super().load_model(load_dummy_weights, *args, **kwargs)
+            self.pd_dspark_aux_layer_ids = aux_layers
+        finally:
+            # Join even when weight loading fails: these threads touch the NPU
+            # device and must not outlive this call. Joining here is also before
+            # memory profiling.
+            join_nz_warm_thread()
+            join_early_kernel_warmup("load_model")
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
@@ -467,8 +488,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
-                if self.speculator is not None:
-                    self.speculator.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
@@ -521,11 +540,6 @@ class NPUModelRunner(GPUModelRunner):
             for groups in self.attn_groups
             for group in groups
         )
-
-        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
-        # vLLM lane where ModelConfig no longer exposes the flag.
-        if getattr(self.model_config, "enable_return_routed_experts", False):
-            self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
@@ -1242,6 +1256,26 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
+    def _can_skip_spec_cpu_length_sync(self) -> bool:
+        """Allow device lengths for GLM-5.3 with a DFlash2 draft."""
+        if self.sync_spec_pp_cpu_counts:
+            return False
+
+        if is_deepseek_v41(self.model_config.hf_config):
+            return True
+
+        spec = self.speculative_config
+        if (  # noqa: SIM103
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dflash"
+            and self.model_config.hf_text_config.model_type == "glm_moe_dsa"
+            and spec.draft_model_config is not None
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
+        ):
+            return True
+        return False
+
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -1250,10 +1284,7 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
+        """Update device state and refresh exact CPU counts when required."""
         if (
             self.use_pp
             and not self.is_last_pp_rank
@@ -1272,13 +1303,8 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # TODO: Gate CPU length synchronization by backend requirements, not
-        # speculative decoding alone. V4.1 uses device lengths; extend this
-        # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
-        if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
-        ) or self.sync_spec_pp_cpu_counts:
+        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -1288,9 +1314,10 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        # Attention metadata still needs exact CPU lengths. This non-blocking
-        # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
-        # sync point that can break asynchronous scheduling overlap.
+        if self._can_skip_spec_cpu_length_sync():
+            return
+
+        # Match this D2H and event with the consumer in _update_seq_lens_cpu.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
@@ -1309,12 +1336,9 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # Speculative decoding needs corrected num_computed_tokens after rejection.
-        # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
-        # so this update also corrects the num_computed_tokens_np used by PCP.
-        if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
-        ) or self.sync_spec_pp_cpu_counts:
+        # Wait for and consume the snapshot only when its producer runs.
+        # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:

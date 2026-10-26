@@ -664,7 +664,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
-        indexer._pcp_active = False
+        indexer.use_pcp = False
         indexer._dsa_cp_active = False
         indexer.write_cache = MagicMock()
 

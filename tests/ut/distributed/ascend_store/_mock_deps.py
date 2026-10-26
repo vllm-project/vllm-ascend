@@ -109,6 +109,7 @@ _vllm_mock_modules = [
     "vllm.v1.core",
     "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
+    "vllm.v1.core.kv_cache_planning",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
