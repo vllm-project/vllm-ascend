@@ -340,7 +340,8 @@ jobs:
         run: |
           set -euo pipefail
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
+          # Third-party sdists need build dependencies absent from the CPU image.
+          uv pip install --no-config -r requirements-dev.txt
           FLA_WHL=flash_linear_attention_npu_a3-26.9.1+deva4a7958-py3-none-manylinux_2_34_x86_64.whl
           FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
           FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
