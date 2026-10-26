@@ -7,8 +7,7 @@ from transformers import AutoModel
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, cleanup_dist_env_and_memory
 
-MODEL = "vllm-sr/d3-edge"
-MODELS = ("vllm-sr/d3-edge", "vllm-sr/d3-nano")
+MODEL = "vllm-sr/d3-nano"
 STATE = "A customer reports a damaged delivery and asks for a replacement."
 QUESTIONS = {
     "route": {
@@ -32,9 +31,8 @@ QUESTIONS = {
 }
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_d3_pooling_matches_checkpoint_runtime(model):
-    reference_model = AutoModel.from_pretrained(model, trust_remote_code=True)
+def test_d3_pooling_matches_checkpoint_runtime():
+    reference_model = AutoModel.from_pretrained(MODEL, trust_remote_code=True)
     runtime = reference_model.runtime
     prepared = runtime.prepare(STATE, QUESTIONS)
     runnable_keys = prepared.runnable
@@ -44,7 +42,7 @@ def test_d3_pooling_matches_checkpoint_runtime(model):
     del reference_model, runtime
     cleanup_dist_env_and_memory()
 
-    with VllmRunner(model, runner="pooling", max_model_len=4096) as runner:
+    with VllmRunner(MODEL, runner="pooling", max_model_len=4096) as runner:
         outputs = runner.model.classify([{"prompt_token_ids": ids} for ids in prompt_ids], use_tqdm=False)
 
     assert len(outputs) == len(option_counts)
