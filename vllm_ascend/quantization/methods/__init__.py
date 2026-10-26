@@ -45,6 +45,9 @@ from .base import (
     WeightSwitchState,
 )
 from .kv_cache import AscendFAQuantAttentionMethod
+
+# OSCAR INT2: importing the module registers the scheme via @register_scheme.
+from .kv_int2 import AscendINT2KVCacheAttentionMethod  # noqa: F401
 from .registry import get_scheme_class, register_scheme
 from .w4a4 import (
     AscendW4A4FlatQuantDynamicLinearMethod,
@@ -123,6 +126,7 @@ __all__ = [
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendFAQuantAttentionMethod",
+    "AscendINT2KVCacheAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
     "AscendW4A4MXFP4FlatQuantDynamicLinearMethod",
