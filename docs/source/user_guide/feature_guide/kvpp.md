@@ -33,22 +33,23 @@ The following table lists individual feature combinations with KVPP. It does not
 
 | Feature or combination | Support | Conditions and limitations |
 | --- | --- | --- |
-| Graph mode | ✅ Supported | Eager and PIECEWISE. |
+| Graph mode | ✅ Supported | Eager and `PIECEWISE`; full graph modes are not supported. |
 | TP | ✅ Supported | KV caches are assigned by layer within each cache-replica group. |
 | EP | ✅ Supported | Requires an MoE model that supports EP. |
-| PP | ✅ Supported | Can be combined with KVPP. |
+| PP | ✅ Supported | Use eager or `PIECEWISE`; see the [PP guide](pipeline_parallel.md) for the current E2E output-mismatch caveat. |
 | Chunked prefill | ✅ Supported | Can be combined with KVPP. |
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Speculative decoding | ✅ Supported | All speculative decoding methods with fixed K; dynamic K has not been validated. |
+| Speculative decoding | ✅ Supported | Fixed-K speculative decoding, including MTP, DSpark, and Eagle3. Draft layers must not share target KV caches; dynamic K has not been validated. |
 | PCP | ✅ Supported | Caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
-| Mooncake layerwise KV pooling | ✅ Supported | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending. |
+| Mooncake layerwise KV pooling | 🟠 Experimental | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
+- 🟠 **Experimental**: The implementation is available, but the model-specific validation listed in the table is incomplete.
 - ❌ **Not supported**: The combination is not currently supported.
 
 ## Usage
@@ -58,13 +59,15 @@ Enable KVPP through `enable_kvpp` in `--additional-config`:
 ```bash
 vllm serve <model-path> \
     --tensor-parallel-size 2 \
-    --enforce-eager \
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
     --additional-config '{"enable_kvpp": true}'
 ```
 
 Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
+
+The example selects `PIECEWISE` graphs explicitly. To use eager execution, replace `--compilation-config` with `--enforce-eager`. Full graph modes, including `FULL_DECODE_ONLY`, are not supported with KVPP. Hybrid models and DCP are also not supported.
 
 ### Combining Features
 
@@ -79,7 +82,7 @@ vllm serve <model-path> \
     --async-scheduling \
     --max-num-batched-tokens 32768 \
     --max-num-seqs 12 \
-    --enforce-eager \
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
     --additional-config '{"enable_kvpp": true}'
 ```
 
@@ -89,7 +92,7 @@ For PCP, add `--prefill-context-parallel-size` to the launch configuration. KVPP
 
 For PP, add `enable_kvpp` to the existing PP launch configuration.
 
-KVPP supports all speculative decoding methods, including MTP, DSpark, and Eagle3, with a fixed number of speculative tokens (K). Dynamic K has not been validated.
+KVPP supports fixed-K speculative decoding, including MTP, DSpark, and Eagle3, when the selected method is supported by the model and attention backend. Draft-model caches remain independently allocated and must not share target KV caches. Dynamic K has not been validated.
 
 ## Configuration Parameters
 
@@ -129,7 +132,7 @@ The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both ro
 
 ### Mooncake Layerwise Pooling
 
-Layerwise pooling is supported with KVPP for the Mooncake block-key data plane. Each TP rank owns a contiguous share of the layers, loads only those layers from the pool, and the KVPP broadcast supplies the other ranks when a layer executes. `layerwise_prefetch_layers` sets the prefetch distance: the load of layer `L` is submitted at model layer `max(0, L - layerwise_prefetch_layers)`.
+Experimental layerwise pooling is available with KVPP for the Mooncake block-key data plane. Each TP rank owns a contiguous share of the layers, loads only those layers from the pool, and the KVPP broadcast supplies the other ranks when a layer executes. `layerwise_prefetch_layers` sets the prefetch distance: the load of layer `L` is submitted at model layer `max(0, L - layerwise_prefetch_layers)`.
 
 Configure Mooncake as described in the [Mooncake layerwise guide](mooncake_layerwise_adaptation_and_optimization.md), then add:
 
@@ -141,11 +144,7 @@ Mooncake layerwise pooling requires `load_async=false` (loads are submitted laye
 
 ### Combining Connectors
 
-Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector`.
-KVPP validates the type and role of each child connector.
-Set the P/D connector to `kv_producer` and enable KVPP only on the prefill node;
-child roles are configured independently of the wrapper role.
-The pooling backend still requires its own SDK and service configuration.
+Use `MultiConnector` to combine `MooncakeConnectorV2` with `AscendStoreConnector`. KVPP validates the type and role of each child connector. Set the P/D connector to `kv_producer` and enable KVPP only on the prefill node; child roles are configured independently of the wrapper role. The pooling backend still requires its own SDK and service configuration.
 
 ```json
 {

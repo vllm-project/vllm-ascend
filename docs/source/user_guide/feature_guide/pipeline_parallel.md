@@ -301,7 +301,7 @@ requirements in the relevant feature guide.
 | DSpark | Supported only for DeepSeek-V4 and GLM-5.2 MoE-DSA models. The drafter taps intermediate target layers, and the tapped hidden states are relayed across PP stages. |
 | PCP (Prefill Context Parallel) | Supported. |
 | DCP (Decode Context Parallel) | Supported; use `MooncakeConnectorV2` for KV transfer. |
-| LayerSplit (KVPP) | Supported. An intermittent output-mismatch issue in the e2e test is under investigation. |
+| LayerSplit (KVPP) | Supported with eager or `PIECEWISE` execution; full graph modes cannot be combined with KVPP. An intermittent output-mismatch issue in the e2e test is under investigation. See the [KVPP guide](kvpp.md). |
 | KV offloading (Sparse KV Cache Offload) | Supported with the layerwise connector. |
 | Prefix caching | Supported. |
 | Pooling | Supported. |
