@@ -305,6 +305,11 @@ def triton_split_qkv_rmsnorm_mrope(
 
     if rope_dim is None:
         rope_dim = head_size
+    if cos_sin.ndim == 2:
+        # Text-only positions produce [T, 2 * half_rope_dim]. There are no
+        # H/W planes to read. Mask them out to avoid out-of-bounds loads.
+        mrope_section = [rope_dim // 2, 0, 0]
+        is_interleaved = False
     IS_PARTIAL_ROPE = rope_dim != head_size
 
     front_core_num = core_num
