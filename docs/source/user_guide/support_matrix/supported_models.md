@@ -11,7 +11,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 |Legend|Description|Usage|Recommendation|
 |----------|----------|-----------|------------|
 |✅|Supported|Fully implemented and verified, meeting both functional and performance standards.|Can be used in production environments.|
-|🔵|Experimental|Implemented and basically functional, but still under improvement. May have instability or performance flutuations.|Can be used for testing/pre-research, production use requires risk assessment.|
+|🔵|Experimental|Implemented and basically functional, but still under improvement. May have instability or performance fluctuations.|Can be used for testing/pre-research, production use requires risk assessment.|
 |🟡|Unverified|Code has been merged but not yet subjected to system testing. Behavior is uncertain and cannot be evaluated.|Users assume the risk of use.|
 |🔴|Unmaintained|Previously supported, but now discontinued and no longer maintained. Issues will not be fixed.|Do not use in new projects.|
 |❌|Unsupported|Not implemented in the current version and cannot be used.|Not available.|
