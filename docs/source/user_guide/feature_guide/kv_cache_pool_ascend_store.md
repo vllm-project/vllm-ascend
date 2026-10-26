@@ -35,14 +35,14 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35. |
+    | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35.<br>• Layerwise support requires Mooncake >= 0.3.14. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
 
 === "Memcache backend"
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• Layerwise support requires `memcache_hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
@@ -761,10 +761,10 @@ ock.mmc.evict_threshold_low = 60
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | No | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
-| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | No | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
-| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | No | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
-| `ock.mmc.log_level` | str | info | No | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
+| `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | Yes | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
+| `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | Yes | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
+| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | Yes | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
+| `ock.mmc.log_level` | str | info | Yes | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
 | `ock.mmc.evict_threshold_high` | int | 90 | No | [1, 99] (percentage) | High watermark of the secondary (L2) pool; eviction is triggered when this watermark is reached, and only when `usedSize * 100 > totalSize * threshold`. When SSD is enabled, 70 is recommended to improve SSD cache hit rate. |
 | `ock.mmc.evict_threshold_low` | int | 80 | No | [1, 98] (percentage) | Low watermark of the secondary (L2) pool; eviction stops at this watermark. When SSD is enabled, 60 is recommended. |
 
@@ -1656,7 +1656,7 @@ Public FAQ references:
 
 **Resolution Steps:**
 
-1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `1 - eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
+1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `--eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
 

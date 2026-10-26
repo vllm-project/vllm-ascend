@@ -390,7 +390,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --async-scheduling \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -438,7 +438,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --async-scheduling \
     --kv-cache-dtype int8 \
     --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -555,14 +555,14 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 **Multi-node performance tuning:**
 
 - For low-latency multi-node scenarios, keep `--data-parallel-size-local 1` to minimize cross-node communication.
-- `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For the w8a8c8 198K high-throughput scenario on A3, `6` is recommended; for the 198K low-latency scenario, `16` is recommended. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
+- `--max-num-seqs` should be tuned based on available KV cache memory after model loading. For the w8a8c8 198K scenarios on A3, `6` is a starting point for the high-throughput layout and `16` for the low-latency layout. These layouts use different parallelism and have different per-engine KV cache capacity; their sequence counts are not directly comparable. For w4a8 on A2 multi-node with long context, start with `2` and increase if memory permits.
 - All nodes in a multi-node deployment must use identical `--tensor-parallel-size`, `--enable-expert-parallel`, and model weight path configurations.
 
 **w8a8c8-specific `--additional-config` fields:**
 
 - `--prefill-context-parallel-size`: Enables PCP to accelerate long-context prefill.
 - `"enable_balance_scheduling": true`: Improves output throughput and reduces TPOT in the v1 scheduler. Not recommended when Prefill-Decode is separated.
-- `"fuse_muls_add": true`: Fuses multiply-add operations.
+- `"ascend_compilation_config": {"fuse_muls_add": true}`: Fuses multiply-add operations.
 - `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream. Automatically disabled when `"enable_fused_mc2": true`.
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -910,7 +910,7 @@ if __name__ == "__main__":
             --data-parallel-address $5 \
             --data-parallel-rpc-port $6 \
             --tensor-parallel-size $7 \
-            --max-model-len 202752 \
+            --max-model-len 135000 \
             --max-num-batched-tokens 240 \
             --served-model-name glm-5.1 \
             --gpu-memory-utilization 0.95 \
@@ -1095,7 +1095,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1157,7 +1157,7 @@ if __name__ == "__main__":
             --max-model-len 202752 \
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1217,7 +1217,7 @@ if __name__ == "__main__":
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -1275,7 +1275,7 @@ if __name__ == "__main__":
             --kv-cache-dtype int8 \
             --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{"ascend_compilation_config": {"fuse_muls_add": true}, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -1419,7 +1419,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 **Decode node-specific configurations:**
 
 - `--additional-config '{"enable_mlapo": true}'`: Enables MLA preprocess operation fusion on decode nodes to significantly improve decode performance. Consumes more NPU memory. In PD scenarios, enable MLAPO only on decode nodes.
-- On decode nodes, keep `--max-num-batched-tokens` close to `--max-num-seqs` — decode processes one token per sequence per step (`164` in the A3 scenario, `240` in the 950DT Products scenario, see the scripts above).
+- On decode nodes, size `--max-num-batched-tokens` for both active sequences and MTP speculative tokens, rather than matching it to `--max-num-seqs`. The scripts use a budget of `164` tokens for `32` sequences on A3 and `240` tokens for `60` sequences on 950DT Products, with three speculative tokens per sequence.
 - `--additional-config '{"recompute_scheduler_enable": true}'`: Enables the recomputation scheduler. When decode node KV cache is insufficient, requests are sent back to prefill nodes for KV cache recomputation. In this deployment: `true` on decode nodes; on prefill nodes `true` in the 950DT Products scenario and `false` in the A3 scenario (see the scripts above).
 
 **Common PD environment variables:**
@@ -1439,11 +1439,11 @@ For further explanation and restrictions of the environment variables above, ref
 Once your server is started, you can query the model with input prompts:
 
 ```shell
-curl http://<node0_ip>:<port>/v1/completions \
+curl http://<node0_ip>:<port>/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "glm-5.1",
-        "prompt": "The future of AI is",
+        "messages": [{"role": "user", "content": "The future of AI is"}],
         "max_completion_tokens": 15,
         "temperature": 0
     }'
@@ -1500,10 +1500,10 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|1|16|1|16|4096|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2, PCP16)|16|1|16|1|64|16384|202752|1|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|1|4|32|164|202752|3|
-|PD 198K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|202752|1|
-|PD 198K High Throughput (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|202752|3|
-|PD 198K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|202752|1|
-|PD 198K Low Latency (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|202752|3|
+|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
+|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement
 
@@ -1527,11 +1527,11 @@ The following optimizations must be explicitly enabled to take effect. They appl
 
 |Parameter|Low Latency|High Throughput|Long Context|Description|
 |---------|-----------|---------------|-------------|-----------|
-|`--max-num-seqs`|Lower (16)|Higher (6–64)|Higher (32–64)|Limits concurrent sequences. Lower values reduce scheduling latency; higher values increase throughput.|
+|`--max-num-seqs`|16 in the reference layout|6–64, depending on the layout|32–64, subject to KV cache capacity|Limits concurrent sequences. Tune within the selected parallel layout; sequence counts across different layouts are not directly comparable.|
 |`--max-model-len`|198K|Longer (128K–198K)|Maximum (198K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
-|`--max-num-batched-tokens`|Lower (4096)|Higher for prefill (4096–16384)|Higher for prefill (16384); small on decode nodes (close to `max-num-seqs`)|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
+|`--max-num-batched-tokens`|Lower (4096)|Higher for prefill (4096–16384)|Higher for prefill (16384); account for MTP tokens on decode nodes|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
 |`--gpu-memory-utilization`|0.92|0.92|0.92|NPU memory fraction. The reference configs in this document use 0.92. Reduce if OOM.|
-|`--enable-chunked-prefill`|Enable (co-located)|Enable (co-located)|Enable (co-located)|Splits long prompts into chunks to prevent prefill from blocking decode. PD prefill nodes use `--enforce-eager` instead.|
+|`--enable-chunked-prefill`|Enable (co-located)|Enable (co-located)|Enable (co-located)|Splits long prompts into chunks to prevent prefill from blocking decode. `--enforce-eager` controls graph execution and does not replace chunked prefill; configure the two independently.|
 |`num_speculative_tokens` (MTP)|3|3|3|MTP speculation count. Higher values improve decode throughput at the cost of memory for the draft model KV cache. In the reference PD configs, prefill nodes use `1`; decode nodes use `3`.|
 |`cudagraph_mode`|FULL_DECODE_ONLY|FULL_DECODE_ONLY (co-located / decode nodes)|FULL_DECODE_ONLY (co-located / decode nodes)|Graph capture for the decode phase only. PD prefill nodes use `--enforce-eager` instead.|
 

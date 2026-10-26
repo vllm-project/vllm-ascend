@@ -194,7 +194,6 @@ from one model to the other. Keep thinking enabled for GLM-5.3.
 For the A3 and A2 PD, pooling and 1M examples, select the hardware-specific
 image tag and container mounts from Section 4. Use the same image on every
 node in a deployment.
-The 950DT products W4A4C8 validation uses the version-pinned image listed in Section 5.1.1.
 
 <a id="glm-common-parameters"></a>
 
@@ -227,9 +226,9 @@ Each node exposes eight devices. Install `fastokens` before enabling
 `VLLM_USE_FASTOKENS=1`.
 
 Before running a role script, export `MODEL_PATH`, `LOCAL_IP`, and
-`NIC_NAME`. PP roles also require `P0_IP`;
-P1 uses the same P0 master address and runs headless.
-Use the same checkpoint path on all nodes.
+`NIC_NAME`. PP ranks within each Prefill instance must use that instance's
+master address; non-master PP ranks run headless. Follow the master-address
+variable in the selected script. Use the same checkpoint path on all nodes.
 
 #### 5.1.1 Single-Node Deployment
 
@@ -913,7 +912,7 @@ layerwise setting and topology.
 
     See [950DT preparation](#glm-950-preparation) for checkpoint, environment and PP-node settings.
 
-    Run the Prefill script on P0/P1. Decode uses four nodes, eight TP1 ranks per node (global ranks 0–31), not the previous two-node DP16 layout. Both roles declare DP32/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
+    This 2P1D service layout has two independent Prefill instances and one Decode group. Each Prefill instance uses PP2/TP8 across two eight-device nodes: P0/P1 form the first instance, and P2/P3 form the second. P0 and P2 expose the two Prefill API endpoints; P1 and P3 run headless. Decode uses DP16/TP1 across D0/D1, with eight local ranks per node (global ranks 0–15). Both roles declare DP16/TP1 in MooncakeConnectorV1. Prefill uses one MTP token; Decode uses five, a 60-token batch budget, and at most ten sequences per rank.
 
     ###### Prepare the Scripts
 
@@ -972,7 +971,7 @@ layerwise setting and topology.
 
     2. prepare the script `run_dp_template.sh` on each node.
 
-        1. Prefill node 0
+        1. Prefill PP rank 0 (P0 and P2)
 
             ```shell
             #!/usr/bin/env bash
@@ -982,7 +981,8 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${P0_IP:?Set the shared PP master address}"
+            # P0/P1 use <P0_IP>; P2/P3 use <P2_IP>.
+            PP_MASTER_IP="<P0_IP>"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1036,7 +1036,7 @@ layerwise setting and topology.
               --enable-expert-parallel \
               --pipeline-parallel-size 2 \
               --distributed-executor-backend mp \
-              --master-addr "$P0_IP" \
+              --master-addr "$PP_MASTER_IP" \
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 0 \
@@ -1057,6 +1057,7 @@ layerwise setting and topology.
               --kv-transfer-config  \
                 '{"kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
+                "engine_id": "0",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
                             "use_ascend_direct": true,
@@ -1067,17 +1068,17 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}'
             ```
 
-        2. Prefill node 1
+        2. Prefill PP rank 1 (P1 and P3)
 
             ```shell
             #!/usr/bin/env bash
@@ -1087,7 +1088,8 @@ layerwise setting and topology.
             : "${NIC_NAME:?Set the matching network interface}"
             local_ip="$LOCAL_IP"
             nic_name="$NIC_NAME"
-            : "${P0_IP:?Set the shared PP master address}"
+            # P0/P1 use <P0_IP>; P2/P3 use <P2_IP>.
+            PP_MASTER_IP="<P0_IP>"
 
             unset ftp_proxy FTP_PROXY
             unset https_proxy HTTPS_PROXY
@@ -1141,7 +1143,7 @@ layerwise setting and topology.
               --enable-expert-parallel \
               --pipeline-parallel-size 2 \
               --distributed-executor-backend mp \
-              --master-addr "$P0_IP" \
+              --master-addr "$PP_MASTER_IP" \
               --master-port 7060 \
               --nnodes 2 \
               --node-rank 1 \
@@ -1162,6 +1164,7 @@ layerwise setting and topology.
               --kv-transfer-config  \
                 '{"kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
+                "engine_id": "1",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
                             "use_ascend_direct": true,
@@ -1172,18 +1175,18 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
                 }'  \
               --kv-cache-dtype fp8 \
               --attention_config.indexer_kv_dtype fp8 \
-              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}' \
+              --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_fused_mc2": 2, "multistream_overlap_shared_expert": true}' \
               --headless
             ```
 
-        3. Decode nodes 0–3
+        3. Decode nodes 0 and 1
 
             ```shell
             #!/usr/bin/env bash
@@ -1260,6 +1263,7 @@ layerwise setting and topology.
               --kv-transfer-config \
                 '{"kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
+                "engine_id": "2",
                 "kv_port": "30300",
                 "kv_connector_extra_config": {
                             "use_ascend_direct": true,
@@ -1270,7 +1274,7 @@ layerwise setting and topology.
                                     "pp_layer_partition": "42,36"
                             },
                             "decode": {
-                                    "dp_size": 32,
+                                    "dp_size": 16,
                                     "tp_size": 1
                             }
                     }
@@ -1283,42 +1287,47 @@ layerwise setting and topology.
     ###### Start the Engines
 
     Export the node-specific `MODEL_PATH`, `LOCAL_IP` and `NIC_NAME`, and the shared
-    `P0_IP` / `D0_IP` addresses before starting the corresponding node script.
+    `D0_IP` address before starting the corresponding node script. Set
+    `PP_MASTER_IP` inside each Prefill script: `<P0_IP>` on P0/P1 and `<P2_IP>`
+    on P2/P3. Save the appropriate PP-rank script above as `run_dp_template.sh`
+    on each node. Run each command on its named node in a separate terminal.
+    Start both PP ranks of each Prefill instance and both Decode nodes before
+    waiting for the APIs to become ready.
 
-    1. Prefill node 0
+    1. Prefill node 0 (PP rank 0 of the first instance)
 
         ```shell
         bash run_dp_template.sh
         ```
 
-    2. Prefill node 1
+    2. Prefill node 1 (PP rank 1 of the first instance)
 
         ```shell
         bash run_dp_template.sh
         ```
 
-    3. Decode node 0
+    3. Prefill node 2 (PP rank 0 of the second instance)
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        bash run_dp_template.sh
         ```
 
-    4. Decode node 1
+    4. Prefill node 3 (PP rank 1 of the second instance)
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        bash run_dp_template.sh
         ```
 
-    5. Decode node 2
+    5. Decode node 0
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
-    6. Decode node 3
+    6. Decode node 1
 
         ```shell
-        python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
+        python launch_online_dp.py --dp-size 16 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
     <a id="glm-950-proxy"></a>
@@ -1331,30 +1340,23 @@ layerwise setting and topology.
     scenarios simultaneously on the same devices or ports.
 
     Run the proxy on a separate host after all API endpoints are healthy.
-    Replace the host placeholders below. Do not register the headless Prefill
-    node as an API endpoint.
+    Register P0 and P2 as the two Prefill endpoints. P1 and P3 are headless
+    and must not be registered as API endpoints. Replace the host placeholders below.
 
     ```shell
     P0_IP="<P0_IP>"
+    P2_IP="<P2_IP>"
     D0_IP="<D0_IP>"
     D1_IP="<D1_IP>"
-    D2_IP="<D2_IP>"
-    D3_IP="<D3_IP>"
 
     python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8000 \
-        --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
+        --prefiller-hosts "$P0_IP" "$P2_IP" --prefiller-ports 8000 8000 \
         --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
-            "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
-            "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
-            "$D3_IP" "$D3_IP" "$D3_IP" "$D3_IP" \
-            "$D3_IP" "$D3_IP" "$D3_IP" "$D3_IP" \
         --decoder-ports 8000 8001 8002 8003 8004 8005 8006 8007 \
-            8000 8001 8002 8003 8004 8005 8006 8007 \
-            8000 8001 8002 8003 8004 8005 8006 8007 \
             8000 8001 8002 8003 8004 8005 8006 8007
     ```
 
@@ -1370,14 +1372,16 @@ layerwise setting and topology.
     topology and scripts in the other tabs for A3 or A2 series.
 
     - `--pipeline-parallel-size 2` and `--tensor-parallel-size 8` define
-      the Prefill engine, with `VLLM_PP_LAYER_PARTITION="42,36"` across
-      two nodes. Only PP rank 0 exposes the Prefill API.
-    - The Decode launcher uses `--dp-size 32`, `--tp-size 1`, and
-      `--dp-size-local 8`: eight local ranks on each of four nodes.
+      each Prefill instance, with `VLLM_PP_LAYER_PARTITION="42,36"` across
+      two nodes. Two instances use four Prefill nodes in total.
+      `PP_MASTER_IP` is P0 for the first instance and P2 for the second;
+      only PP rank 0 in each instance exposes its Prefill API.
+    - The Decode launcher uses `--dp-size 16`, `--tp-size 1`, and
+      `--dp-size-local 8`: eight local ranks on each of two nodes.
       `--dp-address` and `--dp-rpc-port` must match across Decode nodes;
       `--dp-rank-start` assigns their disjoint global rank ranges.
     - `--vllm-start-port 8000` assigns Decode API ports `8000-8007` on
-      each node. Register all 32 endpoints with the proxy.
+      each node. Register all 16 endpoints with the proxy.
     - Both roles use `--max-model-len 135000`. Prefill sets
       `--max-num-seqs 500` and `--max-num-batched-tokens 16384`;
       Decode sets `10` and `60`, respectively, per engine.
@@ -1387,10 +1391,11 @@ layerwise setting and topology.
       `FULL_DECODE_ONLY` graph mode.
     - `MooncakeConnectorV1` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30000` and `30300`, respectively.
-      Both roles declare Prefill DP1/PP2/TP8 and Decode DP32/TP1.
+      The connector describes each Prefill instance as DP1/PP2/TP8 and
+      the shared Decode group as DP16/TP1.
     - Prefill enables DSA CP, FlashComm1 and `enable_fused_mc2: 2`.
-      Decode enables MLAPO and shared-expert multistream overlap.
-      Both roles enable prefix caching and recomputation scheduling.
+      Decode enables MLAPO. Both roles enable shared-expert multistream
+      overlap, prefix caching and recomputation scheduling.
     - `enable_fused_mc2: 2` selects MegaMoE when `cann_ops_transformer`
       is installed. In the selected maintenance branch, MTP draft MoE
       layers with an unsupported quantization layout use the non-fused
@@ -1587,6 +1592,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1676,6 +1682,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1762,6 +1769,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
+                    "engine_id": "2",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1847,6 +1855,7 @@ layerwise setting and topology.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
+                    "engine_id": "3",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -1934,7 +1943,7 @@ layerwise setting and topology.
     - Both roles retain chunked prefill, async scheduling, seed 1024, and
       memory utilization 0.92. Prefill enables prefix caching, DSA CP,
       FlashComm1, `enable_fused_mc2=2`, and `enable_shared_expert_dp=true`.
-      Non-pooled Decode disables prefix caching and uses NPU graph/static-kernel
+      Non-pooled Decode disables prefix caching and NPU graph/static-kernel
       compilation with shared-expert multistream overlap, without fused MC2.
       Both use `glm47` tool and reasoning parsers and the served model name `glm`.
     - `MooncakeConnectorV2` declares the same Prefill DP1/PP2/TP16 and
@@ -1955,15 +1964,15 @@ layerwise setting and topology.
 
     | Role | Nodes | Global DP | TP | PP | Placement | Devices per role |
     | --- | --- | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 | 2 | 16 | 1 | Rank 0 spans P0/P1; rank 1 spans P2/P3 | 32 |
+    | Prefill | P0-P3 | 1 | 16 | 2 | Four nodes | 32 |
     | Decode | D0-D3 | 16 | 2 | 1 | Four DP ranks per node, starting at 0/4/8/12 | 32 |
 
     P0 exposes the only Prefill API on port 8077; P1-P3 are headless.
     Decode exposes ports 10010-10013 on each node. Prefill uses the `mp`
     executor with `--nnodes 4`; Decode uses a launcher to start one TP2
     engine per DP rank. Both roles pin the V1 model runner and use int8
-    attention and indexer KV caches. This deployment has no pipeline
-    parallelism; the [A2 pooling topology in Section 5.1.3](#glm53-pool-a2) is different.
+    attention and indexer KV caches. This deployment uses pipeline parallelism
+    (PP2); the [A2 pooling topology in Section 5.1.4](#glm53-pool-a2) is different.
 
     Prepare identical weights and software on all eight nodes, verify
     [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect),
@@ -2088,12 +2097,12 @@ layerwise setting and topology.
     export ACL_OP_INIT_MODE=1
     export ASCEND_RT_VISIBLE_DEVICES="$VISIBLE_DEVICES"
     export VLLM_USE_FASTOKENS=1
+    export VLLM_PP_LAYER_PARTITION="42,36"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
+      --pipeline-parallel-size 2 \
       --tensor-parallel-size 16 \
       --distributed-executor-backend mp \
       --nnodes 4 \
@@ -2109,7 +2118,7 @@ layerwise setting and topology.
       --seed 1024 \
       --served-model-name glm \
       --max-model-len 135000 \
-      --max-num-batched-tokens 8192 \
+      --max-num-batched-tokens 16384 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
       --trust-remote-code \
@@ -2126,10 +2135,11 @@ layerwise setting and topology.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
+        "engine_id": "0",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 2, "tp_size": 16},
+          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }' \
@@ -2214,10 +2224,11 @@ layerwise setting and topology.
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
+        "engine_id": "1",
         "kv_port": "30100",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
-          "prefill": {"dp_size": 2, "tp_size": 16},
+          "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
           "decode": {"dp_size": 16, "tp_size": 2}
         }
       }'
@@ -2315,7 +2326,7 @@ layerwise setting and topology.
     ```
 
     Both roles use a 135,000-token maximum length, memory utilization 0.92,
-    and three MTP tokens. Prefill uses eager mode, an 8192-token batch budget,
+    and three MTP tokens. Prefill uses eager mode, a 16,384-token batch budget,
     64 sequences, DSA CP, and FlashComm1. Decode uses a 256-token
     batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
     and recomputation scheduling.
@@ -2326,10 +2337,10 @@ layerwise setting and topology.
 
     If Prefill fails during Mooncake KV cache registration with
     `ValueError: Mooncake worker requires a local DP rank`, first verify that
-    `--data-parallel-size-local 1` is present in `start_p_engine.sh`.
-    P0/P1 form global DP rank 0 and P2/P3 form global DP rank 1; each node
-    has one local DP rank. Even with that option, multi-node TP
-    headless workers may receive `data_parallel_rank_local=None`.
+    the conditional single-local-rank fix below is present in the installed
+    worker. This topology uses DP1 with PP2 across P0-P3; it has no separate
+    global DP ranks, and a PP headless worker may still receive
+    `data_parallel_rank_local=None`.
 
     If the installed worker still contains the unconditional `None` check
     shown below, apply the following change to
@@ -2363,13 +2374,13 @@ layerwise setting and topology.
     ```
 
     The same check and conditional fix apply to the pooled Prefill PP
-    headless workers in the [A2 pooling tab of Section 5.1.3](#glm53-pool-a2).
+    headless workers in the [A2 pooling tab of Section 5.1.4](#glm53-pool-a2).
     Confirm that the active Python package contains the change on every
     Prefill node, then start all members of the Prefill group before waiting
     for it to become ready.
 
     The supplied A2 deployment validation record dated 2026-10-15 reports
-    the following results with the explicit local-DP setting and rc1 fix:
+    the following results with the rc1 fix:
 
     | Check | Recorded result |
     | --- | --- |
@@ -2491,6 +2502,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2612,6 +2624,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2727,6 +2740,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
+                    "engine_id": "2",
                     "kv_port": "30300",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -2980,6 +2994,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3093,6 +3108,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_producer",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3205,6 +3221,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
+                    "engine_id": "2",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3316,6 +3333,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
                 --kv-transfer-config '{
                     "kv_connector": "MultiConnector",
                     "kv_role": "kv_consumer",
+                    "engine_id": "3",
                     "kv_port": "30200",
                     "kv_connector_extra_config": {
                         "connectors":[
@@ -3427,27 +3445,26 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     ###### Eight-Node Deployment with MemCache KV Cache Pool
 
     This A2 pooling reference uses four Prefill nodes and four Decode nodes,
-    with eight devices per node. Two independent Prefill instances each
-    span two nodes with TP8 × PP2. Each instance has DP size 1 and its own
-    API server; the proxy registers both instance leaders. Decode uses one
-    DP16 × TP2 group across four nodes.
+    with eight devices per node. One Prefill instance spans four nodes with
+    TP16 × PP2 and has DP size 1 with one API server. Decode uses one DP16 × TP2
+    group across four nodes.
 
     | Role | Nodes | Parallelism | Placement | Devices per role |
     | --- | --- | --- | --- | --- |
-    | Prefill | P0-P3 (2 instances) | TP8 × PP2 per instance | Instance 0 on P0/P1; instance 1 on P2/P3 | 32 |
+    | Prefill | P0-P3 (1 instance) | TP16 × PP2 | One instance on P0-P3 | 32 |
     | Decode | D0-D3 | DP16 × TP2 | Four local DP ranks per node, starting at 0/4/8/12 | 32 |
 
-    P0 and P2 expose APIs on port 8000; P1 and P3 are headless PP partners.
+    P0 exposes the API on port 8000; P1-P3 are headless PP partners.
     Decode exposes ports 8000-8003 on each node, and the proxy listens on
-    1999. This PP2 layout is separate from the non-pooled DP2 × TP16
-    Prefill layout in the [A2 PD tab of Section 5.1.2](#glm53-pd-a2).
+    1999. This pooled PP2 layout uses the same Prefill parallelism as the
+    non-pooled A2 PD deployment and adds MemCache KV pooling.
     Use the A2 image from Section 4 and the
     [A2 Decode launcher](#glm53-pd-a2-launcher).
 
     The pooled Prefill and Decode engines both use `--max-model-len 128000`,
     with MTP token counts 1 and 5, respectively.
     The end-to-end limit is **128,000 tokens**, including input and output.
-    Both roles declare the actual Prefill DP1/PP2/TP8 partition `42,36` and
+    Both roles declare the actual Prefill DP1/PP2/TP16 partition `42,36` and
     Decode DP16/TP2 topology.
 
     <a id="glm53-pool-a2-prepare"></a>
@@ -3503,7 +3520,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     headroom; it is not the number of NPUs in this deployment. `dram.size`
     is allocated per LocalService: eight LocalServices contribute `320GB`
     per fully populated A2 node. MetaService ports 5000/6000, metrics port
-    8009, Prefill master port 7060 on each instance leader, Decode DP RPC
+    8009, Prefill master port 7060 on the Prefill instance leader, Decode DP RPC
     port 12990, API/proxy ports, and the Mooncake ports derived from base
     ports 30000/30200 must be reachable as appropriate.
 
@@ -3528,7 +3545,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     Save this script as `start_p_pool.sh` on P0-P3. The arguments select the
     PP node rank, API port, local IP, instance leader IP, and visible devices.
     Both PP stages of one instance use the same master address and partition.
-    The two independent instances have different master addresses.
+    The Prefill instance uses its own master address.
 
     ```shell
     #!/usr/bin/env bash
@@ -3547,8 +3564,8 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
     case "$NODE_RANK" in
       0) SERVER_ROLE_ARGS=(--api-server-count 1);;
-      1) SERVER_ROLE_ARGS=(--headless);;
-      *) echo "node_rank must be 0 or 1" >&2; exit 1;;
+      1|2|3) SERVER_ROLE_ARGS=(--headless);;
+      *) echo "node_rank must be 0-3" >&2; exit 1;;
     esac
 
     unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY ALL_PROXY all_proxy
@@ -3580,13 +3597,13 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port "$PORT" \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 16 \
       --enable-expert-parallel \
       --pipeline-parallel-size 2 \
       --distributed-executor-backend mp \
       --master-addr "$INSTANCE_LEADER_IP" \
       --master-port 7060 \
-      --nnodes 2 \
+      --nnodes 4 \
       --node-rank "$NODE_RANK" \
       --enable-chunked-prefill \
       --no-async-scheduling \
@@ -3611,6 +3628,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
+        "engine_id": "0",
         "kv_port": "30000",
         "kv_connector_extra_config": {
           "connectors": [
@@ -3620,7 +3638,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30000",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -3644,11 +3662,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     scheduling with this combination is rejected by the runtime.
 
     PP headless workers may fail with
-    `Mooncake worker requires a local DP rank`. Each pooled Prefill instance
+    `Mooncake worker requires a local DP rank`. The pooled Prefill instance
     has DP size 1. Check whether the conditional fix in
     [Local DP Rank Compatibility and Troubleshooting](#glm53-a2-rc1-compatibility)
     applies to the installed worker on all Prefill nodes before starting
-    the two instances.
+    it.
 
     ###### Decode Engine Script (Pooled)
 
@@ -3732,6 +3750,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
+        "engine_id": "1",
         "kv_port": "30200",
         "kv_connector_extra_config": {
           "connectors": [
@@ -3741,7 +3760,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
               "kv_port": "30200",
               "kv_connector_extra_config": {
                 "use_ascend_direct": true,
-                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 8, "pp_layer_partition": "42,36"},
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "42,36"},
                 "decode": {"dp_size": 16, "tp_size": 2}
               }
             },
@@ -3778,17 +3797,11 @@ Select the tab that matches the deployment hardware and its Prefill topology.
        separate terminals before waiting for the instance to become ready:
 
         ```shell
-        # P0: instance 0 leader and API server
+        # P0-P3: one Prefill instance, with P0 as API leader
         bash start_p_pool.sh 0 8000 "<PREFILL_NODE0_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
-
-        # P1: instance 0 headless PP partner
         bash start_p_pool.sh 1 8000 "<PREFILL_NODE1_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
-
-        # P2: instance 1 leader and API server
-        bash start_p_pool.sh 0 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
-
-        # P3: instance 1 headless PP partner
-        bash start_p_pool.sh 1 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE2_IP>" 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 2 8000 "<PREFILL_NODE2_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
+        bash start_p_pool.sh 3 8000 "<PREFILL_NODE3_IP>" "<PREFILL_NODE0_IP>" 0,1,2,3,4,5,6,7
         ```
 
     3. Export the settings from [Prepare MemCache](#glm53-pool-a2-prepare)
@@ -3816,20 +3829,19 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         All DP MemCache initializations completed
         ```
 
-        The Prefill instances have DP size 1 and do not enter this DP
+        The Prefill instance has DP size 1 and does not enter this DP
         barrier; check their logs for successful MemCache initialization and
-        verify that P1 and P3 joined their PP instances. They do not expose
+        verify that P1-P3 joined the Prefill PP instance. They do not expose
         HTTP APIs. On every node, confirm that the active `mmc-local.conf`
         uses `device_rdma` and `dram.size = 40GB`.
 
-        Wait for the APIs on P0:8000, P2:8000, and all sixteen Decode APIs on
+        Wait for the API on P0:8000 and all sixteen Decode APIs on
         ports 8000-8003 to answer `GET /v1/models`. Use `curl --noproxy '*'`
         for these checks when HTTP proxies are configured. Start the proxy
         on P0 or another reachable host:
 
         ```shell
         P0_IP="<PREFILL_NODE0_IP>"
-        P2_IP="<PREFILL_NODE2_IP>"
         D0_IP="<DECODE_NODE0_IP>"
         D1_IP="<DECODE_NODE1_IP>"
         D2_IP="<DECODE_NODE2_IP>"
@@ -3839,7 +3851,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
         python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
           --host 0.0.0.0 --port 1999 --workers 8 \
-          --prefiller-hosts "$P0_IP" "$P2_IP" --prefiller-ports 8000 8000 \
+          --prefiller-hosts "$P0_IP" --prefiller-ports 8000 \
           --decoder-hosts "$D0_IP" "$D0_IP" "$D0_IP" "$D0_IP" \
             "$D1_IP" "$D1_IP" "$D1_IP" "$D1_IP" \
             "$D2_IP" "$D2_IP" "$D2_IP" "$D2_IP" \
@@ -3968,6 +3980,7 @@ Select the tab that matches your deployment hardware.
             --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
+                "engine_id": "0",
                 "kv_port": "30000",
                 "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -4064,6 +4077,7 @@ Select the tab that matches your deployment hardware.
             --kv-transfer-config '{
             "kv_connector": "MooncakeConnectorV2",
             "kv_role": "kv_consumer",
+            "engine_id": "1",
             "kv_port": "30200",
             "kv_connector_extra_config": {
             "use_ascend_direct": true,
@@ -4310,6 +4324,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
+                    "engine_id": "0",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4408,6 +4423,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
+                    "engine_id": "1",
                     "kv_port": "30000",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4502,6 +4518,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
+                    "engine_id": "2",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4596,6 +4613,7 @@ Select the tab that matches your deployment hardware.
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_consumer",
+                    "engine_id": "3",
                     "kv_port": "30100",
                     "kv_connector_extra_config": {
                         "use_ascend_direct": true,
@@ -4756,7 +4774,7 @@ settings when comparing results. Scores are specific to the model shown.
 ### 7.3 W4A4C8 950DT products Validation Records
 
 Both records below use one 950DT products (96GB × 8), the 2026-10-08 950DT products
-image in Section 5.1.1, TP8/DP1/EP, eager mode, a configured maximum
+image, TP8/DP1/EP, eager mode, a configured maximum
 context of 135000, 16384 batched tokens, 20 sequences and FP8 KV/indexer
 caches. On 2026-10-10, `/health`, `/v1/chat/completions` and
 `/v1/completions` returned HTTP 200 for both local checkpoints.
@@ -4795,16 +4813,23 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ## 9 Performance Tuning
 
 The following settings summarize the hardware-specific deployment scripts in
-Sections 5.1 and 5.2. Global DP includes all nodes of one role; local DP is
-the number of ranks on one node. Scheduler limits are per engine.
+Sections 5.1 and 5.2. Global DP includes all nodes within one DP group;
+independent instances are listed per instance. Local DP is the number of
+ranks on one node. Scheduler limits are per engine.
+
+For 950DT ordinary PD, the two independent PP2/TP8 Prefill instances use
+four Prefill nodes in total (P0/P1 and P2/P3). The Prefill row below gives
+DP1 and scheduler limits per instance; it does not combine them into a DP2
+group. The single DP16/TP1 Decode group spans D0/D1. Pooling and 1M rows
+refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 
 ### 9.1 Recommended Configurations {: #91-detailed-node-configuration }
 
 | Scenario | Hardware | Role | TP | Global DP | Local DP | PP | DCP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Spec Num |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Colocated | 950DT | Shared | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 5 |
-| Ordinary PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
-| Ordinary PD | 950DT | Decode | 1 | 32 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
+| Ordinary PD | 950DT | Prefill (2 instances) | 8 | 1 | 1 | 2 | 1 | 500 | 16384 | 135000 | 1 |
+| Ordinary PD | 950DT | Decode | 1 | 16 | 8 | 1 | 1 | 10 | 60 | 135000 | 5 |
 | Pooled PD | 950DT | Prefill | 8 | 1 | 1 | 2 | 1 | 8 | 4096 | 1048576 | 1 |
 | Pooled PD | 950DT | Decode | 2 | 16 | 4 | 1 | 1 | 10 | 60 | 1048576 | 5 |
 | 1M PD | 950DT | Prefill | 8 | 2 | 1 | 1 | 1 | 64 | 32768 | 1046576 | 1 |
