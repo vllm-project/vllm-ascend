@@ -22,8 +22,8 @@
       "bytes": 18463
     },
     "final-comparison-verified.json": {
-      "sha256": "2daaf3bfb4256fb5be325d174c27714bffbc255575ba92d862dee58e374a7b83",
-      "bytes": 80443
+      "sha256": "08a30e1ee5c007ea6ee026976561023cf91b93ce6480610b984377174c6a0191",
+      "bytes": 77743
     },
     "final-comparison.json": {
       "sha256": "2b047cddd6fabdbe05741535e67e6a29546c566cada87c8ce12674ed6e604c89",
@@ -134,12 +134,12 @@
       "bytes": 42596
     },
     "README.md": {
-      "sha256": "54c168865f0296f95b37aaf0140887c5c28edcce37c6e6601afadfd4710e3505",
-      "bytes": 10291
+      "sha256": "f419e916209f6284d4a04a2fa3425cd27431be801631adfe9b7a375899a1cb3c",
+      "bytes": 10375
     },
     "round01-decode-r128-summary.json": {
-      "sha256": "78277f64064459fac8562c36d3748ddc55519cb4035e926333159b09ace6ad45",
-      "bytes": 7134
+      "sha256": "a7fdfb975decc3df4258e120101578475de2bf16429d557f27db57300853cd4d",
+      "bytes": 6855
     },
     "runs/final-decode-r128-d512-fused-run.json": {
       "sha256": "3e340d77df3e82ca2bbcd9eb70d73693c3d1a7e917184e725a0f2e791a6cecbf",

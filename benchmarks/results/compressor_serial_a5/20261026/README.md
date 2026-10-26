@@ -90,6 +90,6 @@ The strict summarizer rejects missing markers, changing task signatures and unkn
 - Nine CPU contract/profiler tests pass. The NPU module is skipped on the Windows CPU environment.
 - Standalone ASC and parent-project CMake builds/install pass. Automatic loading is exercised in a fresh Python process.
 - Six workload classes pass CPU, fused black-box and captured Graph comparisons through all ten valid rounds.
-- Four small NPU edge cases pass Eager and Graph oracle checks.
+- All 13 tests pass on A5 (`9` contract/profiler tests plus `4` NPU edge cases, 7.57 seconds). The edge cases check Eager and Graph oracle results.
 - A complete repository wheel build and model-level test suite were not run.
 - `bash format.sh ci` was attempted on Windows but stopped during actionlint dependency bootstrap after ten minutes without progress; this is not a full CI pass. Selected Ruff, codespell, typos, markdownlint, package-init, forbidden-import, context-manager, function-comment and symbolic-meta checks pass.
