@@ -151,7 +151,7 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
             size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
         )
     speculative = vllm_config.speculative_config
-    identity = (
+    identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
         model.compute_hash(),
