@@ -363,10 +363,10 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
         # Replicated decode stays on the local metadata path. Sharded decode
         # owns different requests per rank, so it still needs global metadata.
         needs_global_metadata = has_prefill or self._is_decode_sharded
-        use_specialized = self._use_specialized_metadata()
+        use_specialized_metadata = self._use_specialized_metadata()
         # The standard caller creates a fresh cache for each build invocation.
         # Global and rank-local layouts must never share metadata entries.
-        shared = common_ratio_to_sas_metadata if use_specialized else {}
+        shared = common_ratio_to_sas_metadata if use_specialized_metadata else {}
         # Reuse the base DSA computation cache even on the full-builder path.
         # Only graph-stable PCP preparation is restricted to specialized builds.
         global_shared = common_ratio_to_sas_metadata.setdefault("pcp_global", {})
@@ -407,7 +407,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
                 fast_build,
                 num_actual_reqs=pcp_context.global_batch.num_reqs,
                 common_ratio_to_sas_metadata=global_shared,
-                build_query=not use_specialized,
+                build_query=not use_specialized_metadata,
                 can_use_rope_cache=False,
                 full_graph_mode=full_graph_mode,
             )
@@ -420,12 +420,12 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
                 req_metadata = global_dsa_metadata.req_metadata
                 assert req_metadata is not None
                 if req_metadata.cos is not None:
-                    rope = global_shared.get("staged_rope") if use_specialized else None
+                    rope = global_shared.get("staged_rope") if use_specialized_metadata else None
                     if rope is None:
                         rope = req_metadata.cos.copy_to_buffers(
                             self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
                         )
-                        if use_specialized:
+                        if use_specialized_metadata:
                             global_shared["staged_rope"] = rope
                     req_metadata.cos, req_metadata.sin = rope
         local_common_attn_metadata = self._build_local_common_attn_metadata(
@@ -459,7 +459,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=local_shared,
             full_graph_mode=full_graph_mode,
-            update_cache=not use_specialized or not needs_global_metadata,
+            update_cache=not use_specialized_metadata or not needs_global_metadata,
         )
         # Base build stores the local namespace on self; expose both layouts
         # to the runner for the next cache group, including empty local ranks.
