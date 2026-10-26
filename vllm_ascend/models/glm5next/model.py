@@ -112,9 +112,10 @@ def _validate_supported_config(config: Glm5NextTextConfig) -> None:
 
 
 def _pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
-    # Keep padding in the graph even when the tracing input is TP-aligned.
-    # A Python branch on this remainder would specialize away padding for
-    # subsequent non-aligned prefills when compilation guards are disabled.
+    # MRV1 pads SP tokens in the runner; MRV2 can pass unaligned prefills.
+    # Filtering capture sizes does not pad runtime tensors. Keep padding
+    # symbolic so tracing an aligned input cannot remove it from a graph
+    # later reused without guards for non-aligned tokens.
     tp_size = get_tensor_model_parallel_world_size()
     padding = (-hidden_states.shape[0]) % tp_size
     pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
@@ -583,7 +584,7 @@ class Glm5NextDecoderLayer(nn.Module):
         return residual, post, comb, layer_input
 
 
-@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "inputs_embeds": 0, "intermediate_tensors": 0})
+@support_torch_compile
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

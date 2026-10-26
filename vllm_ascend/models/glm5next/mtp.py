@@ -46,7 +46,9 @@ def glm5next_mtp_eh_norm(
     hnorm_weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    # Keep process-local Triton kernel indices out of serialized draft graphs.
+    # Keep the Triton launch opaque to Dynamo. The current Ascend generated-code
+    # cache can retain process-local kernel_side_table indices for directly
+    # captured launches, which cannot be replayed in a fresh process.
     return fused_eh_norm(positions, inputs_embeds, previous_hidden, enorm_weight, hnorm_weight, eps)
 
 
@@ -230,15 +232,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         return self.logits_processor.get_top_tokens(mtp_layer.shared_head.head, hidden_states)
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": 0,
-        "hidden_states": 0,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    }
-)
+@support_torch_compile
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

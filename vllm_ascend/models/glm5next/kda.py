@@ -366,14 +366,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        # Piecewise capture has no attention metadata. Execute the stateful
-        # KDA custom op eagerly between captured tensor-compute segments.
-        if compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
-            splitting_op = "vllm::glm5next_kda_forward"
-            splitting_ops = compilation_config.splitting_ops
-            if splitting_ops is not None and splitting_op not in splitting_ops:
-                splitting_ops.append(splitting_op)
-
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
         self.kda_lower_bound = config.linear_lower_bound
