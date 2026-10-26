@@ -44,7 +44,8 @@ workspace requirement or total process HBM usage.
   lacks APIs required by the current Ascend source.
 - The broader mixed-batch suite hits an existing weight-reload incompatibility:
   `replace_parameter()` does not accept `prefer_copy`. Model end-to-end
-  validation remains pending in a matching upstream environment.
+  validation is recorded in [the model E2E report](e2e_qwen3_next_80b.md),
+  including the shared runtime compatibility changes needed in this container.
 
 Ruff, Codespell, Typos, Gitleaks, ShellCheck, and the repository's Python
 structure/import checks passed. Markdownlint 0.45.0 passed separately. The
