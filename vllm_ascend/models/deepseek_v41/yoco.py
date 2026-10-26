@@ -334,31 +334,41 @@ def apply_yoco_mask_to_window_lengths(
     Ascend-native mask path: keep the full query layout through consumer layers
     but empty the visible window for tokens before ``N - keep_tokens``. Returns
     a cloned lengths tensor (does not mutate ``lengths`` in place).
+
+    Fully vectorized: no per-token ``.item()`` host syncs.
     """
     if keep_tokens <= 0:
         raise ValueError(f"keep_tokens must be > 0; got {keep_tokens}")
     out = lengths.clone()
-    if isinstance(seq_lens, torch.Tensor):
-        seq_lens_list = [int(x) for x in seq_lens.tolist()]
-    else:
-        seq_lens_list = [int(x) for x in seq_lens]
+    if out.numel() == 0:
+        return out
+
+    device = out.device
     if isinstance(query_start_loc, torch.Tensor):
-        cu = [int(x) for x in query_start_loc.tolist()]
+        query_start_loc_t = query_start_loc.to(device=device, dtype=torch.long)
     else:
-        cu = [int(x) for x in query_start_loc]
-    if len(cu) != len(seq_lens_list) + 1:
+        query_start_loc_t = torch.tensor(query_start_loc, device=device, dtype=torch.long)
+    if isinstance(seq_lens, torch.Tensor):
+        seq_lens_t = seq_lens.to(device=device, dtype=torch.long)
+    else:
+        seq_lens_t = torch.tensor(seq_lens, device=device, dtype=torch.long)
+    if query_start_loc_t.numel() != seq_lens_t.numel() + 1:
         raise ValueError("query_start_loc length must be num_seqs + 1")
-    flat = out.view(out.shape[0], -1)
-    for i, n in enumerate(seq_lens_list):
-        start, end = cu[i], cu[i + 1]
-        rect_lo = n - keep_tokens
-        for local, row in enumerate(range(start, end)):
-            # Absolute position for prefill chunk starting at (n - q_len).
-            q_len = end - start
-            q_start = n - q_len
-            pos = int(positions[row].item()) if positions.numel() else q_start + local
-            if pos < rect_lo:
-                flat[row].zero_()
+
+    q_lens = query_start_loc_t[1:] - query_start_loc_t[:-1]
+    if positions.numel() == 0:
+        # Reconstruct absolute positions from chunk layout: q_start = N - q_len.
+        local_idx = torch.arange(out.shape[0], device=device, dtype=torch.long) - torch.repeat_interleave(
+            query_start_loc_t[:-1], q_lens
+        )
+        q_starts = seq_lens_t - q_lens
+        positions_t = local_idx + torch.repeat_interleave(q_starts, q_lens)
+    else:
+        positions_t = positions.to(device=device, dtype=torch.long)
+
+    thresholds = torch.repeat_interleave(seq_lens_t - keep_tokens, q_lens)
+    mask = positions_t < thresholds
+    out.view(out.shape[0], -1)[mask] = 0
     return out
 
 
