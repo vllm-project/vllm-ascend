@@ -37,10 +37,12 @@ except ImportError:
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
+from vllm_ascend.ops.shared_quant_proj import project_with_shared_quant
 from vllm_ascend.utils import enable_dense_sp
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+_GDN_ORIGINAL_FORWARD = _GDN_PATCH_TARGET.forward
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -49,8 +51,20 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
-        qkv, _ = self.qkv_proj(hidden_states)
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor = None,
+        sp_num_tokens: int | None = None,
+    ):
+        """``sp_num_tokens`` is the full sequence's token count. Passing it
+        means ``hidden_states`` holds only this rank's sequence-parallel
+        shard, and ``qkv_proj`` all-gathers the rest - after its quantize, so
+        the collective carries one byte per element instead of two. Everything
+        from the q/k/v split on sees the full rows either way.
+        """
+        (qkv,) = project_with_shared_quant(self, hidden_states, ("qkv_proj",), sp_num_tokens)
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
             if positions.ndim == 1:
@@ -148,18 +162,20 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if use_sp:
-            # Attention (full and GDN) needs the full token sequence; the
-            # sequence-parallel output projection above it leaves partial
-            # sums that the reduce-scatter below completes on the shard.
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        # Attention (full and GDN) needs the full token sequence, and its input
+        # projection all-gathers the shard itself - behind the projection's
+        # quantize, so the collective carries one byte per element instead of
+        # two. The sequence-parallel output projection above it leaves partial
+        # sums that the reduce-scatter below completes on the shard.
+        sp_num_tokens = full_num_tokens if use_sp else None
 
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
+            hidden_states = self.linear_attn(hidden_states=hidden_states, sp_num_tokens=sp_num_tokens)
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
+                sp_num_tokens=sp_num_tokens,
             )
         else:
             raise ValueError("Invalid layer_type")
@@ -295,6 +311,14 @@ if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY)
 
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+
+    def _gdn_forward_gathering_sp_shard(self, hidden_states, *args, sp_num_tokens=None, **kwargs):
+        """Accept the decoder layer's shard for the compatibility forward."""
+        if sp_num_tokens is not None:
+            hidden_states = sp_all_gather(hidden_states)[:sp_num_tokens]
+        return _GDN_ORIGINAL_FORWARD(self, hidden_states, *args, **kwargs)
+
+    _GDN_PATCH_TARGET.forward = _gdn_forward_gathering_sp_shard
 else:
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
