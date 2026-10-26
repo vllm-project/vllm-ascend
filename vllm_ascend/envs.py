@@ -72,6 +72,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Deduplicate the KV pool read path when the KV cache is sharded across the
+    # TP group (MLA: one KV head, put_step == tp_size). Each rank reads only its
+    # own shard and the missing shards are gathered from the peers instead of
+    # every rank reading the whole key space. Set to 0 to force the previous
+    # full-read behaviour.
+    "VLLM_ASCEND_KV_POOL_READ_DEDUP": lambda: bool(int(os.getenv("VLLM_ASCEND_KV_POOL_READ_DEDUP", "1"))),
+    # One-shot self-check of the read deduplication: byte-compare the assembled
+    # KV cache against a full pool read of the same blocks. Diagnostic only; it
+    # doubles the pool traffic of the single checked call.
+    "VLLM_ASCEND_KV_POOL_READ_DEDUP_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_KV_POOL_READ_DEDUP_VERIFY", "0"))),
 }
 
 # end-env-vars-definition
