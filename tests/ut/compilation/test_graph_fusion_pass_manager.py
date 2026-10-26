@@ -81,13 +81,15 @@ class TestGraphFusionPassManagerConfig(TestBase):
 @pytest.mark.parametrize("method", [None, "dspark", "mtp"])
 def test_qknorm_rope_fusion_skips_dspark(method):
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(use_dspark=lambda: method == "dspark") if method else None
+        speculative_config=SimpleNamespace(use_dspark=lambda: method == "dspark") if method else None,
+        compilation_config=SimpleNamespace(pass_config=SimpleNamespace(fuse_gemm_comms=False)),
     )
     ascend_config = SimpleNamespace(
         ascend_compilation_config=SimpleNamespace(fuse_norm_quant=False, fuse_qknorm_rope=True, fuse_muls_add=False)
     )
     with (
         patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.compilation.graph_fusion_pass_manager.enable_sp", return_value=False),
         patch("vllm_ascend.compilation.passes.qknorm_rope_fusion_pass.QKNormRopeFusionPass") as fusion_pass,
     ):
         manager = GraphFusionPassManager()
