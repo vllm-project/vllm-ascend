@@ -87,6 +87,12 @@ class NativeSWABuilder:
         starts = torch.clamp(exact[:n] - runtime.window_size, min=0)
         starts = starts // source.block_span * source.block_span
         starts = torch.where(torch.from_numpy(continuing), 0, starts)
+        # torch_npu synchronizes pageable host-to-device copies even with
+        # non_blocking=True. Retain the actual pinned int64 DMA source; the
+        # shared projector's dtype conversion must not unpin it again.
+        starts = starts.to(torch.int64)
+        if source.table.device.type == "npu":
+            starts = starts.pin_memory()
         retain = lambda *items: runtime.pool.retain(owner, *items)
         # Retain both original exact sources and final native result before
         # any derived table copy can submit asynchronous device work.

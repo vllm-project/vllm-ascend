@@ -94,3 +94,78 @@ def test_native_swa_intersection_uses_current_exact_and_canonical_pages(ends, wi
     torch.testing.assert_close(read.seq_lens.cpu(), exact - starts, atol=0, rtol=0)
     torch.testing.assert_close(key_device.cpu(), key, atol=0, rtol=0)
     torch.testing.assert_close(value_device.cpu(), value, atol=0, rtol=0)
+
+
+def test_native_builder_retains_pinned_actual_dma_source():
+    """Check the real DMA input is pinned and retained before submission."""
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import numpy as np
+
+    from vllm_ascend.worker.v2.spec_decode.draft_window_swa import NativeSWABuilder
+
+    @dataclass
+    class Metadata:
+        seq_lens: torch.Tensor
+        seq_lens_gpu: torch.Tensor
+        seq_lens_cpu: torch.Tensor
+        seq_lens_list: list[int]
+        block_tables: torch.Tensor
+        slot_mapping: torch.Tensor
+        causal: bool = True
+
+    exact = torch.tensor([1151, 1152], dtype=torch.int32, device="npu")
+    table = torch.arange(40, dtype=torch.int32).reshape(2, 20).npu()
+    mapping = np.array([1, 0])
+    common = SimpleNamespace(
+        num_reqs=2,
+        seq_lens=exact,
+        block_table_tensor=table,
+        seq_lens_cpu_upper_bound=torch.tensor([1152, 1159], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 8, 16], dtype=torch.int32),
+    )
+    original = Metadata(exact, exact, exact, exact.tolist(), table, torch.arange(16).npu())
+    batch = SimpleNamespace(
+        num_reqs=2,
+        req_ids=["a", "b"],
+        idx_mapping_np=mapping,
+        idx_mapping=torch.from_numpy(mapping).npu(),
+        num_computed_prefill_tokens_np=np.array([0, 0]),
+        prefill_len_np=np.array([8, 8]),
+        num_scheduled_tokens=np.array([8, 8]),
+        num_draft_tokens_per_req=None,
+    )
+    owner, held, copies = object(), [], []
+    runtime = SimpleNamespace(
+        _owner=owner,
+        _input_batch=batch,
+        window_size=1024,
+        pool=SimpleNamespace(retain=lambda actual, *values: held.extend(values)),
+        speculator=SimpleNamespace(
+            num_query_per_req=8,
+            block_tables=SimpleNamespace(
+                block_tables=[SimpleNamespace(gpu=table)],
+                kernel_block_sizes=[128],
+                num_blocks=SimpleNamespace(np=np.full((1, 2), 20)),
+            ),
+        ),
+    )
+    copy = torch.Tensor.copy_
+
+    def checked(destination, source, *args, **kwargs):
+        if destination.device.type == "npu" and source.device.type == "cpu" and source.dtype == torch.int64:
+            assert source.is_pinned(), "Actual start DMA source must be pinned"
+            assert any(value is source for value in held), "Retain the real DMA source before submit"
+            copies.append(source)
+        return copy(destination, source, *args, **kwargs)
+
+    builder = SimpleNamespace(build=lambda *args, **kwargs: original)
+    with patch.object(torch.Tensor, "copy_", checked):
+        result = NativeSWABuilder(builder, runtime, owner, 0, 4096).build(0, common)
+    torch.npu.synchronize()
+    assert len(copies) == 1
+    assert result.slot_mapping is original.slot_mapping
+    torch.testing.assert_close(result.seq_lens_gpu.cpu(), torch.tensor([1151, 1024], dtype=torch.int32), atol=0, rtol=0)
+    assert any(value is result for value in held)

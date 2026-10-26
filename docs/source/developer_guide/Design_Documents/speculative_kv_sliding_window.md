@@ -517,3 +517,8 @@ with no sinks, compression, offload or CP-sharded Draft layout. It requires
 a Full group alongside the native groups and an unpadded current request
 extent. Unsupported consumers and padding are rejected explicitly. This
 Draft-eager extension does not select the Target Graph builders.
+
+The native-SWA adapter pins its completed CPU int64 start vector before H2D.
+The exact pinned DMA source remains held by the proposal owner; converting it
+after pinning must not create a new pageable copy. Real warmed transfer and
+model traces must distinguish this step from the baseline native-list sync.
