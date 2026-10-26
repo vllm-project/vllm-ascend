@@ -55,6 +55,13 @@ one worker share a process-wide BM session and use separate BM objects.
 Another subsystem in that process must not initialize the BM singleton with a
 different store; MemFabric TransferEngine has a separate API.
 
+Consumers initialize the model's AICPU metadata scheduler before creating BM
+mappings. On the tested A3 stack, starting that scheduler after remote mappings
+failed `halMemBindSibling` and stalled FULL decode graph capture. The deterministic
+startup warmup uses the existing metadata operator once per worker; it does not
+modify model weights, sampling state or the inference graph. Both Engram layer
+clients keep the same BM session alive throughout the model lifetime.
+
 Add these options to each server's otherwise unchanged launch:
 
 ```bash
@@ -100,14 +107,41 @@ views, live-view release rejection and retry after a failed leave. Real A3
 component tests exercised a persistent owner, two layers/four BM objects,
 two per-layer clients sharing one BM session, native gather/dequantization,
 graph replay and continued reads after one layer's client detached.
-The tested 1.2.0 wheel required a process-local single-load packaging overlay;
-native binaries were unchanged. That experimental packaging adjustment is not
-part of this feature. Four independent consumer processes across two pods on
-one host passed exact lookup, graph and detach/reattach checks. Each consumer's
-BM contribution was zero DRAM and zero HBM; this excludes explicitly allocated
-HBM reference tables in the benchmark. The four small owner objects used 4GiB
-after allocation rounding. Cross-node and full-model 3P1D validation of the
-MemFabric backend remain pending, separately from historical VMM results below.
+The tested deployment used a repaired 1.2.0 wheel with a single canonical
+native library set; native ELF code was unchanged. This packaging repair is
+not shipped by this PR, and deployment needs a correctly packaged MemFabric.
+
+A full-model GVA comparison ran on four A3 servers in one physical supernode,
+with CANN 9.2, torch-npu 2.10 and 64 NPUs: three DP4/TP4 prefills and one
+DP8/TP2 decoder. Both native host offload and GVA completed 1440/1440 requests
+without errors. One owner held two checkpoint tables/four BM HOST objects;
+64 workers attached 128 layer views with zero local table capacity.
+Table backing fell from approximately 824 GiB to 208 GiB; consumers had no
+large POSIX table replicas. This is table storage, not total memory or HBM.
+
+| Prompt bucket | Concurrency | Native QPS | GVA QPS | GVA TTFT P50 (s) | GVA TPOT P50/P90 (ms) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 0–10K | 96 | 3.979 | 4.181 | 1.709 | 28.951 / 35.532 |
+| 10–20K | 108 | 4.133 | 4.172 | 3.014 | 28.998 / 39.317 |
+| 20–40K | 120 | 3.773 | 3.832 | 8.182 | 26.217 / 36.375 |
+| 40–80K | 64 | 2.038 | 2.034 | 9.571 | 24.356 / 32.142 |
+| Cache-hit dataset | 92 | 4.024 | 4.089 | 1.481 | 29.158 / 36.863 |
+
+Each case used three closed-loop waves, a 700-token cap, 24 warmup requests,
+and backend prefix-cache reset. All paired request hashes and prompt-token
+counts matched. The cache-hit label names a dataset, not a measured hit rate.
+This single sequential A/B supports broadly unchanged throughput; it does not
+prove a stable speedup. Both baseline (8.007s) and GVA (8.182s) missed the
+20–40K TTFT target of 7s. Full SLO acceptance and model-quality validation
+remain open. The private request corpus is not distributed with this change.
+
+The hardware run used Engram leaf-module overlays on a pinned model runtime,
+not a newly built complete framework wheel. Initializing the metadata AICPU
+operator before remote BM imports resolved a reproducible decode graph-capture
+stall; FULL decode graphs were retained. The tested prototype initialized
+before embedding construction; the implementation narrows this to the shared
+allocation branch before the first client attaches. Active-graph owner failure
+and arbitrary BM teardown/reinitialization remain unvalidated.
 
 The component benchmark can be reproduced with the following two commands in
 separate terminals on a supported, correctly packaged A3 environment. Choose a

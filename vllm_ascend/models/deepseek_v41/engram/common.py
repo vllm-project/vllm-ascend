@@ -8,10 +8,54 @@ the Ascend token history lives in ``hash_state`` next to the SWA slot cache,
 which is where upstream keeps it too.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
+
+
+@lru_cache(maxsize=1)
+@torch.inference_mode()
+def warmup_shared_engram_aicpu() -> None:
+    """Bind the model's AICPU scheduler before importing remote BM mappings.
+
+    On the tested A3 stack, lazy sibling binding after BM imports fails with
+    halMemBindSibling/ioctl errors and stalls decode graph capture. Use the
+    same metadata operator as the model, without touching model weights/RNG.
+    """
+    from vllm_ascend.attention.mixed_quant_sparse_flash_mla import _get_mixed_quant_sparse_flash_mla_ops
+
+    metadata = _get_mixed_quant_sparse_flash_mla_ops()[1]
+    lengths = torch.tensor([128], dtype=torch.int32, device="npu")
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="npu")
+    metadata(
+        64,
+        1,
+        512,
+        3,
+        cu_seqlens_q=cu,
+        seqused_ori_kv=lengths,
+        seqused_cmp_kv=lengths // 4,
+        cmp_residual_kv=lengths % 4,
+        batch_size=1,
+        max_seqlen_q=1,
+        max_seqlen_ori_kv=128,
+        max_seqlen_cmp_kv=32,
+        ori_topk=0,
+        cmp_topk=0,
+        rope_head_dim=64,
+        cmp_ratio=4,
+        ori_mask_mode=4,
+        cmp_mask_mode=3,
+        ori_win_left=127,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=True,
+    )
+    torch.npu.synchronize()
 
 
 def load_engram_rotation_block(model_root: str, hidden_size: int, rotation_path: Path | None = None) -> torch.Tensor:

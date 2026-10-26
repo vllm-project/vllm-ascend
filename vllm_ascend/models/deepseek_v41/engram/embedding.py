@@ -157,9 +157,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         quantized = self.storage_dtype != torch.bfloat16
         pool_dir, identity, key = self._shared_pool_spec
         if pool_dir:
+            from .common import warmup_shared_engram_aicpu
             from .shared_pool import SharedPoolClient
 
             assert identity is not None and key is not None
+            warmup_shared_engram_aicpu()
             client = SharedPoolClient(pool_dir, identity, device=device)
             self._shared_pool_client = client
             try:
