@@ -799,6 +799,32 @@ class NPUWorker(WorkerBase):
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
+        if getattr(layout, "name", None) == "LBNHC" and getattr(
+            model_runner, "supports_page_strided_shared_kv_backing", False
+        ):
+            # Standard LBNHC descriptors share one allocation, even for sparse
+            # attention or a PP rank containing only recurrent states. Reserve
+            # the aligned allocator's fixed slack once, before standard planning.
+            alignment_reserve = 2 * 1024 * 1024 if self.vllm_config.kv_transfer_config is not None else 0
+            return max(0, available_memory - alignment_reserve)
+        if (
+            has_attention
+            and has_mamba
+            and getattr(layout, "is_block_outermost", False)
+            and self.vllm_config.kv_transfer_config is None
+            and getattr(
+                model_runner,
+                "supports_page_strided_shared_kv_backing",
+                False,
+            )
+        ):
+            # Main's block-outermost descriptors all address one physical
+            # page-strided backing. In particular, Qwen4Exp's compressed QSA
+            # descriptors describe logical views into that allocation; they
+            # are not independent per-layer buffers. Preserve the profiler's
+            # full budget so the planner derives num_blocks from the packed
+            # physical page size rather than scaling it once per group.
+            return available_memory
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)

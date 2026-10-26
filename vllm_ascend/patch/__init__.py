@@ -283,6 +283,20 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`
+#      `vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker`
+#    Why:
+#       Qwen4Exp needs group width 12 and physical-only page normalization.
+#       Upstream PP projection currently drops group transfer/role metadata.
+#    How:
+#       Select ordinary homogeneous groups; retain metadata with replace().
+#       Capacity, tensor descriptors and block management remain upstream.
+#    Related PR:
+#       vllm-project/vllm-ascend#16981 (Qwen3.8 Flash Next).
+#    Future Plan:
+#       Remove grouping policy when upstream supports configurable group width;
+#       remove projection wrapper when upstream preserves all group metadata.
+#
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`

@@ -12,6 +12,7 @@ from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, reg
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     HiddenStateCacheSpec,
+    KVCacheGroupSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -29,6 +30,8 @@ from vllm_ascend.core.kv_cache_interface import (
     supports_bounded_replay,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
+from vllm_ascend.models.qwen4_exp.cache_config import is_qwen4_exp_cache
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -55,6 +58,28 @@ def test_matching_ascend_mla_specs_merge():
     spec = _mla_spec()
     assert AscendMLAAttentionSpec.merge([spec, spec]) == spec
     assert is_kv_cache_spec_uniform({"layer0": spec, "layer1": spec})
+
+
+@pytest.mark.parametrize(
+    ("version", "detect"),
+    [("deepseek_v41", is_deepseek_v41_cache), ("qwen4_exp", is_qwen4_exp_cache)],
+)
+def test_model_version_detection_accepts_raw_and_grouped_specs(version, detect):
+    spec = AscendMLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version=version,
+    )
+    uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"renamed": spec})
+    group = KVCacheGroupSpec(layer_names=["renamed"], kv_cache_spec=uniform)
+    for items in ({"renamed": spec}, [spec], [uniform], [group], iter([_mla_spec(), group])):
+        assert detect(items)
+    other_detect = is_qwen4_exp_cache if version == "deepseek_v41" else is_deepseek_v41_cache
+    assert not other_detect([group])
+    assert not detect([_mla_spec()])
+    assert not detect([])
 
 
 def test_get_storage_block_size_and_dcp_memory():

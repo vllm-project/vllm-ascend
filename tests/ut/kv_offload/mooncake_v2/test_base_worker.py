@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from tests.ut.models.qwen4_exp.test_cache_config import _allocate, _make_config, _specs, _views
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
@@ -19,6 +21,53 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
+
+
+@pytest.mark.parametrize("ssm_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("transfer_group", [0, 1, 2, 5])
+def test_qwen_standard_cache_transfers_only_effective_payload(monkeypatch, ssm_dtype, transfer_group):
+    specs = _specs()
+    for name, spec in list(specs.items()):
+        if name.endswith("linear_attn"):
+            specs[name] = replace(spec, dtypes=(torch.bfloat16, ssm_dtype))
+    config = _make_config(specs, 3)
+    groups = config.kv_cache_groups
+    backings, _, caches = _allocate(config, aligned=True)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.kv_cache_config = config
+    worker.engine_id, worker.te_rpc_port = "producer", 9000
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
+    worker.block_size, worker.side_channel_host, worker.handshake_port = 128, "127.0.0.1", 5000
+    engine = MagicMock()
+    monkeypatch.setattr(base_worker, "global_te", engine)
+    worker.register_kv_caches(caches)
+    metadata = worker.xfer_handshake_metadata
+    index = metadata.layer_names.index("model.layers.3.self_attn.indexer.compressed_key_cache")
+    assert metadata.block_lens[index] == [8192]
+    assert metadata.block_strides[index] == [groups[0].kv_cache_spec.page_size_bytes]
+    regions = base_worker.collect_configured_register_regions(config, caches)
+    assert len(regions.ptrs) == 1
+    assert regions.ptrs[0] == backings[0].data_ptr()
+    engine.register_buffer.assert_called_once()
+    destinations_backing, _, destinations = _allocate(config, aligned=True)
+    for name in groups[(transfer_group + 1) % len(groups)].layer_names:
+        for state in _views(destinations[name]):
+            state[0].fill_(5)
+    expected = destinations_backing[0].clone()
+    for name in groups[transfer_group].layer_names:
+        index = metadata.layer_names.index(name)
+        for component, (source, destination) in enumerate(
+            zip(_views(caches[name]), _views(destinations[name]), strict=True)
+        ):
+            source[0].fill_(9)
+            size = metadata.block_lens[index][component]
+            assert size == source[0].numel() * source.element_size()
+            assert metadata.block_strides[index][component] == source.stride(0) * source.element_size()
+            destination[1].copy_(source[0])
+            offset = destination[1].data_ptr() - destinations_backing[0].data_ptr()
+            expected[offset : offset + size].copy_(source[0].view(torch.int8).flatten())
+    assert torch.equal(destinations_backing[0], expected)
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,6 @@
+pr: 19863
+entries:
+  - category: other
+    text: Use uniform physical pages and groups of up to 12 layers for Qwen3.8-Flash-Next on Ascend A3, with standard KV cache planning and one shared LBNHC backing allocation. Per-request cache consumption can increase compared with the previous packed layout.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]

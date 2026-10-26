@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.v1.utils import CpuGpuBuffer
 
+from tests.ut.models.qwen4_exp.test_cache_config import _allocate, _config, _make_config, _specs
 from vllm_ascend.patch.worker.patch_mamba_utils import (
+    _collect_mamba_copy_meta_torch,
     _do_mamba_copy_block_npu,
+    _do_mamba_copy_block_torch,
     preprocess_mamba,
 )
 
@@ -208,3 +213,34 @@ def test_layerwise_mamba_copy_is_grouped_by_layer():
     except RuntimeError:
         raised = True
     assert raised, "finish must raise when a loaded layer never executed its copy"
+
+
+@pytest.mark.parametrize("ssm_dtype", [torch.bfloat16, torch.float32])
+def test_qwen_separate_gdn_ple_copies_each_state_with_its_own_stride(ssm_dtype):
+    model_config, specs = _config(cycles=1), _specs(1)
+    for name, spec in list(specs.items()):
+        if name.endswith("linear_attn"):
+            specs[name] = replace(spec, dtypes=(torch.bfloat16, ssm_dtype))
+    config = _make_config(specs, 3, model_config)
+    _, _, caches = _allocate(config, aligned=True)
+
+    def copy_state(state, block_ids, source_index, token_bias):
+        source = state[block_ids[source_index]]
+        return SimpleNamespace(start_addr=source.data_ptr(), num_elements=source.numel())
+
+    for group_id in (2, 3):
+        state_names = config.kv_cache_groups[group_id].layer_names
+        for marker, name in enumerate(state_names, 1):
+            for state in caches[name]:
+                state[0].fill_(marker)
+        copy_funcs = {specs[name].mamba_type: (copy_state,) * len(specs[name].shapes) for name in state_names}
+        count = sum(len(caches[name]) for name in state_names)
+        buffers = SimpleNamespace(offset=0, sizes=SimpleNamespace(np=np.zeros(count, dtype=np.int32)))
+        request = SimpleNamespace(block_ids=([0, 1, 2],) * len(config.kv_cache_groups))
+        context = {name: SimpleNamespace(kv_cache=cache) for name, cache in caches.items()}
+        _collect_mamba_copy_meta_torch(buffers, config, copy_funcs, [group_id], 0, 2, 0, request, context)
+        assert buffers.offset == count
+        _do_mamba_copy_block_torch(buffers)
+        for marker, name in enumerate(state_names, 1):
+            for state in caches[name]:
+                assert torch.all(state[2] == marker)
