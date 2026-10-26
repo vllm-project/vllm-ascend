@@ -21,7 +21,8 @@ only pays off for large messages, so it is gated by a payload threshold.
 Configuration
 -------------
 VLLM_ASCEND_QUANTIZED_ALL_REDUCE=1
-    Enable it. Default 0; only "0"/"1" are accepted. Atlas A2/A3, 1 < TP <= 8.
+    Set to 1 to enable (default 0, parsed as bool(int(...))). Atlas A2/A3,
+    1 < TP <= 8.
     Read when the TP communicator is created, so restart after changing it.
     Active when every TP worker logs
     "Quantized all-reduce enabled (min_numel=..., max_q=...)".
