@@ -194,7 +194,7 @@ def test_zero_copy_reload_does_not_write_shared_weights():
         _loader().load_weights(torch.nn.Module(), Mock())
 
 
-def test_patch_is_idempotent_and_updates_cli_binding():
+def test_patch_is_idempotent_and_updates_cli_binding(require_preload_daemon_api):
     from vllm.entrypoints.cli import preload
     from vllm.model_executor.model_loader.weight_cache import daemon
 
@@ -205,6 +205,20 @@ def test_patch_is_idempotent_and_updates_cli_binding():
     apply_preload_patch()
     assert daemon._run_daemon_original is original
     assert preload.check_ipc_platform_support is check_ipc_platform_support
+
+
+def test_registration_selects_ascend_loader(require_preload_daemon_api, monkeypatch):
+    from vllm.model_executor import model_loader
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+
+    from vllm_ascend.model_loader.preload import register_preload_loader
+
+    # Restore the real loader registry after exercising the public registration
+    # path, including when another test already registered the Ascend loader.
+    monkeypatch.setitem(model_loader._LOAD_FORMAT_TO_MODEL_LOADER, "ipc_cache", IpcModelLoader)
+    register_preload_loader()
+    register_preload_loader()
+    assert isinstance(model_loader.get_model_loader(LoadConfig(load_format="ipc_cache")), AscendIpcModelLoader)
 
 
 def test_nd_export_uses_torch_npu_patched_reducer(monkeypatch):
@@ -277,6 +291,7 @@ def test_failed_constructor_removes_only_its_new_model_hooks(monkeypatch):
 @pytest.mark.parametrize("failure", ["unavailable", "mismatch"])
 @pytest.mark.parametrize("fallback", [False, True])
 def test_cache_failure_obeys_upstream_fallback_policy(valid_config, monkeypatch, failure, fallback):
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
         WeightCacheUnavailableError,
@@ -284,6 +299,9 @@ def test_cache_failure_obeys_upstream_fallback_policy(valid_config, monkeypatch,
 
     loader = _loader()
     loader.fallback = fallback
+    # This CPU test exercises failure routing, not platform registration. Old
+    # vLLM intentionally retains its CUDA-only gate when our adapter is disabled.
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
     exception = (
         WeightCacheUnavailableError("unavailable") if failure == "unavailable" else CacheConfigMismatchError("mismatch")
     )
@@ -300,7 +318,7 @@ def test_cache_failure_obeys_upstream_fallback_policy(valid_config, monkeypatch,
         disk_load.assert_not_called()
 
 
-def test_copy_has_no_external_weight_budget(valid_config, monkeypatch):
+def test_copy_has_no_external_weight_budget(valid_config, monkeypatch, require_daemon_memory_query):
     loader = _loader("copy")
     query = Mock(return_value=4096)
     monkeypatch.setattr(loader, "_daemon_memory", query)
@@ -309,7 +327,16 @@ def test_copy_has_no_external_weight_budget(valid_config, monkeypatch):
     query.assert_called_once()
 
 
-def test_external_memory_budget_avoids_false_startup_oom():
+def test_zero_copy_counts_external_weights_once(valid_config, monkeypatch, require_daemon_memory_query):
+    loader = _loader()
+    query = Mock(return_value=4096)
+    monkeypatch.setattr(loader, "_daemon_memory", query)
+    assert loader.mode == "zero_copy"
+    assert loader.get_external_weight_memory(valid_config) == 4096
+    query.assert_called_once()
+
+
+def test_external_memory_budget_avoids_false_startup_oom(require_external_weight_budget):
     from vllm.v1.worker.utils import request_memory
 
     snapshot = SimpleNamespace(total_memory=1000, free_memory=650, device_="npu:0")
@@ -442,32 +469,63 @@ def test_device_uuid_is_a_protocol_string(monkeypatch):
     assert NPUPlatform.get_device_uuid(0).encode() == b"00cc0800-d000-0000-0000-fc1803570b75"
 
 
-def test_registration_keeps_old_vllm_loaders_untouched(monkeypatch):
+@pytest.mark.parametrize("missing", ["exported_weight_bytes", "release_distributed"])
+def test_registration_keeps_old_vllm_loaders_untouched(monkeypatch, missing):
     from vllm.model_executor import model_loader
-    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader, protocol
 
     from vllm_ascend.model_loader.preload import register_preload_loader
+    from vllm_ascend.patch.platform.patch_preload import apply_preload_patch
 
     register = Mock()
     monkeypatch.setattr(model_loader, "register_model_loader", register)
-    monkeypatch.delattr(daemon, "exported_weight_bytes")
+    if missing == "exported_weight_bytes":
+        monkeypatch.delattr(daemon, missing, raising=False)
+    else:
+        # release_distributed may be inherited by the already-patched class;
+        # substitute the class rather than deleting an inherited attribute.
+        monkeypatch.setattr(daemon, "WeightCacheDaemon", SimpleNamespace())
+    bindings = (daemon._run_daemon, daemon.TensorEntry, protocol.check_ipc_platform_support)
+    loaders = dict(model_loader._LOAD_FORMAT_TO_MODEL_LOADER)
+    platform_check = ipc_loader.check_ipc_platform_support
     register_preload_loader()
+    apply_preload_patch()
     register.assert_not_called()
+    assert loaders == model_loader._LOAD_FORMAT_TO_MODEL_LOADER
+    assert bindings == (daemon._run_daemon, daemon.TensorEntry, protocol.check_ipc_platform_support)
+    assert ipc_loader.check_ipc_platform_support is platform_check
 
 
-def test_spawn_entry_bootstraps_plugins_before_upstream_daemon(monkeypatch):
+@pytest.mark.parametrize("plugin_failure", [False, True])
+def test_spawn_entry_bootstraps_plugins_before_upstream_daemon(monkeypatch, plugin_failure):
+    from vllm import plugins
+
     import vllm_ascend
     from vllm_ascend.model_loader.preload import daemon
     from vllm_ascend.patch.platform import patch_preload
 
     order = []
-    monkeypatch.setattr(vllm_ascend, "_ensure_global_patch", lambda: order.append("plugins"))
+    monkeypatch.setattr(vllm_ascend, "_ensure_global_patch", lambda: order.append("global patches"))
     monkeypatch.setattr(patch_preload, "apply_preload_patch", lambda: order.append("device adapters"))
+
+    def load_plugins():
+        order.append("general plugins")
+        if plugin_failure:
+            raise RuntimeError("plugin initialization failed")
+
+    monkeypatch.setattr(plugins, "load_general_plugins", load_plugins)
     run = Mock(side_effect=lambda *_, **__: order.append("upstream"))
-    monkeypatch.setattr(daemon.upstream, "_run_daemon_original", run)
-    daemon.run_ascend_daemon(0, 0, "config", "rendezvous", "socket", "queue")
-    assert order == ["plugins", "device adapters", "upstream"]
-    run.assert_called_once_with(0, 0, "config", "rendezvous", "socket", "queue")
+    # This is an execution-boundary stub, not a fabricated upstream capability.
+    monkeypatch.setattr(daemon.upstream, "_run_daemon_original", run, raising=False)
+    if plugin_failure:
+        with pytest.raises(RuntimeError, match="plugin initialization failed"):
+            daemon.run_ascend_daemon(0, 0, "config", "rendezvous", "socket", "queue")
+        assert order == ["global patches", "device adapters", "general plugins"]
+        run.assert_not_called()
+    else:
+        daemon.run_ascend_daemon(0, 0, "config", "rendezvous", "socket", "queue")
+        assert order == ["global patches", "device adapters", "general plugins", "upstream"]
+        run.assert_called_once_with(0, 0, "config", "rendezvous", "socket", "queue")
 
 
 def test_copy_finishes_imported_storage_reads_before_release(monkeypatch):
