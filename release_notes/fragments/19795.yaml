@@ -1,0 +1,4 @@
+pr: 19795
+entries:
+  - category: dependency
+    text: Added pinned optional ecosystem FlashAttention NPU to A2 and A3 Docker images.
