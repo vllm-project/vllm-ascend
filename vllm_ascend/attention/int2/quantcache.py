@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import os as _r144_ovl_os
 from typing import Any
 
 import torch
@@ -410,8 +409,11 @@ class Int2QuantCacheMixin:
 
         self._ensure_int2_scale_buffers(k_cache, block_size, k_cache.shape[2], dtype, device)
 
-        k_flat = k_cache.view(num_blocks * block_size, *k_cache.shape[2:])
-        v_flat = v_cache.view(num_blocks * block_size, *v_cache.shape[2:])
+        # vLLM 0.31's V2 runner allocates block-strided KV pages (physical
+        # page padding between kernel blocks), so flattening the whole cache
+        # with .view() is invalid. Scatter through (block, offset) indices,
+        # which address the same slots through the strided layout.
+
         # R113 G-A: indexed scatter (index_put_/index_copy_) FREEZES its index
         # args inside an aclgraph — replay writes to stale slots (probe2-proven
         # for put AND copy). Under capture we instead write the packed KV +
@@ -510,16 +512,11 @@ class Int2QuantCacheMixin:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
             return query, key_packed, value_packed, output
-        if _r144_ovl_os.environ.get("R166_STREAMFIX", "0") in ("paged", "both"):
-            # explicit compute-friendly scatter (index_put_ advanced-assign may
-            # route via the copy engine on some shapes; index_copy_ with a
-            # device index must read indices on device => compute kernel)
-            _sl64 = slots[:num_tokens].to(torch.long)
-            k_flat.index_copy_(0, _sl64, key_packed)
-            v_flat.index_copy_(0, _sl64, value_packed)
-        else:
-            k_flat[slots[:num_tokens]] = key_packed
-            v_flat[slots[:num_tokens]] = value_packed
+        _sl64 = slots[:num_tokens].to(torch.long)
+        _blk64 = torch.div(_sl64, block_size, rounding_mode="floor")
+        _off64 = _sl64 - _blk64 * block_size
+        k_cache[_blk64, _off64] = key_packed
+        v_cache[_blk64, _off64] = value_packed
 
         ks_flat = self.k_scale_cache.view(num_blocks * block_size, -1)
         kz_flat = self.k_zero_cache.view(num_blocks * block_size, -1)
