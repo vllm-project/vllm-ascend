@@ -1649,18 +1649,31 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
             return False
         if backends.model_tag != "dflash_head" or target.hf_text_config.model_type != "glm_moe_dsa":
             return False
-        draft_architecture = "DFlash2DraftModel"
+        draft_architectures = {"DFlash2DraftModel"}
     elif spec.method == "dspark":
         if backends.model_tag != "dspark_head" or not _MINIMAX_M3_ARCHITECTURES.intersection(
             target.hf_config.architectures or ()
         ):
             return False
-        draft_architecture = "Qwen3DSparkModel"
+        draft_architectures = {"Qwen3DSparkModel", "DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"}
+        native_architectures = {"DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"}
+        if native_architectures.intersection(spec.draft_model_config.architectures or ()):
+            parallel = config.parallel_config
+            if (
+                not spec.enforce_eager
+                or parallel.pipeline_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or getattr(spec, "enable_adaptive_verification", False)
+                or selector.use_pcp
+                or selector.use_adaptive_verification
+            ):
+                return False
     else:
         return False
 
     return (
-        draft_architecture in (spec.draft_model_config.architectures or [])
+        bool(draft_architectures.intersection(spec.draft_model_config.architectures or []))
         # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
         and selector.dtype in (torch.float16, torch.bfloat16)
         and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
