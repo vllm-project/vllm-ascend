@@ -7,11 +7,11 @@ from unittest import mock
 
 import pytest
 import torch
-
 from vllm_ascend.quantization.methods.kv_int2 import (
     AscendINT2KVCacheAttentionMethod,
     _int2_kv_scale_weight_loader,
 )
+
 from vllm_ascend.quantization.methods.registry import get_scheme_class
 
 
@@ -146,10 +146,11 @@ class TestModelSlimInt2Selection:
     def test_get_quant_method_selects_int2_for_int2_layer(self):
         from types import SimpleNamespace
 
-        from vllm_ascend.quantization.configs import modelslim_config as msc
         from vllm_ascend.quantization.methods.kv_int2 import (
             AscendINT2KVCacheAttentionMethod,
         )
+
+        from vllm_ascend.quantization.configs import modelslim_config as msc
 
         class _FakeBase(torch.nn.Module):
             pass
