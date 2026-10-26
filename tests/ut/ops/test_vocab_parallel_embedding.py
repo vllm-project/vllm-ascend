@@ -337,7 +337,15 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
 
 @pytest.mark.parametrize(
     "mode,tp_size",
-    [(VocabParallelMode.PCP_X_TP, 1), (VocabParallelMode.PCP_X_TP, 2), (VocabParallelMode.FINE_GRAINED, 1)],
+    [
+        (VocabParallelMode.PCP_X_TP, 1),
+        (VocabParallelMode.PCP_X_TP, 2),
+        (VocabParallelMode.FINE_GRAINED, 1),
+        # Fine-grained embedding TP composed with standard TP: same two-level
+        # exchange contract as PCP_X_TP (token exchange over the fine-grained
+        # group, then the TP all-reduce completing the vocabulary result).
+        (VocabParallelMode.FINE_GRAINED, 2),
+    ],
 )
 def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
     def run_batch(layer, weight, ids, span, tp_rank, rank):
@@ -529,7 +537,20 @@ class TestVocabParallelPlan(unittest.TestCase):
             ("replicated", "layers.0.markov_head", True, False, False, False, 0, 1, VocabParallelMode.REPLICATED, 0, 1),
             ("standard", "model.norm", False, False, False, False, 1, 2, VocabParallelMode.STANDARD, 1, 2),
             (
-                "fine-grained embedding",
+                "fine-grained embedding (pure dp)",
+                "model.embed_tokens",
+                False,
+                False,
+                True,
+                False,
+                0,
+                1,
+                VocabParallelMode.FINE_GRAINED,
+                2,
+                4,
+            ),
+            (
+                "composed embedding (finegrained x tp)",
                 "model.embed_tokens",
                 False,
                 False,
@@ -538,8 +559,8 @@ class TestVocabParallelPlan(unittest.TestCase):
                 1,
                 2,
                 VocabParallelMode.FINE_GRAINED,
-                2,
-                4,
+                1 * 4 + 2,
+                4 * 2,
             ),
             (
                 "fine-grained lm head (pure dp)",
@@ -621,9 +642,12 @@ class TestVocabParallelPlan(unittest.TestCase):
             if name == "pcp embedding":
                 self.assertIs(plan.token_exchange_group, pcp_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
-            elif name == "fine-grained embedding":
+            elif name == "fine-grained embedding (pure dp)":
                 self.assertIs(plan.token_exchange_group, embed_group)
                 self.assertIsNone(plan.output_reduce_group)
+            elif name == "composed embedding (finegrained x tp)":
+                self.assertIs(plan.token_exchange_group, embed_group)
+                self.assertIs(plan.output_reduce_group, tp_group)
             elif mode is VocabParallelMode.STANDARD:
                 self.assertIsNone(plan.token_exchange_group)
                 self.assertIs(plan.output_reduce_group, tp_group)
