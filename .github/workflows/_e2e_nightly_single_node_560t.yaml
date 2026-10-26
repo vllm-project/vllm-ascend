@@ -30,6 +30,11 @@ on:
       tests:
         required: false
         type: string
+      pytest_workers:
+        required: false
+        type: number
+        default: 1
+        description: One pytest process per allocated NPU
       config_file_path:
         required: false
         type: string
@@ -372,13 +377,22 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          TEST_PATH: ${{ inputs.tests }}
+          PYTEST_WORKERS: ${{ inputs.pytest_workers }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-          echo "Running pytest with tests path: ${{ inputs.tests }}"
+          echo "Running pytest with tests path: $TEST_PATH"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+          if [ "$PYTEST_WORKERS" -gt 1 ]; then
+            python3 .github/workflows/scripts/run_singlecard_shards.py \
+              --tests "$TEST_PATH" --workers "$PYTEST_WORKERS" \
+              --output-dir /tmp/test-logs/singlecard-shards \
+              2>&1 | tee /tmp/test-logs/pytest-driven.log
+          else
+            pytest -sv "$TEST_PATH" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+          fi
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
@@ -646,6 +660,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           include-hidden-files: true
+
+      - name: Upload singlecard shard logs
+        if: ${{ always() && inputs.pytest_workers > 1 }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: singlecard-shards-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/test-logs/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Collect requested path
         if: ${{ always() && inputs.download_path != '' }}
