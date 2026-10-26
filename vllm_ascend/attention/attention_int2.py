@@ -1006,7 +1006,9 @@ class AscendINT2AttentionBackendImpl(
                     and attn_metadata.num_actual_tokens <= 16
                 ):
                     try:
-                        import r118_trace as _rt118e
+                        import importlib as _il118e
+
+                        _rt118e = _il118e.import_module("r118_trace")
                     except ImportError:
                         _rt118e = None
                     if _rt118e is not None:
