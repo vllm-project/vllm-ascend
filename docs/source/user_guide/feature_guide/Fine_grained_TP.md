@@ -54,7 +54,7 @@ To check whether a checkpoint qualifies, look at its `config.json`: the model co
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
-Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead, and shared experts stay replicated.
+Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallelism instead, and shared experts stay replicated.
 
 #### Preconditions for o_proj / MLP TP
 

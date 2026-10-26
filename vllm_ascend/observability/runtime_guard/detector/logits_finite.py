@@ -65,7 +65,13 @@ def query_start_loc_np(
 
 
 def req_index_for_flat_token(flat_idx: int, qsl: np.ndarray, num_reqs: int) -> int | None:
-    for r in range(num_reqs):
+    """Map a flat token index into a request via query-start-loc prefixes.
+
+    Scan at most ``min(num_reqs, len(qsl) - 1)`` intervals (``qsl`` is normally
+    length ``num_reqs + 1``).
+    """
+    limit = min(int(num_reqs), max(0, len(qsl) - 1))
+    for r in range(limit):
         if int(qsl[r]) <= flat_idx < int(qsl[r + 1]):
             return r
     return None

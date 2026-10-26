@@ -70,6 +70,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE_MXFP = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
+    # CANN device-side FlashAttn metadata with strided paged GQA K/V.
+    DEVICE_LENGTH_FLASH_ATTN = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
     # Legacy implementation selector: install the 310P-specific operator overrides.
@@ -216,14 +218,6 @@ class WeightLayoutPolicy(Enum):
     FORCE_NZ = auto()
 
 
-class DeepSeekV4TPPolicy(Enum):
-    """Tensor-parallel limits for DeepSeek V4-family models."""
-
-    STANDARD_LIMITS = auto()
-    SINGLE_RANK_ONLY = auto()
-    UNRESTRICTED = auto()
-
-
 @dataclass(frozen=True, slots=True)
 class HardwareProfile:
     """Immutable semantic contracts registered for one SoC family.
@@ -241,7 +235,6 @@ class HardwareProfile:
     default_worker_cls: str
     device_adaptor_family: DeviceAdaptorFamily
     device_addressing_mode: DeviceAddressingMode
-    deepseek_v4_tp_policy: DeepSeekV4TPPolicy
     weight_layout_policy: WeightLayoutPolicy
     moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
@@ -297,7 +290,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.STANDARD_LIMITS,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -310,7 +302,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.STANDARD_LIMITS,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -328,7 +319,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls="vllm_ascend._310p.worker_310p.NPUWorker310",
             device_adaptor_family=DeviceAdaptorFamily.COMPATIBILITY,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.UNRESTRICTED,
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
             moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
@@ -352,7 +342,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             default_worker_cls=_DEFAULT_WORKER_CLS,
             device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
-            deepseek_v4_tp_policy=DeepSeekV4TPPolicy.SINGLE_RANK_ONLY,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
@@ -364,6 +353,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
+                    HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

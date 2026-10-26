@@ -28,7 +28,6 @@ from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -412,12 +411,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
@@ -963,3 +962,10 @@ def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, phys
 def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
     utils.setup_ascend_local_comm_res(0, config)
     physical_device_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert utils.oproj_tp_enable() is enabled

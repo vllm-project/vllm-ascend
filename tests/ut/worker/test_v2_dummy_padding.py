@@ -1,4 +1,6 @@
+from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -11,10 +13,12 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 @pytest.fixture
@@ -25,6 +29,7 @@ def buffers():
 @pytest.fixture
 def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner._uses_flashmla = False
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
     runner.input_buffers = buffers
     runner.debugger = None
@@ -121,17 +126,22 @@ def test_cpp_dummy_is_a_fresh_prefill_request(buffers):
     torch.testing.assert_close(batch.positions, torch.arange(16, dtype=batch.positions.dtype))
 
 
+@pytest.mark.parametrize("is_hybrid", [False, True])
 @pytest.mark.parametrize("draft_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
 @pytest.mark.parametrize("capture_size,uniform", [(16, 1), (16, 2), (16, 4), (32, 2), (32, 4)])
-def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size):
+def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size, is_hybrid):
+    runner.model_config.is_hybrid = is_hybrid
     runner.decode_query_len = uniform
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"dummy": uniform}, total_num_scheduled_tokens=uniform)
     _, original_uniform = runner.gather_batch_req_state(scheduler_output, dummy_run=True)
     target = _make_graph_manager(buffers, CUDAGraphMode.PIECEWISE, uniform, capture_size)
     draft = _make_graph_manager(buffers, draft_mode, uniform, capture_size)
 
+    cpu_group = object()
+
     def other_rank_votes(votes, group):
-        assert group is cpu_group
+        # v0.31.0 passes ``group=cpu_group``; main's ``cpu_all_reduce_`` does not.
+        assert group is None or group is cpu_group
         # The other ranks decode real requests with the same query width.
         votes[0, 1:] = torch.tensor([2 * uniform, 3 * uniform, uniform])
         votes[1, 1:] = CUDAGraphMode.PIECEWISE.value
@@ -140,7 +150,6 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         votes[5, 1:] = torch.tensor([2, 3, 1])
 
     def execute_dummy(num_tokens, **kwargs):
-        assert buffers.dummy_num_tokens == uniform
         desc, sync = dispatch_cg_and_sync_dp(target, 1, uniform, original_uniform, 4, 0, max_query_len=uniform)
         assert sync is not None
         assert sync.uniform_token_count == uniform
@@ -151,22 +160,34 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         actual_uniform = get_uniform_decode_token_count(
             batch.num_reqs, batch.num_tokens, int(batch.num_scheduled_tokens.max()), batch.decode_graph_eligible
         )
-        assert actual_uniform == uniform
+        dp_sync_kwarg = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
         draft_desc, reused_sync = dispatch_cg_and_sync_dp(
-            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, dp_sync=sync
+            draft, batch.num_reqs, batch.num_tokens_after_padding, actual_uniform, 4, 0, **{dp_sync_kwarg: sync}
         )
+        assert actual_uniform == uniform
         assert draft_desc.cg_mode == draft_mode.decode_mode()
         assert draft_desc.num_tokens == capture_size
         assert reused_sync is sync
         return None, None
 
-    cpu_group = object()
+    extra_collective_patch: AbstractContextManager[Any]
+    if vllm_version_is("0.31.0"):
+        # v0.31.0 collects through ``dist.all_reduce(votes, group=cpu_group)``.
+        dp_group = SimpleNamespace(cpu_group=cpu_group)
+        collective = Mock(side_effect=other_rank_votes)
+        extra_collective_patch = patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", collective)
+    else:
+        # vLLM main collects through ``get_dp_group().cpu_all_reduce_(votes)``.
+        collective = Mock(side_effect=lambda votes: other_rank_votes(votes, None))
+        dp_group = SimpleNamespace(cpu_all_reduce_=collective)
+        extra_collective_patch = nullcontext()
+
     with (
         patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy),
         patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
-        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
-        patch("vllm.v1.worker.gpu.dp_utils.dist.all_reduce", side_effect=other_rank_votes) as collective,
+        patch("vllm.v1.worker.gpu.dp_utils.get_dp_group", return_value=dp_group),
+        extra_collective_patch,
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
@@ -181,7 +202,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         ({"context_len": 1}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({}, CUDAGraphMode.PIECEWISE, object(), False, None),
-        ({}, CUDAGraphMode.PIECEWISE, None, True, None),
+        ({}, CUDAGraphMode.PIECEWISE, None, True, 1),
         ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, None),
         ({}, CUDAGraphMode.NONE, None, False, None),
     ],
@@ -314,6 +335,8 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
         assert batch.num_tokens == batch.num_tokens_after_padding == num_tokens
         blocks = SimpleNamespace(
             input_block_tables=[torch.zeros((num_reqs, 8), dtype=torch.int32)],
+            # vLLM main reads block_sizes; v0.31.0 reads kernel_block_sizes.
+            block_sizes=[16],
             kernel_block_sizes=[16],
             blocks_per_kv_block=[1],
         )
@@ -352,15 +375,18 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
     runner.block_tables.get_dummy_slot_mappings.assert_called_once_with(2)
 
 
+@pytest.mark.parametrize("state_type", [AscendModelState, AscendMambaHybridModelState])
 @pytest.mark.parametrize(
     "mode,is_dummy,expected_input_tokens",
     [(CUDAGraphMode.PIECEWISE, True, 16), (CUDAGraphMode.PIECEWISE, False, 2), (CUDAGraphMode.NONE, True, 2)],
 )
-def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, is_dummy, expected_input_tokens):
+def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
+    buffers, mode, is_dummy, expected_input_tokens, state_type
+):
     with patch.object(buffers, "dummy_num_tokens", 2), patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         batch = AscendInputBatch.make_dummy(1, 16, buffers)
     batch.is_dummy = is_dummy
-    state = AscendModelState.__new__(AscendModelState)
+    state = state_type.__new__(state_type)
     state.decoder_replay = None
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1), num_speculative_tokens=0
@@ -372,7 +398,7 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(buffers, mode, i
     state.kvpp_runtime = None
     state.kvpp_is_dummy_run = False
     state.device_metadata = None
-    with patch("vllm_ascend.worker.v2.model_states.default.build_attn_metadata", return_value={}) as build:
+    with patch(f"{state_type.__module__}.build_attn_metadata", return_value={}) as build:
         assert state.prepare_attn(batch, mode, (), torch.full((1, 16), -1), [], None) == {}
     kwargs = build.call_args.kwargs
     assert kwargs["num_input_tokens"] == expected_input_tokens

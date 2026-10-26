@@ -490,12 +490,6 @@ class KVPoolWorker:
         # step in process_layer_data(). masked_block_runs inputs are
         # layer-invariant, so only the first layer pays the O(blocks) scan.
         self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
-        # PERF-TUNE(4): per-step RPC result caches. Defined once here so
-        # mypy does not flag repeated attribute definitions; they are reset
-        # per step via .clear() in process_layer_data().
-        self._step_keyinfo_cache: dict[str, Any] = {}
-        self._step_lease_result: dict[str, int] = {}
-        self._step_exist_cache: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -686,7 +680,11 @@ class KVPoolWorker:
         # or those extra layers are skipped during the save/load lifecycle. A
         # block-key store owns a stage-local object, so its count stays local
         # under PP. A GVA store retains the global PP layout and offset below.
-        if self.use_block_key_layerwise or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1):
+        if (
+            self.use_block_key_layerwise
+            or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1)
+            or (self.use_layerwise_transfer and getattr(self, "pp_size", 1) > 1)
+        ):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
@@ -975,8 +973,79 @@ class KVPoolWorker:
         block_size_scale = tensor_num_blocks // self.num_blocks
         block_len = cache[0].numel() * cache.element_size() * block_size_scale
         block_stride = cache.stride(0) * cache.element_size() * block_size_scale
-        region_len = (self.num_blocks - 1) * block_stride + block_len if self.num_blocks else 0
+        # Registration covers the physical span, including gaps between kernel
+        # blocks inside one scheduler block and non-contiguous inner views.
+        region_len = (
+            (1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))) * cache.element_size()
+            if cache.numel()
+            else 0
+        )
         return block_len, block_stride, region_len, block_size_scale
+
+    def _get_cache_transfer_segments(self, cache: torch.Tensor) -> list[tuple[int, int, int]]:
+        """Describe full-block pool transfers without crossing kernel-page gaps.
+
+        Both bulk and layerwise transfers must preserve physical-block gaps.
+        Partial layerwise transfers also retain each segment's token interval.
+        """
+        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
+        physical_bytes = block_len // scale
+        physical_stride = block_stride // scale
+        if scale == 1 or physical_stride == physical_bytes:
+            return [(cache.data_ptr(), block_len, block_stride)]
+        if not cache[0].is_contiguous():
+            raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
+        return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
+
+    def _get_combined_cache_transfer_segments(
+        self, caches: tuple[torch.Tensor, ...], group_id: int
+    ) -> list[tuple[int, int, int]] | None:
+        """Coalesce adjacent MLA components for complete bulk pages only.
+
+        The packed object becomes physical-page major. All readers and writers
+        must use this layout and a fresh namespace when upgrading an old pool.
+        Layerwise/partial transfers retain component-major segment metadata.
+        """
+        if self.use_layerwise or len(caches) != 2:
+            return None
+        extra_config = getattr(self, "_extra_config", None)
+        if not isinstance(extra_config, dict) or extra_config.get("discard_partial_chunks", True) is not True:
+            return None
+        if extra_config.get("save_decode_cache", False) or getattr(self, "tp_mismatch", False):
+            return None
+        if getattr(self, "dcp_size", 1) != 1 or getattr(self, "use_kvpp", False):
+            return None
+        block_sizes = getattr(self, "grouped_block_size", ())
+        granularity = getattr(self, "cache_transfer_granularity", 0)
+        if group_id >= len(block_sizes) or not granularity or granularity % block_sizes[group_id]:
+            return None
+        align_state = getattr(self, "group_uses_align_state", ())
+        if group_id < len(align_state) and align_state[group_id]:
+            return None
+        first, second = caches
+        if (
+            first.ndim != 4
+            or second.ndim != 4
+            or first.shape[:-1] != second.shape[:-1]
+            or first.dtype != second.dtype
+            or first.device != second.device
+            or self._get_storage_key(first) != self._get_storage_key(second)
+            or not first[0].is_contiguous()
+            or not second[0].is_contiguous()
+        ):
+            return None
+        first_len, block_stride, _, scale = self._get_cache_block_metadata(first)
+        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second)
+        if scale <= 1 or scale != second_scale or block_stride != second_stride:
+            return None
+        first_bytes = first_len // scale
+        page_bytes = (first_len + second_len) // scale
+        page_stride = block_stride // scale
+        if second.data_ptr() != first.data_ptr() + first_bytes or page_stride < page_bytes:
+            return None
+        if page_stride == page_bytes:
+            return [(first.data_ptr(), first_len + second_len, block_stride)]
+        return [(first.data_ptr() + index * page_stride, page_bytes, block_stride) for index in range(scale)]
 
     @staticmethod
     def _get_storage_key(cache: torch.Tensor) -> int:
@@ -1031,6 +1100,7 @@ class KVPoolWorker:
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
         group_block_strides: list[int] = []
+        group_cache_entry_segments: list[tuple[int, int]] = []
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
@@ -1045,17 +1115,33 @@ class KVPoolWorker:
                 )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
-                for cache in self._as_cache_tuple(cache_or_caches):
-                    base_addr = cache.data_ptr()
-                    block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
-                    group_addrs.append(base_addr)
-                    group_block_lens.append(block_len)
-                    group_block_strides.append(block_stride)
+                caches = self._as_cache_tuple(cache_or_caches)
+                combined = self._get_combined_cache_transfer_segments(caches, group_id)
+                cache_segments = (
+                    [combined]
+                    if combined is not None
+                    else [self._get_cache_transfer_segments(cache) for cache in caches]
+                )
+                for segments in cache_segments:
+                    for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
+                        group_cache_entry_segments.append((segment_index, len(segments)))
+                        group_addrs.append(base_addr)
+                        group_block_lens.append(block_len)
+                        group_block_strides.append(block_stride)
+                if combined is not None:
+                    logger.info(
+                        "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
+                        layer_name,
+                        group_id,
+                        2 * (caches[0].shape[0] // self.num_blocks),
+                        len(combined),
+                    )
             layer_cache_entry_offsets.append(len(group_addrs))
         self.group_kv_caches_base_addr[group_id] = group_addrs
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
         self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
+        self.group_cache_entry_segments[group_id] = group_cache_entry_segments
         self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
@@ -1157,6 +1243,7 @@ class KVPoolWorker:
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
+        self.group_cache_entry_segments: dict[int, list[tuple[int, int]]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
             self.physical_layer_to_group_layers.clear()
@@ -1240,6 +1327,7 @@ class KVPoolWorker:
             group_cache_families=self.group_kv_cache_families,
             group_num_layers=self.group_num_layers,
             group_layer_cache_entry_offsets=self.group_layer_cache_entry_offsets,
+            group_cache_entry_segments=self.group_cache_entry_segments,
         )
 
         if self.tp_mismatch:
@@ -1839,12 +1927,9 @@ class KVPoolWorker:
         """
         if not keys:
             return set()
-        # PERF-TUNE(4): reuse this step's existence results for repeated keys
-        step_cache = getattr(self, "_step_exist_cache", None) or {}
-        self._step_exist_cache = step_cache
         unique_keys = list(dict.fromkeys(keys))
-        uncached_keys = [k for k in unique_keys if k not in step_cache]
-        for key_batch in self._layerwise_key_batches(uncached_keys):
+        missing: set[str] = set()
+        for key_batch in self._layerwise_key_batches(unique_keys):
             try:
                 states = self.m_store.batch_is_exist(key_batch)
                 if len(states) != len(key_batch):
@@ -1852,17 +1937,15 @@ class KVPoolWorker:
                         "MemCache exists check returned unexpected number of states: "
                         f"expected={len(key_batch)}, actual={len(states)}"
                     )
-                for k, state in zip(key_batch, states):
-                    step_cache[k] = int(state)
+                missing.update(key for key, state in zip(key_batch, states) if int(state) != 1)
             except Exception as exc:
                 logger.error(
                     "Pool exists check failed keys=%d error=%s; treating all as missing",
                     len(key_batch),
                     exc,
                 )
-                for k in key_batch:
-                    step_cache[k] = 0
-        return {k for k in unique_keys if step_cache.get(k, 0) != 1}
+                missing.update(key_batch)
+        return missing
 
     def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
         if not self.use_layerwise_transfer:
@@ -2203,17 +2286,9 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
-                # PERF-TUNE(4): dedup identical keys across concurrent requests.
-                ki_cache = getattr(self, "_step_keyinfo_cache", None) or {}
-                self._step_keyinfo_cache = ki_cache
-                uncached = [k for k in keys if k not in ki_cache]
-                if uncached:
-                    fetched_infos = self.m_store.batch_get_key_info(uncached, for_load=True)
-                    if fetched_infos is None or len(fetched_infos) != len(uncached):
-                        return False
-                    for k, ki in zip(uncached, fetched_infos):
-                        ki_cache[k] = ki
-                key_infos = [ki_cache[k] for k in keys]
+                key_infos = self.m_store.batch_get_key_info(keys, for_load=True)
+                if key_infos is None or len(key_infos) != len(keys):
+                    return False
                 gvas = []
                 valid_gva_indices = []
                 invalid_block_ids: list[int] = []
@@ -2238,23 +2313,14 @@ class KVPoolWorker:
                         )
 
                 # Only call batch_add_lease for keys with valid size.
-                # PERF-TUNE(4): keys leased earlier in this step reuse their
-                # recorded result code; only new keys hit the RPC. The result
-                # list below stays aligned with valid_gva_indices.
-                lease_cache = getattr(self, "_step_lease_result", None) or {}
-                self._step_lease_result = lease_cache
                 valid_keys = [keys[index] for index in valid_gva_indices]
-                new_lease_keys = [k for k in valid_keys if k not in lease_cache]
-                if new_lease_keys:
-                    new_results = self.m_store.batch_add_lease(new_lease_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if new_results is None or len(new_results) != len(new_lease_keys):
-                        return False
-                    for k, res in zip(new_lease_keys, new_results):
-                        lease_cache[k] = res
-                        if res == 0:
-                            self._step_load_keys.add(k)
                 if valid_keys:
-                    lease_results = [lease_cache[k] for k in valid_keys]
+                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
+                    if lease_results is None or len(lease_results) != len(valid_keys):
+                        return False
+                    for key, res in zip(valid_keys, lease_results):
+                        if res == 0:
+                            self._step_load_keys.add(key)
                     leased_keys = []
                     for gva_index, lease_res in zip(valid_gva_indices, lease_results):
                         block_idx = block_indices[gva_index]
@@ -2269,7 +2335,6 @@ class KVPoolWorker:
                                 if retry_results is None or len(retry_results) != 1:
                                     return False
                                 lease_res = retry_results[0]
-                                lease_cache[partial_key] = lease_res
                                 if lease_res == 0:
                                     self._step_load_keys.add(partial_key)
                                 if lease_res != MEMCACHE_UNMATCHED_STATE:
@@ -2880,10 +2945,6 @@ class KVPoolWorker:
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if not requests:
             return
-        # PERF-TUNE(4): cache repeated memcache RPC results within this step.
-        self._step_keyinfo_cache = {}
-        self._step_lease_result = {}
-        self._step_exist_cache = {}
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
         if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
