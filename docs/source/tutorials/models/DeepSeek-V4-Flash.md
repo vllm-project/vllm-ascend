@@ -166,7 +166,6 @@ vllm serve /mnt/nfs_hw/weight/DeepSeek-V4-Flash-w8a8-mtp \
   --quantization ascend \
   --port 7000 \
   --block-size 128 \
-  --enable-chunked-prefill \
   --enable-prefix-caching \
   --tokenizer-mode deepseek_v4 \
   --tool-call-parser deepseek_v4 \
@@ -178,6 +177,12 @@ vllm serve /mnt/nfs_hw/weight/DeepSeek-V4-Flash-w8a8-mtp \
   --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
   --speculative-config '{"num_speculative_tokens": 1,"method": "mtp"}'
 ```
+
+!!! note
+    The open-source **vLLM V1 scheduler** already enables chunked prefill by default,
+    so `--enable-chunked-prefill` is not required on A2 and is omitted here. This keeps
+    the A2 script consistent with the A3 script below and with newer vLLM-Ascend
+    releases (v0.20.2 / v0.30.0), which no longer pass this flag.
 
 ::::
 
@@ -229,6 +234,14 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     "multistream_overlap_shared_expert":false,
     "multistream_dsa_preprocess":false}'
 ```
+
+!!! note
+    Chunked prefill is enabled by default by the open-source **vLLM V1 scheduler** on
+    A3 as well, so `--enable-chunked-prefill` does not need to be passed explicitly.
+    Adding the flag on top of the default V1 path does not change the behaviour and
+    does not improve long-run stability; if you hit instability under sustained
+    high-throughput serving, please report it with the profiling data instead of
+    relying on this flag.
 
 ::::
 :::::
