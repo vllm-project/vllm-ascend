@@ -5,9 +5,14 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_topk_fused
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("shape", [(0, 0, 0), (0, 3, 32), (4, 0, 32), (4, 0, 0)])
 def test_empty_shape(shape: tuple[int, int, int]) -> None:
     score = torch.empty(shape, dtype=torch.float32, device="npu")
@@ -19,6 +24,9 @@ def test_empty_shape(shape: tuple[int, int, int]) -> None:
     assert indices.device == counts.device == score.device
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("width", [0, 32])
 def test_zero_logical_blocks(width: int) -> None:
     score = torch.empty((4, 8, width), dtype=torch.float32, device="npu")
@@ -28,6 +36,9 @@ def test_zero_logical_blocks(width: int) -> None:
     assert torch.all(counts == 0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     "change,message",
     [
@@ -66,6 +77,9 @@ def test_invalid_inputs(change: dict, message: str) -> None:
         index_decode_topk_fused(score, context, **kwargs)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("context_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("query_len", [1, 4])
 @pytest.mark.parametrize("topk,width", [(1, 1), (16, 7), (16, 33), (32, 16)])
@@ -85,6 +99,9 @@ def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int,
             assert torch.all(indices[head, query, count:] == -1)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
 def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int, local_blocks: int) -> None:

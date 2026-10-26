@@ -11,12 +11,17 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.cann_keypool import pool_key_indexer_nonempty
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import pack_keypool_indices
 from vllm_ascend.ops.triton.prepare_nonempty_keypool_inputs import prepare_nonempty_keypool_inputs
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("tokens,requests,columns", [(1, 1, 1), (5, 2, 128), (65, 64, 1025), (257, 4, 65)])
 @pytest.mark.parametrize("strided", [False, True])
 def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, columns, strided):
@@ -47,6 +52,9 @@ def test_prepare_nonempty_keypool_inputs_matches_reference(tokens, requests, col
         torch.testing.assert_close(value.cpu(), original.cpu(), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("graph_mode", [False, True])
 def test_empty_pool_shards_and_padding(graph_mode):
     bootstrap_custom_op_env(include_vendor_lib=True)
@@ -105,6 +113,9 @@ def test_empty_pool_shards_and_padding(graph_mode):
         torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_nonempty_topk_matches_unadapted_cann():
     bootstrap_custom_op_env(include_vendor_lib=True)
     import cann_ops_transformer  # noqa: F401

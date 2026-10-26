@@ -1002,16 +1002,21 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
     export VLLM_RPC_TIMEOUT=3600000
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export PYTHONHASHSEED=0
+    export VLLM_TORCH_PROFILER_DIR="./vllm_profile"
+    export VLLM_TORCH_PROFILER_WITH_STACK=1
+    export PYTHONPATH="/usr/local/python3.12.13/lib/python3.12/site-packages:${PYTHONPATH:-}"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -1027,31 +1032,36 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-model-len 200000 \
+      --max-model-len 1048576 \
       --max-num-seqs 64 \
       --max-num-batched-tokens 8192 \
       --trust-remote-code \
       --quantization ascend \
+      --kv-cache-dtype int8 \
+      --attention_config.indexer_kv_dtype int8 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --gpu-memory-utilization 0.92 \
+      --gpu-memory-utilization 0.9 \
       --async-scheduling \
       --enforce-eager \
       --tool-call-parser glm47 \
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}' \
+      --profiler-config '{"profiler":"torch","torch_profiler_dir":"./profiling","torch_profiler_with_stack":false}' \
+      --additional-config '{"mc2_comm_alg":"hierarchy","multistream_overlap_shared_expert":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
       ${SERVER_ROLE_ARGS:-} \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_producer",
         "engine_id": "0",
-        "kv_port": "30000",
+        "kv_port": "36000",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {"dp_size": 2, "tp_size": 8},
           "decode": {"dp_size": 8, "tp_size": 2}
         }
-      }'
+      }' \
+      --prefix-cache-retention-interval None
     ```
 
     ##### P0 and P1 wrappers
@@ -1125,10 +1135,11 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_HOST_IP="$LOCAL_IP"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,pin_memory_expandable_segments:True
+    export VLLM_SERVER_DEV_MODE=1
     export VLLM_USE_V2_MODEL_RUNNER=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_BUFFSIZE=1024
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_EXEC_TIMEOUT=3600
     export HCCL_CONNECT_TIMEOUT=1200
     export VLLM_RPC_TIMEOUT=3600000
@@ -1139,6 +1150,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export HCCL_HOST_SOCKET_PORT_RANGE="$((60000 + $4 * 100))-$((60099 + $4 * 100))"
     export HCCL_NPU_SOCKET_PORT_RANGE="$((60000 + $4 * 100))-$((60099 + $4 * 100))"
     export ASCEND_RT_VISIBLE_DEVICES="$1"
+    export PYTHONHASHSEED=0
+    export PYTHONPATH="/usr/local/python3.12.13/lib/python3.12/site-packages:${PYTHONPATH:-}"
 
     exec vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
@@ -1154,11 +1167,13 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --seed 1024 \
       --served-model-name glm \
       --safetensors-load-strategy prefetch \
-      --max-model-len 200000 \
-      --max-num-seqs 32 \
-      --max-num-batched-tokens 1024 \
+      --max-model-len 1048576 \
+      --max-num-seqs 60 \
+      --max-num-batched-tokens 192 \
       --trust-remote-code \
       --quantization ascend \
+      --kv-cache-dtype int8 \
+      --attention_config.indexer_kv_dtype int8 \
       --gpu-memory-utilization 0.85 \
       --skip-mm-profiling \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -1167,7 +1182,9 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}' \
+      --profiler-config '{"profiler":"torch","torch_profiler_dir":"./profile","torch_profiler_with_stack":false}' \
+      --additional-config '{"mc2_comm_alg": "hierarchy","multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_static_kernel": true}}' \
       --kv-transfer-config '{
         "kv_connector": "MooncakeConnectorV2",
         "kv_role": "kv_consumer",
@@ -1178,7 +1195,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
           "prefill": {"dp_size": 2, "tp_size": 8},
           "decode": {"dp_size": 8, "tp_size": 2}
         }
-      }'
+      }' \
+      --prefix-cache-retention-interval None
     ```
 
     ##### D0 and D1 wrappers

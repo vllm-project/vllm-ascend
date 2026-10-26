@@ -1139,17 +1139,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
 
-    # profiling_chunk (CPP) works with async scheduling only on the v2 model
-    # runner; the v1 PP execution path does not provide the same asynchronous
-    # sampled-token cadence and broadcast guarantees.
-    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
-    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError(
-                "profiling_chunk_config with async scheduling requires the v2 model runner "
-                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
-            )
-
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
     if dyntra_lb_config.enabled:
         # DyntraLB targets decoder-only inference on the decode side of a
@@ -1557,12 +1546,12 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
 
-    dcp_enabled = parallel_config.decode_context_parallel_size > 1
+    use_dcp = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-        and dcp_enabled
+        and use_dcp
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -1570,7 +1559,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and dcp_enabled and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if use_sparse and use_dcp and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
         logger.warning_once(
             "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"

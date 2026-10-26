@@ -6,18 +6,21 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
-enable_custom_op()
 
-
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A5,
+    reason="MXFP8/MXFP4 grouped matmul regression requires Ascend A5",
+)
 @pytest.mark.parametrize("experts", [14, 15])
 @pytest.mark.parametrize("group_list_type", [0, 1])
 @torch.inference_mode()
 def test_small_expert_gmm_situ_graph(experts, group_list_type):
     torch.npu.set_device(0)
-    if "Ascend950" not in torch.npu.get_device_name():
-        pytest.skip("requires A5 MXFP8/MXFP4 grouped matmul")
+    enable_custom_op()
     torch.manual_seed(921 + experts)
     rows, capacity, k, n = 128, 17280, 3584, 6144
     weights, scales = [], []
