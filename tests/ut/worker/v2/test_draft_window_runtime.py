@@ -149,6 +149,36 @@ def test_exact_after_rejection_controls_start_not_cpu_upper(setup):
     assert metadata.block_table_tensor[1, :3].tolist() == canonical[3, 1:4].tolist()
 
 
+def test_unprojected_native_group_metadata_is_untouched_while_full_group_windows(setup):
+    runtime, spec, canonical, completions = setup
+    other_table = canonical.clone() + 100
+    spec.block_tables.block_tables.append(SimpleNamespace(gpu=other_table))
+    spec.block_tables.num_blocks.np = np.full((2, 6), 8, dtype=np.int32)
+    spec.block_tables.kernel_block_sizes = [4, 4]
+    # Backend selection's static native-SWA subset certificate has already
+    # selected gid1 alone; the actual callback must leave gid0 completely
+    # outside the private read projection, rather than sharing/rebinding it.
+    runtime.gids = (1,)
+    native_metadata, full_metadata = common(), common()
+    original_native = vars(native_metadata).copy()
+    native_values = {name: value.clone() for name, value in original_native.items() if isinstance(value, torch.Tensor)}
+    original_slots = full_metadata.slot_mapping
+    with runtime.proposal_context(spec, batch()):
+        callback = runtime.metadata_callback(3, 2)
+        callback(0, native_metadata)
+        callback(1, full_metadata)
+    assert vars(native_metadata).keys() == original_native.keys()
+    for name, value in original_native.items():
+        assert getattr(native_metadata, name) is value
+        if name in native_values:
+            assert torch.equal(value, native_values[name])
+    assert full_metadata.seq_lens.tolist() == [12, 11, 0]
+    assert full_metadata.block_table_tensor[1, :3].tolist() == other_table[3, 4:7].tolist()
+    assert full_metadata.slot_mapping is original_slots
+    assert torch.equal(other_table, canonical + 100)
+    assert len(completions) == 1
+
+
 def test_eagle_uniform_first_pass_reads_current_device_end_without_host_snapshot(setup, monkeypatch):
     runtime, spec, _, _ = setup
     runtime.method, runtime.static_k, runtime.window_size = "eagle3", 3, 1035

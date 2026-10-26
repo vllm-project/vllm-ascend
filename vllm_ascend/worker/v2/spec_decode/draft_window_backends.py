@@ -15,6 +15,7 @@ from typing import Any
 
 class DraftWindowProviderStatus(str, Enum):
     DIRECT_DENSE = "DIRECT_DENSE"
+    NATIVE_SWA_CANDIDATE = "NATIVE_SWA_CANDIDATE"
     DIRECT_MLA = "DIRECT_MLA"
     DIRECT_DSA = "DIRECT_DSA"
     DIRECT_SFA = "DIRECT_SFA"
@@ -99,11 +100,12 @@ class DraftWindowBackendTypes:
     dsa_builder: type | None = None
     dsa_cp_builder: type | None = None
     dsa_spec: type | None = None
+    sliding_window_spec: type | None = None
 
     @classmethod
     def load(cls) -> "DraftWindowBackendTypes":
         # Keep device/backend imports out of CONFIG_OFF and policy evaluation.
-        from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
         from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionMetadataBuilder
         from vllm_ascend.attention.context_parallel.dsa_cp import (
@@ -158,6 +160,7 @@ class DraftWindowBackendTypes:
             dsa_builder=AscendDSAMetadataBuilder,
             dsa_cp_builder=AscendDSACPMetadataBuilder,
             dsa_spec=AscendSlidingWindowMLASpec,
+            sliding_window_spec=SlidingWindowSpec,
         )
 
 
@@ -176,6 +179,7 @@ class DraftWindowGroupRoute:
     topology: DraftWindowTopology
     status: DraftWindowProviderStatus
     reason: str
+    native_window: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -253,6 +257,7 @@ def inventory_draft_window_groups(
             )
             reason = "No read-view provider is registered for this consumer"
             status = DraftWindowProviderStatus.PROVIDER_MISSING
+            native_window = None
             if (
                 backend is types.dense_backend
                 and type(builder) is types.dense_builder
@@ -265,6 +270,23 @@ def inventory_draft_window_groups(
                 else:
                     status = DraftWindowProviderStatus.DIRECT_DENSE
                     reason = "Dense kernel-column read view; Full write/query coordinates stay unchanged"
+            elif (
+                types.sliding_window_spec is not None
+                and backend is types.dense_backend
+                and type(builder) is types.dense_builder
+                and all(type(item) is types.sliding_window_spec for item in consumer_specs)
+                and ratio == 1
+                and storage_size == scheduler_span
+            ):
+                windows = {item.sliding_window for item in consumer_specs}
+                if topology.prefill_context_parallel_size != 1 or topology.decode_context_parallel_size != 1:
+                    reason = "Native SWA context-parallel coordinates need a separate provider"
+                elif len(windows) != 1 or next(iter(windows)) <= 0:
+                    reason = "Native SWA group has inconsistent windows"
+                else:
+                    native_window = int(next(iter(windows)))
+                    status = DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE
+                    reason = "Native SWA may already be a subset; requires a static query/window coverage certificate"
             elif (
                 types.mla_backend is not None
                 and backend is types.mla_backend
@@ -375,6 +397,7 @@ def inventory_draft_window_groups(
                     topology=route_topology,
                     status=status,
                     reason=reason,
+                    native_window=native_window,
                 )
             )
     return tuple(routes)
@@ -384,7 +407,11 @@ def require_draft_window_providers(routes: Sequence[DraftWindowGroupRoute]) -> N
     """Fail before materializing any group if any required provider is missing."""
     if not routes:
         raise ValueError("Draft Window requires at least one attention consumer")
-    missing = [route for route in routes if route.status is DraftWindowProviderStatus.PROVIDER_MISSING]
+    missing = [
+        route
+        for route in routes
+        if route.status in (DraftWindowProviderStatus.PROVIDER_MISSING, DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE)
+    ]
     if missing:
         details = "; ".join(f"gid={route.gid}, {route.builder}: {route.reason}" for route in missing)
         raise NotImplementedError(f"Draft Window provider missing: {details}")
@@ -442,9 +469,72 @@ def require_compatible_direct_prefix_routes(routes: Sequence[DraftWindowGroupRou
             )
 
 
-def require_direct_prefix_routes(speculator: Any) -> tuple[DraftWindowGroupRoute, ...]:
+def select_native_swa_subset_routes(
+    routes: Sequence[DraftWindowGroupRoute],
+    *,
+    window_size: int,
+    max_query_tokens: int,
+    future_offset_bound: int,
+    context: Any,
+    dense_impl_type: type,
+) -> tuple[DraftWindowGroupRoute, ...]:
+    """Keep a certified native SWA reader unchanged, never claim its residency.
+
+    S <= max(E+f-W, 0). A native P-window's earliest query reads no
+    earlier than max(E-Q-P, 0). W >= P+Q+f proves that its complete
+    existing read set lies inside the requested extra Window. Only the
+    remaining Full groups receive a private Window projection. Smaller W
+    still needs an intersection provider; it must not silently use native P.
+    """
+    if max_query_tokens < 1 or future_offset_bound < 0:
+        raise ValueError("Native SWA coverage requires a positive query bound")
+    projected = []
+    for route in routes:
+        if route.status is not DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE:
+            projected.append(route)
+            continue
+        native_window = route.native_window
+        if native_window is None or window_size < native_window + max_query_tokens + future_offset_bound:
+            raise NotImplementedError(f"Draft Window gid={route.gid} needs a native-SWA intersection provider")
+        for name in route.layers:
+            impl = getattr(context.get(name), "impl", None)
+            if (
+                type(impl) is not dense_impl_type
+                or impl.sliding_window != native_window
+                or impl.sinks is not None
+                or impl.use_bnsd_kv_cache
+            ):
+                raise NotImplementedError(f"Draft Window native SWA consumer {name} has no coverage certificate")
+    if not projected:
+        raise NotImplementedError("Draft Window requires a projected Full group alongside covered native SWA")
+    return tuple(projected)
+
+
+def require_direct_prefix_routes(
+    speculator: Any, *, window_size: int | None = None
+) -> tuple[DraftWindowGroupRoute, ...]:
     """Select all direct-prefix consumers before any proposal work is submitted."""
     routes = describe_draft_window_routes(speculator)
+    if any(route.status is DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE for route in routes):
+        if window_size is None or speculator.speculative_config.method != "dflash":
+            raise NotImplementedError("Native SWA coverage is only certified for the DFlash extra-Window route")
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+
+        config = speculator.attn_vllm_config
+        scheduler = config.scheduler_config
+        query_bound = max(
+            scheduler.max_num_batched_tokens,
+            scheduler.max_num_scheduled_tokens or 0,
+            speculator.num_query_per_req,
+        )
+        routes = select_native_swa_subset_routes(
+            routes,
+            window_size=window_size,
+            max_query_tokens=query_bound,
+            future_offset_bound=speculator.num_speculative_steps,
+            context=config.compilation_config.static_forward_context,
+            dense_impl_type=AscendAttentionBackendImpl,
+        )
     if any(route.status is DraftWindowProviderStatus.DIRECT_SFA for route in routes):
         from vllm_ascend.worker.v2.spec_decode.draft_window_sfa import validate_sfa_read_consumers
 

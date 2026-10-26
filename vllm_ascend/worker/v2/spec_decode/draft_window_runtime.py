@@ -130,7 +130,7 @@ class DraftWindowRuntime:
         # not Window metadata. Ordinary Flashcomm/SP keeps the baseline query
         # padding and Full write coordinates; actual CP builders are excluded
         # by the provider inventory rather than a target-global CP switch.
-        routes = require_direct_prefix_routes(speculator)
+        routes = require_direct_prefix_routes(speculator, window_size=self.window_size)
         if self.method in ("eagle3", "dflash", "dspark") and all(
             route.status is DraftWindowProviderStatus.DIRECT_DENSE for route in routes
         ):

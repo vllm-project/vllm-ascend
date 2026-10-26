@@ -15,6 +15,7 @@ from vllm_ascend.worker.v2.spec_decode.draft_window_backends import (
     project_draft_window_start,
     require_compatible_direct_prefix_routes,
     require_draft_window_providers,
+    select_native_swa_subset_routes,
 )
 
 
@@ -114,6 +115,90 @@ def test_same_named_unregistered_builder_cannot_gain_dense_capability(types, top
 def test_subclass_and_native_window_require_their_own_provider(types, topology):
     routes = inventory(types, topology, specs=[FullSpec(), SlidingSpec()], builders=[DenseSubclass(), DenseBuilder()])
     assert all(route.status is DraftWindowProviderStatus.PROVIDER_MISSING for route in routes)
+
+
+def native_swa_bundle(types, topology):
+    spec = SlidingSpec()
+    spec.sliding_window = 4096
+    routes = inventory(replace(types, sliding_window_spec=SlidingSpec), topology, specs=[spec, FullSpec()])
+    impl = DenseBuilder()
+    impl.sliding_window = 4096
+    impl.sinks = None
+    impl.use_bnsd_kv_cache = False
+    context = {"draft.layers.0": SimpleNamespace(impl=impl)}
+    return routes, impl, context
+
+
+def test_native_swa_candidate_is_not_a_residency_or_read_provider(types, topology):
+    routes, _, _ = native_swa_bundle(types, topology)
+    assert routes[0].status is DraftWindowProviderStatus.NATIVE_SWA_CANDIDATE
+    with pytest.raises(NotImplementedError, match="provider missing"):
+        require_draft_window_providers(routes)
+
+
+def test_covered_swa_keeps_only_full_group_projection(types, topology):
+    routes, _, context = native_swa_bundle(types, topology)
+    selected = select_native_swa_subset_routes(
+        routes,
+        window_size=32768,
+        max_query_tokens=2048,
+        future_offset_bound=7,
+        context=context,
+        dense_impl_type=DenseBuilder,
+    )
+    assert selected == (routes[1],)
+    require_compatible_direct_prefix_routes(selected)
+    assert context["draft.layers.0"].impl.sliding_window == 4096
+
+
+def test_smaller_extra_window_is_not_silently_ignored(types, topology):
+    routes, _, context = native_swa_bundle(types, topology)
+    with pytest.raises(NotImplementedError, match="intersection provider"):
+        select_native_swa_subset_routes(
+            routes,
+            window_size=1024,
+            max_query_tokens=8,
+            future_offset_bound=7,
+            context=context,
+            dense_impl_type=DenseBuilder,
+        )
+
+
+@pytest.mark.parametrize("change", [{"sliding_window": 1024}, {"sinks": object()}, {"use_bnsd_kv_cache": True}])
+def test_native_swa_actual_consumer_must_match_certificate(types, topology, change):
+    routes, impl, context = native_swa_bundle(types, topology)
+    for name, value in change.items():
+        setattr(impl, name, value)
+    with pytest.raises(NotImplementedError, match="coverage certificate"):
+        select_native_swa_subset_routes(
+            routes,
+            window_size=32768,
+            max_query_tokens=2048,
+            future_offset_bound=7,
+            context=context,
+            dense_impl_type=DenseBuilder,
+        )
+
+
+@pytest.mark.parametrize("future", [0, 7])
+def test_native_swa_coverage_against_absolute_read_sets(types, topology, future):
+    routes, _, context = native_swa_bundle(types, topology)
+    width, native_window = 8, 4096
+    window = native_window + width + future
+    select_native_swa_subset_routes(
+        routes,
+        window_size=window,
+        max_query_tokens=width,
+        future_offset_bound=future,
+        context=context,
+        dense_impl_type=DenseBuilder,
+    )
+    for end in (8, 1151, 1152, 4095, 4096, 4223, 33023):
+        for block in (64, 128):
+            start = max(end + future - window, 0) // block * block
+            for query in range(end - width, end):
+                native_read = set(range(max(query - native_window, 0), query + 1))
+                assert native_read == {key for key in native_read if key >= start}
 
 
 @pytest.mark.parametrize("ratio,span", [(4, 128), (128, 4096)])
