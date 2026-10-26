@@ -1,0 +1,4 @@
+pr: 19798
+entries:
+  - category: feature
+    text: Enabled A5 CANN FlashAttn selection for supported native MiniMax DSpark eager drafts.
