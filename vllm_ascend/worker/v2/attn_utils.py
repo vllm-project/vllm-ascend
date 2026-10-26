@@ -383,7 +383,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
             for layer_name in attention_layer_names:
                 spec = kv_cache_spec[layer_name]
-                page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+                page_size_padded = (
+                    common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+                )
                 kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
             for layer_name, spec in mamba_specs.items():
                 if spec.page_size_bytes < common_page_size:
@@ -595,9 +597,7 @@ def build_attn_metadata(
                 # mapped-token count. Expose only the live request boundaries.
                 common_attn_metadata = replace(
                     common_attn_metadata,
-                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[
-                        : num_actual_reqs + 1
-                    ],
+                    query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
             metadata_variants = [(attn_group.layer_names, common_attn_metadata)]
             if is_sfa_builder and draft_layer_names:
@@ -1734,9 +1734,7 @@ def _reshape_kv_cache_v2(
                     # row ratio on current vLLM. QSA_RAW keeps the logical
                     # 768-token scheduler block; QSA_COMPRESSED stores
                     # block_size/ratio states per page.
-                    storage_block_size = (
-                        kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
-                    )
+                    storage_block_size = kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
                     region = six_region_layout.region("r4" if owner.role == QSA_RAW else "r5")
                     expected_page_bytes = (
                         storage_block_size
