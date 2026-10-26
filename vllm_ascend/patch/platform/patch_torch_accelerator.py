@@ -12,6 +12,9 @@ torch.accelerator.empty_cache = patch_empty_cache
 # with torch.accelerator.memory_stats(), but torch.accelerator does not
 # properly delegate to NPU. We redirect to torch.npu.* equivalents.
 torch.accelerator.memory_stats = torch.npu.memory_stats  # type: ignore[attr-defined]
+# memory_allocated's upstream implementation resolves memory_stats in its own
+# module, so replacing only the public memory_stats alias is insufficient.
+torch.accelerator.memory_allocated = torch.npu.memory_allocated  # type: ignore[attr-defined]
 torch.accelerator.memory_reserved = torch.npu.memory_reserved  # type: ignore[attr-defined]
 torch.accelerator.reset_peak_memory_stats = torch.npu.reset_peak_memory_stats  # type: ignore[attr-defined]
 # torch.accelerator.get_memory_info() routes through c10's
