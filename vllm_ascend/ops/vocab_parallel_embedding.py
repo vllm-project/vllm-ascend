@@ -158,11 +158,27 @@ def _resolve_vocab_parallel_plan(
 
     if is_token_embedding and embedding_tp_enable():
         group = get_embed_tp_group()
+        shard_rank = group.rank_in_group
+        shard_world_size = group.world_size
+        # Compose with standard TP the same way the LM head does (TP outer,
+        # fine-grained inner): each rank looks up only its combined slice of
+        # the table, the reduce-scatter restores the token rows with just the
+        # local TP column's contribution, and the output_reduce_group hook in
+        # _forward_with_token_exchange then all-reduces the remaining columns'
+        # contributions over TP — the same exchange contract PCP_X_TP already
+        # runs for its embedding path.
+        output_reduce_group = None
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
+            shard_world_size *= tp_group.world_size
+            output_reduce_group = tp_group
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
-            group.rank_in_group,
-            group.world_size,
+            shard_rank,
+            shard_world_size,
             token_exchange_group=group,
+            output_reduce_group=output_reduce_group,
         )
 
     tp_group = get_tp_group()
