@@ -468,6 +468,42 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
+def test_mla_replicated_draft_decode_skips_pcp_kv_gather() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_pcp = True
+    impl.is_pcp_decode_sharded = True
+    impl.fused_qkv_a_proj = None
+    impl.kv_a_proj_with_mqa = MagicMock(return_value=(torch.zeros(1, 4), None))
+    impl.layerwise_kv_cache_hook = None
+    impl.exec_kv_prefill = MagicMock(side_effect=AssertionError("replicated decode must not gather KV"))
+    impl.mla_preprocess_decode = MagicMock(return_value="decode")
+    # Replicated draft metadata keeps an unexpanded, rank-local slot mapping.
+    metadata = _make_pcp_metadata(num_actual_tokens=1, num_decode_tokens=1)
+    metadata.num_input_tokens = 1
+    metadata.slot_mapping = torch.tensor([5], dtype=torch.int64)
+    with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
+        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None)
+    assert impl.mla_preprocess_decode.call_args.args[-1] is None
+
+
+def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_pcp = True
+    impl.is_pcp_decode_sharded = True
+    impl.fused_qkv_a_proj = None
+    impl.kv_a_proj_with_mqa = MagicMock(return_value=(torch.zeros(1, 4), None))
+    impl.layerwise_kv_cache_hook = MagicMock()
+    impl.exec_kv_prefill = MagicMock(return_value="written")
+    # A rank without local queries still joins the gather of the expanded slots.
+    metadata = _make_pcp_metadata(num_actual_tokens=0, num_decode_tokens=0)
+    metadata.num_input_tokens = 1
+    metadata.slot_mapping = torch.tensor([-1, 7], dtype=torch.int64)
+    with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
+        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None)
+    impl.layerwise_kv_cache_hook.wait_for_layer.assert_called_once_with("target")
+    impl.exec_kv_prefill.assert_called_once()
+
+
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.is_pcp_decode_sharded = False

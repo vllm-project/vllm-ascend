@@ -461,8 +461,12 @@ def needs_pcp_kv_gather(attn_metadata: AscendSFAMetadata, is_decode_sharded: boo
 
     Only replicated decode-only steps already hold identical KV on every
     rank, including graph padding. Ranks without local prefill still join the
-    gather when another rank has one.
+    gather when another rank has one. A step built without a PCP context
+    (e.g. a replicated draft decode) keeps an unexpanded slot mapping.
     """
+    pcp_slot_mapping = attn_metadata.pcp_slot_mapping
+    if pcp_slot_mapping is None or pcp_slot_mapping.numel() <= attn_metadata.num_input_tokens:
+        return False
     return is_decode_sharded or attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
 
 
