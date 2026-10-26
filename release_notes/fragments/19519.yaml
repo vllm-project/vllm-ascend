@@ -1,4 +1,0 @@
-pr: 19519
-entries:
-  - category: bugfix
-    text: Fixed BF16 SwiGLU quantization compilation with Triton Ascend 3.6.0 by casting the sigmoid input to FP32.
