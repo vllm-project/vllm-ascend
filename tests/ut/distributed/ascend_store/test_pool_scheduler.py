@@ -1283,7 +1283,7 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         scheduler.use_layerwise = True
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
         scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
-        self.assertTrue(scheduler.load_specs["r1"].can_load)
+        self.assertFalse(scheduler.load_specs["r1"].can_load)
 
 
 class _PrefixHitManager:
@@ -1485,3 +1485,49 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("second_hit", [0, 768])
+def test_layerwise_retry_discards_stale_load_spec(second_hit):
+    scheduler = KVPoolScheduler(make_config(block_size=768, extra_config={"backend": "memcache"}), use_layerwise=True)
+    scheduler._get_layerwise_hit_tokens = MagicMock(side_effect=[12288, second_hit])
+    request = SimpleNamespace(
+        request_id="retry", prompt_token_ids=list(range(19000)), num_tokens=19000, block_hashes=[b"h"] * 25
+    )
+    assert scheduler.get_num_new_matched_tokens(request, 768) == (11520, False)
+    previous = scheduler.load_specs[request.request_id]
+    assert scheduler.get_num_new_matched_tokens(request, 0 if second_hit == 0 else 768) == (0, False)
+    if second_hit == 0:
+        assert request.request_id not in scheduler.load_specs
+    else:
+        assert scheduler.load_specs[request.request_id] is not previous
+        assert scheduler.load_specs[request.request_id].kvpool_cached_tokens == 768
+
+    scheduler.update_state_after_alloc(request, MagicMock(), 0)
+    scheduler._build_req_meta = MagicMock()
+    scheduled = SimpleNamespace(
+        req_id=request.request_id,
+        num_computed_tokens=0,
+        block_ids=[list(range(1, 9))],
+        prompt_token_ids=request.prompt_token_ids,
+    )
+    scheduler._process_new_request(scheduled, SimpleNamespace(num_scheduled_tokens={request.request_id: 5376}), False)
+    load_spec = scheduler._build_req_meta.call_args.args[2]
+    assert load_spec is None or load_spec.kvpool_cached_tokens <= 768
+
+
+@pytest.mark.parametrize("early_return", ["consumer", "short_prompt", "local_hit"])
+def test_lookup_early_return_discards_stale_load_spec(early_return):
+    scheduler = KVPoolScheduler(make_config(), use_layerwise=False)
+    scheduler.load_specs["retry"] = LoadSpec(768, 12288, True)
+    request = SimpleNamespace(request_id="retry", prompt_token_ids=list(range(32)), num_tokens=32)
+    local_tokens = 0
+    if early_return == "consumer":
+        scheduler.kv_role = "kv_consumer"
+        scheduler.consumer_is_to_load = False
+    elif early_return == "short_prompt":
+        request.prompt_token_ids = [1]
+    else:
+        local_tokens = 32
+    assert scheduler.get_num_new_matched_tokens(request, local_tokens) == (0, False)
+    assert request.request_id not in scheduler.load_specs
