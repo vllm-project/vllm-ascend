@@ -14,7 +14,6 @@ the monolith under the same environment (validated by the RC53 needle /
 GEN regression legs re-run against this branch).
 """
 
-
 # main moved the CP metadata dataclasses from common_cp into attention_cp
 # (same main-port adaptation as int2/ctx.py)
 # main-port note: enable_cp was folded into enable_dcp on main; the
@@ -233,8 +232,8 @@ class AscendINT2AttentionBackendImpl(
         v_rot_path = _OSCAR_CFG.v_rotation_path
         _r218_diag(
             "LOADER-ENTRY cls={} k={!r} v={!r} required={!r}".format(
-                type(self).__name__, k_rot_path[:60], v_rot_path[:60],
-                os.environ.get("R218_ROT_REQUIRED", "<unset>"))
+                type(self).__name__, k_rot_path[:60], v_rot_path[:60], os.environ.get("R218_ROT_REQUIRED", "<unset>")
+            )
         )
         print(
             "[R218ROT] load entry k={!r} v={!r} cls={}".format(k_rot_path[:40], v_rot_path[:40], type(self).__name__),
@@ -261,11 +260,13 @@ class AscendINT2AttentionBackendImpl(
             if not (vllm_config and hasattr(vllm_config, "model_config")):
                 _r218_diag(
                     "LOADER-SKIP vllm_config unavailable self.vllm_config={!r}".format(
-                        getattr(self, "vllm_config", None))
+                        getattr(self, "vllm_config", None)
+                    )
                 )
                 print(
                     "[R218ROT] SKIP: vllm_config unavailable (self.vllm_config={!r})".format(
-                        getattr(self, "vllm_config", None)),
+                        getattr(self, "vllm_config", None)
+                    ),
                     file=_r144_ovl_sys.stderr,
                     flush=True,
                 )
@@ -295,13 +296,13 @@ class AscendINT2AttentionBackendImpl(
             )
             _r218_diag(
                 "LOADER-LOADED R_k={} R_v={} dev={}".format(
-                    tuple(self._oscar_R_k.shape), tuple(self._oscar_R_v.shape),
-                    self._oscar_R_k.device)
+                    tuple(self._oscar_R_k.shape), tuple(self._oscar_R_v.shape), self._oscar_R_k.device
+                )
             )
             print(
                 "[R218ROT] LOADED R_k={} R_v={} dev={}".format(
-                    tuple(self._oscar_R_k.shape), tuple(self._oscar_R_v.shape),
-                    self._oscar_R_k.device),
+                    tuple(self._oscar_R_k.shape), tuple(self._oscar_R_v.shape), self._oscar_R_k.device
+                ),
                 file=_r144_ovl_sys.stderr,
                 flush=True,
             )
@@ -465,7 +466,8 @@ class AscendINT2AttentionBackendImpl(
                     _r218_diag("FIRE-Q")
                     print(
                         "[R218ROT-Q] decode Q-rotate FIRES tnd={} lay={}".format(
-                        tuple(query_tnd.shape), self._oscar_layer_ord(layer)),
+                            tuple(query_tnd.shape), self._oscar_layer_ord(layer)
+                        ),
                         file=_r144_ovl_sys.stderr,
                         flush=True,
                     )
@@ -501,7 +503,8 @@ class AscendINT2AttentionBackendImpl(
                     _r218_diag("FIRE-O")
                     print(
                         "[R218ROT-O] decode output UN-rotate (x R_v.T) FIRES out={} lay={}".format(
-                        tuple(attn_output.shape), self._oscar_layer_ord(layer)),
+                            tuple(attn_output.shape), self._oscar_layer_ord(layer)
+                        ),
                         file=_r144_ovl_sys.stderr,
                         flush=True,
                     )
@@ -659,7 +662,8 @@ class AscendINT2AttentionBackendImpl(
                     _r218_diag("FIRE-W")
                     print(
                         "[R218ROT-W] write-rotate FIRES nat={} lay={} krot={}".format(
-                        int(attn_metadata.num_actual_tokens), layer_idx, tuple(key_rot.shape)),
+                            int(attn_metadata.num_actual_tokens), layer_idx, tuple(key_rot.shape)
+                        ),
                         file=_r144_ovl_sys.stderr,
                         flush=True,
                     )
@@ -1114,7 +1118,8 @@ class AscendINT2AttentionBackendImpl(
                             "-L" + os.path.join(_TN149, "lib"),
                             "-ltorch_npu",
                         ],
-                        verbose=False)
+                        verbose=False,
+                    )
                 except Exception as _e149:
                     print(f"[R149-NATIVE] launcher build FAILED: {_e149}", flush=True)
                     _r150_tr("launcher_build_failed", err=str(_e149)[:300])
