@@ -33,6 +33,7 @@ import pytest
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
+from pytest import MonkeyPatch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from tests.ut.base import TestBase
@@ -109,4 +110,37 @@ class TestPatternRegistrationIsPerMatcher(TestBase):
         pattern_cls(cfg).register(matcher)
 
         # Registering twice into the same matcher must stay a no-op.
+        assert matcher.apply(_build_neg_relu_graph().graph) == 1
+
+    def test_failed_registration_stays_retryable(self):
+        """A pattern that fails to register must not be marked as registered.
+
+        Otherwise a single failure would be cached for the lifetime of the
+        matcher and the retry would be silently skipped.
+        """
+        base = sys.modules["vllm_ascend.compilation.passes.base_pattern"]
+        pattern_cls = _make_dummy_pattern(base, "DummyPatternRetry")
+        cfg = MagicMock()
+        cfg.model_config.dtype = torch.bfloat16
+
+        matcher = pm.PatternMatcherPass(pass_name="retry")
+        real_register_replacement = pm.register_replacement
+        attempts = []
+
+        def flaky_register_replacement(*args, **kwargs):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise RuntimeError("simulated registration failure")
+            return real_register_replacement(*args, **kwargs)
+
+        with MonkeyPatch.context() as patched:
+            patched.setattr(pm, "register_replacement", flaky_register_replacement)
+
+            with pytest.raises(RuntimeError):
+                pattern_cls(cfg).register(matcher)
+
+            # The retry must actually reach the matcher instead of being skipped.
+            pattern_cls(cfg).register(matcher)
+
+        assert len(attempts) == 2
         assert matcher.apply(_build_neg_relu_graph().graph) == 1

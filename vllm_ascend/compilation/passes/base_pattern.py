@@ -61,15 +61,18 @@ class BasePattern(ABC):
         if registered is None:
             registered = set()
             _registered_by_matcher[pm_pass] = registered
-        if pattern_id in registered:
-            return
-        registered.add(pattern_id)
 
         pattern_fn = self.get_pattern()
         replacement_fn = self.get_replacement()
         example_inputs = self.get_inputs()
 
-        pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
+        # The two registries are independent, so they are guarded and recorded
+        # separately: a pattern that fails to register must stay retryable, and a
+        # failure in one registry must not suppress the other. Record the key only
+        # after the registration actually succeeded.
+        if pattern_id not in registered:
+            pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
+            registered.add(pattern_id)
 
         if pattern_id not in _registered_patterns:
             nge.register_replacement(
