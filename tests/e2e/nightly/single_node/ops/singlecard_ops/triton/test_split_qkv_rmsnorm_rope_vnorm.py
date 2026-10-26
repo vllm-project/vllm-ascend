@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 
 MAX_POSITION_EMBEDDINGS = [262144]
 NUM_TOKENS = [1, 16, 1024, 10240]
@@ -76,6 +78,11 @@ def v_rms_norm(v, num_tokens, head_size, eps):
     return rms_norm(v.reshape(-1, head_size), ones, eps).reshape(num_tokens, -1)
 
 
+# PR #15332 enables this fusion on A2/A3; A5 keeps the unfused path.
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Requires Ascend A2/A3; A5 keeps the unfused path",
+)
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_q_heads, num_kv_heads, head_size, rope_dim", QKV_SHAPES)
@@ -144,6 +151,10 @@ def test_split_qkv_rmsnorm_rope_vnorm(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="Requires Ascend A2/A3; A5 keeps the unfused path",
+)
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_q_heads, num_kv_heads, head_size, rope_dim", QKV_SHAPES)

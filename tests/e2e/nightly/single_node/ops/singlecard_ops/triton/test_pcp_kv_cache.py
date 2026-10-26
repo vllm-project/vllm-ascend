@@ -7,9 +7,15 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.pcp_kv_cache import _copy_pcp_kv_cache_kernel, copy_pcp_kv_cache
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "case,strided",
@@ -43,6 +49,9 @@ def test_c8_cache_preserves_packed_bytes(dtype, case, strided):
     assert torch.equal(packed.cpu(), expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("c8", [False, True])
 @pytest.mark.parametrize("num_slots", [5, 128, 257])
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
@@ -60,7 +69,11 @@ def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
     device = torch.npu.current_device()
     # Isolate the in-memory cache so an existing unaligned variant cannot hide
     # an extra specialization. Compiled disk artifacts can still be reused.
-    with patch.dict(_copy_pcp_kv_cache_kernel.cache, {device: {}}):
+    if hasattr(_copy_pcp_kv_cache_kernel, "device_caches"):
+        kernel_cache = _copy_pcp_kv_cache_kernel.device_caches[device][0]
+    else:
+        kernel_cache = _copy_pcp_kv_cache_kernel.cache[device]
+    with patch.dict(kernel_cache, clear=True):
         for offset in range(5):
             slots = slot_storage[offset : offset + num_slots]
             assert slots.is_contiguous()
@@ -70,9 +83,12 @@ def test_contiguous_slot_slices_reuse_kernel(c8, num_slots, slot_dtype):
             expected = gold[selected.clamp_min(0)].clone()
             expected[selected < 0] = 0
             assert torch.equal(actual, expected)
-            assert len(_copy_pcp_kv_cache_kernel.cache[device]) == 1
+            assert len(kernel_cache) == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_slots", [5, 257, 513])
 @pytest.mark.parametrize("strided", [False, True])
@@ -89,3 +105,49 @@ def test_separate_latent_and_rope_cache(dtype, num_slots, strided):
     expected = torch.cat((k.cpu().reshape(-1, 512), r.cpu().reshape(-1, 64)), dim=-1)[indices.clamp_min(0)]
     expected[indices < 0] = 0
     assert torch.equal(packed.cpu(), expected)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
+@pytest.mark.parametrize("layout", ["component_major", "token_fused"])
+def test_current_mla_kv_read_does_not_copy_history_cache(layout):
+    # A full NoPE copy is 256 MiB, while the current 8193 rows need about
+    # 18 MiB including packed output and both dense components. Use a wide
+    # margin for allocator rounding while still rejecting a full cache copy.
+    blocks, block_size, key_dim, rope_dim, tokens = 2048, 128, 512, 64, 8193
+    page_elements = block_size * (key_dim + rope_dim)
+    storage = torch.empty(blocks * page_elements, dtype=torch.bfloat16, device="npu")
+    if layout == "component_major":
+        key_stride, rope_stride = key_dim, rope_dim
+        rope_offset = block_size * key_dim
+    else:
+        key_stride = rope_stride = key_dim + rope_dim
+        rope_offset = key_dim
+    key = torch.as_strided(storage, (blocks, block_size, 1, key_dim), (page_elements, key_stride, key_stride, 1))
+    rope = torch.as_strided(
+        storage, (blocks, block_size, 1, rope_dim), (page_elements, rope_stride, rope_stride, 1), rope_offset
+    )
+    key.fill_(3)
+    rope.fill_(7)
+    indices = (torch.arange(tokens, dtype=torch.int64) * 127) % (blocks * block_size)
+    indices[::5] = -1
+    slots = indices.to("npu")
+    # Compile and initialize the kernel before measuring live tensor memory.
+    warmup = AscendMLAImpl._gather_current_kv_from_cache((key, rope), slots)
+    torch.npu.synchronize()
+    del warmup
+    baseline = torch.npu.memory_allocated()
+    torch.npu.reset_peak_memory_stats()
+    current_key, current_rope = AscendMLAImpl._gather_current_kv_from_cache((key, rope), slots)
+    torch.npu.synchronize()
+    peak_bytes = torch.npu.max_memory_allocated() - baseline
+    assert peak_bytes < key.numel() * key.element_size() // 2, f"Current KV read allocated {peak_bytes} bytes"
+    for actual, dim, value in ((current_key, key_dim, 3), (current_rope, rope_dim, 7)):
+        expected = torch.full((tokens, 1, dim), value, dtype=torch.bfloat16)
+        expected[indices < 0] = 0
+        assert actual.is_contiguous()
+        assert torch.equal(actual.cpu(), expected)
+    # The read must not alter either view of the shared storage.
+    assert torch.all(key == 3).item()
+    assert torch.all(rope == 7).item()

@@ -76,7 +76,7 @@ public:
     // 初始化LocalTensor
     __aicore__ inline void InitLocalBuffer(TPipe *pipe, ConstInfo &constInfo);
     // 初始化attentionOutGM
-    __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, ConstInfo &constInfo);
+    __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum, ConstInfo &constInfo);
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
         __gm__ uint8_t *blockTable);
     __aicore__ inline void InitOutputSingleCore(ConstInfo &constInfo);
@@ -135,6 +135,9 @@ private:
     const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tilingData;
 
     GlobalTensor<OUTPUT_T> attentionOutGm;
+    GlobalTensor<float> softmaxMaxGm;
+    GlobalTensor<float> softmaxSumGm;
+    bool returnSoftmaxLse = false;
     GlobalTensor<KV_T> keyGm;
     GlobalTensor<int32_t> SparseIndicesGm;
     GlobalTensor<int32_t> blockTableGm;
@@ -679,6 +682,19 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::ProcessVec2(
         }
 
         this->CopyOutAttentionOut(runInfo, constInfo, vec2ResUb, 0, qsfaVec2CalcSize);
+        if (returnSoftmaxLse) {
+            // A5 MLA has one KV head. LSE is [N2=1, T, query_heads].
+            const uint64_t offset = runInfo.attentionOutOffset / constInfo.dSizeV;
+            LocalTensor<float> maxUb = softmaxMaxBuf[runInfo.multiCoreIdxMod2].template Get<float>();
+            LocalTensor<float> sumUb = softmaxSumBuf[runInfo.multiCoreIdxMod2].template Get<float>();
+            SetFlag<HardEvent::V_MTE3>(vToMte3Id[1]);
+            WaitFlag<HardEvent::V_MTE3>(vToMte3Id[1]);
+            DataCopyExtParams statsCopy{1, static_cast<uint32_t>(runInfo.vec2MRealSize * sizeof(float)), 0, 0, 0};
+            DataCopyPad(softmaxMaxGm[offset], maxUb, statsCopy);
+            DataCopyPad(softmaxSumGm[offset], sumUb, statsCopy);
+            SetFlag<HardEvent::MTE3_V>(mte3ToVId[1]);
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVId[1]);
+        }
     }
     SetFlag<HardEvent::MTE3_V>(mte3ToVId[0]);
 }
@@ -739,11 +755,27 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::InitOutputSingleCore(Co
 }
 
 TEMPLATES_DEF_NO_DEFAULT
-__aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::CleanOutput(__gm__ uint8_t *attentionOut, ConstInfo &constInfo)
+__aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::CleanOutput(__gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum, ConstInfo &constInfo)
 {
     if ASCEND_IS_AIV {
         this->attentionOutGm.SetGlobalBuffer((__gm__ OUTPUT_T *)attentionOut);
-        if (constInfo.needInit == 1) {
+        returnSoftmaxLse = this->tilingData->baseParams.returnSoftmaxLse;
+        if (returnSoftmaxLse) {
+            softmaxMaxGm.SetGlobalBuffer((__gm__ float *)softmaxMax);
+            softmaxSumGm.SetGlobalBuffer((__gm__ float *)softmaxSum);
+            uint64_t total = constInfo.s1Size * constInfo.gSize;
+            if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) { total *= constInfo.bSize; }
+            const uint64_t count = (total + GetBlockNum() * CV_RATIO - 1) / (GetBlockNum() * CV_RATIO);
+            const uint64_t begin = constInfo.aivIdx * count;
+            if (begin < total) {
+                const uint64_t size = (total - begin < count) ? total - begin : count;
+                matmul::InitOutput<float>(softmaxMaxGm[begin], size, -3.402823466e38F);
+                matmul::InitOutput<float>(softmaxSumGm[begin], size, 0);
+                matmul::InitOutput<OUTPUT_T>(attentionOutGm[begin * constInfo.dSizeV], size * constInfo.dSizeV, 0);
+            }
+            SyncAll();
+        }
+        if (constInfo.needInit == 1 && !returnSoftmaxLse) {
             InitOutputSingleCore(constInfo);
         }
     }
@@ -808,6 +840,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>
 
     sharedParams.sparseBlockCount = sparseAttnSharedkvBaseParams.sparseBlockCount;
     sharedParams.oriMaskMode = sparseAttnSharedkvBaseParams.sparseMode;
+    sharedParams.returnSoftmaxLse = sparseAttnSharedkvBaseParams.returnSoftmaxLse;
     sharedParams.layoutType = sparseAttnSharedkvBaseParams.outputLayout;
     sharedParams.dSizeRope = 64; // 64: 编码维度
     sharedParams.softmaxScale = sparseAttnSharedkvBaseParams.scaleValue;
@@ -884,7 +917,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>
 TEMPLATES_DEF class QSFAVectorServiceDummy {
 public:
     __aicore__ inline QSFAVectorServiceDummy() {};
-    __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, ConstInfo &constInfo) {}
+    __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax, __gm__ uint8_t *softmaxSum, ConstInfo &constInfo) {}
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
         __gm__ uint8_t *blockTable) {}
     __aicore__ inline void InitVecBlock(TPipe *pipe, const KvQuantSparseFlashAttentionVllmTilingDataMla *__restrict tiling,

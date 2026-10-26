@@ -2557,7 +2557,7 @@ class MooncakeConnectorWorker(BaseMooncakeConnectorWorker):
         )
 
 
-class MooncakeConnector(BaseMooncakeConnector):
+class MooncakeD2RHConnectorV1(BaseMooncakeConnector):
     """V1 connector interface with D Host staging scheduler/worker extensions."""
 
     def __init__(
@@ -2592,4 +2592,9 @@ class MooncakeConnector(BaseMooncakeConnector):
 
 
 # Preserve the configured connector name for external plugin loading.
-MooncakeD2RHConnector = MooncakeConnector
+MooncakeD2RHConnector = MooncakeD2RHConnectorV1
+# Back-compat alias. The class name is the config name on purpose:
+# MultiConnector keys transfer stats by ``__class__.__name__`` and resolves
+# that key through KVConnectorFactory, which is indexed by the registered
+# config name (MooncakeD2RHConnectorV1), not by arbitrary class names.
+MooncakeConnector = MooncakeD2RHConnectorV1

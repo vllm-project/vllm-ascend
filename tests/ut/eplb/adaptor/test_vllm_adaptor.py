@@ -143,10 +143,10 @@ class TestVllmAdaptor(unittest.TestCase):
         mxfp8_layer.local_num_experts = num_local_experts
         mxfp8_layer.ep_rank = 0
         mxfp8_layer.quant_type = QuantType.W8A8MXFP
-        mxfp8_layer.w13_weight = torch.randn(num_local_experts, 2, 2)
-        mxfp8_layer.w2_weight = torch.randn(num_local_experts, 2, 2)
-        mxfp8_layer.w13_weight_scale = torch.randn(num_local_experts, 1)
-        mxfp8_layer.w2_weight_scale = torch.randn(num_local_experts, 1)
+        mxfp8_layer.w13_weight_list = [torch.randn(2, 2) for _ in range(num_local_experts)]
+        mxfp8_layer.w2_weight_list = [torch.randn(2, 2) for _ in range(num_local_experts)]
+        mxfp8_layer.w13_weight_scale_list = [torch.randn(1) for _ in range(num_local_experts)]
+        mxfp8_layer.w2_weight_scale_list = [torch.randn(1) for _ in range(num_local_experts)]
         mxfp8_layer.moe_load = torch.zeros(num_local_experts)
         mxfp8_layer.global_expert_map = torch.arange(num_local_experts * 4).reshape(num_local_experts, 4)
         mxfp8_layer.get_log2phy_map.return_value = torch.arange(4)

@@ -14,7 +14,7 @@ import torch
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

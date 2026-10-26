@@ -314,7 +314,7 @@ The design does not depend on cross-node `flock` behavior.
 
 ## Persistent transport and trust
 
-The restore and save composite actions own the fixed Huawei OBS transport
+The restore and save composite actions own the fixed OBS transport
 configuration. The cache engine has no storage API or credential knowledge.
 
 Read access follows the runner's existing OBS authorization. Shared writes
@@ -372,15 +372,54 @@ Ordinary local source builds use the same action cache in the repository's
 ignored `csrc/build_cache` directory. This is local-only acceleration: no OBS
 credentials or remote snapshot transport are involved. Set
 `VLLM_ASCEND_BUILD_CACHE_DIR` to an absolute path to override this local
-default; CI supplies an explicit directory and is unaffected by the
-repository-local location. Deleting the local directory causes a cold build;
+default. CI uses the same workspace-relative `csrc/build_cache` transport
+path, which the restore helper resolves to an absolute directory for builds.
+Deleting the local directory causes a cold build;
 it does not change the compiled source or CI's persistent snapshot.
+
+`csrc/build.sh` keeps two `operator_text_hash` versions per SOC/operator after
+a successful csrc build, retaining all actions inside each version. Configure
+the script-local `BUILD_CACHE_MAX_OPERATOR_VERSIONS` beside `BUILD_CACHE_DIR`;
+nonpositive values disable cleanup. No project-level setting is introduced.
+HITs and saves refresh recency without deleting versions, so a third version
+can coexist until the entire csrc build succeeds. Failed builds do not prune.
+
+Cleanup runs at the end of `build.sh`, after its foreground build commands
+(including their parallel compilation tasks) have succeeded. No cleanup lock
+is added; the cache directory must not be used by another concurrent build or
+prune operation. Cleanup errors never fail the successful build.
+`.updated` marks compaction for the next trusted snapshot save.
+Published outputs are never removed. Schema 4 and action identity are unchanged.
+
+Standalone action or CMake users can explicitly run
+`python3 csrc/scripts/build_cache.py prune --cache-root csrc/build_cache` after a
+successful complete build. `--max-operator-versions N` changes the default of 2.
+
+This bounds operator source-version history, not disk bytes, third-party
+entries, action-key variants within a retained version, or historical OBS
+snapshot counts. Separate concurrent builds must use separate cache directories,
+or the caller must arrange a maintenance window after all builds finish.
 
 ### Central producer
 
 The reusable producer restores L1, performs the ordinary source build, verifies
 final native artifacts, publishes changed L1 state, and then publishes the
 exact L0 artifact.
+
+All L1 producers and consumers must pass the same literal relative
+`cache-dir: csrc/build_cache` to the restore/save actions. `runs-on/cache`
+includes that path in its remote cache version: using `/tmp` on one runner
+and `runner.temp` on another separates otherwise compatible keys into
+different OBS namespaces. The relative archive layout also restores under
+each consumer's own workspace, not the producer's absolute directory.
+The producer initially sets `VLLM_ASCEND_BUILD_CACHE_DIR=csrc/build_cache`.
+Restore exports its absolute equivalent through `GITHUB_ENV` for compilation
+and preserves the original spelling in its `cache-dir` output. Save consumes
+that output, not the updated environment variable: using the absolute build
+directory as the save input would split the OBS namespace again.
+Restore/save transport failures remain nonfatal; ordinary source compilation
+is still the fallback. Existing snapshots under the old path namespaces are
+not migrated, so the first build with the shared path may be cold.
 
 ### Historical sources
 

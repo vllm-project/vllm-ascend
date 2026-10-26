@@ -253,19 +253,20 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 
 ### 测试入口
 
-在仓库根目录、已编译并安装自定义算子的A2/A3环境中运行：
+在仓库根目录、已编译并安装自定义算子的环境中运行统一测试文件：
 
 ```bash
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py
 ```
 
-原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py)
-共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
-LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
+[统一测试文件](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py)
+保留原有随机golden和精度阈值，并包含已合入同一文件的rope0/64回归用例。
+各测试函数保留各自的设备判断，A5专属用例与A2/A3的rope0/64用例分别执行。
+后者覆盖FP16/BF16、PA与TND、batch与尾块、LSE开关、图捕获/修改KV后的重放，
+以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
 并校验有效query行的softmax_max、softmax_sum及LSE。
-两项Python接入测试调用真实RMSNorm/INT8量化、cache写入和attention路径，
+Python接入用例调用真实RMSNorm/INT8量化、cache写入和attention路径，
 验证空RoPE、FLOAT32 scale字节、slot=-1不写cache以及独立均值精度。
 
 ### Python SFA接入
