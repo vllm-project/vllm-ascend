@@ -99,6 +99,7 @@ class KDAStateCopyPlan:
     _scalars: tuple[int, int, int, int]
     _tiles: int
     _compiled: Mapping[tuple[torch.dtype, bool], _CompiledKernel]
+    _launch_constants: Mapping[tuple[torch.dtype, bool], tuple[int, ...]]
     _layer_name: str
 
     @classmethod
@@ -139,6 +140,7 @@ class KDAStateCopyPlan:
             plan._scalars = (rows, page_stride, payload, 1)
             plan._tiles = (payload + DEFAULT_KDA_BLOCK_SIZE - 1) // DEFAULT_KDA_BLOCK_SIZE
             compiled = {}
+            launch_constants = {}
             for index_dtype in (torch.int32, torch.int64):
                 indices = torch.zeros(1, dtype=index_dtype, device=state.device)
                 for to_cache in (False, True):
@@ -153,10 +155,18 @@ class KDAStateCopyPlan:
                         HAS_FLAGS=not to_cache,
                         BLOCK_SIZE=DEFAULT_KDA_BLOCK_SIZE,
                     )
+                    # Triton-Ascend 3.6 retains constexpr argument slots in
+                    # direct compiled launches, as in the byte-copy fallback.
+                    launch_constants[index_dtype, to_cache] = (
+                        (to_cache, not to_cache, DEFAULT_KDA_BLOCK_SIZE)
+                        if "constexpr" in compiled[index_dtype, to_cache].src.signature.values()
+                        else ()
+                    )
             # Synchronize before disposable allocations leave this scope, also
             # surfacing asynchronous compilation/launch errors during startup.
             torch.npu.synchronize()
         plan._compiled = MappingProxyType(compiled)
+        plan._launch_constants = MappingProxyType(launch_constants)
         return plan
 
     def seal(self) -> None:
@@ -202,6 +212,7 @@ class KDAStateCopyPlan:
                 *tensors,
                 *self._scalars,
                 0 if to_cache else 1,
+                *self._launch_constants[indices.dtype, to_cache],
             )
 
     def gather(self, state: torch.Tensor, indices: torch.Tensor, flags: torch.Tensor | None) -> torch.Tensor:
