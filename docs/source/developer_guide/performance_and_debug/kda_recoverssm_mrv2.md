@@ -1,6 +1,6 @@
 # Experimental GLM KDA RecoverSSM
 
-Enable this experimental path with `--additional-config '{"kda_recoverssm": true}'`
+Enable this experimental path with the upstream `--use-replayssm` option
 alongside speculative decoding. The default remains the native AscendC KDA path.
 
 Service configuration initialization requires speculative decoding,
@@ -22,7 +22,7 @@ That evidence did not use PD separation. PD validation is tracked separately.
 
 Configure the pull connector with `kv_role=kv_producer` on P and
 `kv_role=kv_consumer` on D. Both services need the same model weights, TP size,
-speculative-window configuration, and `kda_recoverssm=true` cache layout.
+speculative-window configuration, and `--use-replayssm` cache layout.
 The initial integration targets one producer and one consumer with equal TP.
 
 The connector's existing stateful-model handoff leaves the last prompt token

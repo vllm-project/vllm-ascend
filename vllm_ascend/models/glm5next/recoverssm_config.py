@@ -1,18 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Explicit, default-off GLM KDA RecoverSSM configuration."""
+"""GLM KDA RecoverSSM uses the upstream ReplaySSM configuration switch."""
 
-from vllm.config import VllmConfig
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+def is_glm_recoverssm_model(vllm_config: VllmConfig) -> bool:
+    model_config = vllm_config.model_config
+    return model_config is not None and model_config.hf_text_config.model_type in ("glm5_next", "glm5_next_text")
 
 
 def use_glm_recoverssm(vllm_config: VllmConfig) -> bool:
-    return vllm_config.additional_config.get("kda_recoverssm", False)
+    return is_glm_recoverssm_model(vllm_config) and vllm_config.cache_config.use_replayssm
 
 
 def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     if vllm_config.speculative_config is None:
         raise ValueError("GLM RecoverSSM requires speculative decoding")
     cache = vllm_config.cache_config
+    if vllm_config.mamba_config.enable_stochastic_rounding:
+        raise ValueError("GLM RecoverSSM does not support stochastic rounding")
     if cache.mamba_cache_mode != "none" or cache.enable_prefix_caching:
         raise ValueError("GLM RecoverSSM currently requires Mamba cache mode none and prefix caching disabled")
     parallel = vllm_config.parallel_config

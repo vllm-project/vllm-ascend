@@ -303,9 +303,9 @@ def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width,
     )
     config = SimpleNamespace(linear_head_dim=128, linear_conv_kernel_dim=width)
     vllm_config = SimpleNamespace(
-        additional_config={},
         quant_config=None,
-        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+        cache_config=SimpleNamespace(use_replayssm=False),
         speculative_config=SimpleNamespace(num_speculative_tokens=num_spec),
     )
     with pytest.raises(ValueError, match="causal-conv requires"):

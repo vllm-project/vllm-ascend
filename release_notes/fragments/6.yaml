@@ -4,3 +4,7 @@ entries:
     text: Reduced experimental GLM KDA RecoverSSM verification, convolution-state compaction, and accepted-state commit overhead, including two-head commit grouping validated on Ascend950DT.
     model: glm-5.3-flash
     hardware: [A5]
+  - category: config
+    text: Unified experimental GLM KDA RecoverSSM activation under the upstream --use-replayssm option, replacing additional_config.kda_recoverssm and validating target and MTP cache configuration before worker startup.
+    model: glm-5.3-flash
+    hardware: [A5]

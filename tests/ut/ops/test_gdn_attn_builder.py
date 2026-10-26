@@ -388,8 +388,7 @@ def test_host_backend_selects_recoverssm_only_for_opted_in_glm(model_type, enabl
 
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
-        additional_config={"kda_recoverssm": enabled},
-        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        cache_config=SimpleNamespace(use_replayssm=enabled, use_kda_recoverssm=False),
     )
     expected = AscendKDARecoverSSMMetadataBuilder if recover else AscendGDNHostMetadataBuilder
     with set_current_vllm_config(config):
