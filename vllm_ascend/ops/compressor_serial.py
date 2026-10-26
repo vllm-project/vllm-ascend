@@ -22,8 +22,11 @@ class CompressorSerialConfig:
     pool_blocks: int = 48
     final_blocks: int = 48
     pool_threads: int = 256
+    weight_layout: str = "nk"
 
     def __post_init__(self):
+        if self.weight_layout not in ("kn", "nk"):
+            raise ValueError("weight_layout must be kn or nk")
         for blocks in (self.cast_blocks, self.pool_blocks, self.final_blocks):
             if not 1 <= blocks <= 72:
                 raise ValueError("block counts must be in [1, 72]")
@@ -237,6 +240,8 @@ class CompressorSerialPlan:
             device=x.device,
         )
         # Static preparation is outside capture; per-replay X casting is timed.
-        weight = torch.cat((wkv, wgate), dim=0).float().t().contiguous()
+        weight = torch.cat((wkv, wgate), dim=0).float().t()
+        if config.weight_layout == "kn":
+            weight = weight.contiguous()
         args = (state_cache, ape, norm_weight, rope_sin, rope_cos, *metadata)
         return cls(args, params, weight, config, x)

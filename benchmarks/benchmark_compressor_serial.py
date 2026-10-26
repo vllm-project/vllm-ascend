@@ -151,6 +151,7 @@ def main():
     parser.add_argument("--pool-blocks", type=int, default=48)
     parser.add_argument("--final-blocks", type=int, default=48)
     parser.add_argument("--pool-threads", type=int, default=256)
+    parser.add_argument("--weight-layout", choices=("kn", "nk"), default="nk")
     parser.add_argument("--hf32", action="store_true")
     parser.add_argument("--profile", choices=("fused", "serial"))
     opts = parser.parse_args()
@@ -166,7 +167,7 @@ def main():
     cases = json.loads(fixture.read_text())["cases"]
     serial_module = load_serial_module()
     config = serial_module.CompressorSerialConfig(
-        opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads
+        opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads, opts.weight_layout
     )
     result = {
         "iteration": opts.iteration,
