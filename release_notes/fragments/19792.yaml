@@ -1,0 +1,4 @@
+pr: 19792
+entries:
+  - category: bugfix
+    text: Aligned MXFP8 MoE activation scale policy and BF16 combine output precision.
