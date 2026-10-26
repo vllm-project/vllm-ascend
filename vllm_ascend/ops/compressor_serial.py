@@ -193,6 +193,17 @@ class CompressorSerialPlan:
             raise ValueError("cache dimensions must be positive")
         if cache_mode == 2 and sequence and state_cache.shape[1] < coff * cmp_ratio + sequence - 1:
             raise ValueError("ring buffer is too small for the sequence")
+        # Use 32-bit device indices only when every buffer offset fits.
+        max_index = 2**31 - 1
+        if (
+            max(
+                state_cache.shape[0] * state_cache.stride(0),
+                x.numel() // hidden * (2 * coff * dim),
+                rope_sin.numel() // 64 * dim,
+            )
+            > max_index
+        ):
+            raise ValueError("serial A5 buffer offsets must fit signed 32-bit indices")
         dummy = torch.empty(0, device=x.device, dtype=torch.int32)
         metadata = tuple(dummy if tensor is None else tensor for tensor in optionals)
         params = torch.tensor(
@@ -216,7 +227,7 @@ class CompressorSerialPlan:
                 2 * coff * dim,
                 coff * dim,
             ],
-            dtype=torch.int64,
+            dtype=torch.int32,
             device=x.device,
         )
         # Static preparation is outside capture; per-replay X casting is timed.
