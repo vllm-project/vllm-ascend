@@ -434,6 +434,26 @@ class NPUModelRunner(GPUModelRunner):
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
 
+    def _initialize_kv_cache_upstream(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None,
+    ) -> None:
+        # Upstream initialize_kv_cache builds the attention metadata builders
+        # via init_attn_backend; the DSA builder registers its fused Q-RMS
+        # JIT kernel during construction, so hold a registry window open
+        # around the super() call (v1 parity; the v1 runner wraps its
+        # initialize_metadata_builders instead). Runners built without the
+        # upstream __init__ (tests, partial mocks) have no registry; the
+        # window is optional for them.
+        registry = getattr(self, "jit_warmup_registry", None)
+        window = registry.activate() if registry is not None else nullcontext()
+        with window:
+            super().initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -468,9 +488,8 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
+            self._initialize_kv_cache_upstream(
+                kv_cache_config, kv_cache_allocation_context
             )
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None

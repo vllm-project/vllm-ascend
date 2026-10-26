@@ -24,7 +24,7 @@ kernel/key pair once, before ACL graph capture.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
@@ -57,17 +57,45 @@ def register_v1_sampling_warmup(vllm_config: VllmConfig) -> None:
     register_rejection_warmup(vllm_config)
 
 
+def _iter_dspark_draft_groups(runner: Any) -> Any:
+    """Yield ``(sliding_window_adapter, attn_group)`` for draft groups.
+
+    The v1 runner keeps its draft attention groups (and the optional
+    sliding-window adapter cropping the block table) on the drafter; the v2
+    runner stores them on the speculator without an adapter.
+    """
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None and hasattr(drafter, "draft_attn_groups"):
+        adapter = getattr(drafter, "sliding_window", None)
+        groups: Any = drafter.draft_attn_groups
+    else:
+        speculator = getattr(runner, "speculator", None)
+        if speculator is None or not hasattr(speculator, "attn_groups"):
+            return
+        adapter = None
+        groups = speculator.attn_groups
+
+    def _flatten(items: Any) -> Any:
+        for item in items:
+            if isinstance(item, (list, tuple)):
+                yield from _flatten(item)
+            else:
+                yield item
+
+    for group in _flatten(groups):
+        yield adapter, group
+
+
 def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
     """Late-register the DSpark SWA indices kernel for each draft attention
     group; returns the number of groups registered.
 
     The block-table width (and therefore the JIT key) is only final once the
-    draft proposer and the input batch exist, so this runs here rather than
-    from the metadata builder's ``__init__``.
+    draft proposer/speculator and the input batch exist, so this runs here
+    rather than from the metadata builder's ``__init__``.
     """
     runner = worker.model_runner
-    drafter = getattr(runner, "drafter", None)
-    if drafter is None or not hasattr(drafter, "draft_attn_groups"):
+    if not hasattr(runner, "jit_warmup_registry"):
         return 0
 
     from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -75,10 +103,9 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
         register_dspark_swa_indices_warmup,
     )
 
-    sliding_window_adapter = getattr(drafter, "sliding_window", None)
     registered = 0
     with runner.jit_warmup_registry.activate():
-        for attn_group in drafter.draft_attn_groups:
+        for adapter, attn_group in _iter_dspark_draft_groups(runner):
             builder = attn_group.get_metadata_builder()
             if not isinstance(builder, AscendDSAMetadataBuilder):
                 continue
@@ -94,8 +121,8 @@ def _register_dspark_swa_indices_warmup(worker: NPUWorker) -> int:
             # will see: the sliding-window adapter crops the table to its
             # window clone, the plain path reads the full per-group table
             # from the input batch.
-            if sliding_window_adapter is not None:
-                table_width = sliding_window_adapter.max_window_blocks
+            if adapter is not None:
+                table_width = adapter.max_window_blocks
             else:
                 gid = attn_group.kv_cache_group_id
                 table_width = runner.input_batch.block_table[gid].get_device_tensor().shape[1]
