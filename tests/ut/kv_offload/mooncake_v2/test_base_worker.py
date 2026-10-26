@@ -133,11 +133,31 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     transfer_engine.register_buffer.assert_called_once()
 
 
-def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> None:
+@pytest.mark.parametrize("spare", [0, 64, 256])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("page_stride", "k_offset", "scale_offset", "scale_len", "merged"),
+    [
+        pytest.param(40, 0, 32, 8, True, id="full-page"),
+        pytest.param(64, 0, 32, 8, False, id="trailing-padding"),
+        pytest.param(64, 16, 48, 8, False, id="shared-page-subregion"),
+        pytest.param(64, 0, 40, 24, False, id="interior-gap"),
+        pytest.param(64, 0, 16, 32, False, id="overlap-hides-gap"),
+        pytest.param(64, 0, 24, 40, True, id="overlapping-full-page"),
+    ],
+)
+def test_register_kv_caches_merges_only_full_pages(
+    monkeypatch, spare, reverse, page_stride, k_offset, scale_offset, scale_len, merged
+) -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
-    raw_cache = torch.empty(4 * 64, dtype=torch.float16)
-    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(64, 1), storage_offset=0)
-    scale_cache = torch.as_strided(raw_cache, size=(4, 8), stride=(64, 1), storage_offset=32)
+    # The same tensor views must publish the same number of descriptors even
+    # when one peer's backing storage has spare capacity after the last block.
+    required = 3 * page_stride + max(k_offset + 32, scale_offset + scale_len)
+    raw_cache = torch.empty(required + spare, dtype=torch.float16)
+    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(page_stride, 1), storage_offset=k_offset)
+    scale_cache = torch.as_strided(raw_cache, size=(4, scale_len), stride=(page_stride, 1), storage_offset=scale_offset)
+    caches = [scale_cache, k_cache] if reverse else [k_cache, scale_cache]
+    page_bytes = page_stride * raw_cache.element_size()
     config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
@@ -145,7 +165,7 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
                 size=raw_cache.nbytes,
                 layers=["layer.0"],
                 layer_stride=raw_cache.nbytes,
-                block_stride=128,
+                block_stride=page_bytes,
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
@@ -171,15 +191,44 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
         MagicMock(),
     )
 
-    worker.register_kv_caches({"layer.0": [k_cache, scale_cache]})
+    worker.register_kv_caches({"layer.0": caches})
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
-    assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
-    assert metadata.block_strides == [[128]]
-    assert metadata.block_lens == [[128]]
-    assert metadata.block_shapes == [[(32,)]]
-    assert metadata.block_size_scales == [[1]]
+    if merged:
+        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+        assert metadata.block_strides == [[page_bytes]]
+        assert metadata.block_lens == [[page_bytes]]
+        assert metadata.block_shapes == [[(max(32, scale_len),)]]
+        assert metadata.block_size_scales == [[1]]
+    else:
+        assert metadata.kv_caches_base_addr == [[cache.data_ptr() for cache in caches]]
+        assert metadata.block_strides == [[page_bytes, page_bytes]]
+        assert metadata.block_lens == [[cache[0].nbytes for cache in caches]]
+        assert metadata.block_shapes == [[tuple(cache.shape[1:]) for cache in caches]]
+        assert metadata.block_size_scales == [[1, 1]]
+
+
+def test_shared_page_rejects_noncontiguous_blocks() -> None:
+    raw_cache = torch.empty(4 * 64, dtype=torch.uint8)
+    caches = (
+        raw_cache.as_strided((4, 16), (64, 2)),
+        raw_cache.as_strided((4, 48), (64, 1), 16),
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.num_blocks = 4
+
+    assert worker._get_shared_page_metadata(caches) is None
+
+
+def test_shared_page_handles_mixed_dtype_views() -> None:
+    raw_cache = torch.empty(4 * 64, dtype=torch.uint8)
+    k_cache = raw_cache.as_strided((4, 48), (64, 1))
+    scale_cache = raw_cache.view(torch.float32).as_strided((4, 4), (16, 1), 12)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.num_blocks = 4
+
+    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
 
 
 def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:

@@ -207,7 +207,9 @@ class AscendSharedExperts:
         down_input: LinearInput,
     ):
         shared_out, _ = self.layer.down_proj(down_input)  # type: ignore
+        return self._apply_output_gate(hidden_states, shared_out)
 
+    def _apply_output_gate(self, hidden_states: torch.Tensor, shared_out: torch.Tensor) -> torch.Tensor:
         # Qwen3-Next specific gating mechanism
         if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
             gate_out, _ = self.layer.expert_gate(hidden_states)  # type: ignore
@@ -566,7 +568,7 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
-        return torch_npu.npu_quant_matmul(
+        shared_out = torch_npu.npu_quant_matmul(
             quantized_x,
             self.layer.down_proj.weight,
             self.layer.down_proj.weight_scale,
@@ -574,6 +576,7 @@ class AscendSharedExperts:
             bias=None,
             output_dtype=submitted_gate_up.hidden_states.dtype,
         )
+        return self._apply_output_gate(submitted_gate_up.hidden_states, shared_out)
 
     def _run_a8_mxfp_mlp(
         self,
@@ -614,7 +617,7 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
-        return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+        return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
         if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):

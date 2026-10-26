@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.v1.kv_block_zeroer import AscendKVBlockZeroer
 
 
 @pytest.fixture(scope="module", autouse=True)

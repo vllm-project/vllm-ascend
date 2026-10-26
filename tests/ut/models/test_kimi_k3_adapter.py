@@ -22,7 +22,6 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -210,6 +209,7 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
 @pytest.mark.parametrize("cache_factory", [_make_component_major_strided_cache, _make_token_fused_cache])
 def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monkeypatch, cache_factory):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_flashmla = False
     impl.use_mla_rope = True
     impl.fa_quant_layer = False
     impl.num_kv_heads = 1
@@ -257,6 +257,7 @@ def test_k3_dspark_prolog_v3_context_writer_uses_pa_bsnd_and_strided_caches(monk
     assert len(calls) == 1
     legacy.assert_not_called()
     assert calls[0]["cache_mode"] == "PA_BSND"
+    assert calls[0]["tile_size"] == 128
     assert calls[0]["kv_cache"] is cache[0]
     assert calls[0]["kr_cache"] is cache[1]
     assert calls[0]["cache_index"].dtype is torch.int64
@@ -447,21 +448,13 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
-    if vllm_version_is("0.30.0"):
-        output, returned_residual = layer.forward_attn_residual(
-            positions=torch.arange(3),
-            hidden_states=hidden_states,
-            block_residual=block_residual,
-        )
-        assert output.shape == torch.Size([2, 2])
-    else:
-        _, returned_residual, output = layer.forward_attn_residual(
-            positions=torch.arange(3),
-            hidden_states=hidden_states,
-            block_residual=block_residual,
-            prefix_delta=None,
-        )
-        assert output.shape == torch.Size([2, 2])
+    _, returned_residual, output = layer.forward_attn_residual(
+        positions=torch.arange(3),
+        hidden_states=hidden_states,
+        block_residual=block_residual,
+        prefix_delta=None,
+    )
+    assert output.shape == torch.Size([2, 2])
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
@@ -535,43 +528,20 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
 
 def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
-    if vllm_version_is("0.30.0"):
+    class RecordingLayer(nn.Module):  # type: ignore[no-redef]
+        def __init__(self, layer_idx: int) -> None:
+            super().__init__()
+            self.layer_idx = layer_idx
+            self.prev_valid_blocks = layer_idx
+            self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
+            self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
 
-        class RecordingLayer(nn.Module):
-            def __init__(self, layer_idx: int) -> None:
-                super().__init__()
-                self.layer_idx = layer_idx
-                self.prev_valid_blocks = layer_idx
-                self.self_attention_res_proj = nn.Identity()
-                self.self_attention_res_norm = nn.Identity()
+        def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
+            del positions
+            return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
 
-            def prepare_attn_residual(self, prefix, bank, addend=None, **kwargs):
-                raw = prefix if addend is None else prefix + addend
-                return raw + 100 * self.prev_valid_blocks, raw, raw + 100 * self.prev_valid_blocks
-
-            def forward(self, *, positions, hidden_states, residual, prepared_attn_input, **kwargs):
-                del positions, hidden_states
-                return prepared_attn_input[1] + 10, residual, None
-
-        expected_materialized = torch.tensor([[111.0]])
-        expected_raw = torch.tensor([[11.0]])
-
-    else:
-
-        class RecordingLayer(nn.Module):  # type: ignore[no-redef]
-            def __init__(self, layer_idx: int) -> None:
-                super().__init__()
-                self.layer_idx = layer_idx
-                self.prev_valid_blocks = layer_idx
-                self.self_attention_res_proj = SimpleNamespace(weight=torch.ones(1, 1))
-                self.self_attention_res_norm = SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-5)
-
-            def forward(self, *, positions, hidden_states, residual, prefix_delta=None, **kwargs):
-                del positions
-                return hidden_states + 10, residual, torch.full_like(hidden_states, 5)
-
-        expected_materialized = torch.tensor([[1016.0]])
-        expected_raw = torch.tensor([[16.0]])
+    expected_materialized = torch.tensor([[1016.0]])
+    expected_raw = torch.tensor([[16.0]])
 
     monkeypatch.setattr(kimi_k3, "_use_attn_res_prefill_cache", lambda: False)
 

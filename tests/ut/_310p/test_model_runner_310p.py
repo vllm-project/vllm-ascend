@@ -24,12 +24,14 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 from tests.ut.base import TestBase
-from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
 
 
 def _prepare_inputs_source() -> str:
-    source_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "_310p" / "model_runner_310p.py"
+    source_path = (
+        Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v1" / "_310p" / "model_runner_310p.py"
+    )
     source = source_path.read_text(encoding="utf-8")
     start = source.index("    def _prepare_inputs(")
     end = source.index("    @torch.inference_mode()", start)
@@ -56,7 +58,8 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self.input_batch.num_accepted_tokens_cpu[" not in source
 
 
-def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
+@pytest.mark.parametrize("decoder_replay_dummy", [False, True])
+def test_model_forward_updates_mtp_full_graph_params_before_replay(decoder_replay_dummy: bool) -> None:
     runner = object.__new__(NPUModelRunner310)
     runner.uses_mrope = False
     runner.enable_enpu = False
@@ -71,6 +74,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     def fake_model(**kwargs):
         assert "is_dummy_run" not in kwargs
+        assert "decoder_replay_dummy" not in kwargs
         calls.append("model")
         return torch.ones(1)
 
@@ -82,13 +86,14 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     )
 
     with patch(
-        "vllm_ascend._310p.model_runner_310p.get_forward_context",
+        "vllm_ascend.worker.v1._310p.model_runner_310p.get_forward_context",
         return_value=forward_context,
     ):
         hidden_states = runner._model_forward(
             8,
             input_ids=torch.tensor([1]),
             positions=torch.tensor([0]),
+            decoder_replay_dummy=decoder_replay_dummy,
         )
 
     assert calls == ["update", "model"]
@@ -109,7 +114,7 @@ def test_graph_dispatch_does_not_treat_later_prefill_chunk_as_decode() -> None:
     runner.speculative_config = None
 
     with patch(
-        "vllm_ascend.worker.model_runner_v1.NPUModelRunner._determine_batch_execution_and_padding",
+        "vllm_ascend.worker.v1.model_runner.NPUModelRunner._determine_batch_execution_and_padding",
         return_value="dispatch-result",
     ) as parent_dispatch:
         result = runner._determine_batch_execution_and_padding(
@@ -165,9 +170,9 @@ class TestNPUModelRunner310(TestBase):
         )
 
         with (
-            patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch") as mock_input_batch,
+            patch("vllm_ascend.worker.v1._310p.model_runner_310p.NPUInputBatch") as mock_input_batch,
             patch(
-                "vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size",
+                "vllm_ascend.worker.v1._310p.model_runner_310p.get_decode_context_model_parallel_world_size",
                 return_value=1,
             ),
         ):
@@ -217,8 +222,10 @@ def test_attention_kernel_blocks_match_input_batch_and_cache_shape(
         kv_cache_tensors=[cache_tensor],
     )
     with (
-        patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch") as input_batch,
-        patch("vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size", return_value=1),
+        patch("vllm_ascend.worker.v1._310p.model_runner_310p.NPUInputBatch") as input_batch,
+        patch(
+            "vllm_ascend.worker.v1._310p.model_runner_310p.get_decode_context_model_parallel_world_size", return_value=1
+        ),
     ):
         runner.may_reinitialize_input_batch(cache_config)
     assert input_batch.call_args.kwargs["kernel_block_sizes"] == [expected_kernel_sizes]
@@ -227,8 +234,8 @@ def test_attention_kernel_blocks_match_input_batch_and_cache_shape(
     assert physical_block_size % expected_kernel_sizes[0] == 0
 
     with (
-        patch("vllm_ascend._310p.model_runner_310p.get_kv_cache_tensor_layers", return_value=["model.attn"]),
-        patch("vllm_ascend._310p.model_runner_310p.torch_npu.empty_with_format", create=True) as allocate,
+        patch("vllm_ascend.worker.v1._310p.model_runner_310p.get_kv_cache_tensor_layers", return_value=["model.attn"]),
+        patch("vllm_ascend.worker.v1._310p.model_runner_310p.torch_npu.empty_with_format", create=True) as allocate,
     ):
         caches = runner._allocate_kv_cache_tensors(cache_config)
     kernel_size = expected_kernel_sizes[0]

@@ -271,7 +271,7 @@ do not select a partition using memory capacity alone.
 
 ## Advanced Scenarios
 
-### PP with Speculative Decoding
+### PP with Speculative Decoding {: #pp-with-speculative-decoding}
 
 `VLLM_PP_LAYER_PARTITION` partitions only the target model. Draft-model layers
 are not included in its layer sum, and their weight naming and layer layout
@@ -288,22 +288,31 @@ layers with a custom partition. `draft_tensor_parallel_size` controls only the
 draft model's TP size; it does not define a draft-model PP partition.
 
 The following matrix lists the features that can be stacked with PP on
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Unless noted otherwise,
-"supported" means the combination is enabled in code and exercised by CI.
+Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual
+feature combination with PP and remains subject to the model and hardware
+requirements in the relevant feature guide.
 
 | Feature stacked with PP | Support |
 | --- | --- |
-| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY`; validated with MTP stacks. |
+| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and `PIECEWISE`; `FULL_DECODE_ONLY` is validated with MTP stacks. |
 | MTP | Supported. |
 | EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model Runner V2 restriction is lifted for these architectures. |
 | DFlash | Not supported. |
 | DSpark | Supported only for DeepSeek-V4 and GLM-5.2 MoE-DSA models. The drafter taps intermediate target layers, and the tapped hidden states are relayed across PP stages. |
-| PCP (Prefill Context Parallel) | Not supported. |
+| PCP (Prefill Context Parallel) | Supported. |
 | DCP (Decode Context Parallel) | Supported; use `MooncakeConnectorV2` for KV transfer. |
 | LayerSplit (KVPP) | Supported. An intermittent output-mismatch issue in the e2e test is under investigation. |
 | KV offloading (Sparse KV Cache Offload) | Supported with the layerwise connector. |
 | Prefix caching | Supported. |
 | Pooling | Supported. |
+| KV Cache Pool | Supported. |
+| Lmhead TP | Supported. |
+| MLAPO | Supported. |
+| Multimodal inputs (mm) | Supported. |
+| Multistream MoE | Supported. |
+| Shared Expert DP | Supported. |
+| Quantization | Supported for all quantization methods available for the model and hardware, including W4A4, W4A8, and W8A8. |
+| Weight NZ | Supported. |
 | P/D disaggregation | Supported with PP on the Prefill node only; the Decode node must use `PP1`. |
 | Async scheduling | Supported. |
 | Sequence parallelism | Supported. |
@@ -423,8 +432,6 @@ adjusts chunk sizes using measured execution time to reduce stage idle time.
 
 ## Compatibility and Limitations
 
-- PP cannot be combined with Prefill Context Parallelism (PCP). See
-  [Context Parallel](context_parallel.md).
 - Xlite graph mode is not compatible with PP.
 - Sparse KV Cache Offload supports PP with the layerwise connector.
 - `MooncakeConnectorV1` currently requires the Decode-side PP size to be `1`.
