@@ -335,7 +335,10 @@ class Int2PrefillMixin:
                         else None
                     )
                     try:
-                        if _r144_ovl_os.path.exists("/tmp/r218_xaudit_on"):
+                        _xa1 = globals().setdefault("_R218_XA_ON", [None])[0]
+                        if _xa1 is None:
+                            _xa1 = globals()["_R218_XA_ON"][0] = _r144_ovl_os.path.exists("/tmp/r218_xaudit_on")
+                        if _xa1:
                             _R2XX_G.setdefault("_R218_DISC", []).append(
                                 "cont_{} b={} sl={} prev={}".format("legacy" if _p0 is None else "vring", b, sl, _prev)
                             )
@@ -414,7 +417,10 @@ class Int2PrefillMixin:
                         self._r198_pos(_rid, int(sl) - 1, _d_pref) if os.environ.get("R198_VRING", "0") == "1" else None
                     )
                     try:
-                        if _r144_ovl_os.path.exists("/tmp/r218_xaudit_on"):
+                        _xa2 = globals().setdefault("_R218_XA_ON", [None])[0]
+                        if _xa2 is None:
+                            _xa2 = globals()["_R218_XA_ON"][0] = _r144_ovl_os.path.exists("/tmp/r218_xaudit_on")
+                        if _xa2:
                             _R2XX_G.setdefault("_R218_DISC", []).append(
                                 "mix_{} b={} sl={}".format("vring" if _dp198 is not None else "legacy", b, sl)
                             )
@@ -497,7 +503,10 @@ class Int2PrefillMixin:
                 # the row's ring origin. The read consumers must see exactly
                 # this X for every later step of the same rid; a stale/other
                 # value rotates the recent window by (X_step - X_init) % cap.
-                if _r144_ovl_os.path.exists("/tmp/r218_xaudit_on"):
+                _xai = globals().setdefault("_R218_XA_ON", [None])[0]
+                if _xai is None:
+                    _xai = globals()["_R218_XA_ON"][0] = _r144_ovl_os.path.exists("/tmp/r218_xaudit_on")
+                if _xai:
                     # NB: env CANNOT gate this -- RAW/r216_serve_full4.sh:90 forwards an
                     # explicit -e whitelist, so a NEW R218_* name silently never reaches
                     # the container (same failure class as the bash var-prefix trap).

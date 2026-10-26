@@ -32,6 +32,8 @@ class Int2RingMixin:
     _tt_rcnt: dict[Any, Any]
     _tt_rcnt_seen: dict[Any, Any]
     _tt_ring_org: dict[Any, Any]
+    # One-shot read-probe latch (None until first _r198_win_idx call).
+    _r218_xaudit_on: bool | None
     _tt_rid: Any
     _tt_slot: Any
     _tt_hp_bufs: Any
@@ -73,12 +75,12 @@ class Int2RingMixin:
         X = self._tt_ring_org.get(rid)
         # R218 read-side key probe: WHAT KEY AND X THE WINDOW READ ACTUALLY USES
         # (slot == row index under the R164 slot(b)==b contract, so the caller's
-        # rid can be compared against the row it claims to be).
-        if (
-            _r144_ovl_os.path.exists("/tmp/r218_xaudit_on")
-            and int(slot) >= 24
-            and _R2XX_G.get("_R218_XAS", {}).get("n", 0) <= 60
-        ):
+        # rid can be compared against the row it claims to be). The marker is
+        # latched once per process -- this runs per row per step.
+        _xaudit = getattr(type(self), "_r218_xaudit_on", None)
+        if _xaudit is None:
+            _xaudit = type(self)._r218_xaudit_on = _r144_ovl_os.path.exists("/tmp/r218_xaudit_on")
+        if _xaudit and int(slot) >= 24 and _R2XX_G.get("_R218_XAS", {}).get("n", 0) <= 60:
             try:
                 import json as _jr
 
@@ -589,7 +591,18 @@ class Int2RingMixin:
         with torch.npu.stream(update_stream):
             for _b in range(int(Bcap)):
                 _slot = impl._tt_slot(_b)
-                _ks = torch.cat([hk[_slot, :mid_start], hk[_slot, mid_start : mid_start + rcnt]], dim=0)
-                _vs = torch.cat([hv[_slot, :mid_start], hv[_slot, mid_start : mid_start + rcnt]], dim=0)
+                # Under R198_VRING the recent window is virtual/rotated, so
+                # plain contiguous slices copy rotated tokens into the S/R
+                # carrier; _r198_pr_window handles both layouts (and returns
+                # None only for rows without a VRING origin, where the
+                # contiguous gather is correct by construction).
+                _rid = impl._tt_rid(_b)
+                _sl = int(md.seq_lens_list[_b]) if _b < len(md.seq_lens_list) else 0
+                _pw = impl._r198_pr_window(_rid, _slot, _sl, mid_start, rcnt, hk, hv)
+                if _pw is not None:
+                    _ks, _vs = _pw
+                else:
+                    _ks = torch.cat([hk[_slot, :mid_start], hk[_slot, mid_start : mid_start + rcnt]], dim=0)
+                    _vs = torch.cat([hv[_slot, :mid_start], hv[_slot, mid_start : mid_start + rcnt]], dim=0)
                 _ent["k"][_b].copy_(_ks.permute(1, 0, 2))
                 _ent["v"][_b].copy_(_vs.permute(1, 0, 2))

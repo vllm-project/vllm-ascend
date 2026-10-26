@@ -289,6 +289,12 @@ class AscendINT2AttentionBackendImpl(
             )
             self._oscar_R_k = load_oscar_rotations(k_rot_path, num_layers, 0, head_dim, device, dtype)
             self._oscar_R_v = load_oscar_rotations(v_rot_path, num_layers, 0, head_dim, device, dtype)
+            # Publish at class level: every layer owns its own impl instance,
+            # and the import-time adoption block above reads type(self) attrs
+            # -- without this, each layer re-reads the checkpoint and holds a
+            # private copy (36 loads + 36x GPU memory).
+            type(self)._oscar_R_k = self._oscar_R_k
+            type(self)._oscar_R_v = self._oscar_R_v
             logger.info(
                 "Loaded Oscar rotation matrices for INT2 attention: R_k=%s R_v=%s",
                 tuple(self._oscar_R_k.shape),
@@ -418,8 +424,25 @@ class AscendINT2AttentionBackendImpl(
             seq_len = actual_seq_kvlen[0]
             key_cache_tnd = key_cache_tnd[:seq_len]
             value_cache_tnd = value_cache_tnd[:seq_len]
+        elif batch_size > 1:
+            # TND is packed-varlen: request i must start at the cumulative
+            # offset of actual_seq_kvlen[:i]. The block gather above is
+            # per-request strided (max_blocks_needed * block_size rows per
+            # request), so repack to contiguous per-request rows -- otherwise
+            # the kernel reads the padded gap rows for every i > 0.
+            _stride = max_blocks_needed * block_size
+            _kparts, _vparts = [], []
+            for _b in range(batch_size):
+                _s0 = _b * _stride
+                _n = int(actual_seq_kvlen[_b])
+                _kparts.append(key_cache_tnd[_s0 : _s0 + _n])
+                _vparts.append(value_cache_tnd[_s0 : _s0 + _n])
+            key_cache_tnd = torch.cat(_kparts, dim=0)
+            value_cache_tnd = torch.cat(_vparts, dim=0)
             _oscar_dbg(
-                f"[INT2-DECODE] Trimmed to seq_len={seq_len}: key_cache_tnd shape={key_cache_tnd.shape}", flush=True
+                f"[INT2-DECODE] Repacked varlen rows: total={int(key_cache_tnd.shape[0])}, "
+                f"key_cache_tnd shape={key_cache_tnd.shape}",
+                flush=True,
             )
 
         # Check tensor properties (Gemini suggestion)
@@ -573,23 +596,6 @@ class AscendINT2AttentionBackendImpl(
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with INT2 KV cache quantization."""
-        # R144 DIAG: unconditional entry probe (first 3 calls only) — file-based
-        import os as _r144i_os
-
-        _r144i_n = globals().setdefault("_R144_INT2_FWD_N", [0])
-        if _r144i_n[0] < 3:
-            _r144i_n[0] += 1
-            _st = "" if attn_metadata is None else f" state={attn_metadata.attn_state}"
-            try:
-                with open("/tmp/r144_int2_fwd_probe.log", "a") as _pf:
-                    _pf.write(
-                        f"[R144-INT2-IN] call#{_r144i_n[0]} pid={_r144i_os.getpid()} "
-                        f"num_tok={query.shape[0]}{_st} "
-                        f"TT_MID={_r144i_os.environ.get('R109_THREETIER_MIDDLE', '?')} "
-                        f"BATCHED={_r144i_os.environ.get('R144_BATCHED_MIDDLE', '?')}\n"
-                    )
-            except Exception:
-                pass
         _r150_tr(
             "fwd_entry",
             cls=type(self).__qualname__,
@@ -780,6 +786,10 @@ class AscendINT2AttentionBackendImpl(
                 attn_metadata.reshape_cache_event.record()
         elif _r114_fused:
             kc, vc = kv_cache[0], kv_cache[1]
+            # Both fused sub-paths below read self.key_cache/value_cache at
+            # decode time; publish them here so the R114-only route (without
+            # R115/R116) leaves them defined instead of AttributeError.
+            self.key_cache, self.value_cache = kc, vc
             # R116 layout contract: scale/zero caches are PAGE-PARALLEL to the
             # packed cache — (kc.shape[0], kc.shape[1], kc.shape[2]) — all dims
             # derived from kc itself (never vllm block_size, never a constant).

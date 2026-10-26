@@ -76,27 +76,33 @@ def preload(device=None):
     import torch  # noqa
 
     _tn = os.path.dirname(importlib.import_module("torch_npu").__file__ or "")
+    # Serialize the (idempotent-per-process) JIT build across TP ranks: two
+    # ranks compiling the same extension concurrently race on the ninja
+    # build directory and can corrupt or fail the build.
+    from filelock import FileLock
     from torch.utils import cpp_extension as _cext
 
-    _MOD = _cext.load(
-        name="r116_cu_aclnn",
-        sources=[os.environ.get("R116_BINDING_SRC") or _binding_source()],
-        extra_include_paths=[
-            os.path.join(_tn, "include"),
-            os.path.join(cann, "aarch64-linux/include"),
-            V + "/op_api/include",
-        ],
-        extra_ldflags=[
-            "-L" + V + "/op_api/lib",
-            "-lcust_opapi",
-            "-L" + os.path.join(cann, "lib64"),
-            "-lascendcl",
-            "-L" + os.path.join(_tn, "lib"),
-            "-ltorch_npu",
-            "-Wl,-rpath," + V + "/op_api/lib",
-        ],
-        verbose=False,
-    )
+    _lock = FileLock(os.path.join(os.environ.get("TORCH_EXTENSIONS_DIR", "/tmp"), "r116_cu_aclnn.build.lock"))
+    with _lock:
+        _MOD = _cext.load(
+            name="r116_cu_aclnn",
+            sources=[os.environ.get("R116_BINDING_SRC") or _binding_source()],
+            extra_include_paths=[
+                os.path.join(_tn, "include"),
+                os.path.join(cann, "aarch64-linux/include"),
+                V + "/op_api/include",
+            ],
+            extra_ldflags=[
+                "-L" + V + "/op_api/lib",
+                "-lcust_opapi",
+                "-L" + os.path.join(cann, "lib64"),
+                "-lascendcl",
+                "-L" + os.path.join(_tn, "lib"),
+                "-ltorch_npu",
+                "-Wl,-rpath," + V + "/op_api/lib",
+            ],
+            verbose=False,
+        )
     _PRELOADED = True
     return _MOD
 

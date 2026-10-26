@@ -40,7 +40,7 @@ def oscar_quantize_int2(
     assert head_dim % 4 == 0, f"head_dim {head_dim} must be divisible by 4"
 
     # Step 1: Clip outliers per token-head
-    clip_idx = int(clip_ratio * head_dim)
+    clip_idx = min(int(clip_ratio * head_dim), head_dim)
     assert clip_idx >= 1, (
         f"clip_ratio={clip_ratio} yields clip_idx=0 for head_dim={head_dim}; "
         "need clip_ratio >= 1/head_dim so at least one value survives clipping"
