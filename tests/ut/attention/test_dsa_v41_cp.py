@@ -663,9 +663,13 @@ class TestPCPMetadata:
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
             builders(dcp=2)
-        builder = builders()["swa"]
-        with pytest.raises(AssertionError, match="global batch context"):
-            builder.build(0, _batch(2, 0, "prefill").local)
+
+    def test_builds_ordinary_metadata_without_pcp_context(self, builders):
+        # A replicated draft decode builds through PCP builders without a
+        # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        for builder in builders().values():
+            metadata = builder.build(0, _batch(2, 0, "decode").local)
+            assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 
 @pytest.fixture
