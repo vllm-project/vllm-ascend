@@ -41,7 +41,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | Prefix caching | ✅ Supported | Can be combined with KVPP. |
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
-| Speculative decoding | ✅ Supported | Fixed-K speculative decoding, including MTP, DSpark, and Eagle3. Draft layers must not share target KV caches; dynamic K has not been validated. |
+| Speculative decoding | ✅ Supported | Fixed-K speculative decoding, including MTP, DSpark, and Eagle3, when the selected method is supported by the model and attention backend. Draft-model caches remain independently allocated and must not share target KV caches; dynamic K has not been validated. |
 | PCP | ✅ Supported | Caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
@@ -91,8 +91,6 @@ Adjust the token budget and maximum number of sequences to device capacity and w
 For PCP, add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks.
 
 For PP, add `enable_kvpp` to the existing PP launch configuration.
-
-KVPP supports fixed-K speculative decoding, including MTP, DSpark, and Eagle3, when the selected method is supported by the model and attention backend. Draft-model caches remain independently allocated and must not share target KV caches. Dynamic K has not been validated.
 
 ## Configuration Parameters
 
