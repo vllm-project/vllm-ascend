@@ -61,7 +61,7 @@ UCM currently provides the following capabilities:
 - vLLM-Ascend (main branch)
 - SGLang (main branch)
 
-> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/support_matrix.html).
+> **Note**: For the complete and latest support matrix, refer to [UCM Support Matrix](https://ucm.readthedocs.io/en/latest/user-guide/support-matrix/).
 
 ## Deployment Guide
 
@@ -74,7 +74,7 @@ UCM currently provides the following capabilities:
 
 ### UCM Installation
 
-**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/getting-started/quickstart_vllm_ascend.html)**
+**Please refer to the [official UCM installation guide for Ascend NPU](https://ucm.readthedocs.io/en/latest/user-guide/quick_start/#vllm-ascend)**
 
 ### PD Disaggregation Scenario
 
@@ -114,7 +114,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS). For cross-node PD disaggregation, this must be a shared storage path.
 
-> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: PipelineStore is the recommended connector for UCM. It chains Cache Store (Device ↔ Host) and Posix Store (Host ↔ Storage backend) for optimal transfer performance. For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Servers**
 
@@ -246,7 +246,7 @@ enable_event_sync: true
 use_layerwise: true
 ```
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run Prefill Service**
 
@@ -389,7 +389,7 @@ Key configuration parameters:
 
 - **storage_backends**: Directory for KV cache storage. Can be local SSD or NFS-mounted path.
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 **Step 2: Run PD-Mixed Service**
 
@@ -514,7 +514,7 @@ Key configuration parameters:
 
 - **storage_backends**: The shared storage directory accessible from all nodes (e.g., NFS-mounted path or 3FS).
 
-> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/user-guide/prefix-cache/pipeline_store.html).
+> **Note**: For more configuration options, refer to [UCM PipelineStore Documentation](https://ucm.readthedocs.io/en/latest/developer-guide/cache-configuration/pipeline/#pipeline-store).
 
 Prepare `prefill.sh` on Prefill nodes (192.168.10.1-4):
 
@@ -617,10 +617,10 @@ for ((i=0; i<dp_size_local; i++)); do
   dp_rank=$((dp_rank_start + i))
   server_port=$((server_port + i))
   mooncake_port=$((mooncake_port + i * tp_size))
-  
+
   start_card=$((i * cards_per_process))
   device_list=$(seq -s, $start_card $((start_card + cards_per_process - 1)))
-  
+
   bash $template_path $device_list $local_ip $nic_name $server_port $tp_size $dp_size $dp_rank $dp_address $dp_rpc_port $mooncake_port &
 done
 
@@ -723,10 +723,10 @@ for ((i=0; i<dp_size_local; i++)); do
   dp_rank=$((dp_rank_start + i))
   server_port=$((server_port + i))
   mooncake_port=$((mooncake_port + i * tp_size))
-  
+
   start_card=$((i * cards_per_process))
   device_list=$(seq -s, $start_card $((start_card + cards_per_process - 1)))
-  
+
   bash $template_path $device_list $local_ip $nic_name $server_port $tp_size $dp_size $dp_rank $dp_address $dp_rpc_port $mooncake_port &
 done
 
@@ -769,9 +769,9 @@ Before each test, KV cache must be pre-seeded with a prefix ratio of **0.8**:
 1. **Pre-seed Phase**: Send 128 requests with input length = `target_input_length × 0.8` and output length = 1 to establish the KV cache prefix
 2. **Test Phase**: Send 128 requests with full target input length and output length = 1000
 
-Example for 32K input scenario:
+Example for 32k input scenario:
 
-- Pre-seed: 128 requests with 25600 (32K × 0.8) input tokens + 1 output token
+- Pre-seed: 128 requests with 25600 (32k × 0.8) input tokens + 1 output token
 - Test: 128 requests with 32000 input tokens + 1000 output tokens
 
 This procedure ensures the prefix portion (80% of input) is cached before measuring performance, simulating real-world prefix reuse scenarios.
@@ -841,8 +841,8 @@ vllm bench serve \
   </thead>
   <tbody>
     <tr>
-      <td><strong>32K</strong></td>
-      <td><strong>1K</strong></td>
+      <td><strong>32k</strong></td>
+      <td><strong>1k</strong></td>
       <td>140730</td>
       <td>64</td>
       <td>173820</td>
@@ -854,8 +854,8 @@ vllm bench serve \
       <td>85615</td>
     </tr>
     <tr>
-      <td><strong>64K</strong></td>
-      <td><strong>1K</strong></td>
+      <td><strong>64k</strong></td>
+      <td><strong>1k</strong></td>
       <td>181864</td>
       <td>64</td>
       <td>214988</td>
@@ -867,8 +867,8 @@ vllm bench serve \
       <td>103752</td>
     </tr>
     <tr>
-      <td><strong>128K</strong></td>
-      <td><strong>1K</strong></td>
+      <td><strong>128k</strong></td>
+      <td><strong>1k</strong></td>
       <td>268016</td>
       <td>65</td>
       <td>301648</td>

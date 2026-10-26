@@ -58,7 +58,6 @@ def elastic_load(
         return None
 
     try:
-        start_elastic_client_join = time.perf_counter()
         # Initialize the interaction layer with the ElasticClient
         with ElasticClient(
             sources_this_device,
@@ -69,13 +68,6 @@ def elastic_load(
             group_name=group_name,
             int8_cache=int8_cache,
         ) as client_interaction_layer:
-            elastic_client_join_time = time.perf_counter() - start_elastic_client_join
-            logger.info(
-                "Netloader elastic client join time: %s, device_id: %s, group: %s",
-                elastic_client_join_time,
-                device_id,
-                group_name,
-            )
             if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
                 raise RuntimeError("Failed to initialize ElasticClient: socket or server_addr is None")
             ack = client_interaction_layer.ack

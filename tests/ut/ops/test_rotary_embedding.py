@@ -19,9 +19,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
+from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.rotary_embedding import (
+    Gemma4RotaryEmbedding,
+    RotaryEmbedding,
+    YaRNScalingRotaryEmbedding,
+)
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import (
+    AscendGemma4RotaryEmbedding,
+    AscendRotaryEmbedding,
+    AscendYaRNRotaryEmbedding,
+    rope_forward_oot,
+)
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -39,7 +49,7 @@ def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     return positions, query, key
 
 
-def check_parent_init_signature_has_not_changed(parent_func, child_func):
+def check_parent_init_signature_has_not_changed(parent_func, child_func, allowed_child_extra=()):
     parent_sig = inspect.signature(parent_func)
     parent_params = set(parent_sig.parameters) - {"self"}
 
@@ -47,7 +57,9 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     child_params = set(child_sig.parameters) - {"self"}
 
     added = parent_params - child_params
-    removed = child_params - parent_params
+    # The child may intentionally keep extra parameters, e.g. the Ascend YaRN
+    # subclass carries both the legacy and the new mscale parameter sets.
+    removed = (child_params - parent_params) - set(allowed_child_extra)
 
     assert not added, (
         f"{parent_func.__name__} added new parameter(s): {added}. "
@@ -57,6 +69,44 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
         f"{parent_func.__name__} removed parameter(s): {removed}. "
         f"Check whether {child_func.__name__} needs to forward them."
     )
+
+
+class TestRopeForwardOOT:
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton", create=True)
+    def test_fp8_dispatch_preserves_index_head_inference(self, mock_rope_triton):
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.empty(SEQ_LEN, 2 * 96, dtype=torch.bfloat16)
+        key = torch.empty(SEQ_LEN, 96, dtype=torch.bfloat16)
+        cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.bfloat16)
+        query_fp8 = torch.empty(SEQ_LEN, 2, 96, dtype=torch.float8_e4m3fn)
+        key_fp8 = torch.empty(SEQ_LEN, 1, 96, dtype=torch.float8_e4m3fn)
+        mock_rope_triton.return_value = query_fp8, key_fp8
+
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", True):
+            query_out, key_out = rope_forward_oot(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                HEAD_SIZE,
+                ROTARY_DIM,
+                True,
+                out_dtype=torch.float8_e4m3fn,
+            )
+
+        query_arg, key_arg = mock_rope_triton.call_args.args
+        assert query_arg.shape == (SEQ_LEN, 2, 96)
+        assert key_arg.shape == (SEQ_LEN, 1, 96)
+        kwargs = mock_rope_triton.call_args.kwargs
+        assert kwargs["cos_sin_cache"] is cos_sin_cache
+        assert kwargs["positions"] is positions
+        assert kwargs["rope_dim"] == ROTARY_DIM
+        assert kwargs["is_neox_style"] is True
+        assert kwargs["out_dtype"] == torch.float8_e4m3fn
+        assert query_out.shape == query.shape
+        assert key_out.shape == key.shape
+        assert query_out.dtype == torch.float8_e4m3fn
+        assert key_out.dtype == torch.float8_e4m3fn
 
 
 @pytest.fixture(autouse=True)
@@ -133,6 +183,28 @@ def make_yarn_embedding(patch_init_side_effects):
     return _factory
 
 
+@pytest.fixture()
+def make_gemma4_embedding(patch_init_side_effects):
+    """Factory for AscendGemma4RotaryEmbedding with parent __init__ suppressed."""
+
+    def _factory(use_mtp: bool = False, is_neox_style: bool = True):
+        spec_cfg = MagicMock(method="mtp") if use_mtp else None
+        patch_init_side_effects.return_value.speculative_config = spec_cfg
+
+        with patch("vllm_ascend.ops.rotary_embedding.Gemma4RotaryEmbedding.__init__") as mock_parent_init:
+            mock_parent_init.return_value = None
+            emb = AscendGemma4RotaryEmbedding.__new__(AscendGemma4RotaryEmbedding)
+            # Gemma4RotaryEmbedding always hands the base class rotary_dim=head_size
+            emb.head_size = HEAD_SIZE
+            emb.rotary_dim = HEAD_SIZE
+            emb.is_neox_style = is_neox_style
+            emb.cos_sin_cache = torch.zeros(MAX_POS, HEAD_SIZE)
+            AscendGemma4RotaryEmbedding.__init__(emb, HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, is_neox_style, DTYPE)
+        return emb
+
+    return _factory
+
+
 class TestAscendEmbeddingForwardOOT:
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -156,6 +228,50 @@ class TestAscendEmbeddingForwardOOT:
             HEAD_SIZE,
             ROTARY_DIM,
             emb.is_neox_style,
+        )
+        assert result is expected_output
+
+    @patch("vllm_ascend.ops.rotary_embedding.is_forward_context_available", return_value=False)
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_oot")
+    def test_q_only_uses_throwaway_key(self, mock_rope, _mock_is_ctx, make_embedding):
+        """key=None (Gemma4 MTP Q-only RoPE) routes to rope_forward_oot with a
+        throwaway key buffer and returns (rotated_query, None)."""
+        emb = make_embedding()
+        positions, query, _ = _make_tensors()
+        expected_query = torch.randn_like(query)
+        mock_rope.return_value = expected_query, torch.empty_like(query)
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False):
+            result = emb.forward_oot(positions, query, None)
+        assert result[0] is expected_query
+        assert result[1] is None
+        dummy_key = mock_rope.call_args.args[2]
+        assert dummy_key.shape == (query.shape[0], HEAD_SIZE)
+        assert dummy_key.dtype == query.dtype
+        assert dummy_key.device == query.device
+
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_fp8_output_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):
+        """The public OOT custom op owns FP8 backend dispatch."""
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        expected_output = (torch.empty(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float8_e4m3fn),) * 2
+        mock_npu_op.return_value = expected_output
+
+        emb = make_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key, out_dtype=torch.float8_e4m3fn)
+
+        mock_npu_op.assert_called_once_with(
+            positions,
+            query,
+            key,
+            emb.cos_sin_cache,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            emb.is_neox_style,
+            out_dtype=torch.float8_e4m3fn,
         )
         assert result is expected_output
 
@@ -227,7 +343,7 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
 
         result = emb.forward_oot(positions, query, key)
 
-        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None)
+        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None, None)
         assert result is expected
 
     @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
@@ -268,7 +384,7 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
 
         emb.forward_oot(positions, query, key, offsets=offsets, is_neox_style_override=False)
 
-        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False)
+        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False, None)
 
     def test_parent_init_signature_has_not_changed(self):
         """
@@ -277,5 +393,91 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+            YaRNScalingRotaryEmbedding.__init__,
+            AscendYaRNRotaryEmbedding.__init__,
+            # vLLM main (#56446) replaced the legacy YaRN mscale parameters;
+            # the Ascend subclass keeps forwarding both sets.
+            allowed_child_extra={"extrapolation_factor", "attn_factor", "apply_yarn_scaling"},
+        )
+
+
+class TestAscendGemma4RotaryEmbedding:
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_delegates_to_ascend_rotary_forward_oot(self, mock_delegate, make_gemma4_embedding):
+        """forward_oot must delegate to AscendRotaryEmbedding.forward_oot and return its result."""
+        expected = MagicMock()
+        mock_delegate.return_value = expected
+
+        emb = make_gemma4_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None, None)
+        assert result is expected
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_all_args_forwarded_together(self, mock_delegate, make_gemma4_embedding):
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_gemma4_embedding()
+        positions, query, key = _make_tensors()
+        offsets = torch.ones(SEQ_LEN, dtype=torch.long)
+
+        emb.forward_oot(
+            positions, query, key, offsets=offsets, is_neox_style_override=False, out_dtype=torch.float8_e4m3fn
+        )
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False, torch.float8_e4m3fn)
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_q_only_call_forwards_none_key(self, mock_delegate, make_gemma4_embedding):
+        """KV-shared Gemma4 layers rotate q alone, passing key=None."""
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_gemma4_embedding()
+        positions, query, _ = _make_tensors()
+
+        emb.forward_oot(positions, query, None)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, None, None, None, None)
+
+    @pytest.mark.parametrize("use_mtp", [True, False])
+    def test_sets_use_mtp_read_by_the_delegate(self, use_mtp, make_gemma4_embedding):
+        """AscendRotaryEmbedding.forward_oot reads self.use_mtp, so __init__ must set it."""
+        emb = make_gemma4_embedding(use_mtp=use_mtp)
+
+        assert bool(emb.use_mtp) is use_mtp
+
+    def test_upstream_class_builds_override_with_proportional_cache(self):
+        """Gemma4RotaryEmbedding resolves to the Ascend override and keeps Gemma4's cos/sin cache.
+
+        The override exists so that the zero-padded inverse frequencies of
+        proportional RoPE still build the cache: the non-rotated pairs hold
+        cos=1 and sin=0, so a full-width rotation leaves them unchanged. The
+        fused q/k/v norm + RoPE kernel relies on that full-width cache.
+        """
+        partial_rotary_dim = HEAD_SIZE // 4
+        rope_angles = partial_rotary_dim // 2
+        vllm_config = MagicMock()
+        vllm_config.compilation_config.custom_ops = ["all"]
+
+        with set_current_vllm_config(vllm_config):
+            emb = Gemma4RotaryEmbedding(HEAD_SIZE, partial_rotary_dim, MAX_POS, BASE, True, DTYPE)
+
+        assert isinstance(emb, AscendGemma4RotaryEmbedding)
+        assert emb.rotary_dim == HEAD_SIZE
+        assert emb.cos_sin_cache.shape == (MAX_POS, HEAD_SIZE)
+        cos, sin = emb.cos_sin_cache.chunk(2, dim=-1)
+        torch.testing.assert_close(cos[:, rope_angles:], torch.ones_like(cos[:, rope_angles:]))
+        torch.testing.assert_close(sin[:, rope_angles:], torch.zeros_like(sin[:, rope_angles:]))
+
+    def test_parent_init_signature_has_not_changed(self):
+        """
+        Fail loudly if Gemma4RotaryEmbedding.__init__ adds, removes, or renames
+        parameters, so a developer knows to update AscendGemma4RotaryEmbedding
+        accordingly.
+        """
+        check_parent_init_signature_has_not_changed(
+            Gemma4RotaryEmbedding.__init__, AscendGemma4RotaryEmbedding.__init__
         )

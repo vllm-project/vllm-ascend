@@ -12,11 +12,8 @@ while the language model path remains the Ascend-native implementation in
 ``vllm_ascend.models.minimax_m3``.
 """
 
-import sys
 from collections.abc import Iterable
 from pathlib import Path
-from types import ModuleType
-from typing import Any, cast
 
 import torch
 import vllm
@@ -31,6 +28,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
@@ -76,12 +74,17 @@ MiniMaxM3VLProcessingInfo = _mm_preprocess.MiniMaxM3VLProcessingInfo
 
 
 def _install_fused_allreduce_norm_fallback() -> None:
-    """Avoid importing vLLM's CUDA-only fusion module on Ascend."""
-    module_name = "vllm.model_executor.layers.fused_allreduce_gemma_rms_norm"
-    if module_name in sys.modules:
-        return
+    """Install the Ascend fused all-reduce implementation on vLLM's real
+    module instead of shadowing it with a fake one.
 
-    fallback_module = ModuleType(module_name)
+    vLLM's real module keeps its optional flashinfer symbols
+    (``_AR_RESIDUAL_RMS_NORM``, ``_can_use_flashinfer``,
+    ``flashinfer_trtllm_fused_allreduce_norm``) and degrades them to None on
+    Ascend through its own try/except, so the kimi_k3 DSpark imports succeed
+    against the real module. We only replace the single public entry
+    ``fused_allreduce_gemma_rms_norm`` and never mirror vLLM internal names.
+    """
+    import vllm.model_executor.layers.fused_allreduce_gemma_rms_norm as _real
 
     def fused_allreduce_gemma_rms_norm(
         hidden_states: torch.Tensor,
@@ -106,8 +109,7 @@ def _install_fused_allreduce_norm_fallback() -> None:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
-    cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
-    sys.modules[module_name] = fallback_module
+    _real.fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
 
 
 _install_fused_allreduce_norm_fallback()
@@ -165,7 +167,14 @@ class MiniMaxM3VLModel(nn.Module):
     info=MiniMaxM3VLProcessingInfo,
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
-class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForConditionalGeneration(
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle3,
+    MixtureOfExperts,
+):
     supports_encoder_tp_data = True
 
     packed_modules_mapping = {
@@ -228,6 +237,32 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self._sync_moe_parameters()
+
+    def _sync_moe_parameters(self) -> None:
+        language_model = self.language_model
+        self.expert_weights = language_model.expert_weights
+        self.num_expert_groups = language_model.num_expert_groups
+        self.moe_layers = language_model.moe_layers
+        self.moe_mlp_layers = language_model.moe_mlp_layers
+        self.num_moe_layers = language_model.num_moe_layers
+        self.num_logical_experts = language_model.num_logical_experts
+        self.num_physical_experts = language_model.num_physical_experts
+        self.num_local_physical_experts = language_model.num_local_physical_experts
+        self.num_routed_experts = language_model.num_routed_experts
+        self.num_shared_experts = language_model.num_shared_experts
+        self.num_redundant_experts = language_model.num_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts,
+            num_local_physical_experts,
+        )
+        self._sync_moe_parameters()
 
     @property
     def lm_head(self) -> nn.Module:
@@ -376,6 +411,9 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits_local(hidden_states)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.set_aux_hidden_state_layers(layers)

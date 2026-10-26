@@ -87,14 +87,15 @@ jobs:
         run: |
           pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          python3 .github/workflows/scripts/select_tests.py \
-            --changed-files vllm_ascend/dummy.py \
-            --run-all-modules
+          python3 .github/workflows/scripts/select_tests.py --all-tests
 
   ensure-csrc-cache:
     needs: select-full-tests
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       target_ids: ${{ needs.select-full-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
@@ -108,7 +109,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_version:
-          - ${{ needs.select-full-tests.outputs.release_tag }}
+          - ${{ needs.select-full-tests.outputs.main_commit }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}

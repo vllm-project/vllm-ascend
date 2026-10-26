@@ -37,7 +37,7 @@ on:
         required: false
         type: string
         default: ''
-        description: override CONFIG_BASE_PATH used by the yaml loader (defaults to nightly path)
+        description: CONFIG_BASE_PATH used by the YAML loader
       soc_version:
         required: true
         type: string
@@ -63,11 +63,21 @@ on:
         type: string
         default: ''
         description: non-empty when triggered by PR /nightly command
+      download_path:
+        required: false
+        type: string
+        default: ''
+        description: test container file or directory to upload as a GitHub artifact
       vllm_ascend_ref:
         required: false
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      vllm_ref:
+        required: false
+        type: string
+        default: ''
+        description: vllm commit SHA / tag / branch to install instead of the image-baked vllm (empty = keep image version)
       testcase_timeout:
         required: false
         default: 120
@@ -78,6 +88,9 @@ on:
         type: boolean
         default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
+      profile_options_json:
+        type: string
+        default: '{}'
       bisect_good_commit:
         required: false
         type: string
@@ -124,6 +137,10 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      HW_OBS_PROFILE_AK:
+        required: false
+      HW_OBS_PROFILE_SK:
+        required: false
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
@@ -148,11 +165,12 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_single_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
       HF_HUB_OFFLINE: 1
+      TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
@@ -162,6 +180,7 @@ jobs:
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
       VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
+      ASCEND_PROFILE_ROOT: /vllm-workspace/vllm-ascend/profile_artifact/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -171,6 +190,40 @@ jobs:
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
+
+      - name: Install vllm from ref
+        if: ${{ inputs.vllm_ref != '' }}
+        run: |
+          cd /vllm-workspace/vllm
+          git config --global --add safe.directory /vllm-workspace/vllm
+          # The nightly image ships an editable vllm checkout at /vllm-workspace/vllm.
+          # Fetch the requested ref into it and refresh the editable install.
+          # Mirrors tools/bisect/version_compat.py (_switch_vllm).
+          git remote add origin https://github.com/vllm-project/vllm.git 2>/dev/null || \
+            git remote set-url origin https://github.com/vllm-project/vllm.git
+          VLLM_REF='${{ inputs.vllm_ref }}'
+          # Fetch the tag ref itself when the ref names a tag: a plain
+          # "git fetch origin <tag>" only fetches the commit object and leaves
+          # no local tag ref, so vllm's setuptools_scm falls back to a wrong
+          # 0.1.dev1+g<sha> version instead of the release version.
+          if ! git fetch --depth 1 origin "+refs/tags/${VLLM_REF}:refs/tags/${VLLM_REF}" 2>/dev/null; then
+            if ! git fetch --depth 1 origin "$VLLM_REF"; then
+              git fetch --depth 1 origin "refs/heads/$VLLM_REF" || \
+                { echo "::error::cannot fetch vllm ref '$VLLM_REF' (use a full commit SHA, tag, or branch name)"; exit 1; }
+            fi
+          fi
+          git checkout -f FETCH_HEAD
+          VLLM_TARGET_DEVICE=empty pip install -e . --no-input --disable-pip-version-check
+          echo ""
+          echo "Installed vllm from ref '$VLLM_REF':"
+          pip show vllm
+          # setuptools_scm falls back to 0.1.dev1+g<sha> when the ref carries no
+          # tag information (bare SHA / branch); surface it instead of silently
+          # misrouting every vllm_version_is() check in vllm-ascend.
+          INSTALLED_VLLM_VERSION=$(pip show vllm 2>/dev/null | sed -n 's/^Version: //p')
+          if [[ "$INSTALLED_VLLM_VERSION" == 0.1.dev* ]]; then
+            echo "::warning::vllm version fell back to '$INSTALLED_VLLM_VERSION': ref '$VLLM_REF' carries no tag info. Version-gated code paths in vllm-ascend may misbehave; prefer a release tag (e.g. v0.29.0) for reliable results."
+          fi
 
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ inputs.request_id != '' }}
@@ -188,6 +241,15 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: ${{ inputs.request_id != '' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: csrc/build_cache
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
         run: |
@@ -196,7 +258,7 @@ jobs:
 
       - name: Set MAX_JOBS based on runner
         run: |
-          CARDS=$(echo "${{ inputs.runner }}" | sed -E 's/.*a3-([0-9]+).*/\1/')
+          CARDS=$(echo "${{ inputs.runner }}" | sed -E 's/.*a3-(800i-)?([0-9]+).*/\2/')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend
@@ -208,8 +270,16 @@ jobs:
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          uv pip install -r requirements-nightly.txt
+          # Keep the packages shipped by the image (torch/torch-npu/
+          # torchvision/torchaudio, triton-ascend, memfabric/memcache) while still
+          # installing the other runtime dependencies declared by requirements.txt.
+          # `|| true` matters: grep returns 1 when every line is filtered out while
+          # GitHub's bash runs with `-e -o pipefail`.
+          grep -vE '^(torch|torch-npu|torchvision|torchaudio|triton-ascend|memfabric_hybrid|memcache_hybrid)[=<>!]' \
+            requirements.txt > /tmp/requirements-runtime.txt || true
+          uv pip install -r /tmp/requirements-runtime.txt
+          uv pip install -e . --no-deps
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}
@@ -280,6 +350,21 @@ jobs:
             exit 1
           fi
 
+      - name: Configure profiling
+        if: ${{ fromJSON(inputs.profile_options_json).enabled == true }}
+        id: profiling
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PROFILE_OPTIONS_JSON: ${{ inputs.profile_options_json }}
+        run: |
+          python3 -m tools.profiling.capture configure \
+            --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT" --env-output "$GITHUB_ENV"
+
+      - name: Initialize profiling job
+        if: ${{ steps.profiling.outputs.enabled == 'true' && inputs.config_file_path != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        run: python3 -m tools.profiling.capture initialize --root "$ASCEND_PROFILE_ROOT"
+
       - name: Run Pytest (py-driven)
         id: pytest-driven
         if: ${{ inputs.tests != '' }}
@@ -293,9 +378,7 @@ jobs:
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv "${{ inputs.tests }}" \
-            --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
-            2>&1 | tee /tmp/test-logs/pytest-driven.log
+          pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
@@ -314,7 +397,7 @@ jobs:
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py \
+          pytest -sv tests/e2e/common/single_node/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
 
       - name: Update good_table.csv on success
@@ -457,6 +540,49 @@ jobs:
           echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
           echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
 
+      - name: Publish profiling data
+        id: profile_bundle
+        if: ${{ always() && steps.profiling.outputs.enabled == 'true' && inputs.config_file_path != '' }}
+        working-directory: /vllm-workspace/vllm-ascend
+        env:
+          PIP_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple/
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_PROFILE_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_PROFILE_SK }}
+          PROFILE_KEY_PREFIX: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path }}
+        run: |
+          upload_status=0
+          echo "::group::Upload raw profiling traces"
+          python3 -c 'import boto3' 2>/dev/null || python3 -m pip install --quiet boto3 || upload_status=$?
+          if [ "$upload_status" -eq 0 ]; then
+            python3 -m tools.profiling.capture upload --root "$ASCEND_PROFILE_ROOT" --prefix "$PROFILE_KEY_PREFIX" || upload_status=$?
+          fi
+          echo "::endgroup::"
+          echo "::group::Prepare profiling index"
+          python3 -m tools.profiling.artifacts package \
+            --manifest "$ASCEND_PROFILE_ROOT/profile_manifest.json" \
+            --output "$RUNNER_TEMP/profile_artifact" \
+            --prefix "$PROFILE_KEY_PREFIX" --github-output "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit "$upload_status"
+
+      - name: Upload profiling index
+        id: profile_artifact
+        if: ${{ always() && steps.profile_bundle.outputs.artifact_key != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.profiling.outputs.parse == 'true' && 'profile-capture' || 'profile-artifact' }}-${{ steps.profile_bundle.outputs.artifact_key }}
+          path: ${{ runner.temp }}/profile_artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Profiling summary
+        if: >-
+          always() && steps.profile_bundle.outputs.artifact_key != '' &&
+          (steps.profiling.outputs.parse != 'true' || steps.profile_bundle.outcome != 'success' ||
+           steps.profile_artifact.outcome != 'success')
+        working-directory: /vllm-workspace/vllm-ascend
+        run: python3 -m tools.profiling.artifacts summary --root "$RUNNER_TEMP/profile_artifact"
+
       - name: Upload benchmark results
         if: ${{ always() && inputs.config_file_path != '' }}
         continue-on-error: true
@@ -478,4 +604,37 @@ jobs:
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
+          compression-level: 0
+
+      - name: Upload AISBench outputs
+        if: ${{ always() && inputs.config_file_path != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: aisbench-outputs-single-node-${{ steps.bench_ts.outputs.effective_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /vllm-workspace/vllm-ascend/outputs/
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Collect requested path
+        if: ${{ always() && inputs.download_path != '' }}
+        id: collect_download
+        continue-on-error: true
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch || '' }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
+        run: |
+          python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" /tmp/download-artifact.tar.gz
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
+          echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload requested path
+        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_download.outputs.name }}
+          path: /tmp/download-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 7
           compression-level: 0

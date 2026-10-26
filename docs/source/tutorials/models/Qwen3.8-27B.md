@@ -2,6 +2,12 @@
 
 ## 1 Introduction
 
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
 Qwen3.8-27B is the 27-billion-parameter dense member of the Qwen3.8 family, the most capable generation in the Qwen open-model family to date. Built on the architectural foundation of Qwen3.5, it shares the same hybrid-attention backbone as the 2.4T MoE flagship: of its 64 layers, only 16 run full (gated) attention (`full_attention_interval: 4`) while the other 48 run linear attention (Gated DeltaNet) with a constant recurrent state. It is a native vision-language model — the architecture is `Qwen3_5ForConditionalGeneration` and `config.json` carries a `vision_config` — that understands images and videos, and it ships with a built-in MTP (Multi-Token Prediction) draft head and a native 262,144-token context window extensible up to 1,000,000 tokens.
 
 Delivering substantial gains over Qwen3.5/Qwen3.6 across coding, professional work, research, and long-horizon agentic tasks, Qwen3.8-27B features stronger autonomous planning, more reliable end-to-end task completion, and broader downstream compatibility with popular harnesses and development tools. Thinking mode is on by default and can be disabled per request; reasoning depth is tunable via `reasoning_effort` (`xhigh`/`medium`/`low`), and reasoning context from historical messages is retained via `preserve_thinking`.
@@ -22,23 +28,27 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 The following model weights are available:
 
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
-- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
-- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
+|  Weight Version                              | Hardware Requirements | Download Links |
+|----------------------------------------------|-----------------------|----------------|
+| `Qwen3.8-27B` (BF16 version)                 | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node <br>or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
+| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 950PR Products (128GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
+| `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
+| `Qwen3.8-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node |  |
+| `Qwen3.8-27B-w8a8-310p` (Quantized version)  | 1 Atlas 300I DUO  | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p) |
+
+- `Qwen3.8-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend950DT series"
+=== "950PR&950DT Products"
 
     Start the docker image on each node.
 
@@ -75,7 +85,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "A3 series"
+=== "Atlas 800I A3"
 
     Start the docker image on each node.
 
@@ -116,12 +126,12 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "A2 series"
+=== "Atlas 800I A2"
 
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -149,43 +159,92 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
+=== "Atlas 300I DUO"
+
+    Start the docker image on each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p
+    export NAME=vllm-ascend
+
+    docker run --rm \
+        --name $NAME \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
 ```shell
 python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 ```
 
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
+```
+
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
+
+!!! note
+
+    On Atlas 300I DUO, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. On Atlas 300I DUO, at least 2 devices are required.
 
 Before starting the service:
 
 - Replace the model path, parallel sizes and service port with values from the target environment.
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
-    The following example is for Ascend950DT series.
+    The following example is for 950DT Products.
 
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8
     export VLLM_USE_MODELSCOPE=True
-    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl kernel.sched_migration_cost_ns=50000
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
 
-    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -193,16 +252,21 @@ Before starting the service:
         --data-parallel-size 1 \
         --tensor-parallel-size 1 \
         --quantization ascend \
+        --kv-cache-dtype mxfp8 \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
-        --max-model-len 131072 \
+        --max-model-len 133120 \
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
+        --allowed-local-media-path / \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --mm-processor-cache-type shm \
         --enable-prefix-caching \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true}'
+        --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
     ```
 
     Key Parameter Descriptions:
@@ -216,15 +280,24 @@ Before starting the service:
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
-    - `--enable-prefix-caching` enables automatic prefix caching.
+    - `--kv-cache-dtype mxfp8` enables the C8 (MXFP8 KV cache) and is required by the `Qwen3.8-27B-w8a8c8-mxfp8` weights. It stores the KV cache of the full-attention layers as FP8 (E4M3) with E8M0 scales, and runs the full-attention layers on the dedicated QFA (quant flash attention) kernel. The W8A8C8 weights bring performance gains in long-sequence scenarios. With this option, `--block-size` must be a multiple of `512` (it defaults to `512` if unset).
+    - For short-sequence scenarios (e.g., 16K input length), the W8A8 weights (e.g., `Qwen3.8-27B-w8a8-mxfp8`) are recommended instead. When serving a W8A8 weight, remove `--kv-cache-dtype mxfp8` from the startup command. Note that C8 quantization is only supported on 950PR&950DT Products.
+    - `--enable-prefix-caching` enables prefix caching, which is the default behavior. To disable it, use `--no-enable-prefix-caching`. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+    - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
+    - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
+    - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
+    - `--mm-processor-cache-type` sets the cache type used by the multimodal preprocessor and mapper. `shm` uses a shared-memory FIFO cache, while the default `lru` uses a mirrored LRU cache.
+    - `--additional-config` contains Ascend-specific optimization options:
+        - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
+        - `"enable_flashcomm1": true` enables the FlashComm communication optimization, which splits the tensor-parallel AllReduce into Reduce-Scatter and All-Gather to reduce communication overhead and improve prefill throughput.
 
-=== "Atlas 800 A3 / Atlas 800 A2"
+=== "950PR Products"
 
-    The following example is for Atlas 800 A3 / Atlas 800 A2.
+    The following example is for 950PR Products. Quantized versions need `--quantization ascend`. On 950PR Products, `Qwen3.8-27B-w8a8` is the current recommended weight; switch to `Qwen3.8-27B-w8a8-mxfp8` later after further optimization.
 
     ```bash
     #!/bin/sh
@@ -234,9 +307,79 @@ Before starting the service:
     export HCCL_BUFFSIZE=512
     # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl kernel.sched_migration_cost_ns=50000
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+
+    vllm serve $MODEL_PATH \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 1 \
+        --quantization ascend \
+        --served-model-name qwen3.8 \
+        --max-num-seqs 32 \
+        --max-model-len 256000 \
+        --max-num-batched-tokens 16384 \
+        --trust-remote-code \
+        --allowed-local-media-path / \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --mm-processor-cache-type shm \
+        --enable-prefix-caching \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_cpu_binding": true, "enable_flashcomm1": true}'
+    ```
+
+    Key Parameter Descriptions:
+
+    - `--data-parallel-size 1` and `--tensor-parallel-size 1` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
+    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
+    - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
+    - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
+        - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
+        - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
+        - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
+    - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
+    - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
+    - `--enable-prefix-caching` enables prefix caching, which is the default behavior. To disable it, use `--no-enable-prefix-caching`. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
+    - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
+    - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
+        - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
+        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+    - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
+    - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
+    - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
+    - `--mm-processor-cache-type` sets the cache type used by the multimodal preprocessor and mapper. `shm` uses a shared-memory FIFO cache, while the default `lru` uses a mirrored LRU cache.
+    - `--additional-config` contains Ascend-specific optimization options:
+        - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
+        - `"enable_flashcomm1": true` enables the FlashComm communication optimization, which splits the tensor-parallel AllReduce into Reduce-Scatter and All-Gather to reduce communication overhead and improve prefill throughput.
+
+=== "Atlas 800I A3 / Atlas 800I A2"
+
+    The following example is for Atlas 800I A3 / Atlas 800I A2.
+
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=512
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl kernel.sched_migration_cost_ns=50000
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
+
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -246,12 +389,18 @@ Before starting the service:
         --quantization ascend \
         --served-model-name qwen3.8 \
         --max-num-seqs 32 \
-        --max-model-len 131072 \
+        --max-model-len 133120 \
         --max-num-batched-tokens 16384 \
         --trust-remote-code \
+        --allowed-local-media-path / \
+        --dtype bfloat16 \
+        --reasoning-parser qwen3 \
+        --mm-processor-cache-gb 0 \
+        --mm-encoder-tp-mode data \
+        --mm-processor-cache-type shm \
         --enable-prefix-caching \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true}'
     ```
@@ -267,11 +416,75 @@ Before starting the service:
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
-    - `--enable-prefix-caching` enables automatic prefix caching.
+    - `--enable-prefix-caching` enables prefix caching, which is the default behavior. To disable it, use `--no-enable-prefix-caching`. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+    - `--allowed-local-media-path` allows the API server to read local images or videos from the specified directory when processing multimodal inputs. In this example, `/` whitelists the entire file system. This is security-sensitive and should only be enabled in trusted environments.
+    - `--dtype bfloat16` sets the data type for model weights and activations. `bfloat16` is used on Atlas 800I A3 / Atlas 800I A2; `float16` is required on Atlas 300I DUO instead.
+    - `--reasoning-parser qwen3` enables the reasoning output parser for the OpenAI-compatible API. It splits the model's thinking content from the final answer and returns it in the `reasoning_content` field of `chat.completions` responses.
+    - `--mm-processor-cache-gb` sets the size (in GiB) of the multimodal processor cache, which is used to avoid re-processing past multimodal inputs. The cache is duplicated in each API server process and engine core process, so the total host memory usage is the cache size multiplied by the number of these processes. A value of `0` disables this cache completely.
+    - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). `data` splits the batched encoder input data across TP ranks while each rank hosts the full encoder weights, and is recommended when multimodal inputs are used. The default mode `weights` splits the encoder weights across TP ranks instead.
+    - `--mm-processor-cache-type` sets the cache type used by the multimodal preprocessor and mapper. `shm` uses a shared-memory FIFO cache, while the default `lru` uses a mirrored LRU cache.
+    - `--additional-config` contains Ascend-specific optimization options:
+        - `"enable_cpu_binding": true` enables Ascend-native CPU binding, which pins the worker process, key runtime threads, memory pages, and NPU IRQs to CPU ranges close to the driven NPU, reducing cross-NUMA traffic and thread preemption and improving latency stability. It is enabled by default starting from vllm-ascend v0.18.0rc1.
+
+=== "Atlas 300I DUO"
+
+    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path. The quantized version needs to start with the `--quantization ascend` parameter.
+
+    === "Qwen3.8-27B-w8a8"
+
+        Startup Command:
+
+        ```bash
+        #!/bin/sh
+        # Load model from ModelScope to speed up download
+        export VLLM_USE_MODELSCOPE=True
+
+        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+        # Ensure the model path matches the directory recorded during download
+        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-310p
+
+        vllm serve $MODEL_PATH \
+            --host 127.0.0.1 \
+            --port 8000 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.8 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+        ```
+
+    Key Parameter Descriptions:
+
+    - `--tensor-parallel-size` sets the tensor parallel size. Choose **TP=2** or **TP=4** according to the available devices.
+    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; `Qwen3.8-27B` supports up to 262144.
+    - `--max-num-seqs` indicates the maximum number of concurrent requests. Configure it as needed—setting it too high may cause OOM.
+    - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
+    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO, only `float16` is supported.
+    - `--dtype float16` must be set on Atlas 300I DUO. These devices only support the FP16 data type.
+    - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
+    - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
+        - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
+        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
+        With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
+
+Wait until the engine finishes loading weights and graph capture. A successful startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 ## 6 Functional Verification
 
@@ -334,7 +547,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 Here is an accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -348,15 +561,21 @@ Here is an accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+
+| Parameter | Standard deployment | Performance test |
+| --- | ---: | ---: |
+| `--max-model-len` | 256000 | 250000 |
+| `--max-num-batched-tokens` | 16384 | 8192 |
+| `--gpu-memory-utilization` | 0.9 | 0.95 |
 
 There are three `vllm bench` subcommands:
 
@@ -369,7 +588,7 @@ Take the `serve` as an example. Run the code as follows.
 ```bash
 export VLLM_USE_MODELSCOPE=True
 # For Qwen3.8-27B-w8a8:
-vllm bench serve --model Eco-Tech/Qwen3.8-27B-w8a8 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Eco-Tech/Qwen3.8-27B-w8a8 --served-model-name qwen3.8 --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -379,6 +598,10 @@ After about several minutes, you can get the performance evaluation result.
 ### 9.1 Recommended Configurations
 
 > **Note**: The current documentation focuses on the rapid adaptation and validation of the Qwen3.8-27B model on Ascend NPUs. Performance tuning results have not yet been fully verified. Recommended configurations for typical scenarios (e.g., long context, low latency, and high throughput) will be supplemented and updated here once the corresponding validation is completed. In the meantime, please refer to [Section 9.2](#92-tuning-guidelines) for general tuning guidance.
+>
+> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
+>
+> **950PR&950DT Products**: The `Qwen3.8-27B-w8a8c8-mxfp8` model weight easily fits in a single NPU (96 GB HBM per NPU on 950DT Products, 128 GB on 950PR Products). Following the **DP-first** principle, **TP=1 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. The C8 weights are recommended for long-sequence scenarios and are served with `--kv-cache-dtype mxfp8`; for short-sequence scenarios (e.g., 16K input), use `Qwen3.8-27B-w8a8-mxfp8` without `--kv-cache-dtype mxfp8`. `--max-model-len` can support up to **262144** in the same TP=1 + DP=8 layout.
 
 ### 9.2 Tuning Guidelines
 
@@ -408,4 +631,4 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md).

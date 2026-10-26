@@ -996,9 +996,9 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/kv_offload/test_factory.py
     estimated_time: 20
-  - name: tests/quantization/test_fp8_per_channel.py
-    estimated_time: 20
   - name: tests/quantization/test_auto_awq.py
+    estimated_time: 20
+  - name: tests/quantization/test_auto_round.py
     estimated_time: 20
   - name: tests/renderers/test_token_offsets.py
     estimated_time: 20

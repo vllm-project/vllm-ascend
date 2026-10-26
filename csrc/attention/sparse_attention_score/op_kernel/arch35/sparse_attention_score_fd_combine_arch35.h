@@ -20,7 +20,7 @@ namespace SasaKernelArch35 {
 template <class ElementO, class Resource>
 class SparseAttentionScoreFdCombineArch35 {
 public:
-    static constexpr uint32_t MAX_SPLIT_NUM = 16;
+    static constexpr uint32_t MAX_SPLIT_NUM = SparseAttn::SASA_FD_MAX_AIC;
     static constexpr uint32_t MAX_ROW_TILE = 8;
     static constexpr uint32_t FLOATS_PER_BLOCK = 8;
     static constexpr uint32_t HEAD_DIM = 128;
@@ -63,16 +63,19 @@ public:
         AscendC::SetVectorMask<int8_t>(static_cast<uint64_t>(-1), static_cast<uint64_t>(-1));
 
         const uint32_t subBlockNum = AscendC::GetSubBlockNum();
+        const uint32_t combineTaskNum = tilingData->fdCombineTaskNum;
+        if (subBlockNum == 0U || combineTaskNum == 0U) {
+            return;
+        }
         const uint32_t aivIdx = AscendC::GetBlockIdx();
         const uint32_t aivNum = AscendC::GetBlockNum() * subBlockNum;
+        if (aivNum == 0U) {
+            return;
+        }
         const uint32_t groupSize = tilingData->groupSize;
         const uint32_t rowSplit = Min(groupSize, RoundUp(groupSize, FLOATS_PER_BLOCK) / subBlockNum);
         const uint32_t sub0Rows = rowSplit;
         const uint32_t sub1Rows = groupSize - rowSplit;
-        const uint32_t combineTaskNum = tilingData->fdCombineTaskNum;
-        if (aivNum == 0 || combineTaskNum == 0) {
-            return;
-        }
 
         const uint32_t totalRows = combineTaskNum * groupSize;
         const uint32_t rowTile = Min(MAX_ROW_TILE, Max(1U, CeilDiv(totalRows, aivNum)));

@@ -37,7 +37,7 @@ MODELS = [
 
 def _install_spies(counters: dict[str, Any]) -> contextlib.ExitStack:
     """Installs thread-safe spies on NPU methods to track invocation counts."""
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
     def make_spy(cls, method_name, counter):
         original = getattr(cls, method_name)
@@ -129,7 +129,6 @@ def _run_worker_process(
         torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip(reason="fix me")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4, 36])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})

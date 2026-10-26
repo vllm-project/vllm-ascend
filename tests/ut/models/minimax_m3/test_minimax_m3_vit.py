@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
 import vllm
 from torch import nn
 from vllm.model_executor.models.utils import StageMissingLayer
@@ -44,6 +45,17 @@ class _DummyLanguageModel(nn.Module):
     def __init__(self, **kwargs) -> None:
         super().__init__()
         self.lm_head = nn.Identity()
+        self.expert_weights: list[list[torch.Tensor]] = []
+        self.num_expert_groups = 1
+        self.moe_layers: list[nn.Module] = []
+        self.moe_mlp_layers: list[nn.Module] = []
+        self.num_moe_layers = 0
+        self.num_logical_experts = 0
+        self.num_physical_experts = 0
+        self.num_local_physical_experts = 0
+        self.num_routed_experts = 0
+        self.num_shared_experts = 0
+        self.num_redundant_experts = 0
 
     def make_empty_intermediate_tensors(self, *args, **kwargs):
         return None
@@ -73,12 +85,16 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
 
     def test_shared_vision_tower_pruning_follows_image_video_limits(self) -> None:
         def make_vllm_config(limit_mm_per_prompt: dict[str, int]):
+            multimodal_config = _DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt)
+            model_config = SimpleNamespace(
+                hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
+                hf_text_config=SimpleNamespace(hidden_size=1),
+                multimodal_config=multimodal_config,
+            )
+            # vLLM #54079 switched the multimodal model helpers to this accessor.
+            model_config.get_multimodal_config = lambda: multimodal_config
             return SimpleNamespace(
-                model_config=SimpleNamespace(
-                    hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
-                    hf_text_config=SimpleNamespace(hidden_size=1),
-                    multimodal_config=_DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt),
-                ),
+                model_config=model_config,
                 quant_config=None,
             )
 

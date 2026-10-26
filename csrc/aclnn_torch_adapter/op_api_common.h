@@ -258,6 +258,10 @@ const std::vector<std::string> g_default_custom_lib_path = get_default_custom_li
 
 inline const char *GetOpApiLibName(void) { return "libopapi.so"; }
 
+inline const char *GetTransformerOpApiLibName(void) {
+  return "libopapi_transformer.so";
+}
+
 inline const char *GetCustOpApiLibName(void) { return "libcust_opapi.so"; }
 
 inline void *GetOpApiFuncAddrInLib(void *handler, const char *libName,
@@ -304,6 +308,20 @@ inline void *GetOpApiFuncAddr(const char *apiName)
                     return funcAddr;
                 }
             }
+        }
+    }
+
+    // CANN 9.2 splits transformer ACLNN entry points out of libopapi.so.
+    // Keep the generic/custom lookup order above, then query the transformer
+    // component before falling back to the common opapi library. This also
+    // allows the 9.2 ops-transformer package to run on a CANN 9.1 base image.
+    static auto transformerOpApiHandler =
+        GetOpApiLibHandler(GetTransformerOpApiLibName());
+    if (transformerOpApiHandler != nullptr) {
+        auto funcAddr = GetOpApiFuncAddrInLib(
+            transformerOpApiHandler, GetTransformerOpApiLibName(), apiName);
+        if (funcAddr != nullptr) {
+            return funcAddr;
         }
     }
 

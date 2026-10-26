@@ -9,7 +9,7 @@ from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import is_rot_weight_used, vllm_version_is
+from vllm_ascend.utils import is_rot_weight_used
 
 
 @support_torch_compile
@@ -43,6 +43,10 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         mtp_layer_idx = self.model.mtp_start_layer_idx
         own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
         if own_head_weight not in loaded_weights:
+            # GLM-5.3 and friends ship no MTP head, leaving shared_head.head at
+            # its allocation-time contents. Record that so the proposer shares
+            # the target head instead of inspecting those values.
+            self.has_own_lm_head = False
             return
 
         self.has_own_lm_head = True
@@ -68,10 +72,13 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if vllm_config.use_v2_model_runner and vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # EPLB maps and expert weights must describe the same local layers.
+            self.num_moe_layers = len(self.moe_layers)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        if vllm_version_is("0.27.1"):
-            loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
-            return loader.load_weights(weights)
         mapper = WeightsMapper(orig_to_new_prefix={"rot.": None})
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=mapper)

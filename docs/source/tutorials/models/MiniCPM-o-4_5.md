@@ -44,7 +44,7 @@ Verified environment:
 
 ## 4 Installation
 
-You can use the official docker image, or build from source. Refer to [installation](../../installation.md) for both options.
+You can use the official docker image, or build from source. Refer to [installation](../../getting_started/installation.md) for both options.
 
 Make sure the Ascend environment variables are set before starting the server:
 

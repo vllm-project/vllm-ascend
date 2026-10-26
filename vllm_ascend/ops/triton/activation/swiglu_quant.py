@@ -22,7 +22,7 @@ def _swiglu_quant_kernel(
 ):
     # calc real total_rows
     if GROUP_LIST_TYPE == 0:  # cusum
-        total_rows = tl.load(group_list_ptr + NUM_EXPERTS).to(tl.int32)
+        total_rows = tl.load(group_list_ptr + NUM_EXPERTS - 1).to(tl.int32)
     else:
         gl_offsets = tl.arange(0, NUM_EXPERTS_ALGIN)
         gl_mask = gl_offsets < NUM_EXPERTS

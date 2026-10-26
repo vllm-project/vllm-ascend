@@ -188,10 +188,12 @@ public:
             uint32_t validTopK = topK_;
             if (params.selectNumIdx != nullptr) {
                 int64_t selectNumOffset = static_cast<int64_t>(kvHeadIdx) * maxQSeqlen_ + qToken;
-                validTopK = static_cast<uint32_t>(gSelectNumIdx.GetValue(selectNumOffset));
+                const int32_t selectNum = gSelectNumIdx.GetValue(selectNumOffset);
+                validTopK = selectNum <= 0 ? 0U :
+                    Min(static_cast<uint32_t>(selectNum), topK_);
             }
             if constexpr (!IS_FD) {
-                if (validTopK == 0) continue;
+                if (validTopK == 0U) continue;
                 rawEnd = validTopK;
             } else {
                 rawBegin = rawBegin < validTopK ? rawBegin : validTopK;
@@ -201,21 +203,22 @@ public:
             uint32_t kvSeqlen = static_cast<uint32_t>(gActualKvseqlen.GetValue(batchIdx));
             uint32_t qSeqlen = static_cast<uint32_t>(gActualQseqlen.GetValue(batchIdx));
             uint32_t historyLen = kvSeqlen - qSeqlen;
-            uint32_t lastBlockTileSize = (historyLen + qTokenInBatch) % blockSize_ + 1;
+            uint32_t visibleKvLen = historyLen + qTokenInBatch + 1U;
+            uint32_t validLogicalBlockNum = CeilDiv(visibleKvLen, blockSize_);
 
             uint32_t kvSLoopNum = rawEnd - rawBegin;
             int32_t validPhysicalIds[16];
             uint32_t validTileSize[16];
-            uint32_t lastLogicalBlockId = (historyLen + qTokenInBatch) / blockSize_;
             uint32_t actualLoopNum = 0;
             for (uint32_t i = rawBegin; i < rawEnd && i < topK_; i++) {
                 int32_t logicalId = gSelectIdx.GetValue(selectIdxBase + i);
-                if (logicalId < 0) continue;
+                if (logicalId < 0 || static_cast<uint32_t>(logicalId) >= validLogicalBlockNum) continue;
                 int64_t btOffset = static_cast<int64_t>(batchIdx) * maxBlocksPerBatch_ + logicalId;
                 int32_t physicalId = gBlockTable.GetValue(btOffset);
                 validPhysicalIds[actualLoopNum] = physicalId;
-                validTileSize[actualLoopNum] = (static_cast<uint32_t>(logicalId) == lastLogicalBlockId) ?
-                    lastBlockTileSize : blockSize_;
+                const uint32_t blockStartToken = static_cast<uint32_t>(logicalId) * blockSize_;
+                const uint32_t remainingTokens = visibleKvLen - blockStartToken;
+                validTileSize[actualLoopNum] = Min(remainingTokens, blockSize_);
                 actualLoopNum++;
             }
             kvSLoopNum = actualLoopNum;

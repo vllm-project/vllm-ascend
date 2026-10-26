@@ -192,7 +192,10 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     hi = tl.minimum(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
 
-    middle = (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K
+    middle = tl.maximum(
+        0,
+        (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K,
+    )
 
     for key_start in tl.range(0, middle, BLOCK_SIZE_K):
         block_id = key_start // BLOCK_SIZE_K
@@ -274,8 +277,8 @@ def _decode_qk_score_kernel(
 
     Visible-range metadata is scalar because each program owns exactly one
     flattened query. Fully visible pages skip the token-position mask; at most
-    one causal boundary page uses it. Invalid score-tail entries are written by
-    ``_decode_index_score_pad_tail_kernel`` after this launch.
+    one causal boundary page uses it. The score buffer is pre-filled with
+    ``-inf``, so unwritten tail entries are already masked.
     """
     query_id = tl.program_id(0)
     chunk_id = tl.program_id(1)
@@ -364,65 +367,27 @@ def _decode_qk_score_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Pad unwritten score tail with -inf so torch.topk ignores [num_blocks, max_block).
-# _decode_qk_score_kernel only writes [0, row_num_blocks); torch.empty leaves
-# the rest as garbage. Per-token num_blocks matches the top-k invalid mask.
-# Split-K over max_block with a shape-constant chunk count (cudagraph-safe).
-# ---------------------------------------------------------------------------
-@triton.jit(do_not_specialize=["decode_query_len", "max_block", "chunk_blocks"])
-def _decode_index_score_pad_tail_kernel(
-    score_ptr,  # [num_idx_heads, total_q, score_block_stride] fp32
-    seq_lens,  # [num_reqs]
-    block_size: tl.constexpr,  # sparse block size (128)
-    max_block,
-    decode_query_len,
-    chunk_blocks,  # max_block split count per chunk (shape-constant)
-    stride_s_h,
-    stride_s_b,
-    stride_s_k,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    pid_b = tl.program_id(0)  # flattened query-token id
-    pid_h = tl.program_id(1)
-    pid_chunk = tl.program_id(2)
-    req_id = pid_b // decode_query_len
-    q_offset = pid_b - req_id * decode_query_len
-
-    seq_len = tl.load(seq_lens + req_id)
-    query_pos = seq_len - decode_query_len + q_offset
-    kv_len = tl.maximum(query_pos + 1, 0)
-    num_blocks = (kv_len + block_size - 1) // block_size
-
-    chunk_start = pid_chunk * chunk_blocks
-    chunk_end = tl.minimum(chunk_start + chunk_blocks, max_block)
-    fill_start = tl.maximum(chunk_start, num_blocks)
-    if fill_start >= chunk_end:
-        return
-
-    num_to_fill = chunk_end - fill_start
-    off_k = tl.arange(0, BLOCK_SIZE_K)
-    for i in tl.range(0, num_to_fill, BLOCK_SIZE_K):
-        blk = fill_start + i + off_k
-        store_mask = (i + off_k) < num_to_fill
-        s_ptrs = score_ptr + pid_h * stride_s_h + pid_b * stride_s_b + blk * stride_s_k
-        tl.store(s_ptrs, float("-inf"), mask=store_mask)
-
-
-# ---------------------------------------------------------------------------
 # Decode top-k: torch.topk on scores, then mask invalid block ids per token.
 # Forced init/local blocks are already encoded in the scores.
 # ---------------------------------------------------------------------------
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
 @triton.jit(do_not_specialize=["decode_query_len"])
-def _topk_index_mask_invalid_kernel(
-    ti_ptr,  # [num_idx_heads, total_q, topk] int32 in/out
+def _index_topk_postprocess_kernel(
+    ti_in_ptr,  # [num_idx_heads, total_q, topk] int64 input
+    ti_out_ptr,  # [num_idx_heads, total_q, topk] int32 output
+    select_num_idx_ptr,  # [num_idx_heads, total_q] int32 output
     seq_lens,  # [num_reqs]
     block_size: tl.constexpr,  # sparse block size (128)
     topk: tl.constexpr,
     decode_query_len,
-    stride_ti_h,
-    stride_ti_b,
-    stride_ti_t,
+    stride_in_h,
+    stride_in_b,
+    stride_in_t,
+    stride_out_h,
+    stride_out_b,
+    stride_out_t,
+    stride_select_h,
+    stride_select_b,
     BLOCK_SIZE_T: tl.constexpr,
 ):
     pid_b = tl.program_id(0)  # flattened query-token id
@@ -438,13 +403,16 @@ def _topk_index_mask_invalid_kernel(
     num_blocks = (kv_len + block_size - 1) // block_size
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
-    ti_ptrs = ti_ptr + pid_h * stride_ti_h + pid_b * stride_ti_b + off_t * stride_ti_t
+    ti_in_ptrs = ti_in_ptr + pid_h * stride_in_h + pid_b * stride_in_b + off_t * stride_in_t
     store_mask = off_t < topk
-    idx = tl.load(ti_ptrs, mask=store_mask, other=0)
+    idx = tl.load(ti_in_ptrs, mask=store_mask, other=0)
     valid_slot = off_t < tl.minimum(topk, num_blocks)
     valid_idx = (idx >= 0) & (idx < num_blocks)
     masked_idx = tl.where(valid_slot & valid_idx, idx, -1)
-    tl.store(ti_ptrs, masked_idx.to(ti_ptr.dtype.element_ty), mask=store_mask)
+    ti_out_ptrs = ti_out_ptr + pid_h * stride_out_h + pid_b * stride_out_b + off_t * stride_out_t
+    tl.store(ti_out_ptrs, masked_idx.to(tl.int32), mask=store_mask)
+    valid_count = tl.sum((valid_slot & valid_idx).to(tl.int32))
+    tl.store(select_num_idx_ptr + pid_h * stride_select_h + pid_b * stride_select_b, valid_count)
 
 
 # ---------------------------------------------------------------------------
@@ -775,10 +743,11 @@ def minimax_m3_index_decode(
     max_decode_query_len: int | None = None,
     out: torch.Tensor | None = None,
     sm_scale=None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Decode index block-score + top-k (torch.topk + invalid-index mask).
 
-    Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+    Returns ``(topk_idx, select_num_idx)``. Invalid block IDs are ``-1`` and
+    ``select_num_idx`` contains the number of valid IDs for each head/query.
     When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
     ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
     """
@@ -793,12 +762,13 @@ def minimax_m3_index_decode(
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
     del sm_scale
 
-    # Keep score strides 16-divisible to avoid Triton recompiles. The score
-    # kernel writes only visible blocks; the existing pad-tail kernel below
-    # initializes the remaining entries to -inf.
-    score_block_stride = round_up(max_block, 16)
-    score = torch.empty(
+    # Pre-fill the tail so torch.topk can run directly on one contiguous tensor
+    # without a separate pad kernel. Keep the stride 16-divisible and at least
+    # topk wide so the output shape is stable for short sequences.
+    score_block_stride = round_up(max(max_block, topk), 16)
+    score = torch.full(
         (num_idx_heads, total_q, score_block_stride),
+        float("-inf"),
         dtype=torch.float32,
         device=idx_q.device,
     )
@@ -838,46 +808,40 @@ def minimax_m3_index_decode(
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         NUM_CHUNKS=num_kv_chunks,
     )
-    # Chunk count `pad_target` is shape-constant (cudagraph-safe)
-    TOPK_TARGET_GRID = 64
-    MAX_NUM_TOPK_CHUNKS = 16
-    pad_target = max(1, min(MAX_NUM_TOPK_CHUNKS, TOPK_TARGET_GRID // max(1, batch * num_idx_heads)))
-    pad_chunk_blocks = (max_block + pad_target - 1) // pad_target
-    _decode_index_score_pad_tail_kernel[(batch, num_idx_heads, pad_target)](
-        score,
-        seq_lens,
-        SPARSE_BLOCK_SIZE,
-        max_block,
-        decode_query_len,
-        pad_chunk_blocks,
-        score.stride(0),
-        score.stride(1),
-        score.stride(2),
-        BLOCK_SIZE_K=2048,
-    )
-
-    score_rows = score[:, :total_q, :max_block]
-    _, topk_idx_raw = torch.topk(score_rows, k=min(topk, max_block), dim=-1)
+    _, topk_idx_raw = torch.topk(score, k=topk, dim=-1)
     if out is not None:
         topk_idx = out[:, :total_q, :]
-        topk_idx.copy_(topk_idx_raw)
     else:
-        if max_block < topk:
-            topk_idx = torch.empty(num_idx_heads, total_q, topk, dtype=torch.int32, device=idx_q.device)
-            topk_idx[..., :max_block].copy_(topk_idx_raw.to(torch.int32))
-        else:
-            topk_idx = topk_idx_raw.to(torch.int32)
-    _topk_index_mask_invalid_kernel[(batch, num_idx_heads)](
+        topk_idx = torch.empty(
+            num_idx_heads,
+            total_q,
+            topk,
+            dtype=torch.int32,
+            device=idx_q.device,
+        )
+    select_num_idx = torch.empty(
+        (num_idx_heads, total_q),
+        dtype=torch.int32,
+        device=idx_q.device,
+    )
+    _index_topk_postprocess_kernel[(batch, num_idx_heads)](
+        topk_idx_raw,
         topk_idx,
+        select_num_idx,
         seq_lens,
         SPARSE_BLOCK_SIZE,
         topk,
         decode_query_len,
+        topk_idx_raw.stride(0),
+        topk_idx_raw.stride(1),
+        topk_idx_raw.stride(2),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
+        select_num_idx.stride(0),
+        select_num_idx.stride(1),
     )
-    return topk_idx
+    return topk_idx, select_num_idx
 
 
 # ---------------------------------------------------------------------------

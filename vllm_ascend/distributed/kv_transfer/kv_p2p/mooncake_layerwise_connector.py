@@ -48,6 +48,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -57,6 +58,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    PD_QOS_DEFAULT,
     RegisterRegions,
     align_memory,
     collect_storage_merged_register_regions,
@@ -65,12 +67,18 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_local_remote_block_port_mappings,
     get_transfer_mappings,
     get_transfer_timeout_value,
+    inject_qos,
     kv_alltoall_and_rearrange,
     parallel_info,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
-from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
+from vllm_ascend.utils import (
+    get_kv_cache_tensor_layers,
+    npu_stream_switch,
+    trans_nd_to_nz,
+    vllm_version_is,
+)
 
 # isort: off
 if TYPE_CHECKING:
@@ -532,7 +540,7 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         if send_task.k_quant_cache is not None:
             self.resharding_stream.synchronize()
-        elif self.pd_head_ratio == 1:
+        elif send_task.k_cache is None or self.pd_head_ratio == 1:
             """
             Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
             This issue will be fixed in CANN version 8.5.rc1.
@@ -762,6 +770,14 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
+    if not vllm_version_is("0.31.0"):
+
+        def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+            # vLLM main's scheduler uses this for skip_zeroing_group_ids and for
+            # the DSV4.1 SWA replay-window check; a P/D transfer restores the
+            # request's own blocks, i.e. every transfer group.
+            return self._kv_cache_config.transfer_group_ids
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
@@ -809,6 +825,14 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the block ids that have load errors."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        assert isinstance(connector_metadata, MooncakeLayerwiseConnectorMetadata)
+        assert self.connector_worker is not None
+        # Newer V1 runners may defer start_load_kv until after target forward.
+        # Layerwise writes need the step's counters and send mappings beforehand.
+        self.connector_worker.prepare_layerwise_step(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1229,6 +1253,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
+        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
@@ -1244,6 +1269,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
         self.layer_metadata: dict[str, LayerMetadata] = {}
+        self.sparse_sfa_c8_layers: set[str] = set()
         self.attn_resharding_group_idx = set[int]()
 
         self.enable_kv_quant = (
@@ -1373,7 +1399,7 @@ class MooncakeLayerwiseConnectorWorker:
         use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                 layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
@@ -1398,17 +1424,35 @@ class MooncakeLayerwiseConnectorWorker:
             layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-            if getattr(layer_kv_cache_spec, "cache_sparse_sfa_c8", False) is True:
+            # Read the layout flags directly: some Ascend versions expose the
+            # cache spec flags without the corresponding utils helpers.
+            is_mla = isinstance(layer_kv_cache_spec, MLAAttentionSpec)
+            sparse_sfa_c8 = is_mla and bool(getattr(layer_kv_cache_spec, "cache_sparse_sfa_c8", False))
+            sparse_sfa_turboquant = is_mla and bool(getattr(layer_kv_cache_spec, "cache_sparse_sfa_turboquant", False))
+            if sparse_sfa_turboquant:
                 raise NotImplementedError(
-                    "Mooncake layerwise connector does not support sparse SFA C8 packed main KV cache yet."
+                    "Mooncake layerwise connector does not support packed SFA main KV caches other than C8."
                 )
+            if sparse_sfa_c8:
+                # Attention already packs quantized NoPE, BF16 RoPE and scales
+                # into one byte tensor on both P and D. Transfer it unchanged.
+                if len(kv_cache_tuple) != 1 or not kv_cache_tuple[0].is_contiguous():
+                    raise NotImplementedError("SFA C8 layerwise transfer requires one contiguous packed cache tensor.")
+                self.sparse_sfa_c8_layers.add(layer_name)
             if (
-                (self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))))
-                or self.enable_kv_quant
-                or self.enable_c8_quant
+                not sparse_sfa_c8
+                and "indexer" not in layer_name.lower()
+                and (
+                    (
+                        self.pd_head_ratio > 1
+                        and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
+                    )
+                    or self.enable_kv_quant
+                    or self.enable_c8_quant
+                )
             ):
                 self.attn_resharding_group_idx.add(layer_kv_group_id)
-                if kv_buffer is None and "indexer" not in layer_name.lower():
+                if kv_buffer is None:
                     kv_buffer = kv_cache_tuple
             single_layer_meta = LayerMetadata([], [], [], [])
             for single_kv_cache in kv_cache_tuple:
@@ -1445,7 +1489,7 @@ class MooncakeLayerwiseConnectorWorker:
         if self.use_attn_mamba_hybrid:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 tensor_addrs = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                     tensor_addrs.extend(self.layer_metadata[layer_name].kv_caches_base_addr)
                     if "mtp" in layer_name:
                         tensor_addrs.append(min(tensor_addrs) - conv_total_padding_size)
@@ -1739,9 +1783,7 @@ class MooncakeLayerwiseConnectorWorker:
         return block_ids
 
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
-        """Start loading KV blocks from remote engine."""
-        self.current_layer = 0
-        self._cache_write_events = [None] * self.total_layers
+        """Track D-side receives without resetting forward/MTP send state."""
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             for req_id, meta in metadata.requests.items():
                 if meta.do_virtual:
@@ -1751,7 +1793,12 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
-        elif self.vllm_config.kv_transfer_config.is_kv_producer:
+
+    def prepare_layerwise_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
+        """Prepare layerwise hooks once, when metadata is bound before forward."""
+        self.current_layer = 0
+        self._cache_write_events = [None] * self.total_layers
+        if self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
@@ -1794,7 +1841,7 @@ class MooncakeLayerwiseConnectorWorker:
                 metadata.requests[req_id] = update_metadata[req_id]
 
             # update send task trans block info
-            if self.pd_head_ratio != 1 or self.enable_kv_quant or self.enable_c8_quant:
+            if self.attn_resharding_group_idx:
                 send_task = metadata.send_task
                 send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
                 send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
@@ -1878,7 +1925,7 @@ class MooncakeLayerwiseConnectorWorker:
             values = None
             quant_keys = None
             quant_values = None
-            if (
+            if layer_name not in self.sparse_sfa_c8_layers and (
                 (
                     self.pd_head_ratio != 1
                     and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))

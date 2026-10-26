@@ -6,6 +6,9 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
+# Set to true temporarily to run all selected targets before reporting failure.
+continue_on_error=false
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enable-coverage)
@@ -138,6 +141,7 @@ print_test_info() {
     echo -e "  \033[33mNPU count:\033[0m ${num_npus}"
   fi
   echo -e "  \033[33mCoverage:\033[0m ${enable_coverage}"
+  echo -e "  \033[33mContinue after failure:\033[0m ${continue_on_error}"
   echo -e "  \033[33mTargets:\033[0m"
   for target in "${targets[@]}"; do
     echo -e "    \033[32m-\033[0m ${target}"
@@ -146,6 +150,7 @@ print_test_info() {
 }
 
 print_summary() {
+  local result target status log_file failed
   echo -e "\033[1;34m=== TEST SUMMARY ===\033[0m"
   for result in "${test_results[@]}"; do
     IFS='|' read -r target status log_file <<< "${result}"
@@ -204,7 +209,10 @@ run_pytest_target() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
+    fi
+    if [ "${record_timing}" != true ] && [ "${continue_on_error}" != true ]; then
       print_summary
       exit "${status}"
     fi
@@ -249,7 +257,10 @@ run_pytest_batch() {
   else
     test_results+=("${target}|FAILED|${log_file}")
     failed_logs+=("${target}|${log_file}")
-    if [ "${record_timing}" != true ]; then
+    if [ "${overall_status}" -eq 0 ]; then
+      overall_status="${status}"
+    fi
+    if [ "${record_timing}" != true ] && [ "${continue_on_error}" != true ]; then
       print_summary
       exit "${status}"
     fi
