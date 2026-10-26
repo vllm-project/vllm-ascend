@@ -146,7 +146,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 === "RoCE"
 
-    For RoCE network protocol, current configuration is to prepare endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. For example, with `DP=4` and `TP=1` on each side:
+    Host RoCE parameter-plane configuration for Atlas 850/850E/950 SuperPod (950PR/950DT) currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
 
     ```json
     {
@@ -168,7 +168,9 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
     When combining PD disaggregation with KV pooling through `MultiConnector`, place `ascend_local_comm_res_path` in the **outer** `MultiConnector`'s `kv_connector_extra_config`, alongside the `connectors` list. Do not place it in a child connector's `kv_connector_extra_config`: the worker loads the endpoint files from the outer KV transfer configuration. Keep the `prefill` and `decode` parallelism settings in the Mooncake P/D child connector's configuration.
 
-    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices. An example file contains:
+    Create an endpoint file for each physical NPU used on the host, named `/etc/hixlep/ub_endpoint_npu_<physical_npu_id>.json`. The suffix is the host physical NPU ID, not the DP rank or the ordinal within the visible devices.
+
+    Check the host's NPU-to-RoCE-IP mapping before filling in these files. For a host whose RoCE IP addresses correspond to physical NPU IDs in ascending order, populate `ub_endpoint_npu_0.json`, `ub_endpoint_npu_1.json`, and so on in that order. **RoCE IPs can be populated in ascending numerical order**, after verifying the actual host mapping. Each file's `comm_id` must match the RoCE IP associated with that physical NPU; do not use the DP rank or visible-device order to select the address. The JSON content of each endpoint file follows this format:
 
     ```json
     {
@@ -185,6 +187,17 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
     ```
 
     Replace `<host_roce_ip>` with the actual host RoCE IP address. Ensure the endpoint files are available at the configured path inside each container.
+
+    !!! warning "Simplified Host RoCE configuration is NOT YET SUPPORTED"
+
+        A future configuration is intended to select Host RoCE with only the following environment variable:
+
+        ```bash
+        # NOT YET SUPPORTED: do not use this in current deployments.
+        export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:host"}'
+        ```
+
+        **This configuration is not yet supported and does not replace the manual endpoint files above.** Continue to configure the per-NPU endpoint files and `ascend_local_comm_res_path` for current deployments.
 
 ## Run with Docker
 
@@ -266,7 +279,12 @@ docker run --rm \
 
 Adjust the device nodes to match the host and set `ASCEND_RT_VISIBLE_DEVICES` inside the container to the physical devices assigned to the service. The complete driver mount includes `driver/topo/950`. All host mount sources must exist and have the expected file/directory type; `-v` creates a directory for a missing source path.
 
-For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. Mounting `/lib/route.conf` is **optional**. If a manual file is needed, generate it first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
+For automatic UB configuration, set `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in both serving environments. The `/lib/route.conf` mount depends on the CANN version:
+
+- **CANN 9.2.0 and later:** This file is no longer a dependency; omit the mount.
+- **CANN 9.1.0 and earlier:** Workloads involving device-to-host memory transfers may optionally mount this file, but it is not mandatory.
+
+If you choose to mount it for CANN 9.1.0 or earlier, generate the file on the host first (see the [LocalCommRes Configuration Guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md)) and add `-v /lib/route.conf:/lib/route.conf:ro`.
 
 For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose the RDMA devices, provide the HRN5 shared library, and mount the endpoint directory configured by `ascend_local_comm_res_path`:
 
@@ -276,14 +294,18 @@ For Host RoCE, insert the following options before `-it "$IMAGE" bash` to expose
 -v /etc/hixlep:/etc/hixlep:ro \
 ```
 
+Both paths in the endpoint-directory mount are configurable: the left side is the host directory containing the endpoint JSON files, and the right side is their directory inside the container. Set `ascend_local_comm_res_path` to the **container-side** directory. For example, `-v /srv/mooncake/endpoints:/opt/mooncake/endpoints:ro` requires `"ascend_local_comm_res_path": "/opt/mooncake/endpoints"`. Keep the `ub_endpoint_npu_<physical_npu_id>.json` filenames unchanged.
+
 - Use the provider library path/version matching the host driver and container RDMA userspace. Mount `/etc/libibverbs.d/hrn5.driver` with `-v /etc/libibverbs.d/hrn5.driver:/etc/libibverbs.d/hrn5.driver:ro` if required by that userspace; this configuration file does not replace the shared library.
 - `--privileged` exposes host devices. A non-privileged Host RoCE configuration must explicitly map the devices and provide `--cap-add=NET_ADMIN`; validate it for your driver and workload.
 - Mounting the `hiroce5` diagnostic tool is **optional**, for example `-v /usr/local/bin/hiroce5:/usr/local/bin/hiroce5:ro` if that is its host path.
 
 ## Install Mooncake
 
+The vLLM-Ascend container images already include a matching Mooncake version. You can use the bundled version directly; **downloading and compiling Mooncake is optional and is only needed for specific workload requirements**. Follow the source-build steps below only if your workload requires a custom Mooncake build, and ensure that it is compatible with the image's vLLM-Ascend and CANN versions.
+
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>
-First, we need to obtain the Mooncake project. Refer to the following command:
+For an optional source build, first obtain the Mooncake project:
 
 ```shell
 git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
