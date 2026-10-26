@@ -2,7 +2,7 @@ test_cases:
   - name: "DeepSeek-V4.1-Flash-W8A8-DSpark-PCP-Diag-560T"
     model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
     server_ready_timeout: 5400
-    startup_diagnostics: true
+    startup_diagnostics: false
     envs:
       VLLM_USE_MODELSCOPE: "true"
       OMP_PROC_BIND: "false"
