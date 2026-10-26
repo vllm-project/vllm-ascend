@@ -152,6 +152,8 @@ def main():
     parser.add_argument("--final-blocks", type=int, default=48)
     parser.add_argument("--pool-threads", type=int, default=256)
     parser.add_argument("--weight-layout", choices=("kn", "nk"), default="nk")
+    parser.add_argument("--auto-launch", action="store_true")
+    parser.add_argument("--cube-math-type", choices=("KEEP_DTYPE", "USE_HF32"))
     parser.add_argument("--hf32", action="store_true")
     parser.add_argument("--profile", choices=("fused", "serial"))
     opts = parser.parse_args()
@@ -161,6 +163,8 @@ def main():
         raise ValueError("profile exactly one case per application for unambiguous task mapping")
     torch.npu.set_device(0)
     torch.npu.matmul.allow_hf32 = opts.hf32
+    if opts.cube_math_type:
+        torch.npu.matmul.cube_math_type = getattr(torch.npu.CubeMathType, opts.cube_math_type)
     torch.ops.load_library(str(opts.fused_library.resolve()))
     torch.ops.load_library(str(opts.serial_library.resolve()))
     fixture = Path(__file__).parents[1] / "tests/ut/ops/compressor_serial_shapes.json"
@@ -177,6 +181,8 @@ def main():
         "fused_library_sha256": hashlib.sha256(opts.fused_library.read_bytes()).hexdigest(),
         "torch": torch.__version__,
         "hf32": opts.hf32,
+        "cube_math_type": str(torch.npu.matmul.cube_math_type),
+        "launch_policy": "adaptive" if opts.auto_launch else "explicit",
         "config": asdict(config),
         "metadata": "synthetic; exported shapes preserved",
         "cases": [],
@@ -186,7 +192,7 @@ def main():
             continue
         args = make_case(case, "npu")
         plan = serial_module.CompressorSerialPlan.prepare(
-            *args, cmp_ratio=case["ratio"], coff=case["coff"], config=config
+            *args, cmp_ratio=case["ratio"], coff=case["coff"], config=None if opts.auto_launch else config
         )
         print(f"Checking {case['id']}: runtime RoPE shape {tuple(args[6].shape)}", flush=True)
         initial, valid = check_case(args, case, plan)
@@ -220,6 +226,7 @@ def main():
                 "ratio": speed,
                 "target_met": speed >= 0.8,
                 "runtime_shapes": [None if t is None else list(t.shape) for t in args],
+                "launch_config": asdict(plan.config),
                 "reference_shapes": case["inputs"],
             }
         )

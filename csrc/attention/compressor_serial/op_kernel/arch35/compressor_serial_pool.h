@@ -109,8 +109,9 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void PoolWarp(
     const int32_t dim = Dim ? Dim : p->dim;
     const int32_t coff = Coff ? Coff : p->coff;
     int32_t lane = Simt::GetThreadIdx() % 32;
-    int32_t first = Simt::GetBlockIdx() * (Threads / 32) + Simt::GetThreadIdx() / 32;
-    int32_t step = Simt::GetBlockNum() * (Threads / 32);
+    int32_t qLane = lane / 8;
+    int32_t first = Simt::GetBlockIdx() * (Threads / 32) * 8 + (Simt::GetThreadIdx() / 32) * 8 + lane % 8;
+    int32_t step = Simt::GetBlockNum() * (Threads / 32) * 8;
     for (int32_t idx = first; idx < p->outputRows * dim; idx += step) {
         int32_t outRow = idx / dim, channel = idx % dim;
         int32_t b = 0, local = outRow, st = 0, count = 0;
@@ -126,7 +127,7 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void PoolWarp(
         int32_t begin = Begin(cu, b, p);
         float maximum = -3.402823466e+38F, denominator = 0, numerator = 0;
         #pragma unroll
-        for (int32_t q = lane; q < coff * ratio; q += 32) {
+        for (int32_t q = qLane; q < coff * ratio; q += 4) {
             int32_t pos = groupEnd - coff * ratio + q;
             if (pos < 0) continue;
             int32_t half = coff == 2 && q >= ratio ? 1 : 0;
@@ -150,11 +151,18 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(Threads) inline void PoolWarp(
             denominator = denominator * oldScale + weight;
             maximum = next;
         }
-        float globalMaximum = asc_reduce_max(maximum);
+        float other = asc_shfl_xor(maximum, 8);
+        float globalMaximum = maximum > other ? maximum : other;
+        other = asc_shfl_xor(globalMaximum, 16);
+        globalMaximum = globalMaximum > other ? globalMaximum : other;
         float scale = expf(maximum - globalMaximum);
-        numerator = asc_reduce_add(numerator * scale);
-        denominator = asc_reduce_add(denominator * scale);
-        if (lane == 0) pooled[idx] = denominator == 0 ? 0 : numerator / denominator;
+        numerator *= scale;
+        denominator *= scale;
+        numerator += asc_shfl_xor(numerator, 8);
+        denominator += asc_shfl_xor(denominator, 8);
+        numerator += asc_shfl_xor(numerator, 16);
+        denominator += asc_shfl_xor(denominator, 16);
+        if (qLane == 0) pooled[idx] = denominator == 0 ? 0 : numerator / denominator;
     }
 }
 
