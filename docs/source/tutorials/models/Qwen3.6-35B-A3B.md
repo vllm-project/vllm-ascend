@@ -30,7 +30,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 | `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 A3 series (64GB x 16) node, 1 A2 series (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 | `Qwen3.6-35B-A3B-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8) |
 | `Qwen3.6-35B-A3B-w8a8c8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8c8-mxfp8) |
-| `Qwen3.6-35B-A3B-w4a8-mxfp4` (quantized version) | 1 950DT Products (96GB x 8) node | |
+| `Qwen3.6-35B-A3B-w4a8-mxfp` (quantized version) | 1 950DT Products (96GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp) |
 
 It is recommended to download the model weight to `/root/.cache/`.
 
