@@ -3,3 +3,6 @@ entries:
   - category: feature
     text: Added support for a Kimi K3 target using decode context parallelism with a replicated GQA DSpark draft on Model Runner V2.
     model: kimi-k3
+  - category: bugfix
+    text: Fixed Kimi K3 attention residual shape errors with the fused O-projection ReduceScatter path on 950.
+    model: kimi-k3
