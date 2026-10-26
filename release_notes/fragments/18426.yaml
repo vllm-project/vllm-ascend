@@ -1,0 +1,10 @@
+pr: 18426
+entries:
+  - category: dependency
+    text: MiniMax-M3 sparse attention now uses CANN GBSA and its metadata operator, requiring compatible CANN Ops Transformer Python bindings and runtime kernels.
+    model: minimax-m3
+    hardware: [A2, A3, A5]
+  - category: performance
+    text: Reduced repeated GBSA metadata generation and query-prefix preparation for supported A3 BF16 decode layers.
+    model: minimax-m3
+    hardware: [A3]
