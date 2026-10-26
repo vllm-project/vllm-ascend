@@ -1244,6 +1244,9 @@ class LookupKeyClient:
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
+    # NOTE: This isolates lookup IPC paths only. With MooncakeConnectorV2,
+    # the current scheduler control-port allocation may still overlap ports
+    # reserved by some workers; DP indices do not guarantee disjoint TCP ranges.
     # Dense engines reset their compute DP rank, but retain their serving index.
     dp_index = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
