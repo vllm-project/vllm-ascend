@@ -454,7 +454,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
             worker.wait_for_layer_load_ready("model.layers.0.self_attn.attn")
 
     def test_load_observer_resolves_local_layer(self):
-        cases = (
+        cases: tuple[tuple[dict[int, int], int, bool], ...] = (
             ({9: 0, 10: 1}, 0, False),
             ({9: 0, 10: 1}, 11, False),
             ({}, 2, False),
