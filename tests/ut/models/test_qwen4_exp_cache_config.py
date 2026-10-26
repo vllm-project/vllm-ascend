@@ -35,6 +35,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.v1 import model_runner as model_runner_v1
 from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
 def _groups() -> list[KVCacheGroupSpec]:
@@ -375,7 +376,8 @@ def _cpu_runner(config):
     return runner
 
 
-def test_runner_materializes_packed_kv_and_contiguous_ssm_views() -> None:
+@pytest.mark.parametrize("runner_kind", ["v1", "v2", "v2_main"])
+def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind) -> None:
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(
             cache_config=SimpleNamespace(
@@ -389,9 +391,51 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views() -> None:
     assert config is not None
     runner = _cpu_runner(config)
 
-    raw = runner._allocate_kv_cache_tensors(config)
-    caches = runner._reshape_kv_cache_tensors(config, raw)
-    layout = runner._six_region_kv_cache_layout
+    if runner_kind == "v1":
+        raw = runner._allocate_kv_cache_tensors(config)
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        layout = runner._six_region_kv_cache_layout
+    else:
+        vllm_config = SimpleNamespace(
+            additional_config={},
+            kv_transfer_config=None,
+            cache_config=SimpleNamespace(cache_dtype="auto"),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()),
+        )
+        monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
+        monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+        # These owned cache views are backend-independent; the main entry point
+        # uses only the backend identity to partition its attention groups.
+        backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+        layers = {
+            name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
+            for group in config.kv_cache_groups
+            for name in group.layer_names
+        }
+        monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+        raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+        if runner_kind == "v2_main":
+            # Exercise upstream main's combined allocation+reshape adapter and
+            # retain its raw buffers for the same storage checks as v0.31.
+            monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
+            caches = attn_utils_v2.allocate_kv_cache_main(
+                config, torch.device("cpu"), None, [128] * len(config.kv_cache_groups)
+            )
+        else:
+            groups = [
+                SimpleNamespace(
+                    kv_cache_group_id=i, kv_cache_spec=g.kv_cache_spec, layer_names=g.layer_names, backend=backend
+                )
+                for i, g in enumerate(config.kv_cache_groups)
+            ]
+            caches = attn_utils_v2._reshape_kv_cache_v2(groups, raw, "auto", [128] * len(groups), {}, config)
+        layout = build_qwen4_kv_cache_layout(config.kv_cache_groups, config.num_blocks)
+        # Every physical byte is represented once by the planner, including
+        # the single PLE and hidden banks outside the shared slot backing.
+        allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
+        assert sum(allocations.values()) == config.num_blocks * get_qwen4_exp_pool_bytes_per_block(
+            config.kv_cache_groups
+        )
     assert layout is not None
 
     shared_names = [owner.layer_name for owner in layout.owners if owner.role not in (HIDDEN, PLE)]

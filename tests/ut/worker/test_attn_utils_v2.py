@@ -361,6 +361,7 @@ def test_hybrid_attention_layout_preserves_padding(monkeypatch):
     )
     group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendAttentionBackend, layer_names=[name])
     vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         cache_config=SimpleNamespace(cache_dtype="auto"),
     )
@@ -2770,6 +2771,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
 
 def _c8_mxfp_vllm_config(cache_dtype: str = "mxfp8") -> SimpleNamespace:
     return SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),

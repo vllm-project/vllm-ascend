@@ -15,10 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# [Role] Ascend platform configuration and execution integration.
-# [Invariants] QSA K+V share one physical page with GDN SSM state.
-# [Timeouts & Locks] Existing worker lifecycle owns device waits and locks.
-# [Side-Effect Policy] Configuration and cache views follow the active model config.
 
 from __future__ import annotations
 

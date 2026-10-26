@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Adapt the generic CANN GBSA operator to Qwen4Exp QSA semantics.
-
-[Role] Map virtual kernel pages to packed K/V storage without copying caches.
-[Invariants] Dense 128-token subpages retain their physical storage stride.
-[Timeouts & Locks] No waits or locks.
-[Side-Effect Policy] Writes the supplied attention output; cache views alias input.
-"""
+"""Adapt the generic CANN GBSA operator to Qwen4Exp QSA semantics."""
 
 import torch
 

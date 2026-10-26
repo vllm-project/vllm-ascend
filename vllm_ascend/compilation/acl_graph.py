@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# [Role] Capture and replay Ascend graphs for the selected runtime mode.
-# [Invariants] Replay uses the captured descriptor and stable input storage.
-# [Timeouts & Locks] Existing stream/event ordering owns device synchronization.
-# [Side-Effect Policy] Captures/replays device work; debug logs do not add syncs.
-
 import dataclasses
 import weakref
 from collections.abc import Callable
@@ -27,7 +22,6 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.logger import init_logger_ascend
 
 from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
@@ -35,8 +29,6 @@ from .updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-
-graph_logger = init_logger_ascend("vllm_ascend.graph_execution")
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -173,13 +165,6 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
-            graph_logger.debug(
-                "acl_graph action=bypass runtime=%s wrapper=%s draft=%s batch=%s",
-                aclgraph_runtime_mode,
-                self.runtime_mode,
-                _EXTRA_CTX.is_draft_model,
-                batch_descriptor,
-            )
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -189,12 +174,6 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
-            graph_logger.debug(
-                "acl_graph action=capture runtime=%s draft=%s batch=%s",
-                self.runtime_mode,
-                _EXTRA_CTX.is_draft_model,
-                batch_descriptor,
-            )
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -319,12 +298,6 @@ class ACLGraphWrapper:
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
-        graph_logger.debug(
-            "acl_graph action=replay runtime=%s draft=%s batch=%s",
-            self.runtime_mode,
-            _EXTRA_CTX.is_draft_model,
-            batch_descriptor,
-        )
         logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
 
