@@ -18,23 +18,25 @@ import os as _r144_ovl_os
 import sys as _r144_ovl_sys
 
 print(
-    f"[R144-OVL-LOAD] R144 overlay attention_v1 LOADED "
-    f"pid={_r144_ovl_os.getpid()} file={__file__}",
+    f"[R144-OVL-LOAD] R144 overlay attention_v1 LOADED pid={_r144_ovl_os.getpid()} file={__file__}",
     file=_r144_ovl_sys.stderr,
-    flush=True)
+    flush=True,
+)
 # R218ID: child-side source-identity banner (stderr -- EngineCore stdout is
 # dropped, only stderr reaches the serve log; probe legs proved this). The
 # wrapper gates expensive legs on file+sha matching the frozen candidate.
 try:
     _r218_id_stat = _r144_ovl_os.stat(__file__)
     import hashlib as _r218_id_hl
+
     _r218_id_sha = _r218_id_hl.sha256(open(__file__, "rb").read()).hexdigest()[:16]  # noqa: SIM115 - one-shot identity banner read
     print(
         f"[R218ID] file={__file__} sha={_r218_id_sha} "
         f"mtime={int(_r218_id_stat.st_mtime)} size={_r218_id_stat.st_size} "
         f"pid={_r144_ovl_os.getpid()}",
         file=_r144_ovl_sys.stderr,
-        flush=True)
+        flush=True,
+    )
 except Exception as _r218_id_e:
     print(f"[R218ID] FAILED {_r218_id_e!r}", file=_r144_ovl_sys.stderr, flush=True)
 
@@ -106,22 +108,31 @@ try:
         f"PBCVERIFY={_r144_ovl_os.environ.get('R161_PBCVERIFY', '?')} "
         f"ENPU={_r144_ovl_os.environ.get('ENPU_ENABLE', '?')}",
         file=_r144_ovl_sys.stderr,
-        flush=True)
+        flush=True,
+    )
 except Exception as _r161_e:
     print(f"[R161-OVL] fence load failed: {_r161_e!r}", file=_r144_ovl_sys.stderr, flush=True)
     import types as _r161_t
-    _r161_f = _r161_t.SimpleNamespace(on_update_enter=lambda *a, **k: None,
-        on_update_exit=lambda *a, **k: None, on_replay_enter=lambda *a, **k: None,
-        on_replay_done=lambda *a, **k: None, on_cu_done=lambda *a, **k: None,
-        on_middle_enter=lambda *a, **k: None, fence_label=lambda: "F0-off")
+
+    _r161_f = _r161_t.SimpleNamespace(
+        on_update_enter=lambda *a, **k: None,
+        on_update_exit=lambda *a, **k: None,
+        on_replay_enter=lambda *a, **k: None,
+        on_replay_done=lambda *a, **k: None,
+        on_cu_done=lambda *a, **k: None,
+        on_middle_enter=lambda *a, **k: None,
+        fence_label=lambda: "F0-off",
+    )
 
 # ---- R164 tier-dump atexit (default OFF via R164_TIERDUMP) ----
 if _r144_ovl_os.environ.get("R164_TIERDUMP", "0") == "1":
     import atexit as _r164_atx
+
     def _r164_dump_tiers():
         try:
             import json as _j164
             import sys as _s164
+
             _m164 = _s164.modules.get("vllm_ascend.attention.attention_v1")
             _buf = None
             if _m164 is not None:
@@ -146,6 +157,7 @@ if _r144_ovl_os.environ.get("R164_TIERDUMP", "0") == "1":
                     _f164e.write("dump_error " + repr(_e164) + "\n")
             except Exception:
                 pass
+
     _r164_atx.register(_r164_dump_tiers)
 
 # ---- R150 P0 trace helper (file-based; default OFF via R150_TRACE) ----
@@ -271,6 +283,7 @@ _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
+
 # R144 P0: module-level dynamic-lifecycle counters (gated by R144_TT_DEBUG=1).
 # Bumped by _tt_resolve_slots when the req_id slot map finishes/reuses a slot.
 # R136 P0: env-gated (R136_P0_DIAG=1, default OFF) dump of the middle launch
@@ -369,6 +382,7 @@ class AscendAttentionBackend(AttentionBackend):
 # untouched; allowlisted prefixes pass through. Default OFF = R115 behavior.
 if os.environ.get("R116_QUIET", "0") == "1":
     _r116_builtin_print = print
+
     def _r116_gate_print(*args, **kwargs):
         try:
             _s = " ".join(str(a) for a in args)
@@ -376,7 +390,9 @@ if os.environ.get("R116_QUIET", "0") == "1":
             _s = ""
         if _s.startswith(("PERFLEG", "PHASE_", "R116-KEY", "[R116-ERR")):
             _r116_builtin_print(*args, **kwargs)
+
     print = _r116_gate_print
+
 
 # R114 steady-token hook: runs INSIDE EngineCore (the overlay is what the
 # engine imports; the R112/R113 parent-side monkeypatch never reached the
@@ -702,12 +718,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
             **backend_metadata,
             request_ids=getattr(common_attn_metadata, "request_ids", None),
-            finished_req_ids=getattr(
-                common_attn_metadata, "finished_req_ids", None),
-            preempted_req_ids=getattr(
-                common_attn_metadata, "preempted_req_ids", None),
-            new_req_ids=getattr(
-                common_attn_metadata, "new_req_ids", None),
+            finished_req_ids=getattr(common_attn_metadata, "finished_req_ids", None),
+            preempted_req_ids=getattr(common_attn_metadata, "preempted_req_ids", None),
+            new_req_ids=getattr(common_attn_metadata, "new_req_ids", None),
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
@@ -814,6 +827,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     sliding_window = None
     alibi_slopes = None
     logits_soft_cap = None
+
     def __init__(
         self,
         num_heads: int,
@@ -1589,13 +1603,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._layer_name = layer.layer_name
 
         # R144 DIAG: outer-forward file probe (first 3 calls only)
-        _r144of_n = globals().setdefault('_R144_OUT_FWD_N', [0])
+        _r144of_n = globals().setdefault("_R144_OUT_FWD_N", [0])
         if _r144of_n[0] < 3:
             _r144of_n[0] += 1
             try:
                 with open("/tmp/r144_out_fwd_probe.log", "a") as _pf:
-                    _pf.write(f"[R144-OUT-FWD] call#{_r144of_n[0]} pid={os.getpid()} "
-                              f"num_tok={query.shape[0]}\n")
+                    _pf.write(f"[R144-OUT-FWD] call#{_r144of_n[0]} pid={os.getpid()} num_tok={query.shape[0]}\n")
             except Exception:
                 pass
 
@@ -1605,8 +1618,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if not getattr(type(self), "_r190_dtype_logged", False):
                 type(self)._r190_dtype_logged = True
                 _oscar_diag_write(
-                    "r190_probe.log",
-                    f"[R190-DTYPE] k_cache.dtype={k_cache.dtype} kv_cache_len={len(kv_cache)}\n")
+                    "r190_probe.log", f"[R190-DTYPE] k_cache.dtype={k_cache.dtype} kv_cache_len={len(kv_cache)}\n"
+                )
             if isinstance(k_cache, torch.Tensor) and k_cache.dtype == torch.uint8:
                 # R189 PROBE: run a small MSD_ON LSE before this layer's attention to check cube state
                 if os.environ.get("R189_PROBE") == "1":
@@ -1616,40 +1629,89 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     try:
                         if not hasattr(type(self), "_r189_mod"):
                             import torch.utils.cpp_extension as _ce189
-                            _R152=os.environ.get("R152_LAUNCHER_DIR", "")
-                            _TN=os.path.dirname(torch_npu.__file__)
-                            _INC=[os.path.join(_TN,"include"),os.path.join(_TN,"include","third_party","op-plugin"),"/usr/local/Ascend/cann-9.0.0/aarch64-linux/include","/usr/local/Ascend/cann-9.0.0/include"]
-                            _VENDOR=os.environ.get("R183_COMPOSITE_OPP", "")
-                            _INC.append(_VENDOR+"/op_api/include")
-                            _LD=["-L/usr/local/Ascend/cann-9.0.0/lib64","-lascendcl","-lopapi","-L"+os.path.join(_TN,"lib"),"-ltorch_npu","-L"+_VENDOR+"/op_api/lib","-lcust_opapi","-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64","-Wl,-rpath,"+_VENDOR+"/op_api/lib"]
-                            os.environ['TORCH_EXTENSIONS_DIR']=f"/tmp/r189_{os.getpid()}"
-                            os.makedirs(os.environ['TORCH_EXTENSIONS_DIR'],exist_ok=True)
-                            type(self)._r189_mod=_ce189.load(name="r189",sources=[_R152+"/int2_op_launch_lse_fast_r152.cpp"],extra_include_paths=_INC,extra_ldflags=_LD,build_directory=os.environ['TORCH_EXTENSIONS_DIR'],verbose=False)
-                        _dev=query.device
-                        _D,_nq,_nkv,_bs=128,32,8,128
-                        _q=(torch.randn(1,_nq,1,_D,device=_dev)*0.5).bfloat16()
-                        _k=torch.randint(0,256,(4,_nkv,_bs,_D//4),device=_dev,dtype=torch.uint8).view(torch.int8)
-                        _v=torch.randint(0,256,(4,_nkv,_bs,_D//4),device=_dev,dtype=torch.uint8).view(torch.int8)
-                        _bt=torch.arange(4,dtype=torch.int32,device=_dev).unsqueeze(0)
-                        _ks=(torch.rand(1,_nkv,4*_bs,device=_dev)*0.05+0.001).bfloat16()
-                        _ko=(torch.randn(1,_nkv,4*_bs,device=_dev)*0.02).bfloat16()
-                        _vs=(torch.rand(1,_nkv,4*_bs,device=_dev)*0.05+0.001).bfloat16()
-                        _vo=(torch.randn(1,_nkv,4*_bs,device=_dev)*0.02).bfloat16()
-                        _o=torch.zeros(1,_nq,1,_D,dtype=torch.bfloat16,device=_dev)
-                        _l=torch.zeros(1,_nq,1,dtype=torch.float32,device=_dev)
+
+                            _R152 = os.environ.get("R152_LAUNCHER_DIR", "")
+                            _TN = os.path.dirname(torch_npu.__file__)
+                            _INC = [
+                                os.path.join(_TN, "include"),
+                                os.path.join(_TN, "include", "third_party", "op-plugin"),
+                                "/usr/local/Ascend/cann-9.0.0/aarch64-linux/include",
+                                "/usr/local/Ascend/cann-9.0.0/include",
+                            ]
+                            _VENDOR = os.environ.get("R183_COMPOSITE_OPP", "")
+                            _INC.append(_VENDOR + "/op_api/include")
+                            _LD = [
+                                "-L/usr/local/Ascend/cann-9.0.0/lib64",
+                                "-lascendcl",
+                                "-lopapi",
+                                "-L" + os.path.join(_TN, "lib"),
+                                "-ltorch_npu",
+                                "-L" + _VENDOR + "/op_api/lib",
+                                "-lcust_opapi",
+                                "-Wl,-rpath,/usr/local/Ascend/cann-9.0.0/lib64",
+                                "-Wl,-rpath," + _VENDOR + "/op_api/lib",
+                            ]
+                            os.environ["TORCH_EXTENSIONS_DIR"] = f"/tmp/r189_{os.getpid()}"
+                            os.makedirs(os.environ["TORCH_EXTENSIONS_DIR"], exist_ok=True)
+                            type(self)._r189_mod = _ce189.load(
+                                name="r189",
+                                sources=[_R152 + "/int2_op_launch_lse_fast_r152.cpp"],
+                                extra_include_paths=_INC,
+                                extra_ldflags=_LD,
+                                build_directory=os.environ["TORCH_EXTENSIONS_DIR"],
+                                verbose=False,
+                            )
+                        _dev = query.device
+                        _D, _nq, _nkv, _bs = 128, 32, 8, 128
+                        _q = (torch.randn(1, _nq, 1, _D, device=_dev) * 0.5).bfloat16()
+                        _k = torch.randint(0, 256, (4, _nkv, _bs, _D // 4), device=_dev, dtype=torch.uint8).view(
+                            torch.int8
+                        )
+                        _v = torch.randint(0, 256, (4, _nkv, _bs, _D // 4), device=_dev, dtype=torch.uint8).view(
+                            torch.int8
+                        )
+                        _bt = torch.arange(4, dtype=torch.int32, device=_dev).unsqueeze(0)
+                        _ks = (torch.rand(1, _nkv, 4 * _bs, device=_dev) * 0.05 + 0.001).bfloat16()
+                        _ko = (torch.randn(1, _nkv, 4 * _bs, device=_dev) * 0.02).bfloat16()
+                        _vs = (torch.rand(1, _nkv, 4 * _bs, device=_dev) * 0.05 + 0.001).bfloat16()
+                        _vo = (torch.randn(1, _nkv, 4 * _bs, device=_dev) * 0.02).bfloat16()
+                        _o = torch.zeros(1, _nq, 1, _D, dtype=torch.bfloat16, device=_dev)
+                        _l = torch.zeros(1, _nq, 1, dtype=torch.float32, device=_dev)
                         _oscar_diag_write("r190_probe.log", "[R189-PROBE] BEFORE-LSE-call\n")
-                        _r=type(self)._r189_mod.launch_lse_fast(_q,_k,_v,_bt,_ks,_ko,_vs,_vo,_o,_l,_nq,1.0/(_D**0.5),_nkv,"BNSD",_bs,1,1,[4*_bs],torch.zeros(0,dtype=torch.bfloat16,device=_dev),0,0,0,True)
+                        _r = type(self)._r189_mod.launch_lse_fast(
+                            _q,
+                            _k,
+                            _v,
+                            _bt,
+                            _ks,
+                            _ko,
+                            _vs,
+                            _vo,
+                            _o,
+                            _l,
+                            _nq,
+                            1.0 / (_D**0.5),
+                            _nkv,
+                            "BNSD",
+                            _bs,
+                            1,
+                            1,
+                            [4 * _bs],
+                            torch.zeros(0, dtype=torch.bfloat16, device=_dev),
+                            0,
+                            0,
+                            0,
+                            True,
+                        )
                         torch.npu.synchronize()
                         _oscar_diag_write(
                             "r190_probe.log",
-                            f"[R189-PROBE-L0-BEFORE-ATTN] rc={int(_r[0])} "
-                            f"finite={torch.isfinite(_o).all().item()}\n")
+                            f"[R189-PROBE-L0-BEFORE-ATTN] rc={int(_r[0])} finite={torch.isfinite(_o).all().item()}\n",
+                        )
                     except Exception as _e:
                         _oscar_diag_write("r190_probe.log", f"[R189-PROBE-L0-BEFORE-ATTN] CRASH: {str(_e)[:80]}\n")
                 # Dispatch to INT2 forward method
-                return self._forward_int2(
-                    layer, query, key, value, kv_cache, attn_metadata, output
-                )
+                return self._forward_int2(layer, query, key, value, kv_cache, attn_metadata, output)
 
         # release-line kvcomp/hamming-sparse feature: main has neither the
         # feature module nor the attribute, so this branch is not ported.
@@ -1721,9 +1783,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Lazy initialization of INT2 backend instance
         if not hasattr(self, "_int2_backend"):
-            self._int2_backend = AscendINT2AttentionBackendImpl.__new__(
-                AscendINT2AttentionBackendImpl
-            )
+            self._int2_backend = AscendINT2AttentionBackendImpl.__new__(AscendINT2AttentionBackendImpl)
             # Copy necessary attributes from self
             self._int2_backend.num_heads = self.num_heads
             self._int2_backend.head_size = self.head_size
@@ -1734,15 +1794,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self._int2_backend.kv_cache_dtype = self.kv_cache_dtype
             # R113: also copy the standard attrs queried on the graph init path
             # (class-level defaults exist as backstop; copy real values when present).
-            for _a in ("sliding_window", "alibi_slopes", "attn_type",
-                       "logits_soft_cap", "hidden_size", "num_heads", "head_size"):
+            for _a in (
+                "sliding_window",
+                "alibi_slopes",
+                "attn_type",
+                "logits_soft_cap",
+                "hidden_size",
+                "num_heads",
+                "head_size",
+            ):
                 if getattr(self, _a, None) is not None:
                     setattr(self._int2_backend, _a, getattr(self, _a))
             self._int2_backend.key_cache = None
             self._int2_backend.value_cache = None
             # Set KV transfer attributes
-            self._int2_backend.is_kv_producer = getattr(self, 'is_kv_producer', False)
-            self._int2_backend.is_kv_consumer = getattr(self, 'is_kv_consumer', False)
+            self._int2_backend.is_kv_producer = getattr(self, "is_kv_producer", False)
+            self._int2_backend.is_kv_consumer = getattr(self, "is_kv_consumer", False)
             # Populate Oscar rotation matrices (this __new__ bypassed __init__).
             self._int2_backend._oscar_R_k = None
             self._int2_backend._oscar_R_v = None
@@ -1750,9 +1817,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self._int2_backend._load_oscar_rotations()
 
         # Delegate to INT2 backend's forward method
-        return self._int2_backend.forward(
-            layer, query, key, value, kv_cache, attn_metadata, output
-        )
+        return self._int2_backend.forward(layer, query, key, value, kv_cache, attn_metadata, output)
 
 
 class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
@@ -2203,7 +2268,3 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             notify_kv_cache_written()
         return query, key, value, output
-
-
-
-
