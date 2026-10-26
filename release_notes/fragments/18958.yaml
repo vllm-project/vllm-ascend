@@ -1,4 +1,0 @@
-pr: 18958
-entries:
-  - category: breaking
-    text: KVPP now requires Model Runner V2. Set VLLM_USE_V2_MODEL_RUNNER=1 for KVPP configurations.
