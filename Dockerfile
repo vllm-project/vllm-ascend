@@ -119,7 +119,7 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
 # Install triton-ascend
     # echo "Install triton-ascend..." && \
     # python3 -m pip install "$TRITON_ASCEND_URL" && \
-# Install mooncake-transfer-engine
+# Install mooncake-transfer-engine, memfabric_hybrid and memcache_hybrid
     wget -q --no-check-certificate "${MOONCAKE_OBS_PREFIX}/${MOONCAKE_WHL}" -P /tmp && \
     python3 -m pip install "$MEMFABRIC_URL" "$MEMCACHE_URL" /tmp/${MOONCAKE_WHL} --force-reinstall --no-deps && \
 # Install memfabric_hybrid kernels (A3/A5)
