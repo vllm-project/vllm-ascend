@@ -1474,7 +1474,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
 def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
-    groups = vllm_kv_cache_utils._get_kv_cache_groups_uniform_page_size(specs)
+    groups = kv_cache_utils_patch._kv_cache_planning._get_kv_cache_groups_uniform_page_size(specs)
     assert any(not g.kv_cache_spec.dcp_sharded and isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
     config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp, block_size=384)
     cache = KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups)
