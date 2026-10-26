@@ -67,6 +67,8 @@ class AscendIndexerKPoolMetadata:
     keypool_state_table: torch.Tensor | None = None
     keypool_start_offsets: torch.Tensor | None = None
     pooled_slot_mapping: torch.Tensor | None = None
+    # Reused between layers; graph capture records the device-side updates.
+    c8_quant_metadata: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -689,8 +691,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             or tail_metadata.cann_inputs is None
         ):
             raise ValueError("GLM KPool metadata requires CANN request boundaries and pooled-key row indices.")
-        if indexer_cache.dtype != torch.bfloat16:
-            raise TypeError("GLM KPool compressed cache must be bfloat16.")
+        if indexer_cache.dtype not in (torch.bfloat16, torch.int8):
+            raise TypeError("GLM KPool compressed cache must be bfloat16 or int8.")
+        row_width = self.head_dim + (4 if indexer_cache.dtype == torch.int8 else 0)
+        if indexer_cache.shape[-1] != row_width:
+            raise ValueError("GLM KPool cache allocation must include the key and reserved scale bytes.")
         if tail_cache.dtype != torch.float32:
             raise TypeError("GLM KPool compressor tail must be float32.")
         if tail_cache.ndim != 3 or tail_cache.shape[1] < self.index_kpool or tail_cache.shape[2] != 2 * self.head_dim:
@@ -756,6 +761,19 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 return output[:, :output_width].unsqueeze(1)
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
+        if indexer_cache.dtype == torch.int8:
+            from vllm_ascend.ops.triton.glm5_next_quant_indexer import glm5_next_c8_quant_indexer
+
+            return glm5_next_c8_quant_indexer(
+                q_values,
+                indexer_cache,
+                weights,
+                indexer_metadata,
+                query_metadata,
+                self.topk_tokens,
+                self.index_kpool,
+                self.topk_indices_buffer,
+            )
         query = q_values.to(indexer_cache.dtype)
         indices, _ = self._pool_key_indexer(
             query,

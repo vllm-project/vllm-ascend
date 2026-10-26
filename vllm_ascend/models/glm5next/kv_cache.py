@@ -81,6 +81,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig,
         prefix: str,
         compress_ratio: int,
+        quant_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         if compress_ratio <= 1 or cache_config.block_size % compress_ratio:
@@ -89,8 +90,11 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"compress_ratio greater than one, got {cache_config.block_size} "
                 f"and {compress_ratio}."
             )
+        if quant_dtype is not None and quant_dtype != torch.int8:
+            raise ValueError(f"GLM-Next indexer cache quant_dtype must be int8, got {quant_dtype}.")
         self.head_dim = head_dim
         self.dtype = dtype
+        self.quant_dtype = quant_dtype
         self.cache_role = cache_role
         self.cache_config = cache_config
         self.compress_ratio = compress_ratio
@@ -105,11 +109,17 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
+        if self.quant_dtype is not None:
+            # Reserve four scale bytes per row to preserve page allocation.
+            # The adapter places INT8 keys and FP16 scales in separate regions
+            # within each page; the remaining two bytes per row are reserved.
+            ratio_kwargs["scale_dim"] = 1
+            ratio_kwargs["scale_dtype"] = torch.float32
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=self.dtype,
+            dtype=self.quant_dtype if self.quant_dtype is not None else self.dtype,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
