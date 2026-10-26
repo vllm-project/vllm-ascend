@@ -72,7 +72,12 @@ from .w8a8 import (
     AscendW8A8PDMixLinearMethod,
     resolve_block_scales,
 )
-from .wna16 import AscendW4A16FusedMoEMethod, AscendW4A16MXFP4FusedMoEMethod, AscendW8A16LinearMethod
+from .wna16 import (
+    AscendW4A16FusedMoEMethod,
+    AscendW4A16MXFP4FusedMoEMethod,
+    AscendW8A16FP8FusedMoEMethod,
+    AscendW8A16LinearMethod,
+)
 
 
 def is_mx_quant_type(instance: Any) -> bool:
@@ -118,6 +123,7 @@ __all__ = [
     "AscendW8A8MXFP8DynamicLinearMethod",
     "AscendW8A8PDMixLinearMethod",
     "AscendW8A16LinearMethod",
+    "AscendW8A16FP8FusedMoEMethod",
     "AscendW4A8DynamicFusedMoEMethod",
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
