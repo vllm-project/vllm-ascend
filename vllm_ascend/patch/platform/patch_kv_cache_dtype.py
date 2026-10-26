@@ -44,6 +44,7 @@ import pydantic.dataclasses as _pdc
 from vllm.config import cache as _cache_mod
 from vllm.config.cache import CacheConfig
 from vllm.logger import logger
+from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
 
 # The upstream Literal that gates ``cache_dtype``. We widen it to also accept
 # ``"int8"`` (DeepSeek V4 Ascend MLA KV cache dtype) and ``"mxfp8"`` (C8-MXFP
@@ -118,3 +119,17 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
 
 
 _apply_kv_cache_dtype_int8_patch()
+
+
+_ORIG_TQ_BOUNDARY_SKIP_LAYERS = TurboQuantConfig.get_boundary_skip_layers
+
+
+def _get_boundary_skip_layers(model_config, n=2) -> list[str]:
+    # Ascend DSV4 has its own cache layout; generic boundary skips would
+    # incorrectly trigger heterogeneous-page alignment after model loading.
+    if getattr(model_config.hf_text_config, "model_type", None) == "deepseek_v4":
+        return []
+    return _ORIG_TQ_BOUNDARY_SKIP_LAYERS(model_config, n)
+
+
+TurboQuantConfig.get_boundary_skip_layers = staticmethod(_get_boundary_skip_layers)
