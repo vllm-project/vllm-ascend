@@ -465,10 +465,13 @@ def build_attn_metadata(
     copy_sfa_restore_tails: bool = False,
     draft_layer_names: set[str] | None = None,
     common_metadata_callback=None,
+    seq_lens_cpu_is_exact: bool = False,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     if skip_ring_state_update is None:
         skip_ring_state_update = ring_state_update_skipped()
+    if seq_lens_cpu_is_exact and seq_lens_np is None:
+        raise ValueError("Exact CPU sequence lengths must be supplied separately from their upper bound.")
     if seq_lens_np is None:
         if seq_lens_cpu_upper_bound is not None:
             # FIA needs a CPU-side seq_lens upper bound for each request when
@@ -571,6 +574,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,
@@ -2219,6 +2223,7 @@ def build_attn_metadata_factory(
     attn_state=None,
     parallel_config=None,
     offload_kwargs=None,
+    seq_lens_cpu_is_exact=False,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -2237,6 +2242,8 @@ def build_attn_metadata_factory(
         kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
+        if seq_lens_cpu_is_exact:
+            kwargs["seq_lens_cpu_is_exact"] = True
         if offload_kwargs is not None:
             kwargs.update(offload_kwargs)
         return raw(*args, **kwargs)
