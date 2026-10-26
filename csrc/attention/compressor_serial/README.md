@@ -16,9 +16,9 @@ boundary so that one core cannot overwrite history still read by another.
 
 ## Status
 
-The implementation is under development. CPU formula checks pass; AscendC
-compilation, NPU correctness, graph replay correctness and performance acceptance
-are pending. No performance ratio or completed optimization round is claimed.
+The implementation is under development. CPU formula checks and CANN 9.2 ASC
+compilation pass. NPU correctness, graph replay correctness and performance
+acceptance are pending. No performance ratio or optimization round is claimed.
 The intended acceptance criterion is fused time / serial time >= 0.8 for every
 reported case, with ten measured optimization rounds even if the target is
 reached earlier. Environment setup and compiler repairs do not count as rounds.

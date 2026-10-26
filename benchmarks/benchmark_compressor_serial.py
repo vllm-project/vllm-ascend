@@ -7,9 +7,11 @@ manufacture an iteration history or count environment/build failures as rounds.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import statistics
 import subprocess
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,10 +19,16 @@ import torch
 import torch_npu  # noqa: F401
 
 from tests.ut.ops.compressor_serial_reference import compressor_reference
-from vllm_ascend.ops.compressor_serial import (
-    CompressorSerialConfig,
-    CompressorSerialPlan,
-)
+
+def load_serial_module():
+    # A standalone extension build does not generate vLLM's _build_info.
+    # Load the real module source without initializing the model plugin.
+    source = Path(__file__).parents[1] / "vllm_ascend/ops/compressor_serial.py"
+    spec = importlib.util.spec_from_file_location("compressor_serial_benchmark", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def make_case(case, device):
@@ -148,7 +156,8 @@ def main():
     torch.ops.load_library(str(opts.serial_library.resolve()))
     fixture = Path(__file__).parents[1] / "tests/ut/ops/compressor_serial_shapes.json"
     cases = json.loads(fixture.read_text())["cases"]
-    config = CompressorSerialConfig(opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads)
+    serial_module = load_serial_module()
+    config = serial_module.CompressorSerialConfig(opts.cast_blocks, opts.pool_blocks, opts.final_blocks, opts.pool_threads)
     result = {
         "iteration": opts.iteration, "hypothesis": opts.hypothesis,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
@@ -160,7 +169,7 @@ def main():
         if opts.case not in ("all", case["id"]):
             continue
         args = make_case(case, "npu")
-        plan = CompressorSerialPlan.prepare(*args, cmp_ratio=case["ratio"], coff=case["coff"], config=config)
+        plan = serial_module.CompressorSerialPlan.prepare(*args, cmp_ratio=case["ratio"], coff=case["coff"], config=config)
         initial, valid = check_case(args, case, plan)
         fused_graph, fused_graph_output = capture(lambda: fused_call(args, case))
         args[3].copy_(initial)
