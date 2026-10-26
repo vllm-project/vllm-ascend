@@ -19,6 +19,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_cumulative_log_p_kernel,
     _compute_global_residual_mass,
@@ -147,7 +148,7 @@ def _probabilistic_rejection_kernel(
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                     u_seed = tl.randint(seed, u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                    u = tl.maximum(u, 4.6566127342e-10)
+                    u = tl.maximum(u, _TL_RAND_MIN)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
                     # -1 placeholder draft tokens can never be accepted.
@@ -165,7 +166,7 @@ def _probabilistic_rejection_kernel(
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                     u_seed = tl.randint(seed, u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                    u = tl.maximum(u, 4.6566127342e-10)
+                    u = tl.maximum(u, _TL_RAND_MIN)
                     prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))
                     next_draft_token = tl.load(
                         draft_sampled_ptr + logit_idx + 2,
@@ -224,7 +225,7 @@ def _probabilistic_rejection_kernel(
                 u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                 u_seed = tl.randint(seed, u_pos)
                 u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                u = tl.maximum(u, 4.6566127342e-10)
+                u = tl.maximum(u, _TL_RAND_MIN)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
