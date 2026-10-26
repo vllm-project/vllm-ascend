@@ -217,7 +217,6 @@ _GDN_PATCH_TARGET.__init__ = _gdn_init_with_lora_config
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
-_GDN_PATCH_TARGET.process_weights_after_loading = AscendGatedDeltaNetAttention.process_weights_after_loading
 
 if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -225,6 +224,7 @@ if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY)
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
+    _GDN_PATCH_TARGET.process_weights_after_loading = AscendGatedDeltaNetAttention.process_weights_after_loading
     _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
 
     @wraps(_GDN_ORIGINAL_INIT)
