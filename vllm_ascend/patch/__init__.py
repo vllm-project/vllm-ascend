@@ -1684,6 +1684,8 @@
 #   Why: upstream gates IPC on CUDA/ROCm and exports CUDA storage handles.
 #   How: register an inherited loader; adapt the daemon spawn target, platform
 #        gate, tensor entry and shared-storage byte accounting for NPU ND IPC.
+#        Initialize general plugins in the spawned daemon after device patches
+#        so model/loader registries match the engine's plugin initialization.
 #        The upstream cache protocol, lifecycle and service loop are retained.
 #   Related PR: https://github.com/vllm-project/vllm/pull/54921
 #   Future Plan: remove these bindings after upstream exposes device IPC and

@@ -62,9 +62,15 @@ class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
 
 def run_ascend_daemon(*args, **kwargs) -> None:
     """Importable spawn target; install device adapters in every new process."""
+    from vllm.plugins import load_general_plugins
+
     from vllm_ascend import _ensure_global_patch
     from vllm_ascend.patch.platform.patch_preload import apply_preload_patch
 
     _ensure_global_patch()
     apply_preload_patch()
+    # A spawn process does not inherit the engine's loader/model registries.
+    # Initialize plugins only after device patches are fully installed, never
+    # while importing this module or from inside a plugin callback.
+    load_general_plugins()
     upstream._run_daemon_original(*args, **kwargs)
