@@ -765,12 +765,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     _needs_qli: ClassVar[bool] = True
 
     def _use_specialized_metadata(self) -> bool:
-        # MRV2 shares the cache during both capture and replay. MRV1 creates
-        # separate caches during capture, so it must keep per-builder outputs.
-        # Deferred device tasks also keep their existing ownership.
+        # Deferred device tasks and vision models keep their existing metadata path.
         return (
             self._specialized_metadata
-            and self.vllm_config.use_v2_model_runner
             and not self._device_metadata_enabled
             and not getattr(self.model_config.hf_config, "vision_n_layers", 0)
         )
@@ -1039,8 +1036,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         update_cache: bool = True,
         **kwargs,
     ) -> AscendDSAMetadata:
-        specialized = self._use_specialized_metadata()
-        if not specialized:
+        use_specialized_metadata = self._use_specialized_metadata()
+        if not use_specialized_metadata:
             build_query = update_cache = True
         num_reqs = common_attn_metadata.num_reqs
         num_actual_reqs = kwargs.get("num_actual_reqs")
@@ -1076,7 +1073,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         cache = self.common_ratio_to_sas_metadata
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        if specialized and self._state_only:
+        if use_specialized_metadata and self._state_only:
             actual_reqs = num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs)
             self.block_table[actual_reqs:].zero_()
             self._device_metadata_tasks = ()
@@ -1116,7 +1113,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_position_tokens = num_input_tokens if full_graph_mode else common_attn_metadata.num_actual_tokens
                 input_positions = common_attn_metadata.positions[:num_position_tokens].long()
                 is_dspark = (
-                    specialized and self.speculative_config is not None and self.speculative_config.method == "dspark"
+                    use_specialized_metadata
+                    and self.speculative_config is not None
+                    and self.speculative_config.method == "dspark"
                 )
                 cos, sin = get_cos_and_sin_dsa(
                     input_positions,
@@ -1185,9 +1184,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # agree on the number of KV iterations and synchronization events.
         # These values change attention semantics even for the same ratio.
         key = ("sas", layer_name, ori_win_left, ori_win_right, dspark_swa)
-        specialized = self._use_specialized_metadata()
+        use_specialized_metadata = self._use_specialized_metadata()
         output_key = ("sas_output", key)
-        if specialized and output_key in metadata_cache:
+        if use_specialized_metadata and output_key in metadata_cache:
             return metadata_cache[output_key]
         sas_metadata = metadata_cache.get(key)
         if sas_metadata is None:
@@ -1238,14 +1237,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             metadata_cache[key] = sas_metadata
 
         output = self.sas_metadata_buffer
-        if specialized:
+        if use_specialized_metadata:
             # A single builder can encounter both causal and DSpark groups.
             # Each variant needs its own capture-stable output address.
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
         output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
-        if specialized:
+        if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
 
@@ -1290,8 +1289,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
-        specialized = self._use_specialized_metadata()
-        if specialized and "qli_output" in metadata_cache:
+        use_specialized_metadata = self._use_specialized_metadata()
+        if use_specialized_metadata and "qli_output" in metadata_cache:
             return metadata_cache["qli_output"][0]
         # Share the tiling output AND its length/residual buffers for this batch.
         seq_lens_i32 = seq_lens
@@ -1326,7 +1325,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             metadata_cache["qli"] = qli_metadata
 
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
-        if specialized:
+        if use_specialized_metadata:
             metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
         return self.qli_metadata_buffer
 
@@ -1473,10 +1472,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert self.common_ratio_to_sas_metadata is not None
         metadata_cache = self.common_ratio_to_sas_metadata
         assert self.num_actual_tokens is not None
-        specialized = self._use_specialized_metadata()
-        needs_sas = build_query and (not specialized or self._needs_sas)
-        needs_qli = build_query and self.compressor_ratio == 4 and (not specialized or self._needs_qli)
-        needs_start_pos = not specialized or (update_cache and self.compressor_ratio > 1)
+        use_specialized_metadata = self._use_specialized_metadata()
+        needs_sas = build_query and (not use_specialized_metadata or self._needs_sas)
+        needs_qli = build_query and self.compressor_ratio == 4 and (not use_specialized_metadata or self._needs_qli)
+        needs_start_pos = not use_specialized_metadata or (update_cache and self.compressor_ratio > 1)
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
@@ -1519,7 +1518,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         start_pos = None
         if needs_start_pos:
             start_key = ("start_pos", actual_reqs)
-            start_pos = metadata_cache.get(start_key) if specialized else None
+            start_pos = metadata_cache.get(start_key) if use_specialized_metadata else None
             if start_pos is None:
                 start_values = metadata_cache.get("start_pos_values")
                 if start_values is None:
@@ -1528,7 +1527,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.start_pos_prefill[:num_reqs].copy_(start_values)
                 self.start_pos_prefill[actual_reqs:].zero_()
                 start_pos = self.start_pos_prefill[:num_reqs]
-                if specialized:
+                if use_specialized_metadata:
                     metadata_cache[start_key] = start_pos
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
@@ -1720,7 +1719,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # from the original length; the persistent builder buffers are
             # refreshed in _build_qli_metadata.
             qli_cu_seqlens_q = query_start_loc
-            if specialized:
+            if use_specialized_metadata:
                 _, qli_seqused_k, qli_cmp_residual_k = metadata_cache["qli_output"]
             else:
                 qli_seqused_k = self.qli_seqused_k[:num_reqs]

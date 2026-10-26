@@ -33,7 +33,6 @@ def make_builder(cls, ratio=0):
         get_head_size=lambda: 8,
     )
     builder.vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         model_config=builder.model_config,
         compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)),
     )
@@ -335,8 +334,7 @@ class TestDSAMetadataBuilders(TestCase):
         self.builder.model_config.hf_config.vision_n_layers = 1
         self.assertFalse(self.builder._use_specialized_metadata())
         self.builder.model_config.hf_config.vision_n_layers = 0
-        self.builder.vllm_config.use_v2_model_runner = False
-        self.assertFalse(self.builder._use_specialized_metadata())
+        self.assertTrue(self.builder._use_specialized_metadata())
 
     def test_pcp_shares_preparation_but_preserves_group_addresses(self):
         shared: dict[Any, Any] = {}
