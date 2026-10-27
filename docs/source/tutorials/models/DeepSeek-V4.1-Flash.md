@@ -1513,7 +1513,7 @@ Select the tab for the target hardware.
     ock.mmc.meta_service_url = tcp://<META_SERVICE_IP>:5000
     ock.mmc.meta_service.config_store_url = tcp://<META_SERVICE_IP>:6000
     ock.mmc.meta_service.metrics_url = http://<META_SERVICE_IP>:18000
-    ock.mmc.log_level = info
+    ock.mmc.log_level = error
     ```
 
     Create `mmc-local.conf` on both Prefill and Decode nodes, using the same
@@ -1529,7 +1529,7 @@ Select the tab for the target hardware.
     ock.mmc.local_service.hbm.size = 0GB
     ock.mmc.local_service.max.hbm.size = 0GB
     ock.mmc.local_service.storage.enabled = false
-    ock.mmc.log_level = info
+    ock.mmc.log_level = error
     ```
 
     Each vLLM worker starts an embedded LocalService. `dram.size` is the DRAM
