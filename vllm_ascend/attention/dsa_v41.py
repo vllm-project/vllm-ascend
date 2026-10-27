@@ -1392,7 +1392,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             skip_ring_update = bool(kwargs.get("skip_ring_state_update", False))
 
             def build_c2_metadata() -> None:
-                if self._uses_a5_packed_cache and full_source_cos is not None and full_source_sin is not None:
+                if full_source_cos is not None and full_source_sin is not None:
                     build_c2_ring_metadata(
                         common.query_start_loc,
                         req.seq_lens,
