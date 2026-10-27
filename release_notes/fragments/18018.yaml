@@ -1,0 +1,4 @@
+pr: 18018
+entries:
+  - category: bugfix
+    text: Fixed the VPP debug switch `VLLM_ASCEND_VPP_FOLD_NO_PRESYNC=1`, which previously skipped the cross-rank send together with the pre-send synchronization and could hang VPP serving.
