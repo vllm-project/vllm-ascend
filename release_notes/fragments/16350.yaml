@@ -1,0 +1,4 @@
+pr: 16350
+entries:
+  - category: performance
+    text: Optimized native SFA decode query layouts, output/LSE exchange and sparse-index remapping under decode context parallelism. Native C8 indexer cache writes combine scale conversion with key and scale publication.

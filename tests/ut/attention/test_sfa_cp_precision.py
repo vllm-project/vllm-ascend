@@ -169,10 +169,15 @@ def test_dcp_query_gather_preserves_distinct_head_or_token_shards(gather_dim, pc
     with (
         patch.object(impl, "_parallel_query_gather_dim", return_value=gather_dim),
         patch.object(sfa_cp, "get_pcp_group", return_value=SimpleNamespace(world_size=pcp_size)),
+        patch.object(
+            sfa_cp,
+            "prepare_query_head_major",
+            side_effect=lambda q, rope: torch.cat((q, rope), dim=-1).transpose(0, 1).contiguous(),
+        ),
         patch.object(sfa_cp, "all_gather_async", return_value=(gathered, None)) as gather,
     ):
         context = impl._start_dcp_query_gather(q, rope)
-        result_q, result_rope = impl._finish_dcp_gather(context)
+        result_q, result_rope = impl._finish_dcp_gather(context, keep_view=True)
     assert gather.call_args.args[1] is impl.dcp_group
     torch.testing.assert_close(gather.call_args.args[0], send)
     torch.testing.assert_close(result_q, torch.cat((q, q + 1000), dim=gather_dim))
