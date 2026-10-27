@@ -33,7 +33,6 @@ hooks, and invalid shapes.
 pytest -q tests/ut/ops/test_fused_gdn_decode.py
 pytest -q tests/ut/ops/test_gdn_mixed_batch.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_decode.py
-python benchmarks/gdn/benchmark_fused_decode.py
 ```
 
 The benchmark compares the complete existing FLA path, including normalization
