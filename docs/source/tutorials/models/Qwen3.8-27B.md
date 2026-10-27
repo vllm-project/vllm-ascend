@@ -33,7 +33,7 @@ The following model weights are available:
 | `Qwen3.8-27B` (BF16 version)                 | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node or 1 Atlas 800I A3 (64GB × 16) node <br>or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
 | `Qwen3.8-27B-w8a8` (Quantized version)       | 1 Atlas 800I A3 (64GB × 16) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
 | `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
-| `Qwen3.8-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8) |
+| `Qwen3.8-27B-w8a8c8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8c8-mxfp8) |
 | `Qwen3.8-27B-w8a8-310p` (Quantized version)  | 1 Atlas 300I DUO  | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p) |
 
 - `Qwen3.8-27B-w8a8c8-mxfp8` (W8A8 MXFP8 quantization with C8 MXFP8 KV cache): serve it with `--kv-cache-dtype mxfp8`; recommended for long-sequence scenarios.
@@ -619,7 +619,7 @@ The following optimizations are enabled by default and require no additional con
 | Optimization Technique | Technical Principle | Performance Benefit |
 | --- | --- | --- |
 | Chunked Prefill | The vLLM V1 scheduler splits long prefill inputs into chunks, with each step processing at most `--max-num-batched-tokens` tokens. | Reduces per-step memory peaks, enabling larger batch sizes and higher throughput. |
-| Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '{"cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128],"cudagraph_mode": "FULL_DECODE_ONLY"}'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
+| Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
 | CPU Binding | Binds worker threads to dedicated CPU cores via `--additional-config '{"enable_cpu_binding":true}'`. | Reduces CPU scheduling jitter and stabilizes decode latency. |
 
 ##### Optimizations That Require Explicit Enabling
