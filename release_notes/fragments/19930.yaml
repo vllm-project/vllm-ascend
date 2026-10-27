@@ -1,0 +1,4 @@
+pr: 19930
+entries:
+  - category: bugfix
+    text: Fixed incorrect shared Top-K indices across pipeline stages when legacy DSA-CP is enabled, including GLM5.2 IndexShare and IndexCache configurations.
