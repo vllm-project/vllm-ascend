@@ -461,6 +461,7 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
     builder._finalize_pcp_metadata(metadata, expanded_slots)
 
+    assert metadata.pcp_sharded_layout
     assert metadata.slot_mapping is expanded_slots
     prefill_metadata = metadata.prefill
     assert prefill_metadata is not None
@@ -496,6 +497,7 @@ def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
     impl.exec_kv_prefill = MagicMock(return_value="written")
     # A rank without local queries still joins the gather of the expanded slots.
     metadata = _make_pcp_metadata(num_actual_tokens=0, num_decode_tokens=0)
+    metadata.pcp_sharded_layout = True
     metadata.num_input_tokens = 1
     metadata.slot_mapping = torch.tensor([-1, 7], dtype=torch.int64)
     with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):

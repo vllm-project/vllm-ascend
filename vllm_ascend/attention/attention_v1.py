@@ -238,6 +238,8 @@ class AscendMetadata:
     # the metadata op executes inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
     pcp_local_num_input_tokens: int | None = None
+    # Resolved by the builder; execution must not infer layout from tensor sizes.
+    pcp_sharded_layout: bool = False
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -488,6 +490,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
+        metadata.pcp_sharded_layout = True
         metadata.slot_mapping = expanded_slot_mapping
         metadata.pcp_local_num_input_tokens = local_num_input_tokens
         if metadata.num_prefills > 0:
@@ -1359,8 +1362,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output_padded = output
             # Only PCP-context metadata expands the slot mapping to every
             # rank's tokens; a replicated draft decode writes its local slots.
-            uses_pcp_slot_layout = self.use_pcp and attn_metadata.slot_mapping.shape[0] > query.shape[0]
-            if uses_pcp_slot_layout:
+            if attn_metadata.pcp_sharded_layout:
                 assert attn_metadata.pcp_local_num_input_tokens is not None, "PCP metadata must be finalized."
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output

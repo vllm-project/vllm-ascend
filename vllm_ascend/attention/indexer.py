@@ -85,6 +85,8 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Resolved by the builder; execution must not infer layout from tensor sizes.
+    pcp_sharded_layout: bool = False
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
@@ -377,7 +379,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             num_replicated_tokens = get_pcp_num_replicated_tokens(
                 indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
-            if slot_mapping.numel() <= k_li.shape[0]:
+            if not indexer_metadata.pcp_sharded_layout:
                 # An unexpanded slot mapping (e.g. a replicated draft decode)
                 # means every rank holds the same tokens: write them locally.
                 num_replicated_tokens = indexer_metadata.num_actual_tokens
@@ -1028,6 +1030,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        pcp_sharded_layout = uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp)
         pcp_context = kwargs.get("pcp_context")
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
@@ -1036,7 +1039,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 kwargs.get("pcp_cache_group_idx"),
                 buffer_key,
             )
-        elif uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
+        elif pcp_sharded_layout:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
@@ -1081,7 +1084,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp):
+        if pcp_sharded_layout:
             # Preserve the decode boundary for PCP's cache-write gather.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
@@ -1103,4 +1106,5 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
+            pcp_sharded_layout=pcp_sharded_layout,
         )

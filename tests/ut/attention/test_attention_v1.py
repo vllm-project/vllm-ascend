@@ -300,6 +300,7 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
     builder._finalize_pcp_metadata(metadata, expanded_slot_mapping)
 
+    assert metadata.pcp_sharded_layout
     assert metadata.slot_mapping is expanded_slot_mapping
     assert metadata.pcp_local_num_input_tokens == 4
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
@@ -431,6 +432,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
         self.attn_metadata = MagicMock()
+        self.attn_metadata.pcp_sharded_layout = False
         self.attn_metadata.return_value = "1"
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
