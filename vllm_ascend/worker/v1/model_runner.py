@@ -122,6 +122,12 @@ from vllm.v1.worker.utils import (
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.kv_offload.dsa_pd_mooncake import (
+    empty_mooncake_cpu_kv_memory,
+    register_dsa_pd_mooncake_offloaded_kv_tensor,
+    reset_dsa_pd_mooncake_kv_registries,
+    should_use_dsa_pd_mooncake_cpu_kv,
+)
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
     fill_mxfp_v_scale_cache,
@@ -5082,6 +5088,10 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        dsa_sparse_config = getattr(self.ascend_config, "dsa_sparse_attention_config", None)
+        if getattr(dsa_sparse_config, "mode", None) == "fused_overlap":
+            reset_dsa_pd_mooncake_kv_registries()
+        self._dsa_pd_mooncake_pending_offloaded_ranges = []
         allocation_context = kv_cache_allocation_context or nullcontext()
         with allocation_context:
             kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
@@ -5094,6 +5104,9 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
+
+        self._register_dsa_pd_mooncake_final_kv_views(kv_caches)
+        self._dsa_pd_mooncake_pending_offloaded_ranges = []
 
         self._fill_c8_mxfp_v_scale_caches(kv_caches)
 
@@ -5295,6 +5308,78 @@ class NPUModelRunner(GPUModelRunner):
         assert dsa_k_scale_tensor.numel() % scale_dtype_size == 0
 
         return dsa_k_tensor, dsa_k_scale_tensor
+
+    def _use_dsa_pd_mooncake_cpu_kv(self, *, is_sparse_kv_cache: bool) -> bool:
+        dsa_sparse_attention_config = getattr(self.ascend_config, "dsa_sparse_attention_config", None)
+        enable_cpu_kv_store = bool(getattr(dsa_sparse_attention_config, "enable_cpu_kv_store", False))
+        dsa_sparse_attention_mode = getattr(dsa_sparse_attention_config, "mode", None)
+        return should_use_dsa_pd_mooncake_cpu_kv(
+            self.vllm_config,
+            use_sparse=is_sparse_kv_cache,
+            is_kv_consumer=self.is_kv_consumer,
+            enable_cpu_kv_store=enable_cpu_kv_store,
+            dsa_sparse_attention_mode=dsa_sparse_attention_mode,
+        )
+
+    def _allocate_dsa_pd_mooncake_kv_tensor(self, tensor_size: int, alignment: int) -> torch.Tensor:
+        tensor = empty_mooncake_cpu_kv_memory(
+            (tensor_size + alignment,),
+            dtype=torch.int8,
+        )
+        tensor = self._align_memory(tensor, alignment)[:tensor_size]
+        if tensor.data_ptr() % alignment != 0:
+            raise RuntimeError(
+                "DSA PD Mooncake offloaded KV tensor is not 2MB aligned, "
+                "which is required by fixed-size NPU staging copy."
+            )
+        pending_ranges = getattr(
+            self,
+            "_dsa_pd_mooncake_pending_offloaded_ranges",
+            None,
+        )
+        if pending_ranges is None:
+            pending_ranges = []
+            self._dsa_pd_mooncake_pending_offloaded_ranges = pending_ranges
+        pending_ranges.append((int(tensor.data_ptr()), int(tensor.numel())))
+        return tensor
+
+    def _register_dsa_pd_mooncake_final_kv_views(
+        self,
+        kv_caches: dict[str, Any],
+    ) -> None:
+        pending_ranges = getattr(
+            self,
+            "_dsa_pd_mooncake_pending_offloaded_ranges",
+            [],
+        )
+        if not pending_ranges:
+            return
+
+        matched_ranges: set[int] = set()
+
+        def register_tensor(tensor: torch.Tensor) -> None:
+            ptr = int(tensor.data_ptr())
+            size = int(tensor.numel() * tensor.element_size())
+            end = ptr + size
+            for range_idx, (start, length) in enumerate(pending_ranges):
+                if ptr >= start and end <= start + length:
+                    register_dsa_pd_mooncake_offloaded_kv_tensor(tensor)
+                    matched_ranges.add(range_idx)
+                    return
+
+        for kv_cache in kv_caches.values():
+            if isinstance(kv_cache, torch.Tensor):
+                register_tensor(kv_cache)
+            elif isinstance(kv_cache, (list, tuple)):
+                for tensor in kv_cache:
+                    if isinstance(tensor, torch.Tensor):
+                        register_tensor(tensor)
+
+        if len(matched_ranges) != len(pending_ranges):
+            raise RuntimeError(
+                "Failed to bind all DSA PD Mooncake offloaded KV allocations "
+                "to final runtime tensor views."
+            )
 
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -5689,16 +5774,34 @@ class NPUModelRunner(GPUModelRunner):
                             and layer_name_inner not in strided_attention_cache_layers
                             and layer_name_inner not in kv_cache_raw_tensors
                         ):
-                            k_tensor = self._allocate_int8_cache_tensor(
-                                k_tensor_size,
-                                alignment,
+                            use_dsa_pd_mooncake_cpu_kv = self._use_dsa_pd_mooncake_cpu_kv(
+                                is_sparse_kv_cache=(
+                                    self.use_sparse
+                                    and not self.sparse_kv_offload_enabled
+                                    and v_tensor_size is not None
+                                ),
                             )
-                            v_tensor = None
-                            if v_tensor_size is not None:
-                                v_tensor = self._allocate_int8_cache_tensor(
+                            if use_dsa_pd_mooncake_cpu_kv:
+                                k_tensor = self._allocate_dsa_pd_mooncake_kv_tensor(
+                                    k_tensor_size,
+                                    alignment,
+                                )
+                                assert v_tensor_size is not None
+                                v_tensor = self._allocate_dsa_pd_mooncake_kv_tensor(
                                     v_tensor_size,
                                     alignment,
                                 )
+                            else:
+                                k_tensor = self._allocate_int8_cache_tensor(
+                                    k_tensor_size,
+                                    alignment,
+                                )
+                                v_tensor = None
+                                if v_tensor_size is not None:
+                                    v_tensor = self._allocate_int8_cache_tensor(
+                                        v_tensor_size,
+                                        alignment,
+                                    )
                             if current_packed_sfa_main_cache:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                             else:

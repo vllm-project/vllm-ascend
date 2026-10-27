@@ -6,6 +6,7 @@ class GlobalTE:
         self.transfer_engine = None
         self._initialization_attempted = False
         self.is_register_buffer: bool = False
+        self.registered_buffers: set[tuple[int, int, str | None]] = set()
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -44,16 +45,40 @@ class GlobalTE:
                     self.transfer_engine = engine
         return self.transfer_engine
 
-    def register_buffer(self, ptrs: list[int], sizes: list[int]):
+    def register_buffer(
+        self,
+        ptrs: list[int],
+        sizes: list[int],
+        locations: list[str | None] | None = None,
+    ):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            if self.is_register_buffer:
-                return
-            for ptr, size in zip(ptrs, sizes):
-                ret_value = self.transfer_engine.register_memory(ptr, size)
+            if locations is not None and len(locations) != len(ptrs):
+                raise ValueError("Transfer buffer locations must match pointer count.")
+            # Register each buffer at most once, so lazily allocated buffers
+            # (e.g. the NPU staging window) can register after the initial
+            # kv_caches registration instead of being silently skipped.
+            register_with_location = getattr(self.transfer_engine, "register_memory_with_location", None)
+            for idx, (ptr, size) in enumerate(zip(ptrs, sizes)):
+                location = locations[idx] if locations is not None else None
+                key = (int(ptr), int(size), location)
+                if key in self.registered_buffers:
+                    continue
+                if location is not None:
+                    if not callable(register_with_location):
+                        raise RuntimeError(
+                            "Mooncake CPU memory registration requires "
+                            "TransferEngine.register_memory_with_location. "
+                            "Install a Mooncake build with Ascend location-aware registration support."
+                        )
+                    ret_value = register_with_location(ptr, size, location)
+                else:
+                    ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory registration failed.")
-            self.is_register_buffer = True
+                self.registered_buffers.add(key)
+            if ptrs:
+                self.is_register_buffer = True
 
 
 global_te = GlobalTE()

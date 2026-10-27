@@ -36,6 +36,7 @@ from vllm_ascend.ascend_config import (
     AscendConfig,
     AscendFusionConfig,
     AscendWarmupConfig,
+    DSASparseAttentionConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -2310,3 +2311,29 @@ class TestEngramSharedMemoryDefaults(TestBase):
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)
+
+
+class TestDSASparseAttentionConfig(TestBase):
+    def setUp(self):
+        self.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(index_topk=2048),
+            ),
+        )
+
+    def test_mode_specific_selection_block_size_defaults(self):
+        baseline = DSASparseAttentionConfig({"mode": "baseline"}, self.vllm_config)
+        fused = DSASparseAttentionConfig({"mode": "fused_overlap"}, self.vllm_config)
+
+        self.assertEqual(baseline.selection_topk_block_size, 64)
+        self.assertEqual(fused.selection_topk_block_size, 1)
+
+    def test_fused_overlap_rejects_non_unit_selection_block_size(self):
+        with self.assertRaisesRegex(ValueError, "must be 1"):
+            DSASparseAttentionConfig(
+                {
+                    "mode": "fused_overlap",
+                    "selection_topk_block_size": 64,
+                },
+                self.vllm_config,
+            )
