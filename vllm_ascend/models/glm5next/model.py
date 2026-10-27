@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 import torch
 import torch_npu
 from torch import nn
 from transformers import Glm5NextTextConfig
+from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -16,6 +18,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -76,6 +80,10 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -108,6 +116,256 @@ def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
 def _validate_supported_config(config: Glm5NextTextConfig) -> None:
     if config.index_topk is not None and not config.index_kpool_always_select_tail:
         raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
+
+
+SP_PP_HEADER_KEY = "__glm5next_sp_pp__"
+_SP_PP_PROTOCOL_VERSION = 1
+
+
+class Glm5NextSPPPError(RuntimeError):
+    """A layout mismatch that must terminate the new PP execution path."""
+
+
+@dataclass(frozen=True)
+class Glm5NextSPPPSpec:
+    tp_size: int
+    tp_rank: int
+    hidden_size: int
+    residual_streams: int
+    dtype: torch.dtype = torch.bfloat16
+
+    def __post_init__(self) -> None:
+        if self.tp_size <= 1 or not 0 <= self.tp_rank < self.tp_size:
+            raise ValueError("GLM SP+PP requires a valid TP lane and TP > 1.")
+        if self.hidden_size <= 0 or self.residual_streams <= 0 or self.dtype != torch.bfloat16:
+            raise ValueError("GLM SP+PP supports positive mHC dimensions and BF16 activations.")
+
+    def local_rows(self, num_tokens: int) -> int:
+        if num_tokens <= 0:
+            raise Glm5NextSPPPError(f"GLM SP+PP physical token count must be positive, got {num_tokens}.")
+        return (num_tokens + self.tp_size - 1) // self.tp_size
+
+    @property
+    def states(self) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+        h, c = self.hidden_size, self.residual_streams
+        return {
+            "hidden_states": ((h,), self.dtype),
+            "residual": ((c, h), self.dtype),
+            "post": ((c, 1), torch.float32),
+            "comb": ((c, c), torch.float32),
+        }
+
+
+class Glm5NextSPPPBuffer:
+    """Keep canonical storage separate from ordinary per-execution tensor views."""
+
+    def __init__(self, spec: Glm5NextSPPPSpec, active: IntermediateTensors) -> None:
+        self.spec = spec
+        self.active = active
+        self.backing = dict(active.tensors)
+        if set(self.backing) != set(spec.states):
+            raise Glm5NextSPPPError("GLM SP+PP buffer keys do not match the mHC state.")
+        rows = {tensor.shape[0] for tensor in self.backing.values()}
+        if len(rows) != 1 or next(iter(rows)) <= 0:
+            raise Glm5NextSPPPError("GLM SP+PP buffers must have one positive local capacity.")
+        self.capacity = next(iter(rows))
+        for key, (tail, dtype) in spec.states.items():
+            tensor = self.backing[key]
+            if tuple(tensor.shape[1:]) != tail or tensor.dtype != dtype:
+                raise Glm5NextSPPPError(f"Invalid GLM SP+PP buffer layout for {key}.")
+        if len({tensor.device for tensor in self.backing.values()}) != 1:
+            raise Glm5NextSPPPError("GLM SP+PP buffers must share one device.")
+
+    @classmethod
+    def allocate(cls, spec: Glm5NextSPPPSpec, num_tokens: int, device: torch.device) -> "Glm5NextSPPPBuffer":
+        rows = spec.local_rows(num_tokens)
+        tensors = {
+            key: torch.empty((rows, *tail), dtype=dtype, device=device) for key, (tail, dtype) in spec.states.items()
+        }
+        return cls(spec, IntermediateTensors(tensors))
+
+    def fork(self) -> "Glm5NextSPPPBuffer":
+        """Use the same stable input storage with an independent host container."""
+        return type(self)(self.spec, IntermediateTensors(dict(self.backing)))
+
+    def activate(self, num_tokens: int) -> None:
+        rows = self.spec.local_rows(num_tokens)
+        if rows > self.capacity:
+            raise Glm5NextSPPPError(f"GLM SP+PP needs {rows} local rows, buffer capacity is {self.capacity}.")
+        self.active.tensors = {key: tensor[:rows] for key, tensor in self.backing.items()}
+
+
+class Glm5NextSPPPRuntime:
+    """Runner-owned host state; never attached to the compiled model."""
+
+    def __init__(self, spec: Glm5NextSPPPSpec, device: torch.device) -> None:
+        self.spec = spec
+        self.device = torch.device(device)
+        if self.device.type in ("cpu", "meta"):
+            self.device = torch.device(self.device.type)
+        elif self.device.index is None:
+            raise ValueError("GLM SP+PP requires an explicitly indexed accelerator device.")
+        self.input_buffer: Glm5NextSPPPBuffer | None = None
+        self._step_active = False
+        self._incoming_tokens: int | None = None
+        self._step_tokens: int | None = None
+
+    def bind_input(self, intermediate_tensors: IntermediateTensors | None) -> None:
+        if intermediate_tensors is None:
+            self.input_buffer = None
+            return
+        buffer = Glm5NextSPPPBuffer(self.spec, intermediate_tensors)
+        for key, tensor in buffer.backing.items():
+            self._validate_device(key, tensor)
+        self.input_buffer = buffer
+
+    def _validate_device(self, key: str, tensor: torch.Tensor) -> None:
+        if tensor.device != self.device:
+            raise Glm5NextSPPPError(
+                f"GLM SP+PP device mismatch for {key}: received {tensor.device}, expected {self.device}."
+            )
+
+    def validate_header(self, header: object) -> int:
+        if not isinstance(header, (tuple, list)) or len(header) != 4 or any(type(value) is not int for value in header):
+            raise Glm5NextSPPPError("Invalid GLM SP+PP header; expected (version, T, TP, lane).")
+        version, num_tokens, tp_size, tp_rank = header
+        if version != _SP_PP_PROTOCOL_VERSION or tp_size != self.spec.tp_size or tp_rank != self.spec.tp_rank:
+            raise Glm5NextSPPPError(f"GLM SP+PP protocol or TP lane mismatch: {header}.")
+        self.spec.local_rows(num_tokens)
+        return num_tokens
+
+    def validate_wire(self, tensors: dict[str, torch.Tensor], header: object) -> None:
+        num_tokens = self.validate_header(header)
+        rows = self.spec.local_rows(num_tokens)
+        if set(tensors) != set(self.spec.states):
+            raise Glm5NextSPPPError(f"GLM SP+PP wire keys do not match the mHC state: {tuple(tensors)}.")
+        for key, (tail, dtype) in self.spec.states.items():
+            tensor = tensors[key]
+            if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != (rows, *tail) or tensor.dtype != dtype:
+                raise Glm5NextSPPPError(
+                    f"Invalid GLM SP+PP wire shape or dtype for {key}; expected {(rows, *tail)}, {dtype}."
+                )
+            self._validate_device(key, tensor)
+
+    def begin_step(self, header: object = None) -> None:
+        if self._step_active:
+            raise Glm5NextSPPPError("GLM SP+PP transport step is already active.")
+        self._incoming_tokens = None if header is None else self.validate_header(header)
+        self._step_tokens = None
+        self._step_active = True
+
+    def prepare_inputs(self, num_tokens: int) -> None:
+        # This hook runs for real execution, dummy and skip-attention profiling.
+        # Only worker-delimited real steps may publish outgoing transport T.
+        if self._step_active:
+            if self._incoming_tokens is not None and num_tokens != self._incoming_tokens:
+                raise Glm5NextSPPPError(
+                    f"GLM SP+PP physical token mismatch: received T={self._incoming_tokens}, local T={num_tokens}."
+                )
+            if self._step_tokens is not None and num_tokens != self._step_tokens:
+                raise Glm5NextSPPPError("GLM SP+PP physical token count changed within a transport step.")
+        if self.input_buffer is not None:
+            self.input_buffer.activate(num_tokens)
+        if self._step_active:
+            self._step_tokens = num_tokens
+
+    def make_header(self) -> tuple[int, int, int, int]:
+        if not self._step_active or self._step_tokens is None:
+            raise Glm5NextSPPPError("GLM SP+PP has no prepared real execution to send.")
+        return (_SP_PP_PROTOCOL_VERSION, self._step_tokens, self.spec.tp_size, self.spec.tp_rank)
+
+    def end_step(self) -> None:
+        self._step_active = False
+        self._incoming_tokens = None
+        self._step_tokens = None
+
+
+def _normalize_sp_pp_state_impl(tensor: torch.Tensor, num_tokens: int, tp_rank: int, tp_size: int) -> torch.Tensor:
+    local_tokens = (num_tokens + tp_size - 1) // tp_size
+    if tensor.shape[0] != local_tokens:
+        raise Glm5NextSPPPError("GLM SP+PP state does not match the local physical token count.")
+    valid_tokens = min(max(num_tokens - tp_rank * local_tokens, 0), local_tokens)
+    output = tensor.clone()
+    # Assignment, rather than multiplication, also clears NaN/Inf padding.
+    output[valid_tokens:].zero_()
+    return output
+
+
+def _normalize_sp_pp_state_fake(tensor: torch.Tensor, num_tokens: int, tp_rank: int, tp_size: int) -> torch.Tensor:
+    return torch.empty_like(tensor)
+
+
+direct_register_custom_op(
+    op_name="glm5next_sp_pp_normalize",
+    op_func=_normalize_sp_pp_state_impl,
+    mutates_args=[],
+    fake_impl=_normalize_sp_pp_state_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+def normalize_sp_pp_state(tensor: torch.Tensor, num_tokens: int, tp_rank: int, tp_size: int) -> torch.Tensor:
+    """Match gather[:T] then shard without gathering at the PP boundary."""
+    return torch.ops.vllm.glm5next_sp_pp_normalize(tensor, num_tokens, tp_rank, tp_size)
+
+
+def _is_glm_sp_pp_enabled(vllm_config: VllmConfig) -> bool:
+    """Validate only the new GLM target SP+PP combination."""
+    parallel = vllm_config.parallel_config
+    if not (
+        parallel.use_sequence_parallel_moe and parallel.tensor_parallel_size > 1 and parallel.pipeline_parallel_size > 1
+    ):
+        return False
+
+    if vllm_config.model_config.runner_type != "generate":
+        raise NotImplementedError("GLM-5.3-Flash SP+PP requires the generation runner.")
+    config = vllm_config.model_config.hf_text_config
+    if not vllm_config.use_v2_model_runner or not config.mhc:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP requires Model Runner V2 and mHC.")
+    if vllm_config.model_config.dtype != torch.bfloat16:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP currently requires BF16 model activations.")
+    if parallel.use_ubatching:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP does not support DBO or microbatch slicing.")
+    if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP does not support context parallelism.")
+    if parallel.distributed_executor_backend != "mp" or parallel.nnodes != 1:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP currently requires the single-node mp executor.")
+    if vllm_config.speculative_config is not None:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP speculative decoding requires separate validation.")
+    if vllm_config.lora_config is not None:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP LoRA requires separate validation.")
+
+    ascend_config = get_ascend_config()
+    if ascend_config.enable_dsa_cp:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP does not support DSA context parallelism.")
+    finegrained = ascend_config.finegrained_tp_config
+    if any(
+        getattr(finegrained, name) > 0
+        for name in (
+            "oproj_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+        )
+    ):
+        raise NotImplementedError("GLM-5.3-Flash SP+PP does not support fine-grained tensor parallelism.")
+    return True
+
+
+def _validate_glm_sp_pp_partitions(num_hidden_layers: int, pp_size: int) -> None:
+    # Use the same partition resolver as make_layers, including its env
+    # override. Every rank validates all stages before allocating any layer.
+    for pp_rank in range(pp_size):
+        start, end = get_pp_indices(num_hidden_layers, pp_rank, pp_size)
+        if end <= start:
+            raise NotImplementedError("GLM-5.3-Flash SP+PP requires strictly positive layer counts on every stage.")
+
+
+def _get_glm_sp_pp_model_state_cls():
+    # Loading MRV2 state machinery is unnecessary for every other GLM mode.
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import Glm5NextSPPPModelState
+
+    return Glm5NextSPPPModelState
 
 
 class Glm5NextMLP(nn.Module):
@@ -579,6 +837,17 @@ class Glm5NextModel(nn.Module):
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
         self.config = config
+        self.is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self._sp_pp_enabled = _is_glm_sp_pp_enabled(vllm_config)
+        if self._sp_pp_enabled:
+            _validate_glm_sp_pp_partitions(config.num_hidden_layers, get_pp_group().world_size)
+            self._glm5next_sp_pp_spec = Glm5NextSPPPSpec(
+                tp_size=get_tensor_model_parallel_world_size(),
+                tp_rank=get_tensor_model_parallel_rank(),
+                hidden_size=config.hidden_size,
+                residual_streams=config.hc_mult,
+                dtype=vllm_config.model_config.dtype,
+            )
 
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
@@ -637,15 +906,8 @@ class Glm5NextModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
-        if self.is_sequence_parallel and get_pp_group().world_size > 1:
-            # SP shards the activations once per TP rank and sp_shard is not
-            # idempotent, so crossing a PP boundary would re-shard an already
-            # sharded tensor. Keep the two features mutually exclusive.
-            raise NotImplementedError(
-                "Sequence parallelism (use_sequence_parallel_moe) is not supported together with "
-                "pipeline parallelism for GLM-5.3-Flash."
-            )
+        if self.is_sequence_parallel and get_pp_group().world_size > 1 and not self._sp_pp_enabled:
+            raise NotImplementedError("GLM-5.3-Flash SP+PP requires the mHC Model Runner V2 adaptation.")
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
@@ -665,9 +927,13 @@ class Glm5NextModel(nn.Module):
         the per-token stream stays 2D while ``residual`` carries the ``n``
         hyper-connection streams, and the deferred hc_post state travels as
         ``post`` / ``comb`` (FP32, matching the hc_pre kernel outputs).
-        Non-mHC configs only ship ``hidden_states`` / ``residual``.
+        Non-mHC configs only ship ``hidden_states`` / ``residual``. The new
+        mHC SP+PP combination allocates local capacity; the private ModelState
+        selects active views for each physical full-token count.
         """
         config = self.config
+        if self._sp_pp_enabled:
+            batch_size = (batch_size + self._glm5next_sp_pp_spec.tp_size - 1) // self._glm5next_sp_pp_spec.tp_size
         if not config.mhc:
             return IntermediateTensors(
                 {
@@ -692,7 +958,7 @@ class Glm5NextModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -711,26 +977,45 @@ class Glm5NextModel(nn.Module):
             comb = intermediate_tensors["comb"] if self.config.mhc else None
 
         full_num_tokens = positions.shape[0]
-        if self.is_sequence_parallel:
+        if self.is_sequence_parallel and (not self._sp_pp_enabled or get_pp_group().is_first_rank):
+            # Only the first stage receives full-token embeddings. Later
+            # stages already receive all four states in the local SP layout.
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
-            hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
+        sp_forward_context = None
+        original_is_padding = None
+        if self._sp_pp_enabled and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            sp_forward_context = get_forward_context()
+            original_is_padding = sp_forward_context.is_padding
+            sp_forward_context.is_padding = sp_padding_mask(original_is_padding, positions)
+        try:
+            for layer in self._active_layers:
+                hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
-        if not get_pp_group().is_last_rank:
-            # Ship the deferred mHC state produced by this rank's last layer so
-            # the next stage can continue exactly where this one stopped.
-            tensors = {"hidden_states": hidden_states, "residual": residual}
-            if self.config.mhc:
-                tensors["post"] = post
-                tensors["comb"] = comb
-            return IntermediateTensors(tensors)
+            if not get_pp_group().is_last_rank:
+                # Keep the deferred hc_post state together across the stage
+                # boundary. Only SP-added rows beyond full_num_tokens are
+                # cleared; original runner padding inside that range stays.
+                tensors = {"hidden_states": hidden_states, "residual": residual}
+                if self.config.mhc:
+                    tensors["post"] = post
+                    tensors["comb"] = comb
+                if self._sp_pp_enabled:
+                    spec = self._glm5next_sp_pp_spec
+                    tensors = {
+                        key: normalize_sp_pp_state(value, full_num_tokens, spec.tp_rank, spec.tp_size)
+                        for key, value in tensors.items()
+                    }
+                return IntermediateTensors(tensors)
 
-        if self.is_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            if self.is_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
-        hidden_states = self.norm(hidden_states)
-        return hidden_states
+            hidden_states = self.norm(hidden_states)
+            return hidden_states
+        finally:
+            if sp_forward_context is not None:
+                sp_forward_context.is_padding = original_is_padding
 
     # Entries are (name, weight) or (name, weight, kwargs); the optional third
     # element carries per-weight loader arguments used by the fused FP8 paths.
@@ -881,6 +1166,9 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=_LOGIT_SCALE)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        if self.model._sp_pp_enabled:
+            self._glm5next_sp_pp_spec = self.model._glm5next_sp_pp_spec
+            self.get_model_state_cls = _get_glm_sp_pp_model_state_cls
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1039,6 +1327,9 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # wrapper so PP ranks > 0 can materialize placeholder intermediate
         # tensors (the vision tower only executes on the first rank).
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        if hasattr(self.language_model, "_glm5next_sp_pp_spec"):
+            self._glm5next_sp_pp_spec = self.language_model._glm5next_sp_pp_spec
+            self.get_model_state_cls = self.language_model.get_model_state_cls
 
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.

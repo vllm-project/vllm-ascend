@@ -16,6 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +48,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
+    from vllm_ascend.models.glm5next.model import Glm5NextSPPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
@@ -492,3 +495,31 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
         )
+
+
+class Glm5NextSPPPModelState(AscendMambaHybridModelState):
+    sp_pp_runtime: "Glm5NextSPPPRuntime"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._sp_pp_capture_layout: Callable[[int], None] | None = None
+
+    def prepare_inputs(self, input_batch, req_states):
+        self.sp_pp_runtime.prepare_inputs(input_batch.num_tokens_after_padding)
+        return super().prepare_inputs(input_batch, req_states)
+
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int):
+        if self._sp_pp_capture_layout is not None:
+            self._sp_pp_capture_layout(num_tokens)
+        return super().prepare_dummy_inputs(num_reqs, num_tokens)
+
+    @contextmanager
+    def capture_layout(self, callback: Callable[[int], None]) -> Iterator[None]:
+        if self._sp_pp_capture_layout is not None:
+            raise RuntimeError("A GLM SP+PP capture layout callback is already installed.")
+        self._sp_pp_capture_layout = callback
+        try:
+            yield
+        finally:
+            # In particular, do not retain a profiling manager/throwaway pool.
+            self._sp_pp_capture_layout = None

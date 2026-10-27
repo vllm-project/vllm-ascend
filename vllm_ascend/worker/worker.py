@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -875,6 +876,31 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        runtime = self.__dict__.get("_glm5next_sp_pp_runtime")
+        if runtime is None:
+            return self._execute_model_with_pp(scheduler_output)
+
+        from vllm_ascend.models.glm5next.model import Glm5NextSPPPError
+
+        self._glm5next_sp_pp_inflight = []
+        try:
+            return self._execute_model_with_pp(scheduler_output)
+        except Glm5NextSPPPError:
+            # Non-output PP ranks do not propagate ordinary RPC exceptions.
+            # Retain in-flight buffers until the process exits; an unbounded
+            # communication drain or Python cleanup could strand other ranks.
+            try:
+                logger.exception("Fatal GLM SP+PP transport/layout mismatch; terminating this worker.")
+            finally:
+                os._exit(1)
+        finally:
+            runtime.end_step()
+            self._glm5next_sp_pp_inflight = []
+
+    def _execute_model_with_pp(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
@@ -885,17 +911,41 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        runtime = self.__dict__.get("_glm5next_sp_pp_runtime")
+        if runtime is not None:
+            from vllm_ascend.models.glm5next.model import SP_PP_HEADER_KEY, Glm5NextSPPPError
+
+            # Previous sends have completed before graph output storage can be
+            # reused. Keep the current send's backing alive until the next call.
+            self._glm5next_sp_pp_send_refs = None
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if runtime is not None and forward_pass and get_pp_group().is_first_rank:
+            runtime.begin_step()
         if forward_pass and not get_pp_group().is_first_rank:
             if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
+            try:
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
+            except Exception as exc:
+                if runtime is None:
+                    raise
+                # Keep partial-posting frame locals alive through the cause until fatal exit.
+                raise Glm5NextSPPPError("GLM SP+PP receive posting failed.") from exc
             assert tensor_dict is not None
+            if runtime is not None:
+                self._glm5next_sp_pp_inflight.extend((tensor_dict, comm_handles, comm_postprocess))
+                # The metadata header must never become a model/graph tensor.
+                tensor_dict = dict(tensor_dict)
+                if SP_PP_HEADER_KEY not in tensor_dict:
+                    raise Glm5NextSPPPError("Missing GLM SP+PP transport header on a non-first stage.")
+                header = tensor_dict.pop(SP_PP_HEADER_KEY)
+                runtime.validate_wire(tensor_dict, header)
+                runtime.begin_step(header)
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
@@ -918,10 +968,23 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        tensor_dict = output.tensors
+        if runtime is not None:
+            self._glm5next_sp_pp_inflight.append(output)
+            header = runtime.make_header()
+            runtime.validate_wire(tensor_dict, header)
+            tensor_dict = dict(tensor_dict)
+            tensor_dict[SP_PP_HEADER_KEY] = header
+            self._glm5next_sp_pp_send_refs = (output, tensor_dict)
+        try:
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                tensor_dict,
+                all_gather_group=all_gather_group,
+            )
+        except Exception as exc:
+            if runtime is None:
+                raise
+            raise Glm5NextSPPPError("GLM SP+PP send posting failed.") from exc
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner
@@ -973,6 +1036,11 @@ class NPUWorker(WorkerBase):
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
+        self._glm5next_sp_pp_runtime = (
+            vars(self.model_runner).get("_glm5next_sp_pp_runtime")
+            if getattr(self, "use_v2_model_runner", False)
+            else None
+        )
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
 

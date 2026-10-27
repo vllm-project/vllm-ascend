@@ -18,7 +18,7 @@
 #
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -78,6 +78,10 @@ def _get_graph_update_backend(
             if impl_cls is not None:
                 return backend
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+
+
+if TYPE_CHECKING:
+    from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
@@ -320,3 +324,61 @@ def model_capture_wrapper(speculator, is_draft_model_prefill):
         yield
     finally:
         speculator.model = speculator.model.get_original_model()
+
+
+class Glm5NextSPPPGraphManager(ModelAclGraphManager):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._sp_pp_output_buffer: Glm5NextSPPPBuffer | None = None
+
+    def capture(
+        self,
+        model,
+        model_state,
+        input_buffers,
+        intermediate_tensors,
+        block_tables,
+        attn_groups,
+        kv_cache_config,
+        **kwargs,
+    ) -> None:
+        from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer
+
+        runtime = self.model_runner._glm5next_sp_pp_runtime
+        # Host containers are independent; only stable canonical input storage
+        # is shared with the runner. Output storage belongs to this manager.
+        input_buffer = None if runtime.input_buffer is None else runtime.input_buffer.fork()
+        if not self.is_last_pp_rank:
+            max_tokens = max(self.capture_sizes, default=0)
+            if max_tokens:
+                self._sp_pp_output_buffer = Glm5NextSPPPBuffer.allocate(runtime.spec, max_tokens, self.device)
+                self.intermediate_tensors = self._sp_pp_output_buffer.active
+
+        def activate_layout(num_tokens: int) -> None:
+            if input_buffer is not None:
+                input_buffer.activate(num_tokens)
+            if self._sp_pp_output_buffer is not None:
+                self._sp_pp_output_buffer.activate(num_tokens)
+
+        with model_state.capture_layout(activate_layout):
+            return super().capture(
+                model,
+                model_state,
+                input_buffers,
+                None if input_buffer is None else input_buffer.active,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                **kwargs,
+            )
+
+    def run_fullgraph(self, desc):
+        # FULL replay does not execute the capture-time Python callback.
+        if self._sp_pp_output_buffer is not None:
+            self._sp_pp_output_buffer.activate(desc.num_tokens)
+        return super().run_fullgraph(desc)
+
+    def release_graphs(self) -> None:
+        super().release_graphs()
+        self.intermediate_tensors = None
+        self._sp_pp_output_buffer = None

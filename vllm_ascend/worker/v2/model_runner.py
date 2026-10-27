@@ -321,6 +321,18 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
+        # Only an actual GLM target instance advertises this private layout.
+        # Other models retain the original buffers, model state and graph class.
+        self._glm5next_sp_pp_runtime = None
+        spec = vars(self.model).get("_glm5next_sp_pp_spec")
+        if spec is not None:
+            from vllm_ascend.models.glm5next.model import Glm5NextSPPPRuntime
+
+            runtime = Glm5NextSPPPRuntime(spec, self.device)
+            runtime.bind_input(self.intermediate_tensors)
+            self.model_state.sp_pp_runtime = runtime
+            self._glm5next_sp_pp_runtime = runtime
+
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
         state = self.execute_model_state
@@ -1459,7 +1471,12 @@ def graph_manager_wrapper(model_runner):
         varlen_decode: bool = False,
         ubatch_runner: Any = None,  # vLLM main (#51700)
     ):
-        return ModelAclGraphManager(
+        manager_cls = ModelAclGraphManager
+        if getattr(model_runner, "_glm5next_sp_pp_runtime", None) is not None:
+            from vllm_ascend.worker.v2.aclgraph_utils import Glm5NextSPPPGraphManager
+
+            manager_cls = Glm5NextSPPPGraphManager
+        return manager_cls(
             vllm_config,
             device,
             cudagraph_mode,
