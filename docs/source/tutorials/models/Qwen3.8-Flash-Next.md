@@ -355,7 +355,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 
