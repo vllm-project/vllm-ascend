@@ -80,8 +80,7 @@ templates:
       - "${TP_SIZE}"
       - "--pipeline-parallel-size"
       - "${PP_SIZE}"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enforce-eager"
       - "--distributed-executor-backend"
       - "mp"
       - "--enable-expert-parallel"
