@@ -150,13 +150,13 @@ def main():
     )
     try:
         pause_generation(BASE_URL)
-        try:
-            # The trainer owns START -> update/broadcast -> FINISH, including
-            # concurrent worker RPCs and propagation of their errors.
-            logger.info("Broadcasting weights via HCCL...")
-            engine.send_weights()
-        finally:
-            resume_generation(BASE_URL)
+        # The trainer owns START -> update/broadcast -> FINISH, including
+        # concurrent worker RPCs and propagation of their errors.
+        logger.info("Broadcasting weights via HCCL...")
+        engine.send_weights()
+        # A failed update may leave partially loaded weights. Keep generation
+        # paused until the workers are restarted or a full reload succeeds.
+        resume_generation(BASE_URL)
     finally:
         engine.shutdown()
 
