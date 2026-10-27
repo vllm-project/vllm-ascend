@@ -47,6 +47,24 @@
 #       Remove when all supported torch_npu versions use runtime.cache and
 #       knobs.runtime for the cache key and launch hooks respectively.
 #
+# ** File: worker/patch_npu_triton_launcher.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torch_npu._inductor.npu_triton_heuristics.TritonCompileResultNpu.make_launcher`
+#    Why:
+#       With Triton's attrs-dict ABI, torch_npu leaves known constexpr block
+#       sizes in the launcher signature although Inductor omits them at runtime.
+#    How:
+#       At worker patch registration, wrap launcher creation to bind only known
+#       constexprs still present in the generated signature. Preserve the NPU
+#       launcher and its metadata, grid logic, callbacks, and full argument ABI.
+#       Each affected launch adds one Python call, with no tensor operations;
+#       legacy layouts and already-fixed launchers return unchanged.
+#    Related PR (if no, explain why):
+#       No torch_npu PR yet. PyTorch 2.10 CompileResult._get_arg_lists already
+#       substitutes known constexprs; this bridges the pinned torch_npu version.
+#    Future Plan:
+#       Remove when supported torch_npu launchers adopt that constexpr handling.
+#
 # * Platform Patch:
 # ==========#
 # Entries are listed in alphabetical order by file name.
