@@ -81,6 +81,7 @@ _TOKEN_ID_DETAIL_KEYS = frozenset(
         "window_token_ids",
         "prompt_token_ids",
         "output_token_ids",
+        "first_device_output_token_ids",
         "window_sampled_token_ids",
         "window_accepted_token_ids",
         "current_sampled_token_ids",
@@ -297,8 +298,10 @@ def _json_default(value: Any) -> Any:
 _DETAIL_TAIL_ORDER = (
     "prompt_token_ids",
     "output_token_ids",
+    "first_device_output_token_ids",
     "prompt_text",
     "output_text",
+    "first_device_output_text",
     "block_ids",
 )
 

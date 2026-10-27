@@ -299,6 +299,9 @@ class RequestGuardState:
 
     req_id: str
     output_token_ids: list[int] = field(default_factory=list)
+    # Device output at the first ``output_token_ids`` store. Report-only
+    # context when detection turns on after output already exists.
+    first_device_output_token_ids: list[int] | None = None
     detection_stopped: bool = False
     # Same-wave append dedupe frontier; not sample-wave stamps.
     last_append_chunk: tuple[int, ...] | None = None
@@ -584,6 +587,31 @@ class RequestGuardStore:
                 self.clear(str(req_id), detectors=detectors)
 
     # ---- IO helpers -------------------------------------------------------
+
+    def set_first_device_output_if_empty(
+        self,
+        req_id: str,
+        token_ids: list[int],
+    ) -> bool:
+        """Save the device output row once, while cumulative output is empty.
+
+        Later samples stay in ``output_token_ids``. A reaped id is left alone
+        so a late append cannot inherit the previous owner's device row.
+        """
+        if not req_id or not token_ids:
+            return False
+        rid = str(req_id)
+        with self._lock:
+            state = self._by_req.get(rid)
+            if state is None:
+                if rid in self._reaped_set:
+                    return False
+                state = RequestGuardState(req_id=rid)
+                self._by_req[rid] = state
+            if state.output_token_ids or state.first_device_output_token_ids is not None:
+                return False
+            state.first_device_output_token_ids = list(token_ids)
+            return True
 
     def append_output_ids(self, req_id: str, token_ids: list[int]) -> None:
         if not req_id or not token_ids:
