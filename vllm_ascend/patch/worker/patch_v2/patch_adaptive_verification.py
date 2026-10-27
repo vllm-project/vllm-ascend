@@ -26,7 +26,19 @@ class _IndexFillMode(TorchFunctionMode):
         return func(*args, **kwargs)
 
 
-_original_assign_draft_token_budget = adaptive_verification._assign_draft_token_budget
+# vLLM main renamed the private helper to the public
+# assign_draft_token_budget. Accept both so the same Ascend patch works on
+# the pinned v0.31 line and on current main.
+_original_assign_draft_token_budget = getattr(
+    adaptive_verification,
+    "_assign_draft_token_budget",
+    getattr(adaptive_verification, "assign_draft_token_budget", None),
+)
+if _original_assign_draft_token_budget is None:
+    raise AttributeError(
+        "adaptive_verification has neither "
+        "_assign_draft_token_budget nor assign_draft_token_budget"
+    )
 
 
 def _assign_draft_token_budget_ascend(*args, **kwargs):
@@ -34,4 +46,10 @@ def _assign_draft_token_budget_ascend(*args, **kwargs):
         return _original_assign_draft_token_budget(*args, **kwargs)
 
 
-adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget_ascend
+adaptive_verification._assign_draft_token_budget_compiled = (
+    _assign_draft_token_budget_ascend
+)
+if hasattr(adaptive_verification, "assign_draft_token_budget_compiled"):
+    adaptive_verification.assign_draft_token_budget_compiled = (
+        _assign_draft_token_budget_ascend
+    )
