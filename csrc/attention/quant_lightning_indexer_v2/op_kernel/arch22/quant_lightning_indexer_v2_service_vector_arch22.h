@@ -654,18 +654,28 @@ __aicore__ inline int32_t QLIV2Vector<QLIV2T>::BuildCandidateCompact(const QLIV2
         LocalTensor<int32_t> tI = tmp[8448].template ReinterpretCast<int32_t>();
         LocalTensor<int32_t> pRaw = tmp[8512].template ReinterpretCast<int32_t>();
         LocalTensor<int32_t> pNeg = tmp[8576].template ReinterpretCast<int32_t>();
-        ArithProgression<int32_t>(eScr, boundaryDst - w, 1, 64); // 窗口内 entry 序号 (boundary 块首为 0)
+        // eScr: 窗口内 entry 相对 boundary 块首的偏移 e = k - (boundaryDst - w)
+        // (k 为窗口内下标, 对应 compactIdx[w + k]; e = 0 即 boundary 块首)
+        ArithProgression<int32_t>(eScr, w - boundaryDst, 1, 64);
         PipeBarrier<PIPE_V>();
         Duplicate(thrI, validTail, 64);          // vj
-        Duplicate(m2, blockSize - 1, 64);        // blockSize-1
         PipeBarrier<PIPE_V>();
+        // 指示函数经 clamp 实现, 需 +1 平移避免边界值被 clamp 抹掉:
+        // m1 = min(1, max(0, e - vj + 1)) = (e >= vj)   — e = vj 时必须为 1 (第一个无效 entry)
         AscendC::Sub(m1, eScr, thrI, 64);        // e - vj
+        PipeBarrier<PIPE_V>();
+        AscendC::Adds(m1, m1, 1, 64);            // e - vj + 1
         PipeBarrier<PIPE_V>();
         AscendC::Maxs(m1, m1, 0, 64);
         PipeBarrier<PIPE_V>();
         AscendC::Mins(m1, m1, 1, 64);            // (e >= vj)
         PipeBarrier<PIPE_V>();
-        AscendC::Sub(m2, m2, eScr, 64);          // (blockSize-1) - e
+        // m2 = min(1, max(0, blockSize - e)) = (e < blockSize) — e = blockSize-1 时必须为 1
+        Duplicate(m2, blockSize, 64);            // blockSize (Sub 后 +1 语义: blockSize - e)
+        PipeBarrier<PIPE_V>();
+        AscendC::Sub(m2, m2, eScr, 64);          // blockSize - e - ... 见下
+        PipeBarrier<PIPE_V>();
+        AscendC::Adds(m2, m2, 1, 64);            // blockSize - e
         PipeBarrier<PIPE_V>();
         AscendC::Maxs(m2, m2, 0, 64);
         PipeBarrier<PIPE_V>();
