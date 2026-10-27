@@ -851,6 +851,40 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
+    def _pooling_forward(self, attn_type):
+        """Run forward() for a pooling request whose metadata still says causal."""
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.zeros_like(query)
+        metadata = MagicMock()
+        metadata.model_runner_type = "pooling"
+        metadata.causal = True
+        metadata.uses_pcp_sharded_layout = False
+        self.impl.attn_type = getattr(attn_module.AttentionType, attn_type)
+        encoder_out = torch.ones(10, 8, 64)
+        with (
+            patch.object(self.impl, "reshape_and_cache", return_value=(query, key, value, output)),
+            patch.object(self.impl, "_forward_encoder_attention", return_value=encoder_out) as encoder,
+            patch.object(self.impl, "forward_impl", return_value=torch.zeros(10, 8, 64)) as causal_path,
+        ):
+            result = self.impl.forward(self.layer_no_quant, query, key, value, None, metadata, output)
+        return result, encoder, causal_path
+
+    def test_forward_pooling_encoder_only_is_bidirectional_despite_causal_metadata(self):
+        """ENCODER_ONLY layers (e.g. D3 full-attention layers in a hybrid model) must not use the causal path."""
+        result, encoder, causal_path = self._pooling_forward("ENCODER_ONLY")
+
+        encoder.assert_called_once()
+        causal_path.assert_not_called()
+        assert torch.equal(result, torch.ones(10, 8, 64))
+
+    def test_forward_pooling_decoder_keeps_causal_path(self):
+        result, encoder, causal_path = self._pooling_forward("DECODER")
+
+        encoder.assert_not_called()
+        causal_path.assert_called_once()
+
     @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
