@@ -15,6 +15,7 @@ from vllm.triton_utils import triton  # noqa: E402
 from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
     _compact_conv_state_kernel,
+    _conv_compaction_block_d,
     kda_recoverssm_verify,
 )
 
@@ -186,11 +187,11 @@ def test_conv_compaction_recorded_b11_l11_shape():
 @pytest.mark.parametrize("align", [False, True])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_conv_compaction_large_tile_preserves_other_slots(channels, dim_first, align):
+def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, align):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(91)
-    slots, state_len, history, block_d = 8, 8, 3, 4096
+    slots, state_len, history = 8, 8, 3
     sources, destinations, accepted = [6, 3, 1, 0], [7, 4, 2, 0], [6, 1, 3, 6]
     boundaries, boundary_lengths = [5, 0, 0, 0], [2, 0, 0, 0]
     views, backings, expected_backings = [], [], []
@@ -222,6 +223,7 @@ def test_conv_compaction_large_tile_preserves_other_slots(channels, dim_first, a
         torch.tensor(values, dtype=torch.int32, device="npu")
         for values in (sources, accepted, destinations, boundaries, boundary_lengths)
     )
+    block_d = _conv_compaction_block_d(views[0].stride(1))
     _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(sources), len(views))](
         views[0],
         *metadata,

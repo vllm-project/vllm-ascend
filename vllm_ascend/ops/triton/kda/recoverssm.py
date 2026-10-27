@@ -16,18 +16,23 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.device.device_config import is_950
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
+RECOVERSSM_CONV_TILE = 4096
+RECOVERSSM_CONV_STRIDED_TILE = 256
 
 
 @triton.jit
 def _kda_l2_normalize(vector):
     # AscendC normalizes nonzero vectors without CUDA's squared-norm bias.
     norm_square = tl.sum(vector * vector)
-    inverse = tl.rsqrt(tl.where(norm_square > 0.0, norm_square, 1.0))
+    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+    tl.static_assert(norm_input.dtype == tl.float32)
+    inverse = tl.rsqrt(norm_input)
     return tl.where(norm_square > 0.0, vector * inverse, 0.0)
 
 
@@ -41,11 +46,17 @@ def _kda_gate(
 ):
     gate_input = raw_g + dt_bias
     if USE_LOWER_BOUND:
-        return lower_bound * tl.sigmoid(A * gate_input)
+        scaled_gate = A * gate_input
+        tl.static_assert(scaled_gate.dtype == tl.float32)
+        return lower_bound * tl.sigmoid(scaled_gate)
+    tl.static_assert(gate_input.dtype == tl.float32)
+    softplus_input = 1.0 + tl.exp(gate_input)
+    tl.static_assert(softplus_input.dtype == tl.float32)
+    log_softplus = tl.log(softplus_input)
     softplus_gate = tl.where(
         gate_input > 20.0,
         gate_input,
-        tl.log(1.0 + tl.exp(gate_input)),
+        log_softplus,
     )
     return -A * softplus_gate
 
@@ -71,8 +82,10 @@ def _kda_recurrent_step(
         USE_LOWER_BOUND,
     )
 
+    tl.static_assert(gate.dtype == tl.float32)
     state *= tl.exp(gate)[None, :]
     correction = v - tl.sum(state * normalized_k[None, :], axis=1)
+    tl.static_assert(raw_beta.dtype == tl.float32)
     correction *= tl.sigmoid(raw_beta)
     return state + correction[:, None] * normalized_k[None, :], correction
 
@@ -172,7 +185,9 @@ def _kda_recoverssm_verify_kernel(
         + offs_k[None, :] * stride_state_k
     )
     state = tl.load(state_ptrs, mask=mask_state, other=0.0 if mask_state is not None else None).to(tl.float32)
-    A = tl.exp(tl.load(A_log_ptr + pid_h).to(tl.float32))
+    a_log = tl.load(A_log_ptr + pid_h).to(tl.float32)
+    tl.static_assert(a_log.dtype == tl.float32)
+    A = tl.exp(a_log)
 
     # token_offset < query_len always holds inside range(query_len); the
     # token_valid masks and the tl.where state select are redundant and dropped.
@@ -210,9 +225,11 @@ def _kda_recoverssm_verify_kernel(
         q = _kda_l2_normalize(q) * (K**-0.5)
         normalized_k = _kda_l2_normalize(k)
         gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+        tl.static_assert(gate.dtype == tl.float32)
         decay = tl.exp(gate)
         weighted_k = normalized_k * decay
         weighted_q = q * decay
+        tl.static_assert(raw_beta.dtype == tl.float32)
         correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
         out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         state = state * decay[None, :] + correction[:, None] * normalized_k[None, :]
@@ -275,9 +292,11 @@ def _kda_recoverssm_verify_kernel(
         q = _kda_l2_normalize(q) * (K**-0.5)
         normalized_k = _kda_l2_normalize(k)
         gate = _kda_gate(raw_g, dt_bias, A, lower_bound, USE_LOWER_BOUND)
+        tl.static_assert(gate.dtype == tl.float32)
         decay = tl.exp(gate)
         weighted_k = normalized_k * decay
         weighted_q = q * decay
+        tl.static_assert(raw_beta.dtype == tl.float32)
         correction = (v - tl.sum(state * weighted_k[None, :], axis=1)) * tl.sigmoid(raw_beta)
         out = tl.sum(state * weighted_q[None, :], axis=1) + correction * tl.sum(normalized_k * q)
         tl.store(
@@ -411,6 +430,7 @@ def _compact_conv_state_kernel(
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
     DIM_STRIDE: tl.constexpr = None,
+    COPY_PER_HISTORY: tl.constexpr = False,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -440,26 +460,48 @@ def _compact_conv_state_kernel(
     source_ptr = conv_state_ptr + source_state_idx * block_stride
     final_ptr = conv_state_ptr + final_state_idx * block_stride
 
-    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-    offs_h = tl.arange(0, BLOCK_HISTORY)
-    mask = (offs_d[None, :] < conv_dim) & (offs_h[:, None] < conv_history_len)
+    if COPY_PER_HISTORY and (DIM_STRIDE is not None and DIM_STRIDE != 1):
+        # A3 Triton 3.2 requires one-dimensional gathers for strided channels.
+        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+        for history in tl.static_range(BLOCK_HISTORY):
+            mask = (offs_d < conv_dim) & (history < conv_history_len)
+            final_values = tl.load(
+                source_ptr + offs_d * dim_stride + (commit_len - 1 + history) * token_stride,
+                mask=mask,
+            )
+            if ALIGN_MODE:
+                boundary_values = tl.load(
+                    source_ptr + offs_d * dim_stride + (boundary_recovery_len - 1 + history) * token_stride,
+                    mask=mask & (boundary_state_idx > null_block_id),
+                )
+                boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
+                tl.store(
+                    boundary_ptr + offs_d * dim_stride + history * token_stride,
+                    boundary_values,
+                    mask=mask & (boundary_state_idx > null_block_id),
+                )
+            tl.store(final_ptr + offs_d * dim_stride + history * token_stride, final_values, mask=mask)
+        return
+    offs_d = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D))[None, :]
+    offs_h = tl.arange(0, BLOCK_HISTORY)[:, None]
+    mask = (offs_d < conv_dim) & (offs_h < conv_history_len)
     final_values = tl.load(
-        source_ptr + offs_d[None, :] * dim_stride + (commit_len - 1 + offs_h[:, None]) * token_stride,
+        source_ptr + offs_d * dim_stride + (commit_len - 1 + offs_h) * token_stride,
         mask=mask,
     )
     if ALIGN_MODE:
         boundary_values = tl.load(
-            source_ptr + offs_d[None, :] * dim_stride + (boundary_recovery_len - 1 + offs_h[:, None]) * token_stride,
+            source_ptr + offs_d * dim_stride + (boundary_recovery_len - 1 + offs_h) * token_stride,
             mask=mask & (boundary_state_idx > null_block_id),
         )
         boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
         tl.store(
-            boundary_ptr + offs_d[None, :] * dim_stride + offs_h[:, None] * token_stride,
+            boundary_ptr + offs_d * dim_stride + offs_h * token_stride,
             boundary_values,
             mask=mask & (boundary_state_idx > null_block_id),
         )
     tl.store(
-        final_ptr + offs_d[None, :] * dim_stride + offs_h[:, None] * token_stride,
+        final_ptr + offs_d * dim_stride + offs_h * token_stride,
         final_values,
         mask=mask,
     )
@@ -507,7 +549,8 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
-    SPEC_QUERY_LEN: tl.constexpr = 6,
+    SPEC_QUERY_LEN: tl.constexpr,
+    UNROLL_COMMIT: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -557,7 +600,9 @@ def _commit_kda_state_kernel(
     else:
         mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
     state_ptrs = source_state_ptr + offs_v[:, None] * stride_state_v + offs_k[None, :] * stride_state_k
-    A = tl.exp(tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32))
+    a_log = tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32)
+    tl.static_assert(a_log.dtype == tl.float32)
+    A = tl.exp(a_log)
 
     dt_bias = tl.load(
         dt_bias_ptr + pid_l * stride_dt_bias_layer + pid_h * stride_dt_bias_head + offs_k * stride_dt_bias_dim,
@@ -569,50 +614,11 @@ def _commit_kda_state_kernel(
     boundary_decay = tl.full([BK], 1.0, tl.float32)
     boundary_correction = tl.zeros([BV, BK], tl.float32)
 
-    if SPEC_QUERY_LEN == 6:
-        for reverse_offset in tl.static_range(6):
-            if reverse_offset < commit_len:
-                token_offset = commit_len - reverse_offset - 1
-                correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
-                kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
-                k = tl.load(
-                    kg_ptr + offs_k * stride_kg_cache_dim,
-                    mask=mask_k,
-                    other=0.0 if mask_k is not None else None,
-                ).to(tl.float32)
-                correction = tl.load(
-                    correction_ptr + offs_v * stride_correction_cache_dim,
-                    mask=mask_v,
-                    other=0.0 if mask_v is not None else None,
-                ).to(tl.float32)
-                raw_g = tl.load(
-                    kg_ptr + (K + offs_k) * stride_kg_cache_dim,
-                    mask=mask_k,
-                    other=0.0 if mask_k is not None else None,
-                ).to(tl.float32)
-                normalized_k = _kda_l2_normalize(k)
-                gate = _kda_gate(
-                    raw_g,
-                    dt_bias,
-                    A,
-                    lower_bound,
-                    USE_LOWER_BOUND,
-                )
-                decay = tl.exp(gate)
-                weighted_k = normalized_k * final_decay
-                final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
-                final_decay *= decay
-                if ALIGN_MODE:
-                    before_boundary = token_offset < boundary_recovery_len
-                    boundary_k = normalized_k * boundary_decay
-                    boundary_correction = tl.where(
-                        before_boundary,
-                        tl.fma(correction[:, None], boundary_k[None, :], boundary_correction),
-                        boundary_correction,
-                    )
-                    boundary_decay *= tl.where(before_boundary, decay, 1.0)
-    else:
-        for reverse_offset in range(commit_len):
+    # A3 runtime iteration bounds UB use; A5 retains its faster static expansion.
+    for reverse_offset in (tl.static_range if UNROLL_COMMIT else range)(
+        SPEC_QUERY_LEN if UNROLL_COMMIT else tl.minimum(commit_len, SPEC_QUERY_LEN)
+    ):
+        if reverse_offset < commit_len:
             token_offset = commit_len - reverse_offset - 1
             correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
             kg_ptr = kg_cache_ptr + token_offset * stride_kg_cache_pos
@@ -639,6 +645,7 @@ def _commit_kda_state_kernel(
                 lower_bound,
                 USE_LOWER_BOUND,
             )
+            tl.static_assert(gate.dtype == tl.float32)
             decay = tl.exp(gate)
             weighted_k = normalized_k * final_decay
             final_correction = tl.fma(correction[:, None], weighted_k[None, :], final_correction)
@@ -684,7 +691,9 @@ def _commit_kda_state_kernel(
 @triton.jit
 def _kda_l2_normalize_heads(vector):
     norm_square = tl.sum(vector * vector, axis=1)
-    inverse = tl.rsqrt(tl.where(norm_square > 0.0, norm_square, 1.0))
+    norm_input = tl.where(norm_square > 0.0, norm_square, 1.0)
+    tl.static_assert(norm_input.dtype == tl.float32)
+    inverse = tl.rsqrt(norm_input)
     return tl.where(norm_square[:, None] > 0.0, vector * inverse[:, None], 0.0)
 
 
@@ -791,7 +800,9 @@ def _commit_kda_state_grouped_kernel(
         + offs_v[None, :, None] * stride_state_v
         + offs_k[None, None, :] * stride_state_k
     )
-    A = tl.exp(tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32))
+    a_log = tl.load(A_log_ptr + pid_l * stride_A_layer + pid_h * stride_A_head).to(tl.float32)
+    tl.static_assert(a_log.dtype == tl.float32)
+    A = tl.exp(a_log)
     dt_bias = tl.load(
         dt_bias_ptr
         + pid_l * stride_dt_bias_layer
@@ -802,7 +813,7 @@ def _commit_kda_state_grouped_kernel(
     ).to(tl.float32)
     final_decay = tl.full([BH, BK], 1.0, tl.float32)
     final_correction = tl.zeros([BH, BV, BK], tl.float32)
-    for reverse_offset in tl.static_range(6):
+    for reverse_offset in tl.static_range(SPEC_QUERY_LEN):
         if reverse_offset < commit_len:
             token_offset = commit_len - reverse_offset - 1
             correction_ptr = correction_cache_ptr + token_offset * stride_correction_cache_pos
@@ -824,6 +835,7 @@ def _commit_kda_state_grouped_kernel(
             ).to(tl.float32)
             normalized_k = _kda_l2_normalize_heads(k)
             gate = _kda_gate(raw_g, dt_bias, A[:, None], lower_bound, USE_LOWER_BOUND)
+            tl.static_assert(gate.dtype == tl.float32)
             decay = tl.exp(gate)
             weighted_k = normalized_k * final_decay
             final_correction = tl.fma(correction[:, :, None], weighted_k[:, None, :], final_correction)
@@ -990,6 +1002,11 @@ def kda_recoverssm_verify(
     return out
 
 
+def _conv_compaction_block_d(dim_stride):
+    # A3 strided gathers need smaller tiles to fit the 192 KiB UB.
+    return RECOVERSSM_CONV_TILE if is_950() or dim_stride == 1 else RECOVERSSM_CONV_STRIDED_TILE
+
+
 @dataclass
 class KDARecoverSSMCommitContext:
     conv_states: tuple[torch.Tensor, ...]
@@ -1016,6 +1033,7 @@ class KDARecoverSSMCommitContext:
     lower_bound: float | None
     spec_query_len: int
     conv_dim_stride: int | None
+    ub_size_bytes: int
 
     @classmethod
     def create(
@@ -1030,6 +1048,7 @@ class KDARecoverSSMCommitContext:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
         if any(len(layer.kv_cache) != 4 for layer in layers):
             raise ValueError("KDA RecoverSSM pages must contain conv, state, correction, and key/gate")
+        init_device_properties_triton()
 
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
@@ -1149,6 +1168,7 @@ class KDARecoverSSMCommitContext:
             dt_bias=torch.stack(tuple(dt_bias)).contiguous(),
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
+            ub_size_bytes=get_ub_size_bytes(),
             conv_dim_stride=(
                 conv_ref.stride(1) if all(state.stride(1) == conv_ref.stride(1) for state in conv_states) else None
             ),
@@ -1228,7 +1248,8 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 4096), batch, num_layers)](
+        conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
+        _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, num_layers)](
             conv_ref,
             self.conv_state_base_addrs,
             self.conv_state_block_strides,
@@ -1243,10 +1264,11 @@ class KDARecoverSSMCommitContext:
             conv_dim,
             self.conv_history_len,
             state_indices.stride(0),
-            BLOCK_D=4096,
+            BLOCK_D=conv_block_d,
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,
             DIM_STRIDE=self.conv_dim_stride,
+            COPY_PER_HISTORY=not is_950(),
             num_warps=4,
         )
 
@@ -1263,15 +1285,22 @@ class KDARecoverSSMCommitContext:
             and num_heads in (32, 64)
             and self.spec_query_len == 6
         )
-        # A3 needs BV64 to fit UB; grouped A5 also uses BV64 for two heads.
-        # Only ordinary, non-align A5 commit may use BV128.
+        # Grouped commit uses BV64; ordinary commit is also capped by its UB budget.
         value_tile = RECOVERSSM_VALUE_TILE
         if is_a5 and block_table is None and not grouped_commit:
             value_tile *= 2
+        if not grouped_commit:
+            # Runtime iteration keeps accumulator/merge matrices independent of window length.
+            matrix_buffers = 6 if block_table is not None else 2
+            bytes_per_row = matrix_buffers * block_k * torch.float32.itemsize
+            # Reserve two rows' worth for FP32 vector temporaries.
+            max_rows = max(1, self.ub_size_bytes // bytes_per_row - 2)
+            value_tile = min(value_tile, 1 << (max_rows.bit_length() - 1))
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         head_groups = num_heads // RECOVERSSM_COMMIT_HEAD_TILE if grouped_commit else num_heads
         grid = (triton.cdiv(value_dim, block_v), batch, num_layers * head_groups)
         commit_kernel = _commit_kda_state_grouped_kernel if grouped_commit else _commit_kda_state_kernel
+        commit_options = {} if grouped_commit else {"UNROLL_COMMIT": is_a5}
         commit_kernel[grid](
             state_ref,
             self.state_base_addrs,
@@ -1316,6 +1345,7 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=4,
             num_stages=2,
+            **commit_options,
         )
 
 
