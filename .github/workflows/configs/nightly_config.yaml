@@ -119,6 +119,10 @@ a3:
         config_file_path: MiniMax-M3-w8a8-PP-prefix-PD.yaml
         config_base_path: tests/e2e/cases/models/configs/MiniMax
         size: 3
+      - name: MiniMax-M3-w8a8-PP-noprefix-PD
+        config_file_path: MiniMax-M3-w8a8-PP-noprefix-PD.yaml
+        config_base_path: tests/e2e/cases/models/configs/MiniMax
+        size: 3
 
   double_node:
     test_config:
