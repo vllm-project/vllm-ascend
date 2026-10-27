@@ -214,7 +214,8 @@ templates:
       - "ascend"
       - "--max-num-seqs"
       - "128"
-      - "--enforce-eager"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--gpu-memory-utilization"
       - "0.92"
       - "--limit-mm-per-prompt"
