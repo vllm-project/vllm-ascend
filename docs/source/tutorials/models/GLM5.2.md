@@ -1871,26 +1871,26 @@ layerwise setting and topology.
 
     Once preparation is complete, run the following commands on each node from the directory containing the scripts:
 
-    3. Prefill node 0
+    1. Prefill node 0
 
         ```shell
         bash run_dp_template.sh
         ```
 
-    4. Prefill node 1
+    2. Prefill node 1
 
         ```shell
         bash run_dp_template.sh
         ```
 
-    5. Decode node 0
+    3. Decode node 0
 
         ```shell
         D0_IP="<DECODE_NODE0_IP>"
         python launch_online_dp.py --dp-size 16 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address "$D0_IP" --dp-rpc-port 16600 --vllm-start-port 8000
         ```
 
-    6. Decode node 1
+    4. Decode node 1
 
         ```shell
         D0_IP="<DECODE_NODE0_IP>"

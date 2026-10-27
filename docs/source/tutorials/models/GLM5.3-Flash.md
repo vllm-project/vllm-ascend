@@ -1525,7 +1525,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ##### Start the Services
 
     Start the services in this order: Memcache MetaService → Decode → Prefill → Proxy. 
-    Each vLLM worker initializes its Memcache LocalServiceduring startup.
+    Each vLLM worker initializes its Memcache LocalService during startup.
 
     1. In a separate terminal in the Prefill container, start MetaService.
        Ensure ports `5000` and `6000` are reachable from both nodes and port
