@@ -340,6 +340,7 @@ class Glm5NextSPPPGraphManager(ModelAclGraphManager):
         block_tables,
         attn_groups,
         kv_cache_config,
+        *args,
         **kwargs,
     ) -> None:
         from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer
@@ -369,6 +370,7 @@ class Glm5NextSPPPGraphManager(ModelAclGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                *args,
                 **kwargs,
             )
 

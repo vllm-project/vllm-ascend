@@ -882,7 +882,7 @@ class NPUWorker(WorkerBase):
 
         from vllm_ascend.models.glm5next.model import Glm5NextSPPPError
 
-        self._glm5next_sp_pp_inflight = []
+        self._glm5next_sp_pp_inflight: list[Any] = []
         try:
             return self._execute_model_with_pp(scheduler_output)
         except Glm5NextSPPPError:

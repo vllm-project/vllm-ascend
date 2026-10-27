@@ -68,7 +68,15 @@ def test_prepare_inputs_activates_before_parent_for_real_dummy_and_profile(monke
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_capture_hooks_precede_slice_store_and_are_always_released(monkeypatch, fail):
+@pytest.mark.parametrize(
+    "capture_options",
+    [
+        ((), {}, "Capturing CUDA graphs"),
+        ((), {"progress_bar_desc": "SP+PP capture"}, "SP+PP capture"),
+        ((False, False, None, "SP+PP capture", None), {}, "SP+PP capture"),
+    ],
+)
+def test_capture_hooks_precede_slice_store_and_are_always_released(monkeypatch, fail, capture_options):
     runtime = Glm5NextSPPPRuntime(Glm5NextSPPPSpec(4, 0, 8, 3), torch.device("cpu"))
     active = Glm5NextSPPPBuffer.allocate(runtime.spec, 16, torch.device("cpu")).active
     runtime.bind_input(active)
@@ -78,7 +86,30 @@ def test_capture_hooks_precede_slice_store_and_are_always_released(monkeypatch, 
     monkeypatch.setattr(AscendMambaHybridModelState, "prepare_dummy_inputs", lambda *args: {})
     seen = []
 
-    def parent_capture(self, model, model_state, input_buffers, inputs, *args, **kwargs):
+    optional_args, optional_kwargs, expected_desc = capture_options
+
+    def parent_capture(
+        self,
+        model,
+        model_state,
+        input_buffers,
+        inputs,
+        block_tables,
+        attn_groups,
+        kv_cache_config,
+        has_lora=False,
+        use_aux_hidden_state_outputs=False,
+        lora_capture_hook=None,
+        progress_bar_desc="Capturing CUDA graphs",
+        pcp_manager=None,
+    ):
+        assert (has_lora, use_aux_hidden_state_outputs, lora_capture_hook, progress_bar_desc, pcp_manager) == (
+            False,
+            False,
+            None,
+            expected_desc,
+            None,
+        )
         for total in (13, 1, 5, 3):
             # Mirrors the unmodified parent: dummy hook, input [:T], output store.
             model_state.prepare_dummy_inputs(1, total)
@@ -96,9 +127,9 @@ def test_capture_hooks_precede_slice_store_and_are_always_released(monkeypatch, 
     monkeypatch.setattr(ModelAclGraphManager, "capture", parent_capture)
     if fail:
         with pytest.raises(RuntimeError, match="capture injection"):
-            manager.capture(None, state, None, active, None, [], None)
+            manager.capture(None, state, None, active, None, [], None, *optional_args, **optional_kwargs)
     else:
-        manager.capture(None, state, None, active, None, [], None)
+        manager.capture(None, state, None, active, None, [], None, *optional_args, **optional_kwargs)
     assert seen == [4, 1, 2, 1]
     assert state._sp_pp_capture_layout is None
     assert manager._sp_pp_output_buffer.capacity == 4
