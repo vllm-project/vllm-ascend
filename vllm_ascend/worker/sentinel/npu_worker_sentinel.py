@@ -27,7 +27,7 @@ from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.eplb.state import refresh_model_routing_tables
+from vllm_ascend.distributed.eplb.eplb_state import refresh_model_routing_tables
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
     build_orig_to_dense_rank_table,
