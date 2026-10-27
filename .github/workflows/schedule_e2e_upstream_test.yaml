@@ -158,7 +158,7 @@ jobs:
 
           - name: Restore vllm-ascend csrc cache
             id: cache-csrc
-            uses: runs-on/cache/restore@v5
+            uses: actions/cache/restore@v4
             with:
               path: |
                 vllm_ascend/_cann_ops_custom
@@ -294,7 +294,7 @@ jobs:
 
           - name: Restore vllm-ascend csrc cache
             id: cache-csrc
-            uses: runs-on/cache/restore@v5
+            uses: actions/cache/restore@v4
             with:
               path: |
                 vllm_ascend/_cann_ops_custom
@@ -424,7 +424,7 @@ jobs:
 
           - name: Restore vllm-ascend csrc cache
             id: cache-csrc
-            uses: runs-on/cache/restore@v5
+            uses: actions/cache/restore@v4
             with:
               path: |
                 vllm_ascend/_cann_ops_custom

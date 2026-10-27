@@ -95,6 +95,10 @@ on:
         required: false
       SWR_PASSWORD:
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
       SYNC_TOOLS_TOKEN:
         required: false
 
@@ -103,6 +107,8 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      source_ref: ${{ steps.set-tag.outputs.source_ref }}
+      branch_tag: ${{ steps.set-tag.outputs.branch_tag }}
       tag_suffix_ubuntu: ${{ steps.set-tag.outputs.tag_suffix_ubuntu }}
       tag_suffix_openeuler: ${{ steps.set-tag.outputs.tag_suffix_openeuler }}
     steps:
@@ -138,7 +144,11 @@ jobs:
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
 
       - id: set-tag
+        env:
+          SOURCE_REF: ${{ inputs.vllm_ascend_branch }}
         run: |
+          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=${SOURCE_REF//\//-}" >> "$GITHUB_OUTPUT"
           # Full builds are published under the stable tag plus a unique history
           # tag whose suffix follows the mainline nightly rule:
           #   -cann<cann_version>-<build_date>-r<run_number>
@@ -390,3 +400,20 @@ jobs:
               workflow_id: 'sync-vllm-ascend.yml',
               ref: 'main',
             });
+
+  ensure-nightly-csrc-cache:
+    needs: [generate-matrix, build, merge-image]
+    if: >-
+      inputs.should_push && inputs.build_type == 'full' && inputs.os_filter != 'openeuler' &&
+      github.repository == 'vllm-project/vllm-ascend' &&
+      github.event_name != 'pull_request' && github.event_name != 'pull_request_target' &&
+      (inputs.vllm_ascend_branch == 'main' || startsWith(inputs.vllm_ascend_branch, 'releases/')) &&
+      (inputs.base_image_branch == '' || inputs.base_image_branch == inputs.vllm_ascend_branch)
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      source_ref: ${{ needs.generate-matrix.outputs.source_ref }}
+      nightly_image: ${{ format('{0}/base_image/ascend-ci/vllm-ascend:nightly-ci-{1}-{2}{3}', inputs.swr_registry, needs.generate-matrix.outputs.branch_tag, inputs.target, needs.generate-matrix.outputs.tag_suffix_ubuntu) }}
+      soc_version: ${{ inputs.target }}
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

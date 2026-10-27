@@ -450,7 +450,7 @@ jobs:
 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
-        uses: runs-on/cache/restore@v5
+        uses: actions/cache/restore@v4
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -517,7 +517,7 @@ jobs:
             env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
             env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
           }}
-        uses: runs-on/cache/save@v5
+        uses: actions/cache/save@v4
         env:
           AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}

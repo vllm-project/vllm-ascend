@@ -414,9 +414,21 @@ jobs:
           # multi-node launch becomes Ready in time; single-node runs independently.
           echo "::warning::Timed out after ${TIMEOUT}s waiting for ${EXPECTED} ready leader pods (${READY:-0} seen); releasing single-node anyway."
 
+  ensure-pr-csrc-cache:
+    needs: [setup-vars, parse-trigger, build-image]
+    if: >-
+      always() && !cancelled() && inputs.request_id != '' &&
+      needs.parse-trigger.outputs.run == 'true' && needs.setup-vars.result == 'success' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      source_ref: ${{ inputs.vllm_ascend_ref }}
+      nightly_image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches)[0] }}-a2"
+      soc_version: "a2"
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image, wait-multi-node-pods-ready, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -557,7 +569,7 @@ jobs:
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -589,7 +601,7 @@ jobs:
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix, wait-multi-node-pods-ready, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&

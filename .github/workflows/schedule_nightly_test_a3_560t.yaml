@@ -203,9 +203,21 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
 
+  ensure-pr-csrc-cache:
+    needs: [setup-vars, parse-trigger, build-image]
+    if: >-
+      always() && !cancelled() && inputs.request_id != '' &&
+      needs.parse-trigger.outputs.run == 'true' && needs.setup-vars.result == 'success' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      source_ref: ${{ inputs.vllm_ascend_ref }}
+      nightly_image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches)[0] }}-a3"
+      soc_version: "a3-560t"
+
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger, build-image, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -257,7 +269,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger, build-image, ensure-pr-csrc-cache]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&

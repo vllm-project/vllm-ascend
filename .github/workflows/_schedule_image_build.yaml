@@ -67,6 +67,10 @@ on:
       SWR_PASSWORD:
         description: 'SWR password for pushing images'
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
       SYNC_TOOLS_TOKEN:
         description: 'GitHub token for dispatching quay.io sync workflow'
         required: false
@@ -79,7 +83,18 @@ env:
   SWR_REPO: ${{ inputs.swr_repo }}
 
 jobs:
+  ensure-csrc-cache:
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      source_ref: ${{ inputs.branch_ref || github.sha }}
+      dockerfile: ${{ inputs.dockerfile || 'Dockerfile' }}
+    secrets:
+      HW_OBS_AK: ${{ github.event_name != 'pull_request' && inputs.should_push && secrets.HW_OBS_AK || '' }}
+      HW_OBS_SK: ${{ github.event_name != 'pull_request' && inputs.should_push && secrets.HW_OBS_SK || '' }}
+
   build-push-digest:
+    needs: ensure-csrc-cache
+    if: ${{ always() && !cancelled() }}
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
     container:
@@ -111,7 +126,7 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
         # Empty on tag pushes and PR events, so the default event ref is used.
-        ref: ${{ inputs.branch_ref }}
+        ref: ${{ needs.ensure-csrc-cache.outputs.source_ref || inputs.branch_ref }}
 
     - name: Compute cache tag
       id: cache-tag
@@ -159,7 +174,7 @@ jobs:
 
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
-      uses: runs-on/cache/restore@v5
+      uses: actions/cache/restore@v4
       with:
         path: |
           vllm_ascend/_cann_ops_custom

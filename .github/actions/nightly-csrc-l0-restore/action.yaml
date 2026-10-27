@@ -1,0 +1,49 @@
+name: Restore nightly csrc L0
+description: Restore and validate native artifacts from GitHub Cache.
+inputs:
+  source-root:
+    default: '.'
+  architecture:
+    required: true
+  soc-version:
+    required: true
+outputs:
+  key:
+    value: ${{ steps.identity.outputs.key }}
+  cache-hit:
+    value: ${{ steps.validate.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: identity
+      shell: bash
+      env:
+        SOURCE_ROOT: ${{ inputs.source-root }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        SOC_VERSION: ${{ inputs.soc-version }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../workflows/scripts/nightly_csrc_l0.py" key \
+          --source-root "$SOURCE_ROOT" --architecture "$ARCHITECTURE" --soc-version "$SOC_VERSION"
+    - id: restore
+      if: steps.identity.outputs.key != ''
+      continue-on-error: true
+      uses: actions/cache/restore@v4
+      with:
+        # Literal transport paths must match the producer, even when the PR
+        # source checkout lives in a subdirectory and is moved after restore.
+        path: |
+          vllm_ascend/_cann_ops_custom
+          vllm_ascend/*.so
+          vllm_ascend/lib
+          vllm_ascend/include
+          .nightly-csrc-l0.json
+        key: ${{ steps.identity.outputs.key }}
+    - id: validate
+      if: steps.restore.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        SOURCE_ROOT: ${{ inputs.source-root }}
+        CACHE_KEY: ${{ steps.identity.outputs.key }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../workflows/scripts/nightly_csrc_l0.py" restore \
+          --source-root "$SOURCE_ROOT" --key "$CACHE_KEY"
