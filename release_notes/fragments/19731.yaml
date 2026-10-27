@@ -1,4 +1,0 @@
-pr: 19731
-entries:
-  - category: bugfix
-    text: Fixed an engine crash for M-RoPE multimodal models (e.g. Qwen3.5) when prefix caching is combined with balance scheduling or DyntraLB, by forwarding uses_mrope when building NewRequestData.
