@@ -283,11 +283,16 @@ def _exchange_kv_shards(
         handle.wait()
 
 
+_KV_STATUS_BITS_PER_BYTE = 8
+
+
 def _all_reduce_kv_status(tp_group: Any, status: torch.Tensor) -> torch.Tensor:
     all_reduce = getattr(tp_group, "all_reduce_kv_status", None)
     if callable(all_reduce):
         return all_reduce(status)
     reduced = status.clone()
+    # Each key belongs to one rank, so bitmap bits are disjoint across ranks.
+    # SUM is equivalent to bitwise OR and cannot overflow a uint8 status byte.
     torch.distributed.all_reduce(reduced, group=tp_group.cpu_group)
     return reduced
 
@@ -303,8 +308,7 @@ def _all_gather_kv_shards(
     device: torch.device,
 ) -> list[int]:
     wire_bytes = max(shard_lengths, default=0)
-    status_word_count = len(status_values) // 2
-    status_bytes = status_word_count * 2 * 4
+    status_bytes = len(status_values)
     packet_bytes = wire_bytes + status_bytes
     payload = torch.empty(packet_bytes, dtype=torch.int8, device=device)
 
@@ -321,7 +325,7 @@ def _all_gather_kv_shards(
     if local_bytes < wire_bytes:
         payload[local_bytes:wire_bytes].zero_()
 
-    status = torch.tensor(status_values, dtype=torch.int32, device=device)
+    status = torch.tensor(status_values, dtype=torch.uint8, device=device)
     payload[wire_bytes:].copy_(status.view(torch.int8))
     gathered = tp_group.all_gather(payload, dim=0).flatten()
     expected_numel = packet_bytes * tp_group.world_size
@@ -345,15 +349,10 @@ def _all_gather_kv_shards(
     if destinations:
         torch._foreach_copy_(destinations, sources)
 
-    aggregated = [0] * len(status_values)
-    for owner in range(tp_group.world_size):
-        status_base = owner * packet_bytes + wire_bytes
-        owner_status = np.frombuffer(
-            gathered[status_base : status_base + status_bytes].cpu().numpy().tobytes(), dtype=np.int32
-        )
-        for index, value in enumerate(owner_status):
-            aggregated[index] |= int(value)
-    return aggregated
+    # Compact the status tails locally so all owners share one device-to-host copy.
+    owner_status = gathered.reshape(tp_group.world_size, packet_bytes)[:, wire_bytes:].contiguous().cpu()
+    status_array = owner_status.numpy().view(np.uint8)
+    return np.bitwise_or.reduce(status_array, axis=0).tolist()
 
 
 _P2P_EXCHANGE_VIEW_LIMIT = 4
@@ -392,7 +391,7 @@ def sharded_get_all_gather(
     shard_lengths = _kv_shard_lengths(sizes, world_size)
     local_bytes = shard_lengths[tp_rank]
     wire_bytes = max(shard_lengths, default=0)
-    status_word_count = (len(keys) + 31) // 32
+    status_byte_count = (len(keys) + _KV_STATUS_BITS_PER_BYTE - 1) // _KV_STATUS_BITS_PER_BYTE
 
     ret = None
     local_missing: set[int] = set()
@@ -411,17 +410,17 @@ def sharded_get_all_gather(
             if isinstance(m_store, MemcacheBackend) and local_missing:
                 local_failed = True
 
-    missing_words = [0] * status_word_count
-    failure_words = [0] * status_word_count
+    missing_bytes = [0] * status_byte_count
+    failure_bytes = [0] * status_byte_count
     for index in local_indices:
         if block_ids[index] in local_missing:
-            word_index, bit_index = divmod(index, 32)
-            missing_words[word_index] |= 1 << bit_index
+            byte_index, bit_index = divmod(index, _KV_STATUS_BITS_PER_BYTE)
+            missing_bytes[byte_index] |= 1 << bit_index
     if local_failed:
         for index in local_indices:
-            word_index, bit_index = divmod(index, 32)
-            missing_words[word_index] |= 1 << bit_index
-            failure_words[word_index] |= 1 << bit_index
+            byte_index, bit_index = divmod(index, _KV_STATUS_BITS_PER_BYTE)
+            missing_bytes[byte_index] |= 1 << bit_index
+            failure_bytes[byte_index] |= 1 << bit_index
 
     if wire_bytes:
         local_views = _coalesced_kv_views(
@@ -448,10 +447,10 @@ def sharded_get_all_gather(
                     f"KV P2P shard size mismatch for rank {owner}: expected={shard_lengths[owner]} actual={owner_bytes}"
                 )
             owner_views[owner] = owner_view_list
-        status_values = missing_words + failure_words
+        status_values = missing_bytes + failure_bytes
         total_views = len(local_views) + sum(len(owner_view_list) for owner_view_list in owner_views.values())
         if total_views <= _P2P_EXCHANGE_VIEW_LIMIT:
-            status = torch.tensor(status_values, dtype=torch.int32, device="cpu")
+            status = torch.tensor(status_values, dtype=torch.uint8, device="cpu")
             status_values = _all_reduce_kv_status(tp_group, status).tolist()
             _exchange_kv_shards(tp_group, tp_rank, local_views, owner_views)
         else:
@@ -466,19 +465,19 @@ def sharded_get_all_gather(
                 device,
             )
     else:
-        status = torch.tensor(missing_words + failure_words, dtype=torch.int32, device="cpu")
+        status = torch.tensor(missing_bytes + failure_bytes, dtype=torch.uint8, device="cpu")
         status_values = _all_reduce_kv_status(tp_group, status).tolist()
-    aggregated_missing = status_values[:status_word_count]
-    aggregated_failure = status_values[status_word_count:]
+    aggregated_missing = status_values[:status_byte_count]
+    aggregated_failure = status_values[status_byte_count:]
 
     request_failed = any(aggregated_failure)
     missing_block_ids: set[int] = set()
-    for word_index, word in enumerate(aggregated_missing):
-        for bit_index in range(32):
-            index = word_index * 32 + bit_index
+    for byte_index, byte in enumerate(aggregated_missing):
+        for bit_index in range(_KV_STATUS_BITS_PER_BYTE):
+            index = byte_index * _KV_STATUS_BITS_PER_BYTE + bit_index
             if index >= len(keys):
                 break
-            if word & (1 << bit_index):
+            if byte & (1 << bit_index):
                 missing_block_ids.add(block_ids[index])
     return request_failed, missing_block_ids, len(local_keys)
 

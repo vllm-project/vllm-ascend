@@ -49,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    _all_gather_kv_shards,
     _block_ids_are_contiguous,
     _coalesced_kv_views,
     _kv_shard_indices,
@@ -135,7 +136,7 @@ class FakeAllGatherGroup:
     def all_reduce_kv_status(self, status):
         self._context.reduce_payloads[self.rank_in_group] = status.clone()
         self._context.reduce_barrier.wait()
-        return torch.stack(self._context.reduce_payloads).sum(dim=0)
+        return torch.stack(self._context.reduce_payloads).sum(dim=0, dtype=status.dtype)
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
@@ -1519,6 +1520,133 @@ class TestShardedGetAllGather(unittest.TestCase):
             self.assertEqual(missing_block_ids, {0})
             self.assertEqual(local_key_count, 1)
         self.assertEqual(keys, ["k0", "k1"])
+
+    def test_all_gather_copies_only_batched_status_to_cpu_once(self):
+        world_size = 4
+        wire_bytes = 3
+        statuses = [[128, 0], [1, 0], [0, 128], [0, 1]]
+        packets = [
+            torch.tensor([rank + 1] * wire_bytes + status, dtype=torch.uint8).view(torch.int8)
+            for rank, status in enumerate(statuses)
+        ]
+        group = MagicMock(world_size=world_size)
+        group.all_gather.return_value = torch.cat(packets)
+        received = {rank: [torch.empty(wire_bytes, dtype=torch.int8)] for rank in range(1, world_size)}
+        cpu_copies = []
+        tensor_cpu = torch.Tensor.cpu
+
+        def record_cpu_copy(tensor, *args, **kwargs):
+            cpu_copies.append((tuple(tensor.shape), tensor.is_contiguous()))
+            return tensor_cpu(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "cpu", record_cpu_copy):
+            aggregated = _all_gather_kv_shards(
+                group,
+                0,
+                [packets[0][:wire_bytes]],
+                received,
+                [wire_bytes] * world_size,
+                wire_bytes,
+                statuses[0],
+                torch.device("cpu"),
+            )
+
+        self.assertEqual(aggregated, [129, 129])
+        self.assertEqual(cpu_copies, [((world_size, len(statuses[0])), True)])
+        group.all_gather.assert_called_once()
+        for rank, views in received.items():
+            torch.testing.assert_close(views[0], packets[rank][:wire_bytes])
+
+    def test_missing_high_bit_does_not_overflow_status(self):
+        num_blocks = 65
+        block_size = 8
+        caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8)]
+        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(num_blocks)}
+        failed_indices = {7, 8, 31, 32, 63, 64}
+        context = FakeAllGatherContext(1)
+        _, _, task_args = self._build_task_args(
+            caches, payloads, context, failed_keys_by_rank=[{f"k{index}" for index in failed_indices}]
+        )
+
+        self.assertEqual(sharded_get_all_gather(*task_args[0]), (False, failed_indices, num_blocks))
+
+    def test_uint8_status_propagates_boundary_and_full_byte_failures(self):
+        num_blocks = 65
+        block_size = 8
+        boundary_indices = {7, 8, 31, 32, 63, 64}
+        for tp_size in (2, 8):
+            for path in ("p2p", "all_gather", "status_only"):
+                for failure in ("boundary", "all_missing", "backend_failure"):
+                    with self.subTest(tp_size=tp_size, path=path, failure=failure):
+                        caches = [torch.zeros(num_blocks, block_size, dtype=torch.uint8) for _ in range(tp_size)]
+                        payloads = {f"k{index}": bytes([index + 1]) * block_size for index in range(num_blocks)}
+                        failed_indices = boundary_indices if failure == "boundary" else set(range(num_blocks))
+                        failed_keys = {f"k{index}" for index in failed_indices}
+                        context = FakeAllGatherContext(tp_size)
+                        _, stores, task_args = self._build_task_args(
+                            caches, payloads, context, failed_keys_by_rank=[failed_keys] * tp_size
+                        )
+                        if path == "status_only":
+                            task_args = [
+                                (
+                                    *args[:5],
+                                    [[0]] * num_blocks,
+                                    args[6],
+                                    [[torch.empty(0, dtype=torch.int8)]] * num_blocks,
+                                )
+                                for args in task_args
+                            ]
+                        if failure == "backend_failure":
+                            for store in stores:
+                                store.get = MagicMock(return_value=None)
+                        results = [None] * tp_size
+                        errors = []
+
+                        def run(rank, task_args=task_args, results=results, errors=errors):
+                            try:
+                                results[rank] = sharded_get_all_gather(*task_args[rank])
+                            except Exception as exc:  # pragma: no cover - surfaced below
+                                errors.append(exc)
+
+                        # Force each exchange branch independently of layout heuristics.
+                        view_limit = 0 if path == "all_gather" else num_blocks * tp_size
+                        backend_type = ByteFakeStore if failure == "backend_failure" else type(None)
+                        with (
+                            patch(
+                                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer._P2P_EXCHANGE_VIEW_LIMIT",
+                                view_limit,
+                            ),
+                            patch(
+                                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.MemcacheBackend",
+                                backend_type,
+                            ),
+                        ):
+                            threads = [threading.Thread(target=run, args=(rank,)) for rank in range(tp_size)]
+                            for thread in threads:
+                                thread.start()
+                            for thread in threads:
+                                thread.join(timeout=15)
+
+                        self.assertFalse(any(thread.is_alive() for thread in threads))
+                        self.assertEqual(errors, [])
+                        for rank, result in enumerate(results):
+                            self.assertEqual(
+                                result,
+                                (
+                                    failure == "backend_failure",
+                                    failed_indices,
+                                    len(_kv_shard_indices(num_blocks, tp_size, rank)),
+                                ),
+                            )
+                        status_bytes = 2 * ((num_blocks + 7) // 8)
+                        if path == "all_gather":
+                            wire_bytes = max(_kv_shard_lengths([[block_size]] * num_blocks, tp_size))
+                            for packet in context.payloads:
+                                self.assertEqual(packet.numel(), wire_bytes + status_bytes)
+                        else:
+                            for status in context.reduce_payloads:
+                                self.assertEqual(status.dtype, torch.uint8)
+                                self.assertEqual(status.numel(), status_bytes)
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
