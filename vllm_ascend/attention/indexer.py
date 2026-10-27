@@ -56,8 +56,8 @@ class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
 
     Carries everything the indexer kernels need from the engine: the paged
-    cache view (block table, slot mapping), the rope tables, the parallel
-    sequence lengths, and the LI C8 reshape-optim fields. All fields are
+    cache view (block table, slot mapping), the rope tables, and sequence
+    lengths. All fields are
     derived from common attention metadata by the indexer's own builder.
     """
 
@@ -98,8 +98,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     The SFA indexer cache is represented as its own AttentionLayerBase so the
     KV-cache planner can assign an independent physical tensor while sharing
     block ids with the main MLA cache group. Its builder constructs the
-    metadata the indexer forward consumes (paged cache view, rope tables,
-    LI C8 reshape-optim fields, RoPE, and parallel-layout values). SFA only
+    metadata the indexer forward consumes (paged cache view, RoPE tables,
+    and parallel-layout values). SFA only
     consumes the completed indexer metadata during its forward.
 
     Do not reuse AscendSFAMetadataBuilder here. It inherits vLLM's
@@ -547,10 +547,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self._group_metadata_buffers: dict[
-            object,
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        ] = {}
         self._rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
