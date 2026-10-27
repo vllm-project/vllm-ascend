@@ -30,6 +30,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -325,8 +326,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Cache-only backends provide metadata without an attention impl,
         # regardless of the KV cache spec's inheritance hierarchy.
         # Executable backends may resolve their impl from the current config.
+        # Upstream cache-only backends use either ``None`` or
+        # ``NotImplementedError`` to express the absence of an attention impl.
         with set_current_vllm_config(self.vllm_config):
-            return attn_group.backend.get_impl_cls() is None
+            try:
+                impl_cls = attn_group.backend.get_impl_cls()
+            except NotImplementedError:
+                return True
+        return impl_cls is None
 
     def _get_primary_draft_attn_group(self) -> Any:
         for attn_group in self.draft_attn_groups:
@@ -404,8 +411,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         # initialized for mamba models
-        self.kernel_block_size = (
+        kernel_block_size = (
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+        )
+        self.kernel_block_size = (
+            kernel_block_size.base if isinstance(kernel_block_size, MultipleOf) else kernel_block_size
         )
 
         # Sliding-window draft attention adapter.
@@ -707,7 +717,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         self._lim_topk_compactors = []
         draft_model = getattr(self.model, "model", None)
-        if hasattr(target_language_model.model, "topk_indices_buffer"):
+        if self._share_mtp_indices and hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
             self.model.model.topk_indices_buffer = target_language_model.model.topk_indices_buffer
@@ -1955,6 +1965,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
+    def _get_draft_slot_block_size(self) -> int:
+        """Return the kernel block size used to address the draft KV cache.
+
+        Hybrid proposers whose draft cache belongs to a non-GDN group can
+        override this target-wide default with their resolved group size.
+        """
+        return self.kernel_block_size if self.has_gdn else self.block_size
+
     def attn_update_stack_num_spec_norm(
         self,
         # `draft_index` must start from `1`, no `0`
@@ -2102,10 +2120,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
             # which is not correct for computing `slot_mapping` below.
-            if self.has_gdn:
-                block_size = self.kernel_block_size
-            else:
-                block_size = self.block_size
+            block_size = self._get_draft_slot_block_size()
 
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped

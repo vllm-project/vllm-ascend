@@ -34,6 +34,10 @@ from vllm_ascend.worker.v1.spec_decode.multi_kv_cache_group_proposer import (
 )
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.worker.v1.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
+from vllm_ascend.worker.v1.spec_decode.qwen4_exp import (
+    AscendQwen4ExpMTPProposer,
+    is_qwen4_exp_mtp,
+)
 from vllm_ascend.worker.v1.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
@@ -64,6 +68,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
+        if speculative_config is not None and is_qwen4_exp_mtp(speculative_config):
+            return AscendQwen4ExpMTPProposer(vllm_config, device, runner)
         if method == "mtp" and is_multi_kv_cache_group_mtp(vllm_config):
             return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)

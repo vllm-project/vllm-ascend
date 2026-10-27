@@ -101,6 +101,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention_vllm"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
@@ -149,6 +151,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention_vllm"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
         "dispatch_ffn_combine"
         "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
@@ -198,6 +202,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "sparse_flash_attention"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
+        "generic_block_sparse_attention"
+        "generic_block_sparse_attention_metadata"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
@@ -273,7 +279,8 @@ log_selected_ops
   # Remove all top-level entries under custom_ops_install_dir except .gitkeep, including hidden files and directories.
   find "$custom_ops_install_dir" -mindepth 1 -maxdepth 1 \
     ! -name '.gitkeep' \
-    -exec rm -rf -- {} +
+    -exec rm -rf -- {} + ||
+    log "continuing after cleanup left NFS-held files in ${custom_ops_install_dir}"
 
   shopt -s nullglob
   installer_candidates=(./build/cann-ops-transformer*.run)
