@@ -60,8 +60,7 @@ Prefetching uses a separate transfer stream. A ready event establishes data depe
 | Supported combinations | TP, EP, PP, PCP, chunked prefill, prefix caching, asynchronous scheduling, fixed-K speculative decoding |
 | Cache layouts | Allocated from actual specifications, including LI-C8 and SFA-C8 |
 | KV transfer | `MooncakeConnectorV2` on the prefill side of P/D disaggregation; `AscendStoreConnector` for supported pooling configurations; `MultiConnector` can combine them |
-| Not supported | DCP, hybrid models, and draft layers sharing target KV caches |
-| Not validated | Dynamic-K speculative decoding |
+| Not supported | DCP, hybrid models, draft layers sharing target KV caches, and Dynamic-K speculative decoding |
 
 KVPP trades communication for persistent cache capacity. Each rank still needs two scratch buffers sized for the largest target layer, plus its independent draft caches. Memory savings therefore depend on layer count, TP size, and per-layer cache sizes. Broadcast traffic grows with the allocated block count; payloads are not filtered by request or active block.
 
