@@ -172,6 +172,7 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.num_heads, impl.num_kv_heads, impl.sliding_window = 8, 1, None
+    impl.head_size = 128
     impl.use_bnsd_kv_cache, impl.sinks, impl.scale = True, None, 128**-0.5
     impl.key_cache = impl.value_cache = torch.empty(0)
     upper_bounds = torch.tensor([110, 210, 0, 0], dtype=torch.int32)

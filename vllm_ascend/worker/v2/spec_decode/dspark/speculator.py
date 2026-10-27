@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, prepare_flash_attn_metadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
@@ -41,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 )
 from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -70,6 +72,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        self.flash_attn_layers: dict[str, Any] = {}
+        self.flash_attn_metadata_executor: DeviceMetadataExecutor | None = None
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -231,6 +235,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
             attn_backends: dict[str, type[AttentionBackend]] = {}
+            self.flash_attn_layers = {}
             active_layer_names = self.draft_attn_layer_names
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
@@ -244,8 +249,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
                 for layer_name in layer_names:
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                    if attn_backends[layer_name] is AscendFlashAttentionBackend:
+                        self.flash_attn_layers[layer_name] = attn_layers[layer_name].impl
 
             self.attn_backends = attn_backends
+            self.flash_attn_metadata_executor = (
+                DeviceMetadataExecutor(capture_producers=True) if self.flash_attn_layers else None
+            )
             backend = _get_graph_update_backend(self.attn_groups)
             if issubclass(backend, AscendMLABackend):
                 self.attn_architecture = "MLA"
@@ -400,9 +410,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> torch.Tensor:
-        hidden_states = super()._run_model(
-            num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
-        )
+        with prepare_flash_attn_metadata(
+            attn_metadata, self.flash_attn_layers, self.flash_attn_metadata_executor, num_tokens
+        ):
+            hidden_states = super()._run_model(
+                num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp, cudagraph_runtime_mode
+            )
         # PCP replicas must propose identical tokens for the next joint target
         # verification. Share the backbone output before sequential Markov sampling.
         hidden_states, _ = AscendPCPManager.broadcast_replicated_hidden_states(

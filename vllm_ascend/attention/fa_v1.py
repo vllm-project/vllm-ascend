@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-"""Device-length CANN FlashAttn for A5 V2 DFlash2 eager drafts."""
+"""Device-length CANN FlashAttn for A5 V2 drafts."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import torch
@@ -14,6 +15,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataStage, DeviceMetadataTask
 
 
 @dataclass
@@ -22,6 +24,68 @@ class AscendFlashAttentionMetadata(AscendMetadata):
     # Share plans only within an attention group and draft step.
     flash_attn_plans: dict = field(default_factory=dict)
     flash_attn_lengths: tuple[torch.Tensor, torch.Tensor] | None = None
+    flash_attn_executor: DeviceMetadataExecutor | None = None
+    flash_attn_group_id: int = 0
+
+
+@contextmanager
+def prepare_flash_attn_metadata(attn_metadata, layers, executor, num_tokens):
+    """Overlap draft tiling with projections, capturing both producer and waits."""
+    if executor is None or attn_metadata is None:
+        yield
+        return
+    if executor.submission_in_flight:
+        # FULL draft capture starts before context KV; _run_model joins that scope.
+        if any(attn_metadata[name].flash_attn_executor is not executor for name in layers):
+            raise RuntimeError("Draft metadata does not match the active producer scope")
+        yield
+        return
+    groups: dict[int, tuple[AscendFlashAttentionMetadata, list[AscendFlashAttentionImpl]]] = {}
+    for group_id, (name, impl) in enumerate(layers.items()):
+        metadata = attn_metadata[name]
+        if id(metadata) not in groups:
+            metadata.flash_attn_lengths = None
+            metadata.flash_attn_plans.clear()
+            metadata.flash_attn_executor = executor
+            # Use the stable layer index, not the per-step metadata object's id.
+            metadata.flash_attn_group_id = group_id
+            groups[id(metadata)] = (metadata, [])
+        groups[id(metadata)][1].append(impl)
+
+    def prepare(metadata, implementations):
+        for impl in implementations:
+            impl.prepare_metadata(metadata, num_tokens)
+
+    tasks = tuple(
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda metadata=metadata, implementations=implementations: prepare(metadata, implementations),
+            metadata.flash_attn_group_id,
+        )
+        for metadata, implementations in groups.values()
+    )
+    submitted = False
+    try:
+        executor.submit(tasks)
+        submitted = True
+        yield
+    finally:
+        stream = torch.npu.current_stream()
+        if executor.submission_in_flight:
+            if submitted:
+                for task in tasks:
+                    executor.wait(task.stage, task.group_id)
+            else:
+                # A producer failed before recording its readiness event.
+                stream.wait_stream(executor.stream)
+            executor.release()
+        for metadata, _ in groups.values():
+            # Aux-stream allocations must outlive the queued main-stream reads.
+            tensors = list(metadata.flash_attn_lengths or ())
+            tensors.extend(plan for plan, _ in metadata.flash_attn_plans.values())
+            for tensor in tensors:
+                tensor.record_stream(stream)
+            metadata.flash_attn_executor = None
 
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -62,22 +126,21 @@ class AscendFlashAttentionBackend(AscendAttentionBackend):
 
 
 class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
-    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
-        """Reuse device lengths and tiling plans across layers in one draft step."""
+    def prepare_metadata(self, metadata, num_tokens):
+        """Build tiling without Q/K/V; share it across identical draft layers."""
         # Load CANN only in workers using this backend.
-        from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
+        from cann_ops_transformer.ops import flash_attn_metadata
 
-        metadata = attn_metadata
         if metadata.flash_attn_lengths is None:
             num_reqs = metadata.block_tables.shape[0]
             boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
             # Dummy requests may have repeated or negative query boundaries.
-            boundaries = boundaries.clamp(min=0, max=query.shape[0]).cummax(dim=0).values
+            boundaries = boundaries.clamp(min=0, max=num_tokens).cummax(dim=0).values
             lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
             metadata.flash_attn_lengths = boundaries, lengths
 
         layout_kv = "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND"
-        plan_key = (self.num_heads, self.num_kv_heads, query.shape[-1], self.sliding_window, layout_kv)
+        plan_key = (self.num_heads, self.num_kv_heads, self.head_size, self.sliding_window, layout_kv)
         cached = metadata.flash_attn_plans.get(plan_key)
         if cached is None:
             window = self.sliding_window - 1 if self.sliding_window is not None else -1
@@ -95,8 +158,17 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
                 layout_kv=layout_kv,
                 layout_out="TND",
             )
-            cached = flash_attn_metadata(self.num_heads, self.num_kv_heads, query.shape[-1], **attrs), attrs
+            cached = flash_attn_metadata(self.num_heads, self.num_kv_heads, self.head_size, **attrs), attrs
             metadata.flash_attn_plans[plan_key] = cached
+        return cached
+
+    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
+        from cann_ops_transformer.ops import flash_attn
+
+        metadata = attn_metadata
+        if metadata.flash_attn_executor is not None:
+            metadata.flash_attn_executor.wait(DeviceMetadataStage.ATTENTION, metadata.flash_attn_group_id)
+        cached = self.prepare_metadata(metadata, query.shape[0])
         plan, attrs = cached
 
         with attention_transfer_window():
