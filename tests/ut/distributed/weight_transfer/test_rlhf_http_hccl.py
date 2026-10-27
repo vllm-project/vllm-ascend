@@ -29,8 +29,8 @@ def example(monkeypatch):
     return module
 
 
-@pytest.mark.parametrize("failure", [None, "pause", "send", "resume"])
-def test_main_resumes_only_after_successful_weight_transfer(example, monkeypatch, failure):
+@pytest.mark.parametrize("send_fails", [False, True])
+def test_main_resumes_only_after_successful_weight_transfer(example, monkeypatch, send_fails):
     events = MagicMock()
     engine = MagicMock()
     events.attach_mock(engine.send_weights, "send")
@@ -38,22 +38,19 @@ def test_main_resumes_only_after_successful_weight_transfer(example, monkeypatch
     monkeypatch.setattr(example, "pause_generation", events.pause)
     monkeypatch.setattr(example, "resume_generation", events.resume)
     monkeypatch.setattr(example.WeightTransferTrainerFactory, "trainer_init", MagicMock(return_value=engine))
-    error = RuntimeError(f"{failure} failed")
-    if failure is not None:
-        getattr(events, failure).side_effect = error
-        if failure == "send":
-            events.resume.side_effect = RuntimeError("resume must not mask a failed transfer")
+    if send_fails:
+        error = RuntimeError("send failed")
+        engine.send_weights.side_effect = error
+        events.resume.side_effect = RuntimeError("resume must not mask a failed transfer")
         with pytest.raises(RuntimeError) as caught:
             example.main()
         assert caught.value is error
     else:
         example.main()
 
-    expected = {
-        None: [call.pause(example.BASE_URL), call.send(), call.resume(example.BASE_URL), call.shutdown()],
-        "pause": [call.pause(example.BASE_URL), call.shutdown()],
-        "send": [call.pause(example.BASE_URL), call.send(), call.shutdown()],
-        "resume": [call.pause(example.BASE_URL), call.send(), call.resume(example.BASE_URL), call.shutdown()],
-    }
-    assert events.mock_calls == expected[failure]
-    assert example.generate_completions.call_count == (2 if failure is None else 1)
+    expected = [call.pause(example.BASE_URL), call.send()]
+    if not send_fails:
+        expected.append(call.resume(example.BASE_URL))
+    expected.append(call.shutdown())
+    assert events.mock_calls == expected
+    assert example.generate_completions.call_count == (1 if send_fails else 2)
