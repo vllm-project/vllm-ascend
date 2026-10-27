@@ -18,7 +18,8 @@ config:
     dp_size: 2
     dp_size_local: 2
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 1
+    cp_size: 8
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
@@ -63,6 +64,8 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
@@ -95,7 +98,7 @@ templates:
       - --additional_config
       - '{"enable_flashcomm1": true, "enable_dsa_cp": false, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
   - node_index: 1
     envs:
@@ -147,7 +150,7 @@ templates:
       - --additional_config
       - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true}, "enable_flashcomm1": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
 benchmarks:
   perf_warmup:
