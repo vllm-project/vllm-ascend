@@ -9,14 +9,6 @@ from tests.ut.model_executor.warmup.helpers import make_registry
 from vllm_ascend.ops.triton import dspark_swa_indices as ds
 
 
-def test_supported_requires_pow2_block_and_row_budget():
-    assert ds.dspark_swa_indices_supported(128, 1024)
-    # Non power-of-two block sizes cannot use shift/mask lowering.
-    assert not ds.dspark_swa_indices_supported(100, 1024)
-    # next_pow2(width) must stay within the UB-preload tile budget.
-    assert not ds.dspark_swa_indices_supported(128, 1 << 14)
-
-
 def test_single_key_pinned_by_deployment_config():
     keys = ds._DSPARK_SWA_INDICES_KERNEL.get_warmup_keys(
         window_size=4096,

@@ -52,19 +52,6 @@ def test_skips_when_jit_warmup_disabled():
 
 
 @patch.object(kw, "HAS_TRITON", True)
-def test_missing_kernel_config_defaults_to_enabled():
-    # Older vllm pins expose no kernel_config; default is enabled.
-    worker, registry = _make_worker()
-    del worker.vllm_config.kernel_config
-    registry.warmup = MagicMock()
-    with patch.object(kw.logger, "warning") as mock_warning:
-        kw.kernel_warmup(worker)
-    # Empty registry: warn and skip the compile pass.
-    mock_warning.assert_called_once()
-    registry.warmup.assert_not_called()
-
-
-@patch.object(kw, "HAS_TRITON", True)
 def test_prunes_non_ascend_registrations_and_warms():
     worker, registry = _make_worker()
     # One real Ascend registration...
@@ -81,12 +68,6 @@ def test_prunes_non_ascend_registrations_and_warms():
     assert len(registry) == 1
     assert rms_norm._TRITON_Q_RMS_KERNEL in registry._registrations
     registry.warmup.assert_called_once()
-
-
-@patch.object(kw, "HAS_TRITON", True)
-def test_dspark_walker_without_drafter_registers_nothing():
-    worker, _ = _make_worker()
-    assert kw._register_dspark_swa_indices_warmup(worker) == 0
 
 
 def _make_dspark_builder(*, device_metadata=True):

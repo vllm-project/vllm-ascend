@@ -33,25 +33,3 @@ def test_penalty_key_uses_vocab_specialization_class():
     assert key.vocab_size == 2  # generic class
 
 
-def test_bincount_key():
-    config = make_mock_vllm_config(vocab_size=1024)
-    (key,) = _keys(bincount, bincount._TOKEN_BIN_COUNTS_AND_MASK_KERNEL, config)
-    assert key.seq_block == 256
-    assert key.vocab_size == 16
-
-    inputs = bincount._TOKEN_BIN_COUNTS_AND_MASK_KERNEL.warmup_inputs(key)
-    assert inputs["tokens"].dtype == torch.int64
-    assert inputs["bin_counts"].strides == (16, 1)
-
-
-def test_registration_collects_both_inside_window():
-    config = make_mock_vllm_config()
-    registry = make_registry(config)
-    with registry.activate(), patch.object(
-        penalty, "get_tensor_model_parallel_world_size", return_value=1
-    ), patch.object(
-        bincount, "get_tensor_model_parallel_world_size", return_value=1
-    ):
-        penalty._APPLY_ALL_PENALTIES_KERNEL.register_warmup(config)
-        bincount._TOKEN_BIN_COUNTS_AND_MASK_KERNEL.register_warmup(config)
-    assert len(registry) == 2

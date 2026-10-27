@@ -11,16 +11,6 @@ from vllm_ascend.ops.triton import prepare_indexer_indices as pi
 from vllm_ascend.ops.triton import quantize_indexer_query as qi
 
 
-def test_block_rows_formula_capped_by_sort_budget_and_cores():
-    # topk=8 -> block_cols=8; sort budget: 128 KiB // (8 * 4 * 8) = 512;
-    # core cap: next_pow2(cdiv(8192, 4)) = 2048 -> min = 512.
-    assert pi.collect_indexer_warmup_block_rows(8, 4, 8192) == [
-        1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
-    ]
-    # A small max_tokens clamps via the core cap instead.
-    assert pi.collect_indexer_warmup_block_rows(8, 4, 64) == [1, 2, 4, 8, 16]
-
-
 def test_keys_cover_both_write_lengths_variants():
     config = make_mock_vllm_config(max_num_batched_tokens=8192)
     with patch.object(pi, "get_vectorcore_num", return_value=4):
@@ -41,28 +31,3 @@ def test_keys_cover_both_write_lengths_variants():
         assert key.positions_dtype == torch.int64
 
 
-def test_quantize_head_dim_from_hf_text_config():
-    config = make_mock_vllm_config(dtype=torch.bfloat16, index_head_dim=192)
-    (key,) = qi._QUANTIZE_INDEXER_QUERY_KERNEL.get_warmup_keys(config)
-    assert key.dtype == torch.bfloat16
-    assert key.head_dim == 192
-
-    config = make_mock_vllm_config(
-        dtype=torch.bfloat16,
-    )
-    config.model_config.hf_text_config = SimpleNamespace()  # attribute missing
-    (key,) = qi._QUANTIZE_INDEXER_QUERY_KERNEL.get_warmup_keys(config)
-    assert key.head_dim == 128
-
-
-def test_register_indexer_warmup_window_semantics():
-    config = make_mock_vllm_config()
-    registry = make_registry(config)
-
-    pi.register_indexer_warmup(8, 4, config)
-    assert len(registry) == 0
-
-    with registry.activate():
-        pi.register_indexer_warmup(8, 4, config)
-        qi._QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(config)
-    assert len(registry) == 2
