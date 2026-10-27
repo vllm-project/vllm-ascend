@@ -96,6 +96,9 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
             return SimpleNamespace(
                 model_config=model_config,
                 quant_config=None,
+                # vLLM main's ``_mark_tower_model`` reads this to skip tower
+                # construction on non-first pipeline stages under MRv2.
+                use_v2_model_runner=False,
             )
 
         test_cases = [

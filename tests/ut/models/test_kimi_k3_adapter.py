@@ -22,6 +22,7 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkModel,
 )
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -735,3 +736,97 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         "context_proj.weight",
     ):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.31.0"),
+    reason="The AMD specialized-decode hooks we inherit are main-only.",
+)
+def test_kimi_lm_initializes_specialized_decode(monkeypatch):
+    from vllm.models.kimi_k3.amd.specialized_decode import runtime
+
+    sentinel = object()
+    seen = {}
+
+    def fake_specialized_decode_config(vllm_config):
+        seen["vllm_config"] = vllm_config
+        return sentinel
+
+    class DummyKimiLinearModel:
+        layers: list = []
+
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(runtime, "specialized_decode_config", fake_specialized_decode_config)
+    monkeypatch.setattr(kimi_k3, "AscendKimiLinearModel", DummyKimiLinearModel)
+    monkeypatch.setattr(kimi_k3, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False))
+    monkeypatch.setattr(kimi_k3, "LogitsProcessor", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        kimi_k3.AscendKimiLinearForCausalLM,
+        "set_moe_parameters",
+        lambda self: None,
+    )
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(vocab_size=16, hidden_size=8, logit_scale=1.0)),
+        quant_config=None,
+    )
+    model = kimi_k3.AscendKimiLinearForCausalLM(vllm_config=vllm_config)
+
+    # The inherited forward/compute_logits read these hooks, so they must exist.
+    assert seen["vllm_config"] is vllm_config
+    assert model.specialized_decode_config is sentinel
+    assert model.specialized_decode is None
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.31.0"),
+    reason="The AMD specialized-decode hooks we inherit are main-only.",
+)
+def test_kimi_lm_uses_ascend_hybrid_model_state():
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    model = kimi_k3.AscendKimiLinearForCausalLM.__new__(kimi_k3.AscendKimiLinearForCausalLM)
+
+    # Upstream points at the ROCm state, whose attention metadata is invalid on NPU.
+    assert model.get_model_state_cls() is AscendMambaHybridModelState
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.31.0"),
+    reason="Upstream passes the specialized-decode step only on main.",
+)
+def test_kimi_model_forwards_specialized_decode_step(monkeypatch):
+    seen = {}
+    step = object()
+
+    def fake_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None, step=None, **kwargs):
+        seen["step"] = step
+        return inputs_embeds
+
+    monkeypatch.setattr(kimi_k3.UpstreamKimiLinearModel, "forward", fake_forward)
+
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=None)
+
+    inputs_embeds = torch.zeros(1, 2)
+    # Upstream passes step as the fifth positional argument.
+    output = model(None, torch.tensor([0]), None, inputs_embeds, step)
+
+    assert seen["step"] is step
+    assert output is inputs_embeds
+
+
+def test_kimi_mla_attention_kv_cache_is_assignable():
+    attn = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+    nn.Module.__init__(attn)
+    inner = SimpleNamespace(kv_cache=torch.zeros(3))
+    attn.mla_attn = SimpleNamespace(mla_attn=inner)
+
+    replacement = torch.tensor([])
+    # Upstream clear_layer_kv_caches() detaches the cache by assignment.
+    attn.kv_cache = replacement
+
+    assert inner.kv_cache is replacement

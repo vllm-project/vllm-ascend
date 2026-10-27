@@ -46,9 +46,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 EP_SIZE = [1]
 DEVICE = ["npu"]
 
-# Triton Ascend 3.6.0 does not support BF16 sigmoid/exp.
-BF16_SIGMOID_SKIP = pytest.mark.skip(reason="Triton Ascend 3.6.0 does not support BF16 sigmoid/exp")
-
 
 @contextlib.contextmanager
 def moe_comm_type(comm_type: MoECommType):
@@ -214,11 +211,11 @@ def test_token_dispatcher_with_all_gather(
     ],
 )
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [pytest.param(torch.bfloat16, marks=BF16_SIGMOID_SKIP)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("device", DEVICE)
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="BF16 W8A8 AllGather fallback UT is limited to A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="BF16 W8A8 AllGather fallback UT is limited to A2/A3/A5",
 )
 def test_token_dispatcher_with_all_gather_quant(
     m: int,

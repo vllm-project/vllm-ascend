@@ -37,7 +37,7 @@ In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. Bel
 
 Note:
 
-- CPP supports asynchronous scheduling (`--async-scheduling`) only with Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Enabling asynchronous scheduling together with CPP on Model Runner V1 fails startup with a configuration error. Short Request First (SRF) can be combined with CPP asynchronous scheduling; the CPP async scheduler installs the SRF waiting queue.
+- Short Request First (SRF) can be combined with CPP; the CPP scheduler installs the SRF waiting queue.
 - It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.
 
 === "P Node (Prefiller — with CPP)"
