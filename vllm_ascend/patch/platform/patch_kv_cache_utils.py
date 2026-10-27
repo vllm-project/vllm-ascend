@@ -435,13 +435,13 @@ def _ascend_annotate_eagle_groups(
     fallback, which incorrectly treats target Mamba groups as draft state and
     disables cross-request prefix reuse.
     """
-    if _orig_annotate_eagle_groups is not None:
-        _orig_annotate_eagle_groups(
-            vllm_config,
-            kv_cache_spec,
-            kv_cache_groups,
-            use_trailing_layer_fallback=use_trailing_layer_fallback,
-        )
+    assert _orig_annotate_eagle_groups is not None
+    _orig_annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        kv_cache_groups,
+        use_trailing_layer_fallback=use_trailing_layer_fallback,
+    )
     speculative_config = vllm_config.speculative_config
     if (
         speculative_config is None

@@ -35,6 +35,9 @@ from vllm.utils.torch_utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.ops.gbsa_qsa import (
+    qsa_gbsa_attention,
+)
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
@@ -43,7 +46,6 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
 
-from .gbsa import qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
 QSAKVCache: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -555,14 +557,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # fused result can contain NaNs in Q/K.  The draft model has only one
         # QSA layer, so keep the target-model fusion and use the graph-safe
         # decomposition for MTP.
-        instance_draft = getattr(self, "_ascend_is_mtp_draft", False)
-        context_draft = getattr(get_forward_context(), "is_draft_model", False)
-        if instance_draft or context_draft:
-            if instance_draft:
-                logger.info_once(
-                    "QSA MTP draft uses decomposed norm/RoPE (context_draft=%s).",
-                    context_draft,
-                )
+        if getattr(get_forward_context(), "is_draft_model", False):
             return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")

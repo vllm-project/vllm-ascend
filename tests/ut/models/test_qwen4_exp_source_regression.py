@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Source-level ownership and integration guards for Qwen4Exp on Ascend."""
 
-import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -45,18 +44,7 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
     # The concrete class is part of the static drafter union so mypy can see
     # the inherited proposer methods. Runtime dispatch still uses capabilities.
     assert "AscendQwen4ExpMTPProposer" in runner
-    tree = ast.parse(runner)
-    concrete_qwen_checks = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "isinstance"
-        and len(node.args) == 2
-        and "AscendQwen4ExpMTPProposer" in ast.unparse(node.args[1])
-    ]
-    assert concrete_qwen_checks == []
-    assert "SupportsPerGroupAttentionMetadata" in runner
+    assert "isinstance(self.drafter, AscendQwen4ExpMTPProposer)" not in runner
     assert "SupportsPerGroupBlockTables" in runner
     assert "SupportsPerGroupKernelBlockSizes" in runner
     assert "SupportsAttentionBackendInitialization" in runner
@@ -68,15 +56,6 @@ def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
         "vllm_ascend/spec_decode/gemma4_proposer.py",
     ):
         assert "def uses_per_group_kernel_block_sizes" in _source(proposer)
-
-
-def test_qwen4_exp_proposer_is_owned_by_qwen_spec_decode_module() -> None:
-    qwen = _source("vllm_ascend/spec_decode/qwen4_exp.py")
-    eagle = _source("vllm_ascend/spec_decode/eagle_proposer.py")
-
-    assert "class AscendQwen4ExpMTPProposer" in qwen
-    assert "Qwen4ExpMTPProposer" not in eagle
-    assert "class AscendEagleProposer" in eagle
 
 
 def test_runner_customizes_compressed_attention_cache_specs() -> None:

@@ -194,6 +194,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_glm5_next_cache
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.input_adapter import (
+    ModelInputContext,
+    build_model_input_adapter,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -205,7 +209,10 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendQwen4ExpMTPProposer,
+)
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -213,14 +220,12 @@ from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.interfaces import (
     SupportsAttentionBackendInitialization,
     SupportsCUDAGraphInitialization,
-    SupportsPerGroupAttentionMetadata,
     SupportsPerGroupBlockTables,
     SupportsPerGroupKernelBlockSizes,
 )
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
-from vllm_ascend.spec_decode.qwen4_exp import AscendQwen4ExpMTPProposer
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import (
@@ -400,13 +405,6 @@ def _resolve_draft_kernel_block_sizes(
     if not isinstance(first, int):
         return [int(size) for size in first]
     return [int(size) for size in cast(Sequence[int], kernel_block_sizes)]
-
-
-def _uses_per_group_kernel_block_sizes(drafter: object) -> bool:
-    """Evaluate the proposer's kernel block-size contract when it has one."""
-    return isinstance(drafter, SupportsPerGroupKernelBlockSizes) and (
-        drafter.uses_per_group_kernel_block_sizes()
-    )
 
 
 def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
@@ -703,19 +701,11 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
-        self.qwen4_exp_input_adapter = None
-        text_config = getattr(self.model_config, "hf_text_config", None)
-        if text_config is not None and getattr(text_config, "ple_layer_ids", None):
-            # Keep the Qwen4Exp package out of unrelated model startup paths.
-            from vllm_ascend.models.qwen4_exp.input_adapter import (
-                build_qwen4_exp_input_adapter,
-            )
-
-            self.qwen4_exp_input_adapter = build_qwen4_exp_input_adapter(
-                self.model_config,
-                max_num_reqs=self.max_num_reqs,
-                device=self.device,
-            )
+        self.model_input_adapter = build_model_input_adapter(
+            self.model_config,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+        )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2705,7 +2695,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
-            self._maybe_add_qwen4_exp_inputs(
+            self._maybe_add_model_inputs(
                 model_kwargs,
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -3656,7 +3646,7 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("Full-graph device metadata requires external events")
         return executor
 
-    def _maybe_add_qwen4_exp_inputs(
+    def _maybe_add_model_inputs(
         self,
         model_kwargs: dict[str, Any],
         *,
@@ -3664,17 +3654,13 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded: int,
         is_dummy: bool = False,
     ) -> None:
-        """Add graph-stable Qwen4Exp PLE inputs when configured."""
-        adapter = getattr(self, "qwen4_exp_input_adapter", None)
+        """Let the active model family add graph-stable auxiliary inputs."""
+        adapter = getattr(self, "model_input_adapter", None)
         if adapter is None:
             return
-        from vllm_ascend.models.qwen4_exp.input_adapter import (
-            Qwen4ExpInputContext,
-        )
-
         adapter.prepare(
             model_kwargs,
-            Qwen4ExpInputContext(
+            ModelInputContext(
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 is_dummy=is_dummy,
@@ -3880,11 +3866,8 @@ class NPUModelRunner(GPUModelRunner):
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return {}, None
-        if num_tokens_padded is None:
-            num_tokens_padded = num_tokens
-        if num_reqs_padded is None:
-            num_reqs_padded = num_reqs
-        resolved_num_reqs_padded: int = num_reqs_padded
+        num_tokens_padded = num_tokens_padded or num_tokens
+        num_reqs_padded = num_reqs_padded or num_reqs
         if self.sparse_kv_offload_enabled:
             update_sparse_kv_offload_metadata(
                 num_tokens,
@@ -4140,7 +4123,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             if (
                 isinstance(builder, QSAMetadataBuilder)
-                and resolved_num_reqs_padded > num_reqs
+                and num_reqs_padded > num_reqs
             ):
                 # FULL graph padding appends dummy request boundaries to the
                 # shared query_start_loc. QSA's metadata builder uses the CPU
@@ -4281,7 +4264,11 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.speculative_config and isinstance(
                 self.drafter,
-                SupportsPerGroupAttentionMetadata,
+                (
+                    AscendStep3p5MTPProposer,
+                    AscendDSparkProposer,
+                    AscendQwen4ExpMTPProposer,
+                ),
             ):
                 # Multi-group draft layers need each group's block table and
                 # slot mapping as one addressing pair. Flattened slot ids are
@@ -4726,7 +4713,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 model_kwargs: dict[str, Any] = {}
-                self._maybe_add_qwen4_exp_inputs(
+                self._maybe_add_model_inputs(
                     model_kwargs,
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
@@ -5141,7 +5128,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             draft_kernel_block_sizes = _resolve_draft_kernel_block_sizes(
                 self.kernel_block_sizes,
-                per_group=_uses_per_group_kernel_block_sizes(self.drafter),
+                per_group=isinstance(
+                    self.drafter,
+                    SupportsPerGroupKernelBlockSizes,
+                ),
             )
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 

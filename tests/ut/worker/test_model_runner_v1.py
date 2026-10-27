@@ -3,7 +3,6 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
@@ -61,7 +60,6 @@ from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import (
     NPUModelRunner,
     _resolve_draft_kernel_block_sizes,
-    _uses_per_group_kernel_block_sizes,
 )
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -77,18 +75,6 @@ class SparseAttentionBackend(AscendAttentionBackend):
 
 
 class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
-    def test_capability_result_is_evaluated(self):
-        class PerGroupProposer:
-            def __init__(self, enabled: bool):
-                self.enabled = enabled
-
-            def uses_per_group_kernel_block_sizes(self) -> bool:
-                return self.enabled
-
-        self.assertTrue(_uses_per_group_kernel_block_sizes(PerGroupProposer(True)))
-        self.assertFalse(_uses_per_group_kernel_block_sizes(PerGroupProposer(False)))
-        self.assertFalse(_uses_per_group_kernel_block_sizes(object()))
-
     def test_single_group_contract_preserves_supported_sizes(self):
         self.assertEqual(
             _resolve_draft_kernel_block_sizes([[128, 64], [32]], per_group=False),
@@ -124,24 +110,24 @@ class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
         )
 
 
-class TestQwen4ExpInputAdapterDispatch(unittest.TestCase):
+class TestModelInputAdapterDispatch(unittest.TestCase):
     def test_runner_delegates_auxiliary_inputs(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.qwen4_exp_input_adapter = MagicMock()
+        runner.model_input_adapter = MagicMock()
         runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1], dtype=torch.int32))
         runner.input_batch = SimpleNamespace(
             num_computed_tokens_cpu=np.array([3], dtype=np.int32),
             token_ids_cpu=np.array([[7, 8, 9]], dtype=np.int32),
         )
-        model_kwargs: dict[str, Any] = {}
+        model_kwargs = {}
 
-        runner._maybe_add_qwen4_exp_inputs(
+        runner._maybe_add_model_inputs(
             model_kwargs,
             num_reqs=1,
             num_reqs_padded=1,
         )
 
-        call_args = runner.qwen4_exp_input_adapter.prepare.call_args.args
+        call_args = runner.model_input_adapter.prepare.call_args.args
         self.assertIs(call_args[0], model_kwargs)
         self.assertEqual(call_args[1].num_reqs, 1)
         self.assertEqual(call_args[1].num_reqs_padded, 1)

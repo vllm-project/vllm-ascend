@@ -1,9 +1,7 @@
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.models.qwen4_exp.common.qsa_cache import QSAKeyStateCache
 
@@ -22,19 +20,9 @@ class _TestMambaLayer(MambaBase):
         return None
 
 
-class _TensorOnlyAttentionLayer:
-    """Models upstream attention hooks that only accept canonical tensors."""
-
-    def __init__(self) -> None:
-        self.kv_cache: object = torch.empty(0)
-        self.bind_called = False
-
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        self.bind_called = True
-        self.kv_cache = kv_cache.squeeze(1)
-
-
-def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views() -> None:
+def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views(
+    monkeypatch,
+) -> None:
     context: dict[str, object] = {}
     cache_config = SimpleNamespace(block_size=768)
     vllm_config = SimpleNamespace(
@@ -52,13 +40,14 @@ def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views() -> None:
         vllm_config=vllm_config,
     )
     assert layer.kv_cache.numel() == 0
-    assert layer.key_cache.numel() == 0
+    assert not hasattr(layer, "key_cache")
 
     # Main's canonical allocation is [blocks, heads, states, width]. The QSA
     # hook converts it to its runtime [blocks, states, heads, width] view and
     # splits the key and exact int64 MRoPE-position tail without a copy.
     allocated = torch.zeros(2, 1, 8, 44, dtype=torch.bfloat16)
     runner_caches: list[torch.Tensor] = []
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
     patch_bind_kv_cache.bind_kv_cache(
         {layer_name: allocated},
         context,
@@ -80,11 +69,14 @@ def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views() -> None:
     assert torch.count_nonzero(layer.rope_position_cache).item() == 0
 
 
-def test_bind_kv_cache_calls_packed_mamba_layer_hook_and_preserves_state_dtypes() -> None:
+def test_bind_kv_cache_calls_packed_mamba_layer_hook_and_preserves_state_dtypes(
+    monkeypatch,
+) -> None:
     layer_name = "model.layers.1.linear_attn"
     layer = _TestMambaLayer()
     allocated = torch.zeros(2, 1, 1, 28, dtype=torch.int8)
     runner_caches: list[torch.Tensor] = []
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
 
     patch_bind_kv_cache.bind_kv_cache(
         {layer_name: allocated},
@@ -105,25 +97,9 @@ def test_bind_kv_cache_calls_packed_mamba_layer_hook_and_preserves_state_dtypes(
     assert temporal_state.storage_offset() == 3
 
 
-def test_bind_kv_cache_preserves_materialized_attention_tuple() -> None:
-    """Tuple K/V views must not enter tensor-only upstream attention hooks."""
-    layer_name = "model.layers.0.self_attn"
-    layer = _TensorOnlyAttentionLayer()
-    key_cache = torch.zeros(2, 16, 1, 8)
-    value_cache = torch.zeros(2, 16, 1, 8)
-    allocated = (key_cache, value_cache)
-
-    patch_bind_kv_cache.bind_kv_cache_to_layers(
-        {layer_name: allocated},
-        {layer_name: cast(AttentionLayerBase, layer)},
-    )
-
-    assert layer.bind_called is False
-    assert layer.kv_cache is allocated
-
-
 @pytest.mark.parametrize("container_type", [list, tuple])
 def test_bind_kv_cache_accepts_materialized_mamba_states(
+    monkeypatch,
     container_type,
 ) -> None:
     layer_name = "model.layers.1.linear_attn"
@@ -132,6 +108,7 @@ def test_bind_kv_cache_accepts_materialized_mamba_states(
     temporal_state = torch.zeros(5, 4, dtype=torch.float32)
     allocated = container_type((conv_state, temporal_state))
     runner_caches: list[object] = []
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
 
     patch_bind_kv_cache.bind_kv_cache(
         {layer_name: allocated},
@@ -190,12 +167,14 @@ def test_bind_kv_cache_accepts_materialized_mamba_states(
     ],
 )
 def test_bind_kv_cache_rejects_invalid_materialized_mamba_states(
+    monkeypatch,
     states,
     error,
     match,
 ) -> None:
     layer_name = "model.layers.1.linear_attn"
     layer = _TestMambaLayer()
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
 
     with pytest.raises(error, match=match):
         patch_bind_kv_cache.bind_kv_cache(

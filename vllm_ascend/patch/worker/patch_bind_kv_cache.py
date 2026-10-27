@@ -8,8 +8,6 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
-from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
-
 KVCache: TypeAlias = torch.Tensor | Sequence[torch.Tensor]
 
 
@@ -26,21 +24,8 @@ def _bind_layer_kv_cache(
     validate and bind them directly.  Canonical tensors, including ordinary
     packed Mamba pages and QSA cache pages, continue through the layer hook.
     """
-    if isinstance(kv_cache, torch.Tensor):
+    if not isinstance(layer, MambaBase) or isinstance(kv_cache, torch.Tensor):
         layer.bind_kv_cache(kv_cache)  # type: ignore[arg-type]
-        return
-
-    # Ascend can allocate ordinary attention caches as materialized (K, V)
-    # tuples.  Their upstream hooks consume one canonical tensor (for example,
-    # MLAAttention immediately calls ``squeeze``), so preserve the tuple as the
-    # runtime cache instead of passing it through a tensor-only hook.  The V4.1
-    # cache owner is the exception: its hook intentionally wraps either form
-    # to retain the ``kv_cache[0]`` contract.
-    if not isinstance(layer, MambaBase):
-        if isinstance(layer, DeepseekV41CacheLayer):
-            layer.bind_kv_cache(kv_cache)
-        else:
-            layer.kv_cache = kv_cache
         return
 
     expected_shapes = tuple(tuple(shape) for shape in layer.get_state_shape())

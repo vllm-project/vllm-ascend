@@ -317,6 +317,8 @@ class ModelWithContext(nn.Module):
 
     def forward(self, *args, **kwargs):
         forward_context = get_forward_context()
+        forward_context.is_draft_model = self.is_draft_model
+        forward_context.is_draft_model_prefill = self.is_draft_model_prefill
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
         _EXTRA_CTX.capturing = (

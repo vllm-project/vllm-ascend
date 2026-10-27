@@ -472,14 +472,6 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         which upstream ``set_forward_context`` never sets on the V2 runner.
         """
         assert self.model is not None
-        # The forward-context attribute can be replaced by nested capture or
-        # compilation scopes. Bind the same invariant to the actual draft
-        # attention instance so QSA cannot silently select the target fusion.
-        predictor = getattr(self.model, "model", None)
-        iter_attentions = getattr(predictor, "_iter_qsa_attentions", None)
-        if iter_attentions is not None:
-            for attention in iter_attentions():
-                attention._ascend_is_mtp_draft = True
         original_forward = self.model.forward
 
         def forward_with_draft_flag(*args: Any, **kwargs: Any) -> torch.Tensor:

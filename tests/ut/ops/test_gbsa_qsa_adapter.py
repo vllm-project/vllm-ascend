@@ -8,7 +8,7 @@ import torch
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tail_tokens", range(4))
 def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gbsa_qsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
     calls = []
@@ -26,7 +26,7 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
         for row in range(query.shape[0]):
             explicit = indices[0, row, : counts[0, row]].tolist()
             sequence_length = int(kwargs["seqused_kv"][row])
-            selected_tokens: list[int] = []
+            selected_tokens = []
             for block in explicit:
                 selected_tokens.extend(range(block * 4, block * 4 + 4))
             selected_tokens.extend(range(sequence_length - tail_tokens, sequence_length))
@@ -76,7 +76,7 @@ def test_qsa_gbsa_uses_original_paged_cache(dtype, tail_tokens):
 
 
 def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gbsa_qsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
     calls = []
@@ -132,8 +132,8 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
     ]
 
 
-def test_residual_mode_has_arch_specific_kernel_keys():
-    root = Path(__file__).resolve().parents[4]
+def test_a3_residual_mode_reuses_runtime_kernel_key():
+    root = Path(__file__).resolve().parents[3]
     tiling_source = (
         root / "csrc/attention/generic_block_sparse_attention/op_host/generic_block_sparse_attention_tiling.cpp"
     ).read_text()
@@ -144,40 +144,25 @@ def test_residual_mode_has_arch_specific_kernel_keys():
     tiling_keys = (
         root / "csrc/attention/generic_block_sparse_attention/op_kernel/generic_block_sparse_attention_tilingkey.h"
     ).read_text()
-    kernel_dispatch = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/generic_block_sparse_attention.cpp"
-    ).read_text()
 
-    assert "if (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE)" in tiling_source
-    assert "tilingKey += GBSA_RESIDUAL_BLOCK_MODE_TILING_OFFSET;" in tiling_source
+    assert "if (isArch35 && residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE)" in tiling_source
     assert "residualBlockMode_ = tilingData->residualBlockMode;" in arch22_kernel
-    assert "GBSA_BF16_TND_PA_BBND_TILING_RESIDUAL 9200001071023222ULL" in tiling_keys
+    assert "GBSA_BF16_TND_PA_BBND_TILING 9200000071023222ULL" in tiling_keys
     assert "GBSA_BF16_TND_PA_BBND_FP32SM_TILING_RESIDUAL 9250001071023222ULL" in tiling_keys
-    assert "TILING_KEY_IS(GBSA_BF16_TND_PA_BBND_TILING_RESIDUAL);" in kernel_dispatch
 
 
-def test_a3_qsa_arch22_maps_logical_tokens_into_paged_kv():
-    root = Path(__file__).resolve().parents[4]
+def test_a3_qsa_arch22_maps_logical_blocks_into_paged_kv():
+    root = Path(__file__).resolve().parents[3]
     arch22_kernel = (
         root / "csrc/attention/generic_block_sparse_attention/op_kernel/arch22/"
         "generic_block_sparse_attention_kernel_arch22.h"
-    ).read_text()
-    qk_mmad = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/attn_infra/gemm/block/block_mmad_qk.hpp"
-    ).read_text()
-    pv_mmad = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/attn_infra/gemm/block/block_mmad_pv.hpp"
     ).read_text()
     tiling_source = (
         root / "csrc/attention/generic_block_sparse_attention/op_host/generic_block_sparse_attention_tiling.cpp"
     ).read_text()
 
-    assert "blockSize_, kStride0_" in arch22_kernel
-    assert "blockSize_, vStride0_" in arch22_kernel
-    for mmad_source in (qk_mmad, pv_mmad):
-        assert "pageIdx = static_cast<uint32_t>(offsetInKV / pageSize)" in mmad_source
-        assert "physicalPage = gBlockTable.GetValue(pageIdx)" in mmad_source
-        assert "(offsetInKV % pageSize) * strideKV" in mmad_source
-    assert "blockSize_ == 128U" in tiling_source
-    assert "(128U % blockShapeY_) == 0U" in tiling_source
-    assert "GBSA_A3_QSA_MAX_TOPK = 512" in tiling_source
+    assert "MAX_SPARSE_BLOCK_CAPACITY = 512" in arch22_kernel
+    assert "logicalTokenOffset / blockSize_" in arch22_kernel
+    assert "logicalTokenOffset % blockSize_" in arch22_kernel
+    assert "tokenOffsetInPage) * strideKVRow" in arch22_kernel
+    assert "blockSize_ % blockShapeY_ != 0U" in tiling_source
