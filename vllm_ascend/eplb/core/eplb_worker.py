@@ -22,6 +22,7 @@ import torch
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
+from vllm_ascend.eplb.core.allgather import build_allgather_routing
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
@@ -278,6 +279,7 @@ class EplbWorker:
         recv_all = []
         maps = []
         log2phy_all = []
+        allgather_all = []
         layer_ids = []
 
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
@@ -294,10 +296,12 @@ class EplbWorker:
                 tp_size=self.tp_size,
             )
             log2phy_all.append(log2phy_map.numpy().tolist())
+            slots, counts = build_allgather_routing(new_expert_map)
+            allgather_all.append((slots.tolist(), counts.tolist(), new_expert_map.tolist()))
 
             layer_ids.append(layer_id)
 
-        return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
+        return list(zip(send_all, recv_all, maps, log2phy_all, allgather_all, layer_ids))
 
     @staticmethod
     def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray, return_list: bool = False):

@@ -38,7 +38,7 @@ traffic before production deployment.
 !!!IMPORTANT
 
     950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
-    A2 does not support redundant experts. On A2, `num_redundant_experts` must be set to `0`. Examples using a non-zero `num_redundant_experts` apply only to hardware that supports redundant experts, such as A3 or 950PR&950DT Products.
+    A2 redundant experts are validated with MRv1, ALLGATHER, W8A8 and dynamic SwiftBalance EPLB on a single node: Qwen3.5-35B-A3B, TP4/EP4, eight redundant experts and FULL_DECODE_ONLY. Other model, quantization and multi-node combinations require separate validation. This does not extend MRv2 support.
 
 ### Model Runner V2 Weight Formats
 
@@ -80,7 +80,7 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 !!!NOTE
 
-    The examples below may use a non-zero `num_redundant_experts` to demonstrate redundant-expert placement. This setting is only valid on hardware that supports redundant experts, such as A3 or 950PR&950DT Products. A2 does not support redundant experts; on A2, set `num_redundant_experts` to `0`.
+    The examples below may use a non-zero `num_redundant_experts` to demonstrate redundant-expert placement. For A2, use the MRv1 path and the validated configuration described above. Set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly. Redundant experts consume additional memory; benchmark your workload before enabling them for performance.
 
 ### Model Runner V2: Asynchronous EPLB
 

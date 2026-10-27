@@ -379,6 +379,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         """
         return self.moe_config.is_sequence_parallel
 
+    def _eplb_valid_rows(self, num_tokens: int, shard: bool = False):
+        if _EXTRA_CTX.eplb_heat_collection_status is not True:
+            return None
+        mask = _EXTRA_CTX.mc2_mask
+        if mask is None:
+            return None
+        if shard:
+            start = get_tensor_model_parallel_rank() * num_tokens
+            return mask[start : start + num_tokens].to(torch.int32)
+        return mask[:num_tokens].to(torch.int32)
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -401,6 +412,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
+        valid_rows = self._eplb_valid_rows(hidden_states.shape[0], shard=True)
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -419,6 +431,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
+        if valid_rows is not None:
+            valid_rows = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(valid_rows).bool()
 
         self.num_tokens = hidden_states.shape[0]
 
@@ -428,7 +442,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=valid_rows,
             padded_hidden_states_shape=None,
             pertoken_scale=pertoken_scale,
         )
@@ -449,6 +463,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        valid_rows = self._eplb_valid_rows(hidden_states.shape[0])
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -457,10 +472,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if valid_rows is not None:
+                    valid_rows = nn.functional.pad(valid_rows, (0, pad_size))
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+            if valid_rows is not None:
+                valid_rows = self.moe_config.dp_group.all_gather(valid_rows, 0)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -470,6 +489,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if valid_rows is not None:
+                    valid_rows = nn.functional.pad(valid_rows, (0, pad_size))
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -479,11 +500,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if valid_rows is not None:
+                valid_rows = get_pcp_group().all_gather(valid_rows, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            mc2_mask=None,
+            mc2_mask=valid_rows.bool() if valid_rows is not None else None,
             padded_hidden_states_shape=None,
             pertoken_scale=None,
         )
