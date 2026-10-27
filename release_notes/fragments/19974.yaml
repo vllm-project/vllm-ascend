@@ -1,0 +1,8 @@
+pr: 19974
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Mooncake V2 transfers of TP-replicated Mamba state, including PLE
+      convolution state, by copying one complete producer replica instead of
+      applying TP sharding. Equal and unequal TP transfers retain the physical
+      cache strides and validate matching state shapes and lengths.
