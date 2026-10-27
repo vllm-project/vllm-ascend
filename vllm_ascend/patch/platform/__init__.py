@@ -39,6 +39,10 @@ import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
+# isort: split
+# Patch Scheduler after structured-output initialization, before BalanceScheduler.
+import vllm_ascend.patch.platform.patch_mrv2_grammar  # noqa
+
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 

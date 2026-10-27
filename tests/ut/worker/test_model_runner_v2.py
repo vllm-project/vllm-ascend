@@ -12,7 +12,7 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
 from vllm.sequence import IntermediateTensors
-from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput as VllmGrammarOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
@@ -25,6 +25,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.core.grammar_output import GrammarOutput
+from vllm_ascend.patch.worker.patch_v2 import patch_mrv2_grammar  # noqa: F401
 from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -1953,7 +1955,9 @@ def test_flashmla_dcp_bypass_preserves_device_postprocess_and_prefill_lengths(dc
 
 
 @pytest.mark.parametrize("lmhead_tp", [False, True])
-@pytest.mark.parametrize("acceptable, expected_rows", [(None, [1, 2]), ([0], [1, 2]), ([1], [2]), ([2], None)])
+@pytest.mark.parametrize(
+    "acceptable, expected_rows", [(None, [1, 2]), ([0], [1, 2]), ([1], [2]), ([2], None), ("legacy", [1, 2])]
+)
 def test_sample_caps_grammar_acceptance_without_changing_drafts(monkeypatch, lmhead_tp, acceptable, expected_rows):
     runner = _make_runner()
     runner.batch_sharder = None
@@ -1972,7 +1976,10 @@ def test_sample_caps_grammar_acceptance_without_changing_drafts(monkeypatch, lmh
         logits_indices=torch.arange(5),
         input_ids=original_ids.clone(),
     )
-    grammar = GrammarOutput(["json"], np.zeros((3, 1), dtype=np.int32), acceptable)
+    bitmask = np.zeros((3, 1), dtype=np.int32)
+    grammar = (
+        VllmGrammarOutput(["json"], bitmask) if acceptable == "legacy" else GrammarOutput(["json"], bitmask, acceptable)
+    )
     seen = []
 
     def apply_mask(logits, actual_batch, req_ids, bitmask):

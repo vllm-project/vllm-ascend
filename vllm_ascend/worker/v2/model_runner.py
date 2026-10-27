@@ -50,7 +50,6 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
-from vllm.v1.worker.gpu.structured_outputs import grammar_invalid_drafts
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -124,6 +123,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.structured_outputs import grammar_invalid_drafts
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
     C8KVBlockZeroer,
@@ -1100,7 +1100,7 @@ class NPUModelRunner(GPUModelRunner):
             invalid_drafts = grammar_invalid_drafts(
                 input_batch,
                 grammar_output.structured_output_request_ids,
-                grammar_output.num_acceptable_drafts,
+                getattr(grammar_output, "num_acceptable_drafts", None),
             )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
