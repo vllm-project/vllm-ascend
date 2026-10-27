@@ -12,6 +12,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 
 PATCH_PATH = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_recompute_response.py"
 spec = importlib.util.spec_from_file_location("ascend_recompute_test", PATCH_PATH)
+assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patch)
 

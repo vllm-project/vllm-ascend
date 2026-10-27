@@ -173,7 +173,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
-    received = []
+    received: list[dict[str, Any]] = []
 
     @app.get("/__requests__")
     async def requests():
@@ -571,7 +571,7 @@ def test_recompute_error_preserves_legacy_continuation(proxy_server, stream, fra
     """New error envelopes must produce the same next attempt as legacy terminals."""
     next_attempts = []
     for wrapped in (False, True):
-        partial = {
+        partial: dict[str, Any] = {
             "choices": [
                 {"index": 0, "stop_reason": "recomputed", "delta" if stream else "message": {"content": "partial"}}
             ],

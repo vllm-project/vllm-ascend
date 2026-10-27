@@ -547,6 +547,7 @@ async def _handle_completions(api: str, request: Request):
             retry = True
             completion_tokens = 0
             # Only one await per chunk, minimal logic in loop
+            gen = None
             try:
                 while retry:
                     retry = False
@@ -629,7 +630,8 @@ async def _handle_completions(api: str, request: Request):
                 )
             finally:
                 try:
-                    await gen.aclose()
+                    if gen is not None:
+                        await gen.aclose()
                 finally:
                     proxy_state.release_decoder(decoder_idx, decoder_score)
                     await proxy_state.cleanup_request_batch(request_id)
