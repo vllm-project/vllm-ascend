@@ -16,21 +16,19 @@ class AscendEngram(nn.Module):
     """Consume rows prepared by the v1 runner in the checkpoint residual basis."""
 
     def __init__(
-    self,
-    config,
-    quant_config,
-    prefix: str,
-    *,
-    use_sequence_parallel: bool = False,
+        self,
+        config,
+        quant_config,
+        prefix: str,
+        *,
+        use_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
         self.eps = config.rms_norm_eps
         self.wkv = ColumnParallelLinear(
-            (config.engram_max_ngram_size - 1)
-            * config.engram_n_heads
-            * config.engram_head_dim,
+            (config.engram_max_ngram_size - 1) * config.engram_n_heads * config.engram_head_dim,
             (self.hc_mult + 1) * self.dim,
             bias=False,
             gather_output=True,
