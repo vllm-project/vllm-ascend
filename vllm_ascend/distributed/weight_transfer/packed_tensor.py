@@ -169,6 +169,13 @@ def packed_broadcast_producer(
         _drain_packed_streams(streams, packed_tensors, body_error)
 
 
+def _record_packed_clones(weights: list[tuple[str, torch.Tensor]], streams: list[Any], caller_stream: Any) -> None:
+    # Return before invoking the loader, so loop locals cannot retain clones.
+    for _, tensor in weights:
+        for stream in (*streams, caller_stream):
+            tensor.record_stream(stream)
+
+
 def packed_broadcast_consumer(
     iterator: Iterator[tuple[str, tuple[list[int], torch.dtype]]],
     group: Any,
@@ -283,9 +290,7 @@ def packed_broadcast_consumer(
                 )
                 # Callbacks may retain these owning clones and enqueue reads on
                 # a later slot or caller stream before releasing the references.
-                for _, tensor in weights:
-                    for stream in (*streams, caller_stream):
-                        tensor.record_stream(stream)
+                _record_packed_clones(weights, streams, caller_stream)
                 post_unpack_func(weights)
                 # The callback can queue derived-state writes as well as clone
                 # reads, so record completion only after it has returned.
