@@ -303,8 +303,6 @@ class RequestGuardState:
     # context when detection turns on after output already exists.
     first_device_output_token_ids: list[int] | None = None
     detection_stopped: bool = False
-    # Same-wave append dedupe frontier; not sample-wave stamps.
-    last_append_chunk: tuple[int, ...] | None = None
     # Scheduler finished; keep state until reap (last get_output / idle sweep).
     finished: bool = False
     finish_mark_wave: int | None = None
@@ -617,7 +615,6 @@ class RequestGuardStore:
         if not req_id or not token_ids:
             return
         rid = str(req_id)
-        chunk = tuple(token_ids)
         with self._lock:
             state = self._by_req.get(rid)
             if state is None:
@@ -630,16 +627,7 @@ class RequestGuardStore:
                     self._finished.add(rid)
                     self._reaped_set.discard(rid)
                 self._by_req[rid] = state
-            if state.last_append_chunk == chunk:
-                return
             state.output_token_ids.extend(token_ids)
-            state.last_append_chunk = chunk
-
-    def clear_wave_append_frontier(self) -> None:
-        """Reset same-wave dedupe so identical chunks across steps are kept."""
-        with self._lock:
-            for state in self._by_req.values():
-                state.last_append_chunk = None
 
     def new_output_ids_since(self, req_id: str, consumed: int) -> tuple[int, list[int]]:
         """Return ``(total_len, ids[consumed:])``, copying only the new tail.
