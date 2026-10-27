@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 import requests
 import torch
@@ -9,6 +11,11 @@ from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, cleanup_dist_env_
 
 MODEL = "vllm-sr/d3-edge"
 MODELS = ("vllm-sr/d3-edge", "vllm-sr/d3-nano")
+# bf16 backbone vs the checkpoint runtime: d3-nano reaches about 0.019 on this prompt, so leave headroom.
+SOFTMAX_ATOL = 0.03
+# These tests only send text. Graph mode with multimodal inputs enabled currently fails during startup profiling
+# for D3's ENCODER_ONLY attention layers, so media is switched off here.
+NO_MEDIA = {"image": 0, "video": 0}
 STATE = "A customer reports a damaged delivery and asks for a replacement."
 QUESTIONS = {
     "route": {
@@ -44,7 +51,7 @@ def test_d3_pooling_matches_checkpoint_runtime(model):
     del reference_model, runtime
     cleanup_dist_env_and_memory()
 
-    with VllmRunner(model, runner="pooling", max_model_len=4096) as runner:
+    with VllmRunner(model, runner="pooling", max_model_len=4096, limit_mm_per_prompt=NO_MEDIA) as runner:
         outputs = runner.model.classify([{"prompt_token_ids": ids} for ids in prompt_ids], use_tqdm=False)
 
     assert len(outputs) == len(option_counts)
@@ -55,7 +62,7 @@ def test_d3_pooling_matches_checkpoint_runtime(model):
         torch.testing.assert_close(
             torch.softmax(ascend_logits[:option_count].float(), dim=-1),
             torch.softmax(reference[:option_count].float(), dim=-1),
-            atol=0.02,
+            atol=SOFTMAX_ATOL,
             rtol=0,
         )
 
@@ -66,7 +73,8 @@ def test_d3_systemone_endpoint():
         "state": STATE,
         "questions": QUESTIONS,
     }
-    with RemoteOpenAIServer(MODEL, ["--max-model-len", "4096"]) as server:
+    server_args = ["--max-model-len", "4096", "--limit-mm-per-prompt", json.dumps(NO_MEDIA)]
+    with RemoteOpenAIServer(MODEL, server_args) as server:
         response = requests.post(
             server.url_for("v1", "systemone"),
             json=request,
