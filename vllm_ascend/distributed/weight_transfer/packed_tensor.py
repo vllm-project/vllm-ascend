@@ -109,24 +109,58 @@ class _PackedHCCLGroup:
             stream.synchronize()
         self.group.broadcast(tensor, src=src, stream=stream)
         if not self.producer:
-            # Preserve main's #18078 native receive-to-torch boundary. No wait
-            # is added after unpacking/loading: clone readiness remains testable.
+            # Preserve main's #18078 native receive-to-torch boundary. Loader
+            # ordering is established separately with device-side events.
             stream.synchronize()
         self.previous_broadcast_stream = stream
         self.slot = (self.slot + 1) % len(self.streams)
 
 
 def _unpack_hccl_tensor(packed_tensor, names, shapes, dtypes, tensor_sizes):
-    """Preserve Ascend's owning-storage and unaligned-byte-offset contract.
-
-    This is deliberately not a cross-chunk clone readiness/lifetime fix. The
-    reused upstream Event/record_stream protocol protects the receive buffer;
-    whether owning NPU clones need additional protection is a separate change.
-    """
+    """Preserve Ascend's owning-storage and unaligned-byte-offset contract."""
     return [
         (name, tensor.clone().view(dtype).reshape(shape))
         for name, shape, dtype, tensor in zip(names, shapes, dtypes, packed_tensor.split(tensor_sizes))
     ]
+
+
+class _PackedReload:
+    """Extend upstream's receive ordering to owning clones and loader work.
+
+    The upstream ready event precedes unpacking. Record completion after the
+    loader callback instead, so the next slot can safely consume retained
+    clones and state written by earlier callbacks without a post-load host wait.
+    """
+
+    def __init__(self, load: Callable, streams: tuple[Any, ...], caller_stream: Any) -> None:
+        self.load_weights = load
+        self.streams = streams
+        self.caller_stream = caller_stream
+        self.slot = 0
+        self.previous_ready: Any = None
+
+    def _record_clones(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        # A later callback can queue a read and release a retained clone before
+        # returning. Its owning stream may then reuse that block immediately.
+        # Protect every supported reader before handing any clone to the loader.
+        for _, tensor in weights:
+            for stream in (*self.streams, self.caller_stream):
+                tensor.record_stream(stream)
+
+    def unpack(self, packed_tensor, names, shapes, dtypes, tensor_sizes):
+        stream = self.streams[self.slot]
+        if self.previous_ready is not None:
+            stream.wait_event(self.previous_ready)
+        weights = _unpack_hccl_tensor(packed_tensor, names, shapes, dtypes, tensor_sizes)
+        self._record_clones(weights)
+        return weights
+
+    def load(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        self.load_weights(weights)
+        ready = torch.npu.Event()
+        ready.record(self.streams[self.slot])
+        self.previous_ready = ready
+        self.slot = (self.slot + 1) % len(self.streams)
 
 
 def _run_upstream_packed(function: Any, group: Any, num_buffers: int, **kwargs: Any) -> None:
@@ -138,16 +172,25 @@ def _run_upstream_packed(function: Any, group: Any, num_buffers: int, **kwargs: 
     Remove this binding shim when upstream exposes device-neutral hooks.
     """
     streams = _get_npu_streams(torch.accelerator.current_device_index(), num_buffers)
+    caller_stream = torch.npu.current_stream()
+    # Join work already submitted by this caller without synchronizing the host.
+    # Additional producer/callback streams must be joined by their owner.
+    for stream in streams:
+        stream.wait_stream(caller_stream)
     adapter = _PackedHCCLGroup(group, streams, producer="post_iter_func" in kwargs)
     globals_ = dict(function.__globals__)
     globals_.update(torch=_PackedNPUTorch(), _get_streams=_get_npu_streams, unpack_tensor=_unpack_hccl_tensor)
+    if "post_unpack_func" in kwargs:
+        reload = _PackedReload(kwargs["post_unpack_func"], streams, caller_stream)
+        globals_["unpack_tensor"] = reload.unpack
+        kwargs["post_unpack_func"] = reload.load
     bound = FunctionType(function.__code__, globals_, function.__name__, function.__defaults__, function.__closure__)
     bound.__kwdefaults__ = function.__kwdefaults__
     try:
         bound(group=adapter, num_buffers=num_buffers, **kwargs)
     except BaseException as exc:
         # Upstream drains on success only. Preserve the existing Ascend failure
-        # cleanup without adding per-chunk host barriers or source entry waits.
+        # cleanup without adding post-load host barriers.
         _drain_packed_streams(list(streams), adapter.buffers, exc)
         raise
 
@@ -162,8 +205,9 @@ def packed_broadcast_producer(
 ) -> None:
     """Use upstream packing/broadcast orchestration with NPU stream bindings.
 
-    Callers must make source writes ready on the active packing stream. No
-    additional entry synchronization or cross-chunk fix is introduced here.
+    Already-submitted caller-stream writes are joined onto every packing slot.
+    Join writes from any additional streams onto the caller before entry. Lazy
+    iterators must make newly produced tensors ready on their active slot.
     """
     if buffer_size_bytes <= 0 or num_buffers <= 0:
         raise ValueError("buffer_size_bytes and num_buffers must be positive")
@@ -199,11 +243,13 @@ def packed_broadcast_consumer(
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
-    """Use upstream receive/event/raw-storage ordering with NPU owning unpack.
+    """Reuse upstream receives while ordering and protecting owning NPU clones.
 
-    Owning byte clones preserve existing loader mutation/retention and mixed
-    dtype alignment behavior. This branch evaluates upstream ordering; it does
-    not add clone record_stream calls or post-load host synchronization.
+    Each callback is ordered after earlier callbacks' slot-stream work. Owning
+    clones are protected on all slots and the caller stream before loading.
+    Callbacks using additional streams must establish their own dependencies;
+    join any work needed by later callbacks back onto the active slot before
+    returning. No per-chunk post-load host barrier is added.
     """
     if buffer_size_bytes <= 0 or num_buffers <= 0:
         raise ValueError("buffer_size_bytes and num_buffers must be positive")

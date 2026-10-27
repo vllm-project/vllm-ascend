@@ -65,6 +65,9 @@ class _FakeNpuStream:
     def wait_event(self, event) -> None:
         return None
 
+    def wait_stream(self, stream) -> None:
+        return None
+
     def __enter__(self) -> _FakeNpuStream:
         return self
 
@@ -84,10 +87,11 @@ def _stub_torch_npu():
     to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
+    caller_stream = _FakeNpuStream()
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
         Event=MagicMock,
-        current_stream=_FakeNpuStream,
+        current_stream=lambda: caller_stream,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
@@ -190,8 +194,11 @@ def test_consumer_reuses_upstream_event_chain_without_post_load_host_wait():
         operations.append(("receive", stream.index))
         tensor.zero_()
 
+    loaded = []
+
     def load(weights):
-        operations.append(("load", len(events) - 1))
+        operations.append(("load", len(loaded)))
+        loaded.append(weights)
 
     with patch.object(torch.npu, "Stream", Stream), patch.object(torch.npu, "Event", Event):
         packed_broadcast_consumer(
@@ -207,7 +214,64 @@ def test_consumer_reuses_upstream_event_chain_without_post_load_host_wait():
     assert operations.index(("receive", 1)) < operations.index(("event_wait", 1, 0))
     assert operations.index(("event_wait", 1, 0)) < operations.index(("load", 1))
     between = operations[operations.index(("load", 0)) + 1 : operations.index(("receive", 1))]
-    assert between == [("sync", 1)]
+    assert between == [("event_record", 1, 0), ("sync", 1)]
+    assert ("event_wait", 1, 1) in operations
+    assert operations.index(("event_wait", 1, 1)) < operations.index(("load", 1))
+
+
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_clones_are_tracked_before_the_loader_can_release_them(num_buffers):
+    caller_stream = torch.npu.current_stream()
+    streams = packed_module._get_npu_streams(0, num_buffers)
+    recorded = []
+
+    def record(tensor, stream):
+        recorded.append((tensor.untyped_storage().data_ptr(), stream))
+
+    raw_pointers = []
+
+    def receive(tensor, **kwargs):
+        tensor.zero_()
+        raw_pointers.append(tensor.untyped_storage().data_ptr())
+
+    def load(weights):
+        for _, tensor in weights:
+            pointer = tensor.untyped_storage().data_ptr()
+            assert pointer not in raw_pointers
+            assert all((pointer, stream) in recorded for stream in (*streams, caller_stream))
+
+    with patch.object(torch.Tensor, "record_stream", record):
+        packed_broadcast_consumer(
+            iter((str(i), ([1], torch.float32)) for i in range(4)),
+            types.SimpleNamespace(broadcast=receive),
+            0,
+            load,
+            1,
+            num_buffers,
+        )
+
+
+@pytest.mark.parametrize("producer", [False, True])
+def test_packed_slots_join_the_caller_without_a_caller_host_wait(producer):
+    caller_stream = torch.npu.current_stream()
+    joined = []
+
+    class Stream(_FakeNpuStream):
+        def wait_stream(self, stream):
+            assert stream is caller_stream
+            joined.append(self)
+
+    with (
+        patch.object(torch.npu, "Stream", Stream),
+        patch.object(caller_stream, "synchronize", side_effect=AssertionError("unexpected caller host wait")),
+    ):
+        if producer:
+            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], num_buffers=3)
+        else:
+            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, lambda weights: None, num_buffers=3)
+
+    assert len(joined) == 3
+    assert tuple(joined) == packed_module._get_npu_streams(0, 3)
 
 
 def _make_group_mock() -> MagicMock:
