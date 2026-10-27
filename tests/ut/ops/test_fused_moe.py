@@ -1189,6 +1189,7 @@ def test_shared_expert_mlp_path_preserves_quant_and_lora_semantics(
         down_proj=down_proj,
     )
     shared_experts.quant_type = quant_type
+    shared_experts.situ_activation = None
     shared_experts.lora_context = object() if has_active_lora else None
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: has_active_lora)
 
@@ -1264,7 +1265,11 @@ def test_int_shared_expert_preserves_output_gate(monkeypatch, quant_type, gate_m
     current_stream = MagicMock()
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
     monkeypatch.setattr(
-        shared_experts_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False)
+        shared_experts_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(
+            supports=lambda cap: cap is shared_experts_module.HardwareCapability.DEQUANT_SITU_QUANT
+        ),
     )
     monkeypatch.setattr(shared_experts_module.torch_npu, "npu_quant_matmul", down_matmul, raising=False)
     monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", lambda: current_stream)

@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import regex as re
 import torch
 
@@ -243,6 +244,31 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
             self.quant_method._pack_to_int32(weight)
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_hardware_profile")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=identity)
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
+    def test_native_situ_weights_keep_packed_nd(self, trans_nz, profile):
+        for native_support, activation in [(True, "situ"), (False, "situ"), (True, "silu")]:
+            profile.return_value.supports.return_value = native_support
+            trans_nz.reset_mock()
+            layer = self.build_layer()
+            layer.activation = activation
+            expected = layer.w13_weight.data.transpose(1, 2).contiguous().view(torch.int32)
+            self.quant_method.process_weights_after_loading(layer)
+            native = native_support and activation == "situ"
+            self.assertEqual(self.quant_method.use_native_s8s4_gmm, native)
+            self.assertEqual(trans_nz.call_count, 0 if native else 2)
+            self.assertEqual(self.quant_method.supports_fused_activation("situ"), not native)
+            self.assertTrue(self.quant_method.supports_fused_activation("silu"))
+            torch.testing.assert_close(layer.w13_weight, expected, rtol=0, atol=0)
+        self.quant_method.use_expert_weight_list = True
+        profile.return_value.supports.return_value = True
+        layer.activation = "situ"
+        with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
+            self.quant_method.process_weights_after_loading(layer)
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.build_fused_experts_input")
     def test_apply_comprehensive(self, mock_build_input, mock_ctx):
@@ -303,3 +329,30 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
+
+
+@pytest.mark.parametrize("input_size", [256, 3072, 3584])
+@pytest.mark.parametrize("expert_list", [False, True])
+@pytest.mark.parametrize("group_axis", [False, True])
+def test_native_s8s4_scale_views_preserve_per_channel_values(input_size, expert_list, group_axis):
+    method = object.__new__(AscendW4A8DynamicFusedMoEMethod)
+    scales = torch.arange(2 * 64, dtype=torch.int64).reshape(2, 64)
+    original = scales.clone()
+    stored_scales = scales.unsqueeze(1) if group_axis else scales
+    weights = torch.empty(2, input_size, 8, dtype=torch.int32)
+    scale_list = list(stored_scales.unbind()) if expert_list else [stored_scales]
+    weight_list = list(weights.unbind()) if expert_list else [weights]
+    expanded = method._native_s8s4_scales(scale_list, weight_list, input_size)
+    for source, result in zip(scale_list, expanded):
+        assert result.untyped_storage().data_ptr() == source.untyped_storage().data_ptr()
+        assert result.shape[-2:] == (input_size // 256, 64)
+        channels = source.squeeze(-2) if group_axis else source
+        for group in result.unbind(-2):
+            torch.testing.assert_close(group, channels, rtol=0, atol=0)
+    torch.testing.assert_close(scales, original, rtol=0, atol=0)
+
+
+def test_native_s8s4_rejects_partial_quant_groups():
+    method = object.__new__(AscendW4A8DynamicFusedMoEMethod)
+    with pytest.raises(ValueError, match="K divisible by 256"):
+        method._native_s8s4_scales([torch.ones(2, 64)], [torch.empty(2, 384, 8)], 384)

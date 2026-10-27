@@ -95,6 +95,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         )
         self.executor.quant_type = self.quant.W8A8MXFP
         self.executor.lora_context = None
+        self.executor.situ_activation = None
         self.executor.multistream_overlap = True
         self.executor.swiglu_limit = 0.0
         self.gate_up = SimpleNamespace(dtype="bf16", ndim=2, shape=(36, 4096))
@@ -117,6 +118,29 @@ class TestSharedMXFPActivation(unittest.TestCase):
     def run_mlp(self):
         self.submitted.path = self.executor._select_mlp_path()
         return self.executor._finish_shared_mlp(self.submitted, self.events)
+
+    def test_integer_situ_fusion_requires_device_support(self):
+        capability = object()
+        self.namespace["HardwareCapability"] = SimpleNamespace(DEQUANT_SITU_QUANT=capability)
+        for supported in (False, True):
+            supports = Mock(return_value=supported)
+            self.namespace["get_current_hardware_profile"] = lambda supports=supports: SimpleNamespace(
+                supports=supports
+            )
+            for quant_type in (self.quant.W8A8, self.quant.W4A8):
+                self.executor.quant_type = quant_type
+                self.executor.situ_activation = object()
+                path = self.executor._select_mlp_path()
+                expected = self.paths.A8_INT_FUSED if supported else self.paths.LINEAR_WRAPPER
+                self.assertIs(path, expected)
+                supports.assert_called_with(capability)
+                if not supported:
+                    self.executor.layer.down_proj.return_value = (7, None)
+                    self.assertEqual(self.run_mlp(), 7)
+                    self.executor.apply_activation.assert_called_with(self.gate_up)
+                    self.executor._prepare_linear_input_for_overlap.assert_called_with(
+                        self.executor.layer.down_proj, "original_activation"
+                    )
 
     def test_mxfp_path_preserves_gate_up_preparation_and_linear(self):
         prepared_input = self.prepared_cls("quantized_hidden", "input_scale", "bf16")

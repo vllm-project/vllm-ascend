@@ -1298,9 +1298,8 @@ def _allocate_kv_cache(
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
                 if (
-                    kv_cache_tensor.layer_stride != layer_size
-                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
-                ):
+                    len(shared_names) > 1 and kv_cache_tensor.layer_stride != layer_size
+                ) or kv_cache_tensor.block_stride != layer_spec.page_size_bytes:
                     raise ValueError(
                         "Ascend hybrid KV cache requires contiguous per-layer "
                         f"views, but {layer_name} has layer_stride="

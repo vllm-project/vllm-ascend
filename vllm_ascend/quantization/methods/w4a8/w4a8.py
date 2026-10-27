@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -39,6 +40,8 @@ from vllm_ascend.utils import (
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+_S8S4_GROUP_SIZE = 256
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -128,6 +131,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         # Only per-channel W4A8 is supported, this parameter will be removed soon.
         self.is_per_channel_weight = True
+        self.use_native_s8s4_gmm = False
         self.quant_method = vllm_config.quant_config.get_name()
         self.tp_size = (
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
@@ -297,12 +301,23 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
 
     def process_weights_after_loading(self, layer):
+        activation = getattr(layer, "activation", None)
+        self.use_native_s8s4_gmm = getattr(
+            activation, "value", activation
+        ) == MoEActivation.SITU.value and get_current_hardware_profile().supports(
+            HardwareCapability.S8S4_GROUPED_MATMUL
+        )
+        if self.use_native_s8s4_gmm and self.use_expert_weight_list:
+            raise ValueError("Native S8S4 Situ GMM requires stacked expert weights; EPLB is not supported.")
         if self.quant_method == COMPRESSED_TENSORS_METHOD:
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
             self.process_weights_after_loading_modelslim(layer)
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # The MSD INT8 NZ layout is not the native S8S4 kernel's INT4 layout.
+        # Keep packed ND weights for the native Situ GMM path.
+        if not self.use_native_s8s4_gmm:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         tensor_names = (
             "w13_weight",
             "w2_weight",
@@ -393,6 +408,26 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if w2_scale_bias is not None:
             w2_scale_bias = [w2_scale_bias]
         return w1_scale_bias, w2_scale_bias
+
+    def _native_s8s4_scales(self, scales, weights, input_size):
+        # Repeating a per-channel scale over K groups preserves its values.
+        # Use expanded views so the persistent scale storage stays per-channel.
+        if input_size % _S8S4_GROUP_SIZE:
+            raise ValueError(f"Native S8S4 GMM requires K divisible by {_S8S4_GROUP_SIZE}, got {input_size}")
+        groups = input_size // _S8S4_GROUP_SIZE
+        result = []
+        for scale, weight in zip(scales, weights):
+            if scale.ndim == weight.ndim - 1:
+                scale = scale.unsqueeze(-2)
+            result.append(scale.expand(*scale.shape[:-2], groups, scale.shape[-1]))
+        return result
+
+    def supports_fused_activation(self, activation):
+        # DequantSituQuant implements the MSD path. Native S8S4 uses the
+        # common Situ activation and dynamic quantization between its GMMs.
+        if self.use_native_s8s4_gmm and getattr(activation, "value", activation) == MoEActivation.SITU.value:
+            return False
+        return super().supports_fused_activation(activation)
 
     def _maybe_convert_group_list(self, mlp_compute_input):
         """scale_bias prelude: group_list 0->1 conversion and output dtype."""
@@ -514,6 +549,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
         scale = [w1_scale[0].to(w2_scale[0].dtype)]
+        if self.use_native_s8s4_gmm:
+            scale = self._native_s8s4_scales(w1_scale, w1, hidden_states.shape[-1])
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],
@@ -536,6 +573,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
         _, bias2 = self._get_mlp_scale_bias(mlp_compute_input.layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
+        if self.use_native_s8s4_gmm:
+            w2_scale = self._native_s8s4_scales(w2_scale, w2, hidden_states.shape[-1])
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,

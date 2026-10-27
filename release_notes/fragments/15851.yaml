@@ -1,0 +1,17 @@
+pr: 15851
+entries:
+  - category: feature
+    text: Added support for a Kimi K3 target using decode context parallelism with a replicated GQA DSpark draft on Model Runner V2.
+    model: kimi-k3
+  - category: bugfix
+    text: Fixed Kimi K3 attention residual shape errors with the fused O-projection ReduceScatter path on 950.
+    model: kimi-k3
+  - category: bugfix
+    text: Fixed per-channel W4A8 Kimi K3 Situ grouped matmul weight layout and scale grouping on 950.
+    model: kimi-k3
+  - category: bugfix
+    text: Fixed Kimi K3 integer-quantized shared experts using an unsupported fused Situ operator on 950 by retaining the registered linear and activation implementations.
+    model: kimi-k3
+  - category: bugfix
+    text: Fixed prepared Kimi K3 state-copy launches with Triton versions that retain constexpr argument slots.
+    model: kimi-k3

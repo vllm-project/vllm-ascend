@@ -227,5 +227,6 @@ class AscendBlockTables(BlockTables):
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
             HAS_SLOT_MAPPING_ENABLED=True,
+            dcp_sharded=self.dcp_sharded,
         )
         return slot_mappings[:, :num_tokens_padded]
