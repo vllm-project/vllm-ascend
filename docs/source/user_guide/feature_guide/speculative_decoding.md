@@ -940,6 +940,36 @@ This entropy-aware threshold is controlled by two parameters:
 
 Both features can be enabled independently or together. When used together, the cumulative acceptance from Block Verify is combined with the entropy-adjusted threshold from Entropy Verify.
 
+## Experimental GLM KDA RecoverSSM
+
+GLM-5.3-Flash supports experimental KDA RecoverSSM on A3 and A5 with
+Model Runner V2. It reconstructs the accepted recurrent state after speculative
+decoding instead of keeping a recurrent checkpoint for every draft token.
+The default remains the native AscendC KDA path.
+
+Add the following options to your GLM serving command. Keep the parallelism,
+quantization, KV-cache dtype, and memory settings appropriate for your model
+and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "deepseek_mtp", "num_speculative_tokens": 5}' \
+--no-enable-prefix-caching \
+--mamba-cache-mode none \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+RecoverSSM requires speculative decoding, PP/PCP/DCP=1, disabled prefix caching,
+Mamba cache mode `none`, and disabled stochastic rounding. Eager execution is
+also supported; use `--enforce-eager` instead of the compilation option above.
+For prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` with matching model weights, TP size, speculative window,
+and RecoverSSM settings on both sides.
+
+This feature is experimental. Floating-point differences can change generated
+tokens; evaluate model accuracy and performance for your workload before use.
+Removing `--use-replayssm` selects the native KDA path.
+
 ## Synthetic Rejection Sampling
 
 In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.

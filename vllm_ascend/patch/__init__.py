@@ -28,6 +28,13 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_kda_recoverssm.py:
+#   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
+#   Why: The upstream metadata builder imports its CUDA context directly.
+#   How: Replace only the context class on GLM workers with RecoverSSM enabled.
+#   Related PR: No upstream context-factory extension point exists yet.
+#   Future plan: Remove when upstream allows the backend to select the context.
+# --------------------------------
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
 #   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,

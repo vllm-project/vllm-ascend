@@ -18,7 +18,6 @@ from vllm_ascend.ops.gdn_attn_builder import (
     _build_actual_seq_lengths,
     _build_non_spec_chunked_prefill_metadata,
 )
-from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
 @contextmanager
@@ -37,16 +36,6 @@ def _disable_upstream_graph_staging(builder):
 class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    def _get_recoverssm_context(self):
-        if self.recoverssm_context is None:
-            forward_context = self.vllm_config.compilation_config.static_forward_context
-            self.recoverssm_context = KDARecoverSSMCommitContext.create(
-                [forward_context[name] for name in self.layer_names],
-                spec_query_len=self.num_spec + 1,
-                max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
-            )
-        return self.recoverssm_context
-
     def build(
         self,
         common_prefix_len,
@@ -56,7 +45,16 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         fast_build=False,
         num_actual_reqs=None,
     ):
-        m = common_attn_metadata
+        m, num_decode_draft_tokens_cpu = self._normalize_graph_padding(
+            common_attn_metadata, num_actual_reqs, num_decode_draft_tokens_cpu
+        )
+        with _disable_upstream_graph_staging(self):
+            metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
+        self._build_conv_metadata(m, metadata, num_decode_draft_tokens_cpu)
+        return metadata
+
+    def _normalize_graph_padding(self, m, num_actual_reqs, num_decode_draft_tokens_cpu):
+        # Exclude graph-padded requests from sampler rows and accepted-state commit metadata.
         if num_actual_reqs is not None and num_actual_reqs < m.num_reqs:
             # FIA pads graph requests with full query spans. They must not
             # become sampler rows: commit receives only actual request counts.
@@ -73,8 +71,10 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
             if num_decode_draft_tokens_cpu is not None:
                 num_decode_draft_tokens_cpu = num_decode_draft_tokens_cpu.clone()
                 num_decode_draft_tokens_cpu[num_actual_reqs:] = -1
-        with _disable_upstream_graph_staging(self):
-            metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
+        return m, num_decode_draft_tokens_cpu
+
+    def _build_conv_metadata(self, m, metadata, num_decode_draft_tokens_cpu):
+        # Build Ascend convolution descriptors for speculative decode, prefill and ordinary decode.
         metadata.non_spec_prefill_metadata = None
         metadata.non_spec_decode_metadata = None
         metadata.spec_decode_metadata = None
@@ -91,16 +91,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
                 actual_seq_lengths=None,
             )
         if metadata.num_prefills:
-            cpu_starts = self._non_spec_cpu_starts(m, metadata, num_decode_draft_tokens_cpu)
-            decode_tokens = metadata.num_decode_tokens
-            prefill_starts = metadata.non_spec_query_start_loc[metadata.num_decodes :] - decode_tokens
-            prefill_cpu_starts = cpu_starts[metadata.num_decodes :] - decode_tokens
-            metadata.prefill_query_start_loc = prefill_starts
-            metadata.prefill_state_indices = metadata.non_spec_state_indices_tensor[metadata.num_decodes :]
-            metadata.prefill_has_initial_state = metadata.has_initial_state[metadata.num_decodes :]
-            chunk = _build_non_spec_chunked_prefill_metadata(
-                self, prefill_cpu_starts, m.query_start_loc.device, build_device_metadata=False
-            )
+            chunk = self._build_prefill_chunk_metadata(m, metadata, num_decode_draft_tokens_cpu)
             metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
                 causal_conv1d=GDNCausalConv1dMetadata(
                     query_start_loc=metadata.non_spec_query_start_loc,
@@ -122,11 +113,18 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
                 ),
                 actual_seq_lengths=_build_actual_seq_lengths(starts, metadata.num_decodes),
             )
-        return metadata
 
-    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
-        m = common_attn_metadata
-        return self.build(0, m, torch.diff(m.query_start_loc), torch.diff(m.query_start_loc_cpu) - 1)
+    def _build_prefill_chunk_metadata(self, m, metadata, num_decode_draft_tokens_cpu):
+        # Remove decode rows and rebase prefill offsets before building chunk metadata.
+        cpu_starts = self._non_spec_cpu_starts(m, metadata, num_decode_draft_tokens_cpu)
+        decode_tokens = metadata.num_decode_tokens
+        metadata.prefill_query_start_loc = metadata.non_spec_query_start_loc[metadata.num_decodes :] - decode_tokens
+        prefill_cpu_starts = cpu_starts[metadata.num_decodes :] - decode_tokens
+        metadata.prefill_state_indices = metadata.non_spec_state_indices_tensor[metadata.num_decodes :]
+        metadata.prefill_has_initial_state = metadata.has_initial_state[metadata.num_decodes :]
+        return _build_non_spec_chunked_prefill_metadata(
+            self, prefill_cpu_starts, m.query_start_loc.device, build_device_metadata=False
+        )
 
     def _non_spec_cpu_starts(self, m, metadata, draft_counts):
         if metadata.num_spec_decodes == 0:
@@ -139,6 +137,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
     def _stage_spec(self, metadata, batch_size):
         if not self.use_full_cuda_graph or metadata.num_prefills or metadata.num_decodes:
             return
+        # TODO: Fuse staging with an Ascend Triton kernel; upstream currently requires CUDA tensors.
         count = metadata.num_spec_decodes
         states = self.spec_state_indices_tensor[:batch_size]
         starts = self.spec_query_start_loc[: batch_size + 1]

@@ -1,18 +1,6 @@
 pr: 19133
 entries:
-  - category: bugfix
-    text: Account for both GLM physical cache page classes through the platform KV-cache builder on vLLM main, allowing native and RecoverSSM services to initialize.
+  - category: feature
+    text: Added experimental GLM KDA RecoverSSM support on Ascend Model Runner V2, enabled with --use-replayssm alongside speculative decoding.
     model: glm-5.3-flash
     hardware: [A3, A5]
-  - category: bugfix
-    text: Use separate 64-value RecoverSSM verification and commit tiles on A3 to fit its unified buffer, preserving the existing A5 tile selection.
-    model: glm-5.3-flash
-    hardware: [A3]
-  - category: performance
-    text: Reduced experimental GLM KDA RecoverSSM verification, convolution-state compaction, and accepted-state commit overhead, including two-head commit grouping validated on Ascend950DT.
-    model: glm-5.3-flash
-    hardware: [A5]
-  - category: config
-    text: Unified experimental GLM KDA RecoverSSM activation under the upstream --use-replayssm option, replacing additional_config.kda_recoverssm and validating target and MTP cache configuration before worker startup.
-    model: glm-5.3-flash
-    hardware: [A5]
