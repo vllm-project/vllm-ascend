@@ -24,6 +24,9 @@ def main():
     parser.add_argument("--device", type=int, default=0, help="Logical NPU index in this process")
     args = parser.parse_args()
     torch_npu.npu.set_device(args.device)
+    # Unlike the model runner, this standalone process has not enabled NZ.
+    # Otherwise format_cast can silently leave these INT8 weights in ND.
+    torch.npu.config.allow_internal_format = True
     torch.manual_seed(42)
     device = torch.device(f"npu:{args.device}")
     dtype = torch.bfloat16
@@ -33,7 +36,14 @@ def main():
 
     def weight(rows, columns):
         tensor = torch.randint(-4, 5, (rows, columns), dtype=torch.int8, device=device)
-        return torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ)
+        tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ)
+        actual_format = torch_npu.get_npu_format(tensor)
+        if actual_format != ACL_FORMAT_FRACTAL_NZ:
+            raise RuntimeError(
+                f"MlaPrologV3 INT8 weights require FRACTAL_NZ (29), got format {actual_format}. "
+                "Check torch.npu.config.allow_internal_format and the torch_npu/device combination."
+            )
+        return tensor
 
     common = {
         "weight_dq": weight(hidden_size, q_rank),
@@ -115,6 +125,7 @@ def main():
                 "device": str(device),
                 "operator_calls": 3,
                 "checked": [
+                    "INT8 weights use FRACTAL_NZ (29)",
                     "Dr=0 shapes",
                     "W8A8+C8",
                     "single token",
