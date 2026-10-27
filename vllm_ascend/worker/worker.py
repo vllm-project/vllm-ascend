@@ -20,9 +20,9 @@
 import copy
 import gc
 import logging
-from fnmatch import filter as fnmatch_filter
 import os
 from contextlib import AbstractContextManager, nullcontext
+from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import Any
 from unittest.mock import patch
