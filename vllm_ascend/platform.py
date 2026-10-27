@@ -108,14 +108,22 @@ def ensure_hccl_socket_port_range() -> None:
     Ray-scheduled workers are fenced to one device via
     ASCEND_RT_VISIBLE_DEVICES, so ``torch.npu.current_device()`` is 0 in all
     of them; the physical device id must come from the env var instead.
+    Multi-device processes (harness-spawned test workers sharing one
+    ASCEND_RT_VISIBLE_DEVICES list) must instead map their *current logical*
+    device to the physical id, otherwise every rank derives the same range
+    and concurrent comm creation collides again with EI0020.
     """
     if "HCCL_NPU_SOCKET_PORT_RANGE" in os.environ:
         return
-    visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-    first = visible.split(",")[0].strip() if visible.strip() else ""
+    visible = [t.strip() for t in os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "").split(",") if t.strip()]
     try:
-        device = int(first)
-    except ValueError:
+        if len(visible) == 1:
+            device = int(visible[0])
+        elif len(visible) > 1:
+            device = int(visible[torch.npu.current_device()])
+        else:
+            device = torch.npu.current_device()
+    except (ValueError, IndexError):
         device = torch.npu.current_device()
     base = 17000 + device * 20
     os.environ["HCCL_NPU_SOCKET_PORT_RANGE"] = f"{base}-{base + 19}"
