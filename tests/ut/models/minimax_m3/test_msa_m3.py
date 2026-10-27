@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
@@ -157,6 +157,7 @@ def _make_vllm_config(
 
 def _make_sparse_builder(device: torch.device) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
+    vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
     spec = FullAttentionSpec(
         block_size=128,
         num_kv_heads=2,
@@ -421,7 +422,7 @@ def test_sparse_decode_prefix_keeps_captured_buffers_alive() -> None:
     torch.testing.assert_close(captured, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("batch_size,query_len", [(-1, 4), (8193, 4), (1, 0)])
+@pytest.mark.parametrize("batch_size,query_len", [(-1, 4), (8193, 4), (1, 0), (1, 9)])
 def test_sparse_decode_prefix_rejects_invalid_dimensions(batch_size: int, query_len: int) -> None:
     builder = _make_sparse_builder(torch.device("cpu"))
     with pytest.raises(ValueError, match="Invalid uniform decode"):
@@ -446,7 +447,7 @@ def test_sparse_metadata_builder_forwards_uniform_decode_prefix(
     if query_len == 0:
         assert metadata.num_decodes == 0
         assert metadata.decode.cu_seqlens_q is None
-        assert not builder.decode_cu_seqlens_q_buffers
+        assert builder.decode_cu_seqlens_q_buffers  # Buffers already exist before the first build.
     else:
         expected = common.query_start_loc.to(torch.int64)
         torch.testing.assert_close(metadata.decode.cu_seqlens_q, expected, rtol=0, atol=0)
@@ -637,19 +638,19 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
 
 def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
-    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
+    a5_branch_start = module_source.index("if not _USE_ASCENDC_INDEX_SCORE_DECODE:")
     a5_branch_end = module_source.index("\n\ndef _active_decode_num_reqs", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
-        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
+        msa_m3_module.get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED
     )
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "get_ascend_device_type" not in module_source
 
 
 def _make_mrv2_padding_context(
@@ -1690,7 +1691,7 @@ def test_sparse_decode_unverified_paths_do_not_reuse_metadata(
 def test_sparse_builder_metadata_cache_is_forward_local(
     device_type: AscendDeviceType, enabled: bool, mock_gbsa_ops
 ) -> None:
-    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=device_type):
+    with patch.object(msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)):
         builder = _make_sparse_builder(torch.device("cpu"))
         common = _create_common_attn_metadata(BatchSpec([512], [1]), 128, torch.device("cpu"))
         first = builder.build(0, common).decode
@@ -1731,8 +1732,15 @@ def test_prepared_gbsa_counts_match_decode_topk_mask(query_len, topk, logical_bl
 @pytest.mark.parametrize("query_len", [1, 4])
 def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query_len, mock_gbsa_ops, monkeypatch):
     metadata_op, attention_op = mock_gbsa_ops
-    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
     builder = _make_sparse_builder(torch.device("cpu"))
+    buffers = builder.decode_gbsa_metadata_buffers
+    assert set(buffers) == {(4, 2, 128, 16, 1), (4, 2, 128, 16, 4)}
+    assert all(buffer.shape == (1024,) and buffer.dtype == torch.int32 for buffer in buffers.values())
+    preallocated = buffers[(4, 2, 128, 16, query_len)]
+    mock_gbsa_ops[0].assert_not_called()
     monkeypatch.setattr(msa_m3_module, "split_decodes_and_prefills", lambda *args, **kwargs: (2, 0, 2 * query_len, 0))
     common = _create_common_attn_metadata(BatchSpec([128, 257], [query_len] * 2), 128, torch.device("cpu"))
     events = []
@@ -1746,6 +1754,7 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query
     assert events == ["metadata"]  # No IndexScore / sparse layer has run yet.
     assert md.decode.gbsa_metadata_prepared
     buffer = next(iter(md.decode.gbsa_metadata_cache.values()))
+    assert buffer is preallocated
     q = torch.zeros((2 * query_len, 4, 128), dtype=torch.bfloat16)
 
     def run_gbsa(*args, **kwargs):
@@ -1781,6 +1790,12 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query
     assert torch.all(refreshed == 2) and metadata_op.call_count == 2
     expected_counts = _decode_gbsa_block_counts(common.seq_lens, query_len, 2, 16, common.block_table_tensor.shape[-1])
     torch.testing.assert_close(metadata_op.call_args.args[1], expected_counts, rtol=0, atol=0)
+    monkeypatch.setattr(msa_m3_module, "split_decodes_and_prefills", lambda *args, **kwargs: (1, 0, query_len, 0))
+    smaller = _create_common_attn_metadata(BatchSpec([512], [query_len]), 128, torch.device("cpu"))
+    with patch.object(torch, "empty_like", side_effect=AssertionError("Persistent buffers must already exist")):
+        changed_size = builder.build(0, smaller).decode
+    assert next(iter(changed_size.gbsa_metadata_cache.values())) is preallocated
+    assert len(buffers) == 2 and torch.all(preallocated == 3)
 
 
 @pytest.mark.parametrize("query_len", [1, 4])
@@ -1789,7 +1804,9 @@ def test_sparse_builder_refreshes_captured_gbsa_buffer_for_padded_decode(
     query_len, actual_reqs, padded_reqs, mock_gbsa_ops, monkeypatch
 ):
     metadata_op, _ = mock_gbsa_ops
-    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
     monkeypatch.setattr(
         msa_m3_module,
         "split_decodes_and_prefills",
@@ -1837,7 +1854,10 @@ def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size,
     config = _make_vllm_config()
     config.model_config.dtype = dtype
     spec = FullAttentionSpec(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
-    with patch.object(msa_m3_module, "get_ascend_device_type", return_value=AscendDeviceType.A3):
+    config.speculative_config = SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False)
+    with patch.object(
+        msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+    ):
         builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))
         common = _create_common_attn_metadata(BatchSpec([512], [query_len]), block_size, torch.device("cpu"))
         with patch.object(msa_m3_module, "split_decodes_and_prefills", return_value=(1, 0, query_len, 0)):
