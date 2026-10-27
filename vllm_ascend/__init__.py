@@ -97,9 +97,11 @@ def register_model_loader():
     _ensure_global_patch()
 
     from .model_loader.netloader import register_netloader
+    from .model_loader.preload import register_preload_loader
     from .model_loader.rfork import register_rforkloader
 
     register_netloader()
+    register_preload_loader()
     register_rforkloader()
 
 

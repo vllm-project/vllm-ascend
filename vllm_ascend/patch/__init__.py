@@ -744,7 +744,7 @@
 #
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
+#   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_allocated`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
 #      `torch.accelerator.empty_cache`
 #    Why:
@@ -1663,3 +1663,17 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: platform/patch_preload.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Target: vllm.model_executor.model_loader.weight_cache and CLI preload
+#   Why: upstream gates IPC on CUDA/ROCm and exports CUDA storage handles.
+#   How: register an inherited loader; adapt the daemon spawn target, platform
+#        gate, tensor entry and shared-storage byte accounting for NPU ND IPC.
+#        Initialize general plugins in the spawned daemon after device patches
+#        so model/loader registries match the engine's plugin initialization.
+#        The upstream cache protocol, lifecycle and service loop are retained.
+#   Related PR: https://github.com/vllm-project/vllm/pull/54921
+#   Future Plan: remove these bindings after upstream exposes device IPC and
+#                preload daemon initialization hooks through Platform.
+#                Drop the worker's copy snapshot correction after upstream
+#                accounts for producer memory released during copy handoff.

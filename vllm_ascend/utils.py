@@ -1204,8 +1204,12 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
         return None
     if group_name == SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME:
         return {"hccl_buffer_size": SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE}
+    # The preload daemon initializes its world group outside the engine's
+    # VllmConfig context to retain its own rendezvous. Only DP groups need
+    # the config-dependent buffer calculation.
+    if group_name == "dp":
+        return {"hccl_buffer_size": calculate_dp_buffer_size()}
     hccl_config_map = {
-        "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
