@@ -3,19 +3,36 @@
 
 import inspect
 from functools import wraps
+from types import FunctionType
 from typing import Any
 
 from torch_npu._inductor.npu_triton_heuristics import TritonCompileResultNpu, triton_version_uses_attrs_dict
 
 
 def _bind_launcher_constants(make_launcher):
+    # Reuse torch_npu's existing compact-ABI branch without changing its module
+    # global (which is also used by concurrent/full-signature compilations).
+    compact_make_launcher = FunctionType(
+        make_launcher.__code__,
+        {**make_launcher.__globals__, "triton_version_uses_attrs_dict": lambda: False},
+        make_launcher.__name__,
+        make_launcher.__defaults__,
+        make_launcher.__closure__,
+    )
+
     @wraps(make_launcher)
     def make_launcher_with_constants(self):
-        launcher = make_launcher(self)
         if not triton_version_uses_attrs_dict():
-            return launcher
+            return make_launcher(self)
 
         fn = self.kernel.src.fn
+        constexpr_names = {fn.arg_names[i] for i in fn.constexprs}
+        # NPULauncher builds its C argument parser from src.signature. Inductor
+        # may omit all constexprs there even with Triton's attrs-dict API.
+        if constexpr_names and constexpr_names.isdisjoint(self.kernel.src.signature):
+            return compact_make_launcher(self)
+
+        launcher = make_launcher(self)
         parameters = inspect.signature(launcher).parameters
         constants = {
             fn.arg_names[i]: self.compile_meta["constants"][fn.arg_names[i]]
@@ -38,6 +55,6 @@ def _bind_launcher_constants(make_launcher):
     return make_launcher_with_constants
 
 
-# Remove when supported torch_npu launchers bind all known constexprs, as
-# torch._inductor.runtime.triton_heuristics.CompileResult._get_arg_lists does.
+# Remove when supported torch_npu launchers handle constexprs according to the
+# compiled source signature rather than inferring the launch ABI from attrs.
 TritonCompileResultNpu.make_launcher = _bind_launcher_constants(TritonCompileResultNpu.make_launcher)

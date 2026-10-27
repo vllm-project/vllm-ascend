@@ -13,6 +13,32 @@ from unittest.mock import Mock, patch
 PATCH_PATH = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_npu_triton_launcher.py"
 
 
+def triton_version_uses_attrs_dict():
+    return True
+
+
+def _make_launcher(self):
+    # Reduced torch_npu 2.10.0.post4 argument-generation contract. Keep both
+    # branches so tests exercise the real ABI decision, not just a callback.
+    fn = self.kernel.src.fn
+    if triton_version_uses_attrs_dict():
+        def_args = call_args = fn.arg_names
+    else:
+        def_args = [name for name in fn.arg_names if name not in self.config.kwargs]
+        call_args = [name for i, name in enumerate(fn.arg_names) if i not in fn.constexprs]
+    scope: dict[str, Any] = {"runner": self.kernel.run, "control": self.control}
+    exec(
+        f"def launcher({', '.join(def_args)}, stream):\n    return runner(*control, {', '.join(call_args)})",
+        scope,
+    )
+    launcher = scope["launcher"]
+    launcher.config = self.config
+    launcher.store_cubin = True
+    launcher.def_args = [name for name in def_args if name not in self.config.kwargs]
+    launcher.call_args = [name for name in call_args if self.kernel.src.signature.get(name) != "constexpr"]
+    return launcher
+
+
 class TestNpuTritonLauncher(unittest.TestCase):
     def setUp(self):
         module = ModuleType("torch_npu._inductor.npu_triton_heuristics")
@@ -20,12 +46,16 @@ class TestNpuTritonLauncher(unittest.TestCase):
         self.uses_attrs = Mock(return_value=True)
         vars(module).update(TritonCompileResultNpu=self.result_type, triton_version_uses_attrs_dict=self.uses_attrs)
         with patch.dict(sys.modules, {module.__name__: module}):
-            runpy.run_path(str(PATCH_PATH))
+            self.bind_constants = runpy.run_path(str(PATCH_PATH))["_bind_launcher_constants"]
 
     def result(self, launcher, names, constexprs, constants):
         result = self.result_type()
         result.launcher = launcher
-        result.kernel = SimpleNamespace(src=SimpleNamespace(fn=SimpleNamespace(arg_names=names, constexprs=constexprs)))
+        result.kernel = SimpleNamespace(
+            src=SimpleNamespace(
+                fn=SimpleNamespace(arg_names=names, constexprs=constexprs), signature=dict.fromkeys(names)
+            )
+        )
         result.compile_meta = {"constants": constants}
         return result
 
@@ -110,6 +140,55 @@ class TestNpuTritonLauncher(unittest.TestCase):
         second = result.make_launcher()
         self.assertEqual(first("src", stream=1), ("src", 32, 1))
         self.assertEqual(second("src", stream=1), ("src", 64, 1))
+
+    def test_compact_signature_matches_strict_npu_launch_arity(self):
+        calls = []
+
+        # NPULauncher uses nine control args plus len(src.signature) args.
+        # A fixed Python signature rejects extra constants just like its C stub.
+        def runner(g0, g1, g2, stream, function, packed, metadata, enter, leave, src, dst, x_numel):
+            enter(metadata)
+            calls.append((g0, g1, g2, stream, function, packed, metadata, src, dst, x_numel))
+            leave(metadata)
+
+        for names in (
+            ["src", "dst", "x_numel", "X0BLOCK", "X0BLOCK_SUB"],
+            ["src", "X0BLOCK", "dst", "X0BLOCK_SUB", "x_numel"],
+        ):
+            with self.subTest(names=names):
+                constants = {"X0BLOCK": 128, "X0BLOCK_SUB": 32}
+                result = self.result(None, names, [names.index(n) for n in constants], constants)
+                result.config = SimpleNamespace(kwargs=constants)
+                result.kernel.src.signature = {"src": "*fp32", "dst": "*fp32", "x_numel": "i32"}
+                result.kernel.run = runner
+                enter, leave = Mock(), Mock()
+                result.control = (2, 1, 1, 7, "kernel", "packed", "metadata", enter, leave)
+                launcher = self.bind_constants(_make_launcher)(result)
+                launcher("src", "dst", 2, stream=7)
+                self.assertEqual(calls[-1], (2, 1, 1, 7, "kernel", "packed", "metadata", "src", "dst", 2))
+                self.assertEqual(launcher.def_args, ["src", "dst", "x_numel"])
+                self.assertEqual(launcher.call_args, ["src", "dst", "x_numel"])
+                self.assertIs(launcher.config, result.config)
+                self.assertTrue(launcher.store_cubin)
+                enter.assert_called_once_with("metadata")
+                leave.assert_called_once_with("metadata")
+                # No per-launch wrapper and no mutation of shared backend globals.
+                self.assertIs(launcher.__globals__["runner"], runner)
+                self.assertTrue(triton_version_uses_attrs_dict())
+
+    def test_full_signature_retains_constants_in_strict_runner(self):
+        def runner(g0, g1, g2, stream, function, packed, metadata, enter, leave, src, dst, x_numel, block, sub):
+            return src, dst, x_numel, block, sub
+
+        names = ["src", "dst", "x_numel", "X0BLOCK", "X0BLOCK_SUB"]
+        constants = {"X0BLOCK": 128, "X0BLOCK_SUB": 32}
+        result = self.result(None, names, [3, 4], constants)
+        result.kernel.src.signature = dict(zip(names, ["*fp32", "*fp32", "i32", "constexpr", "constexpr"]))
+        result.config = SimpleNamespace(kwargs=constants)
+        result.kernel.run = runner
+        result.control = (2, 1, 1, 7, "kernel", "packed", None, None, None)
+        launcher = self.bind_constants(_make_launcher)(result)
+        self.assertEqual(launcher("src", "dst", 2, stream=7), ("src", "dst", 2, 128, 32))
 
 
 if __name__ == "__main__":

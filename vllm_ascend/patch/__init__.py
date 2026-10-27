@@ -51,19 +51,23 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch_npu._inductor.npu_triton_heuristics.TritonCompileResultNpu.make_launcher`
 #    Why:
-#       With Triton's attrs-dict ABI, torch_npu leaves known constexpr block
-#       sizes in the launcher signature although Inductor omits them at runtime.
+#       Triton's attrs-dict API does not determine the NPU launch ABI. Inductor
+#       can omit constexprs from src.signature, so passing them to NPULauncher
+#       produces too many arguments even after binding the Python launcher.
 #    How:
-#       At worker patch registration, wrap launcher creation to bind only known
-#       constexprs still present in the generated signature. Preserve the NPU
-#       launcher and its metadata, grid logic, callbacks, and full argument ABI.
-#       Each affected launch adds one Python call, with no tensor operations;
-#       legacy layouts and already-fixed launchers return unchanged.
+#       Select torch_npu's existing compact argument path when src.signature
+#       omits all declared constexprs. Reuse its function code with a private
+#       globals dictionary overriding only the ABI predicate; shared module
+#       globals remain unchanged. This adds no per-launch call for that path.
+#       For full signatures, bind known constexprs still required by the Python
+#       launcher (one extra Python call). Preserve grid logic, metadata and hooks.
 #    Related PR (if no, explain why):
 #       No torch_npu PR yet. PyTorch 2.10 CompileResult._get_arg_lists already
-#       substitutes known constexprs; this bridges the pinned torch_npu version.
+#       substitutes known constexprs, but Ascend also needs signature-based ABI
+#       selection. This bridges the pinned torch_npu version.
 #    Future Plan:
-#       Remove when supported torch_npu launchers adopt that constexpr handling.
+#       Remove when supported torch_npu launchers use the compiled signature to
+#       determine constexpr argument handling.
 #
 # * Platform Patch:
 # ==========#
