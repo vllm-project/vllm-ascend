@@ -13,8 +13,9 @@ MODEL = "vllm-sr/d3-edge"
 MODELS = ("vllm-sr/d3-edge", "vllm-sr/d3-nano")
 # bf16 backbone vs the checkpoint runtime: d3-nano reaches about 0.019 on this prompt, so leave headroom.
 SOFTMAX_ATOL = 0.03
-# These tests only send text. Graph mode with multimodal inputs enabled currently fails during startup profiling
-# for D3's ENCODER_ONLY attention layers, so media is switched off here.
+# These tests only send text, so media inputs are switched off. Keep every D3 run on one setting: the torch.compile
+# cache key of vLLM ignores `limit_mm_per_prompt`, and a graph compiled with the other setting crashes graph-mode
+# startup when it is reused.
 NO_MEDIA = {"image": 0, "video": 0}
 STATE = "A customer reports a damaged delivery and asks for a replacement."
 QUESTIONS = {
