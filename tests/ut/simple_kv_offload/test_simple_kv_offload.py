@@ -232,3 +232,142 @@ def test_get_finished_records_store_barrier_on_npu(
     store_event = store_call["wait_event"]
     assert isinstance(store_event, FakeEvent)
     assert store_event.recorded_stream is current_stream
+
+
+# ---------------------------------------------------------------------------
+# Copy backend worker thread: a failing job must not kill the thread, and a
+# failed load must reach the engine instead of hanging (issue #17932).
+# ---------------------------------------------------------------------------
+
+
+def _make_backend(monkeypatch: pytest.MonkeyPatch, failures: set[int]):
+    """Backend whose copy raises for the jobs whose event_idx is in `failures`."""
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import copy_backend as backend_module
+
+    seen: list[int] = []
+
+    def fake_copy_blocks(src_blocks, dst_blocks, params) -> None:
+        event_idx = len(seen)
+        seen.append(event_idx)
+        if event_idx in failures:
+            raise RuntimeError("swap_blocks_batch failed")
+
+    monkeypatch.setattr(backend_module, "copy_blocks", fake_copy_blocks)
+    monkeypatch.setattr(backend_module, "build_params", lambda *args, **kwargs: object())
+
+    backend = backend_module.NPUDmaCopyBackend()
+    backend.init({}, {}, torch.device("cpu"), torch.npu.Stream(), torch.npu.Stream())
+    return backend
+
+
+def _drain(backend, events_list, expected: int, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while len(events_list) < expected and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(events_list) == expected, f"worker thread stopped after {len(events_list)} of {expected} jobs"
+
+
+def test_copy_loop_survives_a_failing_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _make_backend(monkeypatch, failures={0})
+    events: list[tuple[int, object]] = []
+
+    backend.launch_copy([1], [11], is_store=False, event_idx=0, events_list=events)
+    backend.launch_copy([2], [12], is_store=False, event_idx=1, events_list=events)
+
+    # Both jobs complete: the thread is still alive after the first one raised.
+    _drain(backend, events, expected=2)
+    assert [event_idx for event_idx, _ in events] == [0, 1]
+    assert backend._thread is not None and backend._thread.is_alive()
+
+
+def test_failed_load_reports_its_destination_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _make_backend(monkeypatch, failures={0})
+    events: list[tuple[int, object]] = []
+
+    backend.launch_copy([1, 2], [11, 12], is_store=False, event_idx=0, events_list=events)
+    _drain(backend, events, expected=1)
+
+    # The event is still recorded, so the high-water mark advances and the
+    # request is reported as finished receiving, as upstream requires.
+    assert [event_idx for event_idx, _ in events] == [0]
+    assert backend.drain_load_errors() == {11, 12}
+    # Draining is destructive: the engine must not see them twice.
+    assert backend.drain_load_errors() == set()
+
+
+def test_failed_store_is_not_reported_as_a_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _make_backend(monkeypatch, failures={0})
+    events: list[tuple[int, object]] = []
+
+    # A store failure leaves HBM intact; the blocks just stay uncached.
+    backend.launch_copy([1], [11], is_store=True, event_idx=0, events_list=events)
+    _drain(backend, events, expected=1)
+
+    assert backend.drain_load_errors() == set()
+
+
+def test_successful_copies_report_no_load_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _make_backend(monkeypatch, failures=set())
+    events: list[tuple[int, object]] = []
+
+    backend.launch_copy([1], [11], is_store=False, event_idx=0, events_list=events)
+    backend.launch_copy([2], [12], is_store=True, event_idx=1, events_list=events)
+    _drain(backend, events, expected=2)
+
+    assert backend.drain_load_errors() == set()
+
+
+def test_shutdown_reports_a_thread_that_already_died(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import copy_backend as backend_module
+
+    backend = _make_backend(monkeypatch, failures=set())
+    thread = backend._thread
+    assert thread is not None
+
+    # Simulate the pre-fix behavior: the loop is gone without seeing the sentinel.
+    backend._queue.put(None)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    backend._loop_exited_cleanly = False
+
+    # vLLM's logger does not propagate to the root logger, so caplog sees nothing.
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        backend_module.logger, "warning", lambda msg, *args: warnings.append(msg % args if args else msg)
+    )
+
+    backend.shutdown()
+    assert any("already gone at shutdown" in message for message in warnings)
+
+
+def test_clean_shutdown_logs_no_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import copy_backend as backend_module
+
+    backend = _make_backend(monkeypatch, failures=set())
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        backend_module.logger, "warning", lambda msg, *args: warnings.append(msg % args if args else msg)
+    )
+
+    backend.shutdown()
+    assert warnings == []
+
+
+def test_worker_and_connector_surface_backend_load_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = SimpleNamespace(drain_load_errors=lambda: {7, 8})
+    assert worker.get_block_ids_with_load_errors() == {7, 8}
+
+    connector = AscendSimpleCPUOffloadConnector.__new__(AscendSimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    assert connector.get_block_ids_with_load_errors() == {7, 8}
+
+    # An upstream (non-NPU) worker has no such channel; report nothing.
+    connector.worker_handler = SimpleNamespace()
+    assert connector.get_block_ids_with_load_errors() == set()
+
+    # Prefix caching disabled: upstream leaves the worker unset.
+    connector.worker_handler = None
+    assert connector.get_block_ids_with_load_errors() == set()
