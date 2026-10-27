@@ -156,6 +156,9 @@ starting from `kv_port`.
 
 | Parameter | Description |
 | :--- | :--- |
+| `use_fused_overlap` | Defaults to `false`: whenever the offload is enabled, the fused pipeline runs — LIM (top-k selection + residency management in one NPU operator) plus the fused Copy-SFA attention operator. `true` selects the alternative overlap operator instead (Lightning Indexer selection, CPU-side LRU residency planning, `sparse_copy` onboarding, SFA attention). |
+| `offload_shared_indexer_only` | Requires the fused Copy-SFA path (the default; mutually exclusive with `use_fused_overlap=true`). Keep the KV cache of full (indexer-owner) layers resident in NPU paged caches and offload only the shared-indexer layers. See the [shared-indexer-only tutorial](../../tutorials/features/sparse_kv_offload_shared_indexer_only.md) for details. |
+| `miss_onboard_mode` | Requires `offload_shared_indexer_only=true`. `"inline"` (default) resolves misses inside the fused Copy-SFA kernel; `"side_stream"` pre-copies the group's misses on a side stream via the `npu_lim_copy_descriptors` operator, so members run direct-addressed attention with an all-zero miss plan. Falls back to `inline` when the operator is unavailable. |
 | `topk_buffer_size` | Device hot-buffer size. Defaults to `-1`, which resolves to `(1 + num_speculative_tokens) * 2048` (2048 without speculation). Explicit values are unchanged. For the default Copy-SFA path, use a multiple of 256, at least `(1 + num_speculative_tokens) * 2048` and at most 32512. |
 | `dram_size_per_dp_GB` | Defaults to `110` GiB of host memory per DP rank. It must hold the full KV cache. TP ranks share this pool while different DP ranks use different pool. The whole required host memory is around `dram_size_per_dp_GB * data_parallel_size`. |
 | `keep_device_kv_cache` | Defaults to `false`. Debug-only option that retains the full device KV cache when enabled. |

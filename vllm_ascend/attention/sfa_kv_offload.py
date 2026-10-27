@@ -36,7 +36,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import DUMMY_POOL_ROW_COUNT, SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.indexer import (
@@ -56,6 +56,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
+    LIM_MISS_PLAN_MAX_WIDTH,
     get_sparse_kv_offload_manager,
 )
 
@@ -89,6 +90,18 @@ def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloa
             "the dense short-sequence layout only lines up with the circular "
             f"tail slots when topk_buffer_size is a multiple of {COPY_SFA_TAIL_TOKENS}"
         )
+    # The inactive-request dummy rows share a DUMMY_POOL_ROW_COUNT ring
+    # whose row indices are capacity + [0, ring); the LIM history arrays
+    # are sized 2 * (max_num_seqs + 2), so a smaller capacity would let
+    # the ring indices run past them. Minimal test namespaces may omit the
+    # scheduler config; the bound is checked wherever it is available
+    # (both real callers pass full configs).
+    max_num_seqs = getattr(getattr(vllm_config, "scheduler_config", None), "max_num_seqs", None)
+    if max_num_seqs is not None and max_num_seqs + 2 < DUMMY_POOL_ROW_COUNT:
+        raise ValueError(
+            "fused_copy_sfa requires max_num_seqs + 2 >= "
+            f"{DUMMY_POOL_ROW_COUNT} (dummy hot-row ring bound), got max_num_seqs={max_num_seqs}"
+        )
 
 
 @dataclass
@@ -99,6 +112,8 @@ class AscendSFAOffloadMetadata(AscendSFAMetadata):
     # required, including after speculative-token rejection.
     fused_copy_sfa_enabled: bool = False
     copy_sfa_query_ends: torch.Tensor | None = None
+    # Per-token resident block table, identical for every layer of the step;
+    # computed once by the builder so each shared layer can reuse it.
     copy_sfa_seq_lens: torch.Tensor | None = None
     copy_sfa_prefix_lens: torch.Tensor | None = None
     copy_sfa_cache_tokens: torch.Tensor | None = None
@@ -202,6 +217,8 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls if metadata_cls is not None else AscendSFAOffloadMetadata,
             supports_dcp_with_varlen,
         )
+        # Both fused modes share the request-owned hot-row/circular-tail
+        # metadata; only the attention execution differs.
         self.use_fused_copy_sfa = cfg.use_fused_copy_sfa
         if self.use_fused_copy_sfa:
             self._init_copy_sfa_metadata_buffers(vllm_config, device)
@@ -303,6 +320,9 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.num_decode_tokens = num_decode_tokens
         metadata.req_ids_tensor = common_attn_metadata.req_ids_tensor
         metadata.token_to_req = common_attn_metadata.token_to_req
+        # NOTE: fused_copy_sfa_enabled means "the fused LIM pipeline runs for
+        # this step"; the impl still dispatches between the fused Copy-SFA
+        # and overlap operators on its own op-level flag.
         metadata.fused_copy_sfa_enabled = (
             self.use_fused_copy_sfa
             and (num_prefills == 0 or common_attn_metadata.offload_dummy)
@@ -341,7 +361,13 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         ends_np, starts_np = query_loc[1:], query_loc[:-1]
         widths_np = ends_np - starts_np
         active_np = active_rows_np & (widths_np > 0)
-        pools_np = np.where(active_np, pools_np, np.arange(count) + self.copy_sfa_pool_capacity)
+        # Inactive request slots share a small dummy-row ring instead of
+        # each consuming a dedicated hot row (DUMMY_POOL_ROW_COUNT).
+        pools_np = np.where(
+            active_np,
+            pools_np,
+            self.copy_sfa_pool_capacity + np.arange(count) % DUMMY_POOL_ROW_COUNT,
+        )
         ends = upload("query_ends", ends_np)
         widths = upload("widths", widths_np)
         active = upload("active", active_np)
@@ -349,6 +375,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.copy_sfa_query_ends = ends
         metadata.copy_sfa_pool_entries = pools
         metadata.copy_sfa_prefill_pool_slots = pools
+        # The side-stream onboarding derives its H2D descriptors from the
+        # per-token byte sizes; expose the builder-owned tensor on the step
+        # metadata like the other fused-pipeline geometry.
+        metadata.copy_sfa_token_bytes = self.copy_sfa_token_bytes
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
@@ -444,7 +474,11 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         token_invalid = upload("token_invalid", ~token_active_np)
         metadata.slot_mapping.masked_fill_(token_invalid[: metadata.slot_mapping.numel()], -1)
         logical_positions = seq_lens[token_rows] - widths[token_rows] + token_offsets
-        token_pools_np = np.where(token_active_np, pools_np[rows_np], self.copy_sfa_pool_capacity + rows_np)
+        token_pools_np = np.where(
+            token_active_np,
+            pools_np[rows_np],
+            self.copy_sfa_pool_capacity + rows_np % DUMMY_POOL_ROW_COUNT,
+        )
         row_base = upload("token_bases", token_pools_np * self.copy_sfa_stride_blocks * LIM_CACHE_BLOCK_SIZE)
         self.copy_sfa_device_slots[step, :tokens].copy_(
             row_base
@@ -494,6 +528,21 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
 class AscendSFAKVOffloadImpl(AscendSFAImpl):
     """SFA implementation that routes main MLA K/V through the CPU pool."""
 
+    @staticmethod
+    def is_full_resident_layer(
+        *,
+        offload_shared_indexer_only: bool,
+        skip_topk: bool,
+        is_mtp_layer: bool,
+    ) -> bool:
+        """Whether this layer keeps its main KV in the NPU paged cache.
+
+        Under ``offload_shared_indexer_only`` only the full (indexer-owner,
+        non-MTP) layers stay device-resident; shared ``skip_topk`` layers and
+        the MTP layer keep the offloaded hot-row flow.
+        """
+        return offload_shared_indexer_only and not skip_topk and not is_mtp_layer
+
     def __init__(
         self,
         num_heads: int,
@@ -534,6 +583,24 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.block_size = self.vllm_config.cache_config.block_size
         self.use_fused_overlap = offload_cfg.use_fused_overlap
         self.use_fused_copy_sfa = offload_cfg.use_fused_copy_sfa
+        self.use_side_stream_onboard = offload_cfg.use_side_stream_onboard
+        self.lim_shared_only = offload_cfg.offload_shared_indexer_only
+        # offload_shared_indexer_only: full (indexer-owner, non-MTP) layers
+        # keep their KV in NPU paged caches and run the standard decode flow.
+        # The model runner fills _lim_share_members after loading; owners
+        # with members still run LIM (the group reuses its selection), while
+        # singleton owners fall back to the standard indexer selection.
+        self.lim_full_resident = self.is_full_resident_layer(
+            offload_shared_indexer_only=self.lim_shared_only,
+            skip_topk=self.skip_topk,
+            is_mtp_layer=self._is_mtp_layer,
+        )
+        self._lim_share_members: list[AscendSFAKVOffloadImpl] = []
+        # Lazily-built zero block for SP-MoE/DSA-CP query padding in the
+        # full-resident attention path (see _execute_sparse_flash_attention_
+        # process): reused across steps so padded layers do not allocate a
+        # fresh zeros tensor per forward.
+        self._lim_topk_pad_zeros: torch.Tensor | None = None
         self.lim_indexer_owner = self
         self._copy_sfa_metadata: AscendSFAOffloadMetadata | None = None
         if self.use_fused_copy_sfa:
@@ -541,6 +608,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             requests = self.vllm_config.scheduler_config.max_num_seqs + 2
             tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             device = torch.device("npu")
+            width = 1 + (
+                self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
+            )
+            output_tokens = min(tokens, requests * width + self.vllm_config.parallel_config.tensor_parallel_size)
             if not self.skip_topk:
                 source_capacity = (
                     cdiv(self.vllm_config.model_config.max_model_len, LIM_CACHE_BLOCK_SIZE) * LIM_CACHE_BLOCK_SIZE
@@ -548,16 +619,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 self.lim_slot_map = torch.full(
                     (requests * 2, source_capacity), -(1 << 31), dtype=torch.int32, device=device
                 )
-                width = 1 + (
-                    self.vllm_config.speculative_config.num_speculative_tokens
-                    if self.vllm_config.speculative_config
-                    else 0
-                )
-                output_tokens = min(tokens, requests * width + self.vllm_config.parallel_config.tensor_parallel_size)
                 self.lim_topk_src = torch.zeros((output_tokens, 1, LIM_TOPK), dtype=torch.int32, device=device)
                 self.lim_topk_dst = torch.zeros_like(self.lim_topk_src)
                 self.lim_topk_misses = torch.zeros(output_tokens, dtype=torch.int32, device=device)
-                self.lim_miss_src = torch.empty((requests, 32768), dtype=torch.int32, device=device)
+                self.lim_miss_src = torch.empty((requests, LIM_MISS_PLAN_MAX_WIDTH), dtype=torch.int32, device=device)
                 self.lim_miss_dst = torch.empty_like(self.lim_miss_src)
                 self.lim_misses = torch.zeros(requests, dtype=torch.int32, device=device)
                 self.copy_sfa_reuse_logical_lens = torch.empty(requests, dtype=torch.int32, device=device)
@@ -567,12 +632,17 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 self.lim_reuse_request_count = 0
                 self.lim_query_scale = None
                 self.lim_key_scale = None
+            # All-zero miss plan for the direct-addressed attention under
+            # miss_onboard_mode=side_stream: once the group's misses are
+            # pre-copied into the hot rows, the fused Copy-SFA operator runs
+            # as pure HBM attention (no host reads, no slot-list).
+            if self.use_side_stream_onboard:
+                self.lim_zero_topk_misses = torch.zeros(output_tokens, dtype=torch.int32, device=device)
+                self.lim_zero_misses = torch.zeros(requests, dtype=torch.int32, device=device)
             # Descriptor storage belongs to the attention implementation;
             # per-step source/destination geometry is supplied by metadata.
             self.copy_sfa_copy_src = torch.empty(requests * 4, dtype=torch.int64, device=device)
             self.copy_sfa_copy_dst = torch.empty_like(self.copy_sfa_copy_src)
-            self.copy_sfa_host_bases = None
-            self.copy_sfa_device_bases = None
         self.lru_resident_capacity = offload_cfg.topk_buffer_size
         self.sfa_sparse_topk = offload_cfg.topk
 
@@ -669,9 +739,18 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self._copy_sfa_metadata = None
 
     def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
-        indexer_metadata.topk_selector = (
-            self._lim_select if attn_metadata.fused_copy_sfa_enabled and not self.skip_topk else None
-        )
+        run_lim = False
+        if attn_metadata.fused_copy_sfa_enabled and not self.skip_topk:
+            if not self.lim_full_resident:
+                # Offloaded owners (the MTP layer) keep the LIM flow.
+                run_lim = True
+            elif self._lim_share_members:
+                # Resident group owners still run LIM: the shared members of
+                # the group reuse its top-k selection and miss plan.
+                run_lim = True
+            # Resident singleton owners (no shared members) use the standard
+            # indexer selection, exactly like the non-offload flow.
+        indexer_metadata.topk_selector = self._lim_select if run_lim else None
 
     def _lim_select(self, query, weights, indexer, indexer_metadata, query_scale=None):
         metadata = self._copy_sfa_metadata
@@ -746,22 +825,26 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             # Dense short rows retain seq with C == 0; long rows retain C.
             self.copy_sfa_reuse_logical_lens[:count].copy_(metadata.copy_sfa_reuse_logical_lens)
             self.copy_sfa_reuse_cache_tokens[:count].copy_(cache)
+        if self._lim_share_members and self.use_side_stream_onboard:
+            # Group owner: issue the shared members' miss onboarding
+            # on the side stream right after the LIM plan is ready, so the
+            # copies overlap this layer's SFA and MoE compute on the main
+            # stream. (Under miss_onboard_mode=inline this block never runs:
+            # each member's fused attention operator resolves the owner's
+            # miss plan itself, with host reads inside the kernel.)
+            manager = get_sparse_kv_offload_manager()
+            manager.launch_lim_group_onboard(self, metadata)
         return self.lim_topk_src[:tokens]
 
     def bind_copy_sfa_kv_cache(self, manager, layer_name) -> None:
-        """Bind immutable layer addresses after cache registration, before capture."""
-        layer_id = manager._get_offload_layer_id(layer_name)
-        device = manager.topk_buffers_k[layer_id].device
-        self.copy_sfa_host_bases = torch.tensor(
-            [manager.k_caches_cpu[layer_id].data_ptr(), manager.v_caches_cpu[layer_id].data_ptr()],
-            dtype=torch.int64,
-            device=device,
-        ).view(2, 1)
-        self.copy_sfa_device_bases = torch.tensor(
-            [manager.topk_buffers_k[layer_id].data_ptr(), manager.topk_buffers_v[layer_id].data_ptr()],
-            dtype=torch.int64,
-            device=device,
-        ).view(2, 1)
+        """Validate the layer's offload registration after cache setup.
+
+        The hot-row / CPU-pool base addresses consumed by the fused pipeline
+        live on the manager itself (``_bind_copy_sfa_bases``); this hook only
+        pins the layer -> offload-id mapping before graph capture so an
+        unregistered layer fails loudly here instead of mid-step.
+        """
+        manager._get_offload_layer_id(layer_name)
 
     def compact_lim_topk_metadata(self, slot_ids: torch.Tensor) -> None:
         """Compact draft-step-0 LIM rows for direct reuse by later steps."""
@@ -772,7 +855,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.lim_topk_src[:count].copy_(self.lim_topk_src[compact_ids])
         self.lim_topk_dst[:count].copy_(self.lim_topk_dst[compact_ids])
 
-    def _copy_sfa_attention(self, query, query_rope, topk_indices, metadata, manager, layer_name):
+    def _copy_sfa_attention(
+        self,
+        query,
+        query_rope,
+        topk_indices,
+        metadata,
+        manager,
+        layer_name,
+        misses_already_resident: bool = False,
+    ):
         tokens = metadata.num_decode_tokens
         count = metadata.copy_sfa_pool_entries.numel()
         owner = self.lim_indexer_owner
@@ -794,6 +886,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             logical_lens = self.copy_sfa_reuse_logical_lens[:count]  # exact saved selection; no extra tail
             topk_misses = self.lim_reuse_topk_misses[:tokens]
             misses = self.lim_reuse_misses[:count]
+        elif misses_already_resident:
+            # The group's misses were pre-copied into the hot rows on the
+            # side stream (miss_onboard_mode=side_stream) and the wait already
+            # ordered the writes before this call, so hand the operator an
+            # all-zero miss plan: its attention path then reads the hot rows
+            # directly with no host reads and its scatter-copy part is a no-op.
+            cache_tokens = metadata.copy_sfa_cache_tokens
+            logical_lens = metadata.copy_sfa_logical_lens
+            topk_misses = self.lim_zero_topk_misses[:tokens]
+            misses = self.lim_zero_misses[:count]
         else:
             cache_tokens = metadata.copy_sfa_cache_tokens
             logical_lens = metadata.copy_sfa_logical_lens
@@ -861,6 +963,12 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         attn_metadata: AscendSFAMetadata,
     ):
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
+
+        if self.lim_full_resident:
+            # offload_shared_indexer_only: this layer's KV stays in the NPU
+            # paged cache; the write path is identical to non-offload serving
+            # (no hot-row scatter, no D2H commit).
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
@@ -876,6 +984,26 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 ):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
+                owner_members = getattr(self.lim_indexer_owner, "_lim_share_members", [])
+                if self.lim_shared_only and owner_members and self in owner_members:
+                    # One D2H sparse_copy per LIM group: each member stages
+                    # its slice, the group's last member flushes.
+                    owner = self.lim_indexer_owner
+                    owner_name = owner.layer_name
+                    if owner_name is None:
+                        raise RuntimeError("group D2H staging requires a bound owner layer name")
+                    member_idx = owner_members.index(self)
+                    manager.stage_group_d2h(
+                        owner_name,
+                        member_idx,
+                        member_idx == len(owner_members) - 1,
+                        k_nope,
+                        k_pe,
+                        slots,
+                        k_cache_cpu,
+                        v_cache_cpu,
+                    )
+                    return k_pe, k_nope
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,
@@ -1584,8 +1712,72 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager = get_sparse_kv_offload_manager()
         layer_name = self._offload_layer_name()
 
+        if self.lim_full_resident:
+            # offload_shared_indexer_only: full layers attend their NPU paged
+            # cache directly with the top-k token ids (standard non-offload
+            # flow). No miss onboarding is issued for them.
+            #
+            # SP padding: sequence-parallel MoE pads the batch's query rows
+            # to the TP size, but the standard lightning indexer selection
+            # only returns rows for the real tokens. Normalize to 3D and pad
+            # the trailing dummy rows with zero indices (token 0 of request
+            # row 0, same convention as the LIM dummy ring). DSA-CP never
+            # reaches here (rejected in __init__).
+            if topk_indices.dim() == 2:
+                topk_indices = topk_indices.unsqueeze(1)
+            if ql_nope.shape[0] > topk_indices.shape[0]:
+                pad_rows = ql_nope.shape[0] - topk_indices.shape[0]
+                # Keep every trailing dim of the selection (query heads,
+                # topk width) so this also works if the indexer ever returns
+                # more than one query head per token. The zero block is
+                # cached on the impl; only the concatenated result is a
+                # fresh allocation.
+                pad = self._lim_topk_pad_zeros
+                if pad is None or pad.shape[0] < pad_rows or pad.shape[1:] != topk_indices.shape[1:]:
+                    pad = topk_indices.new_zeros((pad_rows, *topk_indices.shape[1:]))
+                    self._lim_topk_pad_zeros = pad
+                topk_indices = torch.cat([topk_indices, pad[:pad_rows]], dim=0)
+            return super()._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                block_table=block_table,
+            )
+
         if attn_metadata.fused_copy_sfa_enabled:
-            result = self._copy_sfa_attention(ql_nope, q_pe, topk_indices, attn_metadata, manager, layer_name)
+            if (
+                self.use_side_stream_onboard
+                and manager.lim_group_onboard_ready
+                and self.skip_topk
+                and self.lim_indexer_owner is not self
+                # The direct-addressed (all-zero miss plan) path below is
+                # only valid when the owner's LIM actually issued this
+                # pass's side-stream pre-copy; otherwise (e.g. a pass whose
+                # owner skipped the LIM) fall back to inline resolution.
+                and manager.lim_group_launched_for(self.lim_indexer_owner)
+            ):
+                # Shared-indexer member under miss_onboard_mode=side_stream:
+                # its miss onboarding was already issued on the side stream by
+                # the group owner's LIM. Only the write -> read ordering
+                # remains (the owner's per-member done event); the pre-copy
+                # has landed, so the fused Copy-SFA operator with an all-zero
+                # miss plan runs as pure direct-addressed HBM attention.
+                manager.wait_lim_group_onboard(self.lim_indexer_owner, self)
+                result = self._copy_sfa_attention(
+                    ql_nope,
+                    q_pe,
+                    topk_indices,
+                    attn_metadata,
+                    manager,
+                    layer_name,
+                    misses_already_resident=True,
+                )
+            else:
+                result = self._copy_sfa_attention(ql_nope, q_pe, topk_indices, attn_metadata, manager, layer_name)
             return self._pad_to_input_tokens(result, ql_nope.shape[0])
 
         if num_decode_tokens == 0 or not self.use_fused_overlap:

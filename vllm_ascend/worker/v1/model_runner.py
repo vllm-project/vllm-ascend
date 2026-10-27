@@ -4800,14 +4800,33 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
+        self._lim_shared_only_groups: dict[str, list[str]] = {}
         if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+            from vllm_ascend.utils import is_mtp_layer
 
             owners: dict[int, AscendSFAKVOffloadImpl] = {}
-            for layer in self.compilation_config.static_forward_context.values():
+            for layer_name, layer in self.compilation_config.static_forward_context.items():
                 impl = getattr(layer, "impl", None)
                 if not isinstance(impl, AscendSFAKVOffloadImpl):
                     continue
+                if impl.layer_name is None:
+                    # No in-tree model passes layer_name into the attention
+                    # impl constructor; bind it from the forward context so
+                    # the offload pipeline (layer->offload-id lookup, MTP
+                    # classification, LIM group names) does not depend on an
+                    # optional model-side kwarg.
+                    impl.layer_name = layer_name
+                    impl._is_mtp_layer = is_mtp_layer(self.model_config.hf_config, layer_name)
+                    # Re-derive the selection-preprocess flag with the corrected
+                    # MTP classification (same expression the skip_topk property
+                    # setter maintains).
+                    impl.skip_indexer_pre_process = impl.skip_topk and not impl._is_mtp_layer
+                    impl.lim_full_resident = AscendSFAKVOffloadImpl.is_full_resident_layer(
+                        offload_shared_indexer_only=impl.lim_shared_only,
+                        skip_topk=impl.skip_topk,
+                        is_mtp_layer=impl._is_mtp_layer,
+                    )
                 shared = impl.topk_indices_buffer
                 if shared is None:
                     continue
@@ -4816,6 +4835,13 @@ class NPUModelRunner(GPUModelRunner):
                     if key not in owners:
                         raise RuntimeError("fused_copy_sfa shared attention precedes its indexer owner")
                     impl.lim_indexer_owner = owners[key]
+                    owner = owners[key]
+                    # Track the group members that reuse this owner's LIM
+                    # selection; owners with members keep running LIM under
+                    # offload_shared_indexer_only, singleton owners do not.
+                    if self.sparse_kv_offload_config.offload_shared_indexer_only:
+                        owner._lim_share_members.append(impl)
+                        self._lim_shared_only_groups.setdefault(owner.layer_name, []).append(impl.layer_name)
                 else:
                     owners[key] = impl
 
@@ -4904,6 +4930,22 @@ class NPUModelRunner(GPUModelRunner):
             self._debugger_started = False
 
         self.debugger.step(**kwargs)
+
+    def _full_resident_offload_layer_names(self) -> list[str]:
+        """Attention layers kept on NPU paged caches under offload_shared_indexer_only."""
+        if not (
+            self.sparse_kv_offload_enabled
+            and self.sparse_kv_offload_config.offload_shared_indexer_only
+        ):
+            return []
+        from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+        return [
+            layer_name
+            for layer_name, layer in self.compilation_config.static_forward_context.items()
+            if isinstance(getattr(layer, "impl", None), AscendSFAKVOffloadImpl)
+            and layer.impl.lim_full_resident
+        ]
 
     def initialize_kv_cache(
         self,
@@ -5022,11 +5064,16 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
-            self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
+            self.sparse_kv_offload_manager.register_kv_caches(
+                kv_caches,
+                full_resident_layer_names=self._full_resident_offload_layer_names(),
+            )
             if self.sparse_kv_offload_config.use_fused_copy_sfa:
                 for layer_name in self.sparse_kv_offload_manager.offload_layer_names:
                     layer = self.compilation_config.static_forward_context[layer_name]
                     layer.impl.bind_copy_sfa_kv_cache(self.sparse_kv_offload_manager, layer_name)
+                if self.sparse_kv_offload_config.offload_shared_indexer_only:
+                    self.sparse_kv_offload_manager.configure_lim_groups(self._lim_shared_only_groups)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
@@ -5682,7 +5729,10 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         assert v_tensor_size is not None
                         for layer_name_inner in allocation_layers:
-                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                            if "attn" not in layer_name_inner or "linear_attn" in layer_name_inner:
+                                continue
+                            inner_spec = layer_kv_cache_spec[layer_name_inner]
+                            if getattr(inner_spec, "store_on_host", False):
                                 kv_cache_raw_tensors[layer_name_inner] = (
                                     allocate_kv_cache_tensors_for_sparse_kv_offload(
                                         k_tensor_size,
@@ -5692,6 +5742,13 @@ class NPUModelRunner(GPUModelRunner):
                                         self.sparse_kv_offload_config.keep_device_kv_cache,
                                         self._allocate_int8_cache_tensor,
                                     )
+                                )
+                            else:
+                                # offload_shared_indexer_only: full layers keep
+                                # standard private (k, v) paged caches.
+                                kv_cache_raw_tensors[layer_name_inner] = (
+                                    self._allocate_int8_cache_tensor(k_tensor_size, alignment),
+                                    self._allocate_int8_cache_tensor(v_tensor_size, alignment),
                                 )
                         continue
                     # main: every layer owns its own region; give each layer a
@@ -5993,7 +6050,7 @@ class NPUModelRunner(GPUModelRunner):
                     # unpack them as a K/V tuple.
                     current_sparse_sfa_c8 = kv_cache_spec_uses_sparse_sfa_c8(current_kv_cache_spec)
                     current_packed_sfa_main_cache = kv_cache_spec_uses_packed_sfa_main_cache(current_kv_cache_spec)
-                    if self.sparse_kv_offload_enabled:
+                    if self.sparse_kv_offload_enabled and getattr(current_kv_cache_spec, "store_on_host", False):
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_packed_sfa_main_cache, (
                             "Sparse KV offload do not support a packed SFA main cache."
@@ -6008,6 +6065,8 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = reshaped_tensors
                         continue
+                    # Device-resident full layers under offload_shared_indexer_only
+                    # fall through to the standard MLA reshape below.
 
                     # MLA uses one raw backing allocated by the allocation or
                     # hybrid phase. A5 FlashMLA consumes one token-interleaved
@@ -6723,6 +6782,14 @@ class NPUModelRunner(GPUModelRunner):
                     # the attention layer itself.
                     model_version = getattr(attn_module, "model_version", None)
                     indexes_kv_by_block_stride = bool(getattr(attn_module, "indexes_kv_by_block_stride", False))
+                    # offload_shared_indexer_only: full (indexer-owner) layers
+                    # stay device-resident so their pages count against the
+                    # NPU budget and they allocate standard paged caches.
+                    full_resident = bool(
+                        self.sparse_kv_offload_enabled
+                        and self.sparse_kv_offload_config.offload_shared_indexer_only
+                        and getattr(impl, "lim_full_resident", False)
+                    )
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=self.block_size,
                         num_kv_heads=1,
@@ -6731,7 +6798,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                         cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
-                        store_on_host=self.sparse_kv_offload_enabled,
+                        store_on_host=self.sparse_kv_offload_enabled and not full_resident,
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
                     )

@@ -297,6 +297,18 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             )
             compression_ratio = get_kv_cache_compression_ratio(spec)
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
+            # offload_shared_indexer_only: full (indexer-owner) layers stay
+            # device-resident so their pages count against the NPU budget and
+            # they allocate standard paged caches. The impl computes the
+            # classification at construction; the runner binds layer names
+            # (and thus MTP classification) right after model load, before
+            # any spec is created.
+            sparse_offload_cfg = get_ascend_config().sparse_kv_offload_config
+            full_resident = bool(
+                sparse_offload_cfg.enabled
+                and sparse_offload_cfg.offload_shared_indexer_only
+                and getattr(attn_module.impl, "lim_full_resident", False)
+            )
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
                 # ``num_heads`` describes physical cache head slots, not query
@@ -313,7 +325,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
+                store_on_host=enable_sfa(vllm_config) and sparse_offload_cfg.enabled and not full_resident,
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
