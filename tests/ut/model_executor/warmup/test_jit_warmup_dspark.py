@@ -1,10 +1,17 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the DSpark SWA indices warmup wrapper."""
 
+import pytest
 import torch
+from vllm.triton_utils import HAS_TRITON
 
 from tests.ut.model_executor.warmup.helpers import make_registry
 from vllm_ascend.ops.triton import dspark_swa_indices as ds
+
+# The registration gates and key spaces under test are only meaningful
+# with a real Triton kernel behind them; the without-device CI leg has no
+# triton installed.
+pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="triton is not installed")
 
 
 def test_single_key_pinned_by_deployment_config():

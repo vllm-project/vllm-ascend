@@ -24,120 +24,119 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
-if HAS_TRITON:
 
-    @triton.jit(
-        do_not_specialize=[
-            "num_blocks",
-            "num_reqs",
-            "num_rows_padded",
-            "num_rows",
-            "num_query_per_req",
-            "num_slots",
-        ]
-    )
-    def _dspark_swa_indices_kernel(
-        bt_ptr,  # block_table       [R_alloc, num_blocks]  i32/i64 (narrowed in-kernel)
-        stride_bt_r,  # block_table.stride(0): row pitch of a possibly sliced/padded table
-        qsl_ptr,  # query_start_loc  [R_alloc + 1]  i32/i64
-        seq_lens_ptr,  # seq_lens         [R_alloc]  i32/i64
-        slots_ptr,  # out_slots        [num_rows_padded, 1, INDEX_W]  i32
-        lens_ptr,  # out_lens         [num_rows_padded]  i64
-        num_blocks,  # block_table.shape[1]
-        num_reqs,  # active request count == block_table.shape[0]
-        num_rows_padded,  # padded row count == R_alloc * num_query_per_req
-        num_rows,  # active row count == sum(query_lens)
-        num_query_per_req,  # row-expansion factor per request slot
-        num_slots,  # request-slot capacity (row bands are [r*nqp, (r+1)*nqp))
-        WINDOW_SIZE: tl.constexpr,  # sliding window size (model constant)
-        BLOCK_SIZE: tl.constexpr,  # DSA block size (power of two)
-        INDEX_W: tl.constexpr,  # aligned index width
-        BLOCK_W: tl.constexpr,  # column-block width
-        ROW_POW2: tl.constexpr,  # next_pow2(num_blocks): UB preload tile shape
-        Q_POW2: tl.constexpr,  # next_pow2(spec + 1): output row-tile height
-    ):
-        # NUM_CB must be ceil: a floor division sends tail items' r past
-        # num_slots, reading qsl/seq_lens out of bounds (MTE "DDR address
-        # out of range" faults on non-divisible widths).
-        NUM_CB: tl.constexpr = (INDEX_W + BLOCK_W - 1) // BLOCK_W
-        ALIGNED_W: tl.constexpr = (INDEX_W % BLOCK_W) == 0
-        pid = tl.program_id(0)
-        num_progs = tl.num_programs(0)
-        total_items = num_slots * NUM_CB
+@triton.jit(
+    do_not_specialize=[
+        "num_blocks",
+        "num_reqs",
+        "num_rows_padded",
+        "num_rows",
+        "num_query_per_req",
+        "num_slots",
+    ]
+)
+def _dspark_swa_indices_kernel(
+    bt_ptr,  # block_table       [R_alloc, num_blocks]  i32/i64 (narrowed in-kernel)
+    stride_bt_r,  # block_table.stride(0): row pitch of a possibly sliced/padded table
+    qsl_ptr,  # query_start_loc  [R_alloc + 1]  i32/i64
+    seq_lens_ptr,  # seq_lens         [R_alloc]  i32/i64
+    slots_ptr,  # out_slots        [num_rows_padded, 1, INDEX_W]  i32
+    lens_ptr,  # out_lens         [num_rows_padded]  i64
+    num_blocks,  # block_table.shape[1]
+    num_reqs,  # active request count == block_table.shape[0]
+    num_rows_padded,  # padded row count == R_alloc * num_query_per_req
+    num_rows,  # active row count == sum(query_lens)
+    num_query_per_req,  # row-expansion factor per request slot
+    num_slots,  # request-slot capacity (row bands are [r*nqp, (r+1)*nqp))
+    WINDOW_SIZE: tl.constexpr,  # sliding window size (model constant)
+    BLOCK_SIZE: tl.constexpr,  # DSA block size (power of two)
+    INDEX_W: tl.constexpr,  # aligned index width
+    BLOCK_W: tl.constexpr,  # column-block width
+    ROW_POW2: tl.constexpr,  # next_pow2(num_blocks): UB preload tile shape
+    Q_POW2: tl.constexpr,  # next_pow2(spec + 1): output row-tile height
+):
+    # NUM_CB must be ceil: a floor division sends tail items' r past
+    # num_slots, reading qsl/seq_lens out of bounds (MTE "DDR address
+    # out of range" faults on non-divisible widths).
+    NUM_CB: tl.constexpr = (INDEX_W + BLOCK_W - 1) // BLOCK_W
+    ALIGNED_W: tl.constexpr = (INDEX_W % BLOCK_W) == 0
+    pid = tl.program_id(0)
+    num_progs = tl.num_programs(0)
+    total_items = num_slots * NUM_CB
 
-        # Grid-stride: each program claims w = pid, pid + num_progs, ...
-        for w in range(pid, total_items, num_progs):
-            r = w // NUM_CB
-            cb = w % NUM_CB
+    # Grid-stride: each program claims w = pid, pid + num_progs, ...
+    for w in range(pid, total_items, num_progs):
+        r = w // NUM_CB
+        cb = w % NUM_CB
 
-            # Distributed pad-row cleanup: reset the slice of
-            # [num_rows, num_rows_padded) in this item's row band
-            # [r*nqp, (r+1)*nqp). Must precede every guard below.
-            row_lo = tl.maximum(r * num_query_per_req, num_rows)
-            row_hi = tl.minimum((r + 1) * num_query_per_req, num_rows_padded)
-            if row_lo < row_hi:
-                pad_offs = tl.arange(0, BLOCK_W)
-                pad_mask = (cb * BLOCK_W + pad_offs) < INDEX_W
-                for row in range(row_lo, row_hi):
-                    base = row * INDEX_W + cb * BLOCK_W
-                    tl.store(slots_ptr + base + pad_offs, -1, mask=pad_mask)
-                    if cb == 0:
-                        tl.store(lens_ptr + row, 0)
+        # Distributed pad-row cleanup: reset the slice of
+        # [num_rows, num_rows_padded) in this item's row band
+        # [r*nqp, (r+1)*nqp). Must precede every guard below.
+        row_lo = tl.maximum(r * num_query_per_req, num_rows)
+        row_hi = tl.minimum((r + 1) * num_query_per_req, num_rows_padded)
+        if row_lo < row_hi:
+            pad_offs = tl.arange(0, BLOCK_W)
+            pad_mask = (cb * BLOCK_W + pad_offs) < INDEX_W
+            for row in range(row_lo, row_hi):
+                base = row * INDEX_W + cb * BLOCK_W
+                tl.store(slots_ptr + base + pad_offs, -1, mask=pad_mask)
+                if cb == 0:
+                    tl.store(lens_ptr + row, 0)
 
-            # Positive guards (Triton has no `continue`): skipping an item
-            # must not drop the remaining items this program owns.
-            if r < num_reqs:
-                q0 = tl.load(qsl_ptr + r).to(tl.int32)
-                q1 = tl.load(qsl_ptr + r + 1).to(tl.int32)
-                q_len = q1 - q0
-                seq_len = tl.load(seq_lens_ptr + r).to(tl.int32)
-                prefix_len = seq_len - q_len
-                start_pos = tl.maximum(prefix_len - WINDOW_SIZE, 0)
-                visible_len = seq_len - start_pos
+        # Positive guards (Triton has no `continue`): skipping an item
+        # must not drop the remaining items this program owns.
+        if r < num_reqs:
+            q0 = tl.load(qsl_ptr + r).to(tl.int32)
+            q1 = tl.load(qsl_ptr + r + 1).to(tl.int32)
+            q_len = q1 - q0
+            seq_len = tl.load(seq_lens_ptr + r).to(tl.int32)
+            prefix_len = seq_len - q_len
+            start_pos = tl.maximum(prefix_len - WINDOW_SIZE, 0)
+            visible_len = seq_len - start_pos
 
-                if q_len > 0:
-                    offs_w = cb * BLOCK_W + tl.arange(0, BLOCK_W)
-                    pos = start_pos + offs_w
-                    blk_num = pos // BLOCK_SIZE
-                    # Clamp so gather never reads OOB; clamped lanes are
-                    # discarded by the visible mask below.
-                    safe_num = tl.minimum(tl.maximum(blk_num, 0), num_blocks - 1)
+            if q_len > 0:
+                offs_w = cb * BLOCK_W + tl.arange(0, BLOCK_W)
+                pos = start_pos + offs_w
+                blk_num = pos // BLOCK_SIZE
+                # Clamp so gather never reads OOB; clamped lanes are
+                # discarded by the visible mask below.
+                safe_num = tl.minimum(tl.maximum(blk_num, 0), num_blocks - 1)
 
-                    # triton-ascend's tl.gather rejects int32 payloads; ride
-                    # the id through fp32 bitcast (bits preserved). Narrow the
-                    # loaded row to int32 first: no-op on i32 tables, a
-                    # value-preserving truncation on i64 (same pattern as
-                    # qsl/seq_lens above; physical block IDs fit int32).
-                    r_offs = tl.arange(0, ROW_POW2)
-                    bt_row = tl.load(
-                        bt_ptr + r * stride_bt_r + r_offs,
-                        mask=r_offs < num_blocks,
-                        other=0,
-                    ).to(tl.int32)
-                    block_id = tl.gather(bt_row.to(tl.float32, bitcast=True), safe_num, 0).to(tl.int32, bitcast=True)
+                # triton-ascend's tl.gather rejects int32 payloads; ride
+                # the id through fp32 bitcast (bits preserved). Narrow the
+                # loaded row to int32 first: no-op on i32 tables, a
+                # value-preserving truncation on i64 (same pattern as
+                # qsl/seq_lens above; physical block IDs fit int32).
+                r_offs = tl.arange(0, ROW_POW2)
+                bt_row = tl.load(
+                    bt_ptr + r * stride_bt_r + r_offs,
+                    mask=r_offs < num_blocks,
+                    other=0,
+                ).to(tl.int32)
+                block_id = tl.gather(bt_row.to(tl.float32, bitcast=True), safe_num, 0).to(tl.int32, bitcast=True)
 
-                    blk_off = pos - blk_num * BLOCK_SIZE
-                    slot = block_id * BLOCK_SIZE + blk_off
-                    slot = tl.where(offs_w < visible_len, slot, -1)
+                blk_off = pos - blk_num * BLOCK_SIZE
+                slot = block_id * BLOCK_SIZE + blk_off
+                slot = tl.where(offs_w < visible_len, slot, -1)
 
-                    is_first_cb = cb == 0
-                    lens_val = visible_len.to(tl.int64)
+                is_first_cb = cb == 0
+                lens_val = visible_len.to(tl.int64)
 
-                    # One 2D store for the [q_len, INDEX_W] tile: rows
-                    # [q0, q0+q_len) broadcast the same slot vector (the
-                    # uniform-query contract keeps q_len <= Q_POW2).
-                    t_offs = tl.arange(0, Q_POW2)
-                    slot_tile = tl.broadcast_to(slot[None, :], (Q_POW2, BLOCK_W))
-                    tile_ptrs = slots_ptr + (q0 + t_offs)[:, None] * INDEX_W + offs_w[None, :]
-                    if ALIGNED_W:
-                        tl.store(tile_ptrs, slot_tile, mask=(t_offs < q_len)[:, None])
-                    else:
-                        tl.store(
-                            tile_ptrs,
-                            slot_tile,
-                            mask=(t_offs < q_len)[:, None] & (offs_w < INDEX_W)[None, :],
-                        )
-                    tl.store(lens_ptr + q0 + t_offs, lens_val, mask=(t_offs < q_len) & is_first_cb)
+                # One 2D store for the [q_len, INDEX_W] tile: rows
+                # [q0, q0+q_len) broadcast the same slot vector (the
+                # uniform-query contract keeps q_len <= Q_POW2).
+                t_offs = tl.arange(0, Q_POW2)
+                slot_tile = tl.broadcast_to(slot[None, :], (Q_POW2, BLOCK_W))
+                tile_ptrs = slots_ptr + (q0 + t_offs)[:, None] * INDEX_W + offs_w[None, :]
+                if ALIGNED_W:
+                    tl.store(tile_ptrs, slot_tile, mask=(t_offs < q_len)[:, None])
+                else:
+                    tl.store(
+                        tile_ptrs,
+                        slot_tile,
+                        mask=(t_offs < q_len)[:, None] & (offs_w < INDEX_W)[None, :],
+                    )
+                tl.store(lens_ptr + q0 + t_offs, lens_val, mask=(t_offs < q_len) & is_first_cb)
 
 
 # Column-block width for the 1D grid split (optimum of the 910B4 benchmark

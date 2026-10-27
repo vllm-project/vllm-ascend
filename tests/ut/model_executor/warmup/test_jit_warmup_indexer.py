@@ -3,10 +3,17 @@
 
 from unittest.mock import patch
 
+import pytest
 import torch
+from vllm.triton_utils import HAS_TRITON
 
 from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config
 from vllm_ascend.ops.triton import prepare_indexer_indices as pi
+
+# The registration gates and key spaces under test are only meaningful
+# with a real Triton kernel behind them; the without-device CI leg has no
+# triton installed.
+pytestmark = pytest.mark.skipif(not HAS_TRITON, reason="triton is not installed")
 
 
 def test_keys_cover_both_write_lengths_variants():
