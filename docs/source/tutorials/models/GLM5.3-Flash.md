@@ -18,8 +18,29 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all A3 series scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+The deployment examples below use Model Runner V1 and set
+`VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+
+### Experimental SP with PP on Model Runner V2
+
+An experimental SP+PP path keeps the four mHC states sharded by token across
+pipeline stages using native MRV2 PP communication. This path targets A3 W8A8;
+accuracy qualification is pending. Current-main GLM hybrid-cache planning also
+requires the KV builder change tracked in [#18359](https://github.com/vllm-project/vllm-ascend/pull/18359).
+
+For the validated single-node topology, set `VLLM_USE_V2_MODEL_RUNNER=1`,
+`--tensor-parallel-size 8`, `--pipeline-parallel-size 2`, `--data-parallel-size 1`,
+`--enable-expert-parallel`, `--distributed-executor-backend mp`, and
+`--dtype bfloat16`. Use `--all2all-backend allgather_reducescatter` and
+`--additional-config '{"enable_flashcomm1":true,"enable_dsa_cp":false,"enable_fused_mc2":0}'`.
+Use `--enforce-eager` or
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`. Other graph modes
+and multiple data-parallel replicas are rejected; this keeps physical token
+counts equal across stages without adding a transport header.
+
+The path requires mHC and rejects CP, DBO/microbatch slicing, speculative decoding,
+LoRA, fine-grained TP, and multi-node execution. Other models and SP-disabled
+configurations retain their existing model-state and graph-manager paths.
 
 ## 3 Prerequisites
 

@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import os
 from contextlib import AbstractContextManager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -892,9 +893,18 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
+            try:
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
+            except Exception:
+                if getattr(self.model_runner, "_glm5next_sp_pp_spec", None) is not None:
+                    # The active exception retains partial-posting frame locals until exit.
+                    try:
+                        logger.exception("Fatal GLM SP+PP receive posting failure; terminating worker.")
+                    finally:
+                        os._exit(1)
+                raise
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -918,10 +928,18 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        try:
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=all_gather_group,
+            )
+        except Exception:
+            if getattr(self.model_runner, "_glm5next_sp_pp_spec", None) is not None:
+                try:
+                    logger.exception("Fatal GLM SP+PP send posting failure; terminating worker.")
+                finally:
+                    os._exit(1)
+            raise
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner
