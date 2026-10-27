@@ -19,6 +19,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PMambaHybridModelState,
     Ascend310PModelState,
 )
+from vllm_ascend._310p.worker.v2.rejection_sampler import RejectionSampler310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -686,6 +687,65 @@ def test_sampler_logprobs_returns_sampled_and_topk() -> None:
     assert int(out.logprobs_tensors.logprob_token_ids[0, 0].item()) == 1
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
     assert out.logprobs_tensors.logprobs.shape == (1, 3)
+
+
+def test_rejection_sampler_uses_processed_logits_and_raw_logprobs() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
+    _add_request(sampler, 0, 1, SamplingParams(temperature=0, allowed_token_ids=[2], logprobs=1))
+    sampler.apply_staged_writes()
+    rejection = RejectionSampler310V2.__new__(RejectionSampler310V2)
+    rejection.sampler = sampler
+    rejection.device = torch.device("cpu")
+    rejection.num_speculative_steps = 1
+    rejection.sampled_tokens_cpu = torch.empty((1, 2), dtype=torch.int32)
+    rejection.num_sampled_cpu = torch.empty(1, dtype=torch.int32)
+    rejection.num_rejected_cpu = torch.empty(1, dtype=torch.int32)
+    rejection._copy_stream = MagicMock()
+    rejection._copy_event = MagicMock()
+    batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping_np=np.array([0], dtype=np.int32),
+        expanded_idx_mapping=torch.tensor([0, 0]),
+        input_ids=torch.tensor([0, 2], dtype=torch.int32),
+        logits_indices=torch.tensor([0, 1]),
+        cu_num_logits_np=np.array([0, 2], dtype=np.int32),
+        cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens_np=np.array([2], dtype=np.int32),
+        prefill_len_np=np.array([1], dtype=np.int32),
+    )
+    logits = torch.tensor([[0.0, 5.0, 1.0], [0.0, 4.0, 2.0]])
+    with patch.object(torch.npu, "current_stream"), patch.object(torch.npu, "stream"):
+        out = rejection(logits.clone(), batch, draft_logits=None)
+
+    # Both draft verification and the bonus token must respect the allowed IDs.
+    assert out.sampled_token_ids.tolist() == [[2, 2]]
+    assert out.num_sampled.tolist() == [2]
+    assert out.num_rejected.tolist() == [0]
+    assert out.logprobs_tensors is not None
+    assert out.logprobs_tensors.logprob_token_ids[:, 0].tolist() == [2, 2]
+    torch.testing.assert_close(out.logprobs_tensors.logprobs[:, 0], logits.log_softmax(-1)[:, 2])
+
+
+@pytest.mark.parametrize("num_sampled", [[2, 1], [0, 0]])
+def test_rejection_logprobs_follow_request_offsets(num_sampled: list[int]) -> None:
+    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=3)
+    for req_idx in range(2):
+        _add_request(sampler, req_idx, 1, SamplingParams(temperature=0, logprobs=0))
+    rejection = RejectionSampler310V2.__new__(RejectionSampler310V2)
+    rejection.sampler = sampler
+    logits = torch.tensor([[3.0, 1.0, 0.0], [0.0, 2.0, 1.0], [1.0, 0.0, 4.0], [2.0, 0.0, 1.0]])
+    result = rejection._build_logprobs_tensors(
+        logits=logits,
+        sampled=torch.tensor([[0, 1, -1], [2, -1, -1]], dtype=torch.int32),
+        num_sampled=torch.tensor(num_sampled, dtype=torch.int32),
+        cu_num_logits_np=np.array([0, 2, 4], dtype=np.int32),
+        idx_mapping_np=np.array([0, 1], dtype=np.int32),
+    )
+    if num_sampled == [0, 0]:
+        assert result is None
+    else:
+        assert result.logprob_token_ids[:, 0].tolist() == [0, 1, 2]
+        torch.testing.assert_close(result.logprobs[:, 0], logits.log_softmax(-1)[[0, 1, 2], [0, 1, 2]])
 
 
 def _make_penalty_req_states(

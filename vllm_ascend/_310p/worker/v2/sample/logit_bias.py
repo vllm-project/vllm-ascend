@@ -10,12 +10,13 @@ import torch
 
 def apply_logit_bias(
     logits: torch.Tensor,
-    expanded_idx_mapping_np: np.ndarray,
+    expanded_idx_mapping: torch.Tensor,
     *,
     logit_bias: dict[int, dict[int, float]],
     use_logit_bias: np.ndarray,
 ) -> None:
-    for row_idx, req_idx in enumerate(expanded_idx_mapping_np.tolist()):
+    expanded_np = expanded_idx_mapping.detach().to("cpu").numpy()
+    for row_idx, req_idx in enumerate(expanded_np.tolist()):
         req_idx = int(req_idx)
         if req_idx < 0 or not bool(use_logit_bias[req_idx]):
             continue

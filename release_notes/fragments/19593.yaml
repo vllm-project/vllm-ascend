@@ -1,0 +1,4 @@
+pr: 19593
+entries:
+  - category: feature
+    text: Added min_p, repetition/frequency/presence penalties, allowed token IDs, logit bias, bad words, and generated-token logprobs support for Ascend 310P Model Runner V2, including MTP rejection sampling.
