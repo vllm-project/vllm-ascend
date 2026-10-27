@@ -2,12 +2,6 @@
 
 ## 1 Introduction
 
-!!! note
-
-    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-
-    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
-
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
 The current version supports only Atlas A3 series hardware. Atlas A2 series hardware and Ascend 950DT and 950PR products are not yet supported and will be enabled progressively in future releases. This tutorial describes the W8A8 deployment on Atlas 800 A3. Text and multimodal input have been validated on Atlas 800 A3.
@@ -30,9 +24,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 ### 3.1 Model Weight
 
-The following model weights are available:
+The following model weight is available:
 
-- `Qwen3.8-Flash-Next-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (64GB × 8) node. [https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp)
+- `Qwen3.8-Flash-Next-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (64GB × 8) node to serve. [https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-Flash-Next-w8a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as /root/.cache/.
 
@@ -47,7 +41,7 @@ A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https:
 - openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
 - Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
 
-The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices.
+The following example uses the AArch64 image and exposes 16 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices.
 
 === "A3 series"
 
@@ -115,7 +109,7 @@ For single-node online deployment on Atlas 800 A3, the following DP1 × TP8 comm
 Before starting the service:
 
 - Replace `MODEL_PATH` with the directory recorded when downloading the model weight.
-- Revalidate memory capacity before changing the context length, concurrency, or memory utilization.
+- Revalidate memory capacity (e.g., with `npu-smi info`) before changing the context length, concurrency, or memory utilization.
 
 === "A3 series"
 
@@ -142,7 +136,7 @@ Before starting the service:
         --data-parallel-size-local 1 \
         --data-parallel-start-rank 0 \
         --enable-expert-parallel \
-        --max-model-len 135168 \
+        --max-model-len 131072 \
         --max-num-seqs 8 \
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.93 \
@@ -162,6 +156,7 @@ Before starting the service:
     - `VLLM_ASCEND_ENABLE_QSA_E3V=1` enables the fused QSA Expand E3 path.
     - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
     - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
+    - `--max-model-len 131072` caps the maximum context length. Common values: `65536` (64K), `131072` (128K).
     - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
     - `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
     - The validated command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
@@ -170,6 +165,8 @@ Before starting the service:
     - `--speculative-config` uses the model's MTP head to draft three tokens. `enforce_eager=true` keeps the MTP proposer in eager mode.
     - `--compilation-config` enables `FULL_DECODE_ONLY` ACLGraph for decode.
     - `fuse_norm_quant=false` selects the validated norm and quantization path for this W8A8 deployment.
+
+    Verify the service is ready: the log should show `Application startup complete`.
 
 ## 6 Functional Verification
 
