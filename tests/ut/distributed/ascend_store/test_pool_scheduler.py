@@ -1043,10 +1043,10 @@ class TestLookupKeyClient(unittest.TestCase):
         client = LookupKeyClient(config)
         self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 32)
         mock_socket.send_multipart.assert_called_once()
-        self.assertEqual(
-            mock_socket.send_multipart.call_args.args[0],
-            [(64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"hashes"],
-        )
+        frames = mock_socket.send_multipart.call_args.args[0]
+        self.assertEqual(frames[0], b"lookup")
+        self.assertEqual(int.from_bytes(frames[1], "big"), 64)
+        self.assertEqual(int.from_bytes(frames[3], "big"), 16)
         client.close()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
@@ -1123,6 +1123,101 @@ class TestLookupKeyClient(unittest.TestCase):
         self.assertTrue(client.closed)
         mock_socket.close.assert_called_once_with(linger=0)
         client.ctx.term.assert_called_once_with()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_reset_ack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x01"
+
+        client = LookupKeyClient(config)
+        self.assertTrue(client.reset())
+        mock_socket.send.assert_called_once_with(b"reset")
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
+    def test_reset_nack(self, mock_zmq, mock_make_socket):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+        mock_socket = MagicMock()
+        mock_make_socket.return_value = mock_socket
+        mock_socket.recv.return_value = b"\x00"
+
+        client = LookupKeyClient(config)
+        self.assertFalse(client.reset())
+
+
+class TestKVPoolSchedulerResetStore(unittest.TestCase):
+    def _scheduler(self):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.backend_name = "mooncake"
+        scheduler.use_layerwise = False
+        scheduler.vllm_config = MagicMock()
+        scheduler.client = MagicMock()
+        scheduler.client.reset.return_value = True
+        scheduler.sending_events = {}
+        scheduler.sending_blocks = {}
+        scheduler._loading_req_ids = set()
+        scheduler._block_pool = None
+        return scheduler
+
+    def _bind_pool(self, scheduler, used: int):
+        pool = MagicMock()
+        pool.num_gpu_blocks = used + 10
+        pool.get_num_free_blocks.return_value = 10
+        scheduler._block_pool = pool
+
+    def test_reset_store_acks(self):
+        scheduler = self._scheduler()
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+
+    def test_reset_store_nack(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.return_value = False
+        self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rpc_error(self):
+        scheduler = self._scheduler()
+        scheduler.client.reset.side_effect = RuntimeError("zmq")
+        self.assertFalse(scheduler.reset_store())
+
+    def test_reset_store_rejects_inflight_sends(self):
+        scheduler = self._scheduler()
+        scheduler.sending_events = {1: 0}
+        scheduler.sending_blocks = {1: [10, 11]}
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler.sending_events, {1: 0})
+        self.assertEqual(scheduler.sending_blocks, {1: [10, 11]})
+
+    def test_reset_store_rejects_loading_while_blocks_held(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self._bind_pool(scheduler, used=21)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
+        self.assertEqual(scheduler._loading_req_ids, {"req"})
+
+    def test_reset_store_clears_stale_ids_when_blocks_free(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"loading"}
+        self._bind_pool(scheduler, used=1)
+        self.assertTrue(scheduler.reset_store())
+        scheduler.client.reset.assert_called_once_with()
+        self.assertEqual(scheduler._loading_req_ids, set())
+
+    def test_reset_store_rejects_loading_without_block_pool(self):
+        scheduler = self._scheduler()
+        scheduler._loading_req_ids = {"req"}
+        self.assertIsNone(scheduler._block_pool)
+        self.assertFalse(scheduler.reset_store())
+        scheduler.client.reset.assert_not_called()
 
 
 class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
