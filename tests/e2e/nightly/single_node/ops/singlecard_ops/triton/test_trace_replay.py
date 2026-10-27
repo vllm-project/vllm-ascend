@@ -32,7 +32,7 @@ def _tensor(values, dtype):
     reason="Requires Ascend A2/A3/A5",
 )
 def test_trace_replay_patches_only_outer_call(monkeypatch):
-    from vllm_ascend.patch.worker.patch_v2 import patch_triton
+    from vllm_ascend.patch.worker import patch_triton
 
     upstream_trace_replay_kernel = upstream_trace_replay._trace_replay_kernel
     unpatched_apply_trace_tokens = object()

@@ -23,10 +23,10 @@ from vllm.v1.worker.mamba_utils import (
     do_mamba_copy_block,
 )
 
-import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+import vllm_ascend.patch.worker.patch_v1.patch_mamba_utils  # noqa: F401
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.patch.worker.patch_mamba_utils import _reset_layerwise_copy_meta
+from vllm_ascend.patch.worker.patch_v1.patch_mamba_utils import _reset_layerwise_copy_meta
 
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)

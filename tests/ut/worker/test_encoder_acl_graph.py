@@ -225,7 +225,7 @@ def test_capture_axis_graph_params_are_isolated():
 def test_mrv2_model_state_uses_ascend_encoder_graph_manager():
     # Importing the MRV2 patch replaces the binding used inside ModelState,
     # rather than only the source encoder_cudagraph module.
-    from vllm_ascend.patch.worker.patch_v2 import patch_model_state  # noqa: F401
+    from vllm_ascend.patch.worker import patch_model_state  # noqa: F401
 
     assert interface.EncoderCudaGraphManager is EncoderAclGraphManager
 

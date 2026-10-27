@@ -13,7 +13,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
-import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+import vllm_ascend.patch.worker.patch_v1.patch_mamba_utils  # noqa: F401
 
 
 def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:

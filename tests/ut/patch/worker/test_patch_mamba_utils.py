@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.patch.worker.patch_mamba_utils import (
+from vllm_ascend.patch.worker.patch_v1.patch_mamba_utils import (
     _do_mamba_copy_block_npu,
     preprocess_mamba,
 )
@@ -47,11 +47,11 @@ def test_preprocess_stages_metadata_but_defers_state_copy():
 
     with (
         patch(
-            "vllm_ascend.patch.worker.patch_mamba_utils.mamba_utils.collect_mamba_copy_meta",
+            "vllm_ascend.patch.worker.patch_v1.patch_mamba_utils.mamba_utils.collect_mamba_copy_meta",
             side_effect=collect_metadata,
         ),
-        patch("vllm_ascend.patch.worker.patch_mamba_utils._can_launch_triton_batch_memcpy", return_value=True),
-        patch("vllm_ascend.patch.worker.patch_mamba_utils._batch_memcpy_triton") as state_copy,
+        patch("vllm_ascend.patch.worker.patch_v1.patch_mamba_utils._can_launch_triton_batch_memcpy", return_value=True),
+        patch("vllm_ascend.patch.worker.patch_v1.patch_mamba_utils._batch_memcpy_triton") as state_copy,
     ):
         preprocess_mamba(
             scheduler_output,
@@ -99,12 +99,12 @@ def test_load_only_step_does_not_hide_remote_state_copy_on_next_forward():
     mamba_state_idx: dict[str, int] = {}
 
     with (
-        patch("vllm_ascend.patch.worker.patch_mamba_utils.mamba_utils.collect_mamba_copy_meta") as collect,
+        patch("vllm_ascend.patch.worker.patch_v1.patch_mamba_utils.mamba_utils.collect_mamba_copy_meta") as collect,
         patch(
-            "vllm_ascend.patch.worker.patch_mamba_utils._can_launch_triton_batch_memcpy",
+            "vllm_ascend.patch.worker.patch_v1.patch_mamba_utils._can_launch_triton_batch_memcpy",
             return_value=True,
         ),
-        patch("vllm_ascend.patch.worker.patch_mamba_utils._stage_mamba_copy_metadata") as stage,
+        patch("vllm_ascend.patch.worker.patch_v1.patch_mamba_utils._stage_mamba_copy_metadata") as stage,
     ):
         preprocess_mamba(
             scheduler_output,
@@ -152,7 +152,7 @@ def test_layerwise_mamba_copy_is_grouped_by_layer():
     """Per-layer scheduling: prepare stages all layers once; each layer's
     do_mamba_copy_block_for_layer consumes only its own slice; finish validates
     all layers executed."""
-    from vllm_ascend.patch.worker import patch_mamba_utils as pm
+    from vllm_ascend.patch.worker.patch_v1 import patch_mamba_utils as pm
 
     bufs = SimpleNamespace(
         src_ptrs=CpuGpuBuffer(8, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False),

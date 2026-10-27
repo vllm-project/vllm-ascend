@@ -10,7 +10,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
-from vllm_ascend.patch.worker.patch_v2 import patch_model_runner  # noqa: F401
+from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])

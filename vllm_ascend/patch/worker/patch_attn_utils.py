@@ -1,4 +1,5 @@
 import vllm
+import vllm.v1.worker.utils as v1_worker_utils
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
 
@@ -37,5 +38,13 @@ vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
 # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers,
 # which Ascend overrides with direct raw-allocation binding.
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
+
+# ``vllm.v1.worker.utils`` is the binding source for both the V1 Model Runner
+# and the 310P V2 model runner (``vllm_ascend/_310p/worker/v2/model_runner.py``,
+# which imports ``bind_kv_cache`` by name from it). Installing the shared Ascend
+# implementations here keeps both of them working without depending on the
+# MRv1-only ``patch_v1`` package.
+v1_worker_utils.bind_kv_cache = bind_kv_cache
+v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

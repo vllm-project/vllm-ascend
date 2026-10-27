@@ -9,7 +9,7 @@ from types import ModuleType
 
 import torch
 
-from vllm_ascend.patch.worker.patch_v2 import patch_uva
+from vllm_ascend.patch.worker import patch_uva
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 

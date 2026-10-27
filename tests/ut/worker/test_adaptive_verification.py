@@ -93,7 +93,7 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
 
     assert adaptive._assign_draft_token_budget_compiled is module._assign_draft_token_budget_ascend
@@ -106,7 +106,7 @@ def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
     # Isolate this test from batch-invariant tests that patch torch.sum globally.
     monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     confidence_probs = torch.tensor([[0.95, 0.8, 0.5], [0.9, 0.85, 0.7], [0.7, 0.6, 0.5]])
     idx_mapping = torch.tensor([0, 1])
@@ -128,7 +128,7 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
+    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
     importlib.reload(module)
     tensor = torch.zeros(5)
     indices = torch.tensor([1, 3])
