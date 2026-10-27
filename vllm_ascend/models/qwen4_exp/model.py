@@ -19,7 +19,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -183,7 +182,18 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             self.norm_key.eps,
         )
 
-        conv_input = sp_all_gather(conv_input)[: input_ids.shape[0]]
+        # PLE short-conv and the immediately following attention both need a
+        # full-token view. Gather the token-local residual branch and conv
+        # input together so the decoder can reuse the same full-token result
+        # instead of launching a second all-gather before attention.
+        gated_output.add_(hidden_states)
+        gated_output_size = gated_output.shape[-1]
+        gathered_ple = sp_all_gather(
+            torch.cat((gated_output, conv_input), dim=-1)
+        )[: input_ids.shape[0]]
+        gated_output, conv_input = gathered_ple.split(
+            (gated_output_size, conv_input.shape[-1]), dim=-1
+        )
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             conv_input,
@@ -191,8 +201,7 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             torch.zeros_like(conv_input),
             self.prefix,
         )
-        gated_output.add_(sp_shard(conv_output))
-        gated_output.add_(hidden_states)
+        gated_output.add_(conv_output)
         return gated_output
 
 
@@ -200,14 +209,6 @@ class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen4Exp MoE with Ascend sequence parallel support."""
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
-        parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size != 1
-        ):
-            raise NotImplementedError(
-                "Qwen4Exp sequence-parallel MoE requires pipeline_parallel_size=1"
-            )
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
@@ -231,7 +232,6 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         self.layer_idx = extract_layer_index(prefix)
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
         )
         self.ple = None
         ple_layer_ids = config.ple_layer_ids
@@ -314,6 +314,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         ngram_context: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_hc = self.attn_hyper_connection
+        ple_output_is_full_tokens = False
         if self.ple is not None:
             if prev_block_output is not None and prev_injection is not None:
                 hidden_states = attn_hc.combine(
@@ -329,6 +330,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
                 query_start_loc,
                 ngram_context,
             )
+            ple_output_is_full_tokens = self.use_sequence_parallel
         if prev_block_output is not None and prev_injection is not None:
             hidden_states, block_input, injection = attn_hc.combine_and_mix(
                 hidden_states, prev_block_output, prev_injection
@@ -336,8 +338,15 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
+
         if self.use_sequence_parallel:
-            block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+            if ple_output_is_full_tokens:
+                # HC mixing is token-local. Keep its attention input full and
+                # restore only the delayed residual state to the local shard.
+                hidden_states = sp_shard(hidden_states)
+                injection = sp_shard(injection)
+            else:
+                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
 
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
@@ -352,6 +361,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
         if self.use_sequence_parallel:
             attn_out = sp_reduce_scatter(attn_out)
 
+
         mlp_hc = self.mlp_hyper_connection
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
@@ -360,6 +370,14 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
             block_input,
             already_sequence_parallel=self.use_sequence_parallel,
         )
+        if self.use_sequence_parallel and is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None and is_padding.shape[0] == mlp_out.shape[0]:
+                mlp_out = torch.where(
+                    is_padding.unsqueeze(-1),
+                    torch.zeros((), dtype=mlp_out.dtype, device=mlp_out.device),
+                    mlp_out,
+                )
         return hidden_states, mlp_out, injection
 
 
@@ -378,7 +396,6 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
         )
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
@@ -399,29 +416,47 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         ngram_context: torch.Tensor | None = None,
         deepstack_input_embeds: IntermediateTensors | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 if input_ids is None:
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
-            if self.use_sequence_parallel:
-                if (
-                    envs.VLLM_MOE_SKIP_PADDING
-                    and is_forward_context_available()
-                ):
-                    forward_context = get_forward_context()
-                    forward_context.is_padding = sp_padding_mask(
-                        forward_context.is_padding,
-                        hidden_states,
-                    )
-                hidden_states = sp_shard(hidden_states)
-            hidden_states = hidden_states.repeat(1, self.config.hc_count)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
+
+        if (
+            self.use_sequence_parallel
+            and hidden_states.shape[0] == positions.shape[-1]
+        ):
+            if is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(
+                    forward_context.is_padding,
+                    hidden_states,
+                )
+            hidden_states = sp_shard(hidden_states)
+        elif self.use_sequence_parallel and is_forward_context_available():
+            # A non-first PP stage receives an already sharded intermediate,
+            # while its ForwardContext still carries the full-token padding
+            # mask prepared by the runner. Shard that mask to the same TP row
+            # range so MoE never processes SP padding as real tokens.
+            forward_context = get_forward_context()
+            is_padding = forward_context.is_padding
+            if is_padding is not None and is_padding.shape[0] != hidden_states.shape[0]:
+                mask_input = hidden_states.new_empty(
+                    (is_padding.shape[0], 1), dtype=hidden_states.dtype
+                )
+                forward_context.is_padding = sp_padding_mask(
+                    is_padding,
+                    mask_input,
+                )
+        if pp_group.is_first_rank:
+            hidden_states = hidden_states.repeat(1, self.config.hc_count)
 
         block_output = None
         injection = None
@@ -463,11 +498,15 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                     deepstack_embed = sp_shard(deepstack_embed)
                 hidden_states = hidden_states + deepstack_embed
 
-        if not get_pp_group().is_last_rank:
+        if not pp_group.is_last_rank:
             if last_layer is not None and block_output is not None:
                 hidden_states = last_layer.mlp_hyper_connection.combine(
                     hidden_states, block_output, injection
                 )
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[
+                    : positions.shape[-1]
+                ]
             return IntermediateTensors({"hidden_states": hidden_states})
 
         final_mixer = self.hyper_connection_mixer
@@ -497,6 +536,10 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
+    # Decoder stages gather their SP shard before crossing a PP boundary.
+    # The runner must therefore transport full-token intermediate tensors.
+    pp_intermediate_tensors_are_full_tokens = True
+
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
@@ -512,6 +555,8 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
 
 class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

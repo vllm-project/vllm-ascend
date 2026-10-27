@@ -145,6 +145,9 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    # Token-major offsets into ``cache_indices.reshape(-1)``. The mapping is
+    # layer-independent and can be reused by all GDN layers in one step.
+    recurrent_state_flat_indices: torch.Tensor | None = None
     output_buffer: torch.Tensor | None = None
 
 
