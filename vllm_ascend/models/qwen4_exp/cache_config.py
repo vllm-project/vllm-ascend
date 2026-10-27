@@ -178,7 +178,7 @@ def build_qwen4_kv_cache_layout(
     """Build shared QSA/GDN slots; PLE and hidden states have private storage."""
 
     if num_blocks <= 0:
-        raise ValueError("Six-region layout requires a positive block count")
+        raise ValueError("Qwen4 hybrid layout requires a positive block count")
     role_members: dict[str, list[tuple[str, KVCacheSpec]]] = {
         QSA_MAIN: [],
         QSA_RAW: [],
@@ -206,7 +206,7 @@ def build_qwen4_kv_cache_layout(
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
         details = [(name, type(spec).__name__) for name, spec in unknown]
-        raise ValueError(f"Six-region QSA hybrid cache layout is incomplete: missing={missing}, unsupported={details}")
+        raise ValueError(f"Qwen4 QSA hybrid cache layout is incomplete: missing={missing}, unsupported={details}")
 
     qsa_by_role: dict[str, dict[str, tuple[str, KVCacheSpec]]] = {}
     for role in (QSA_MAIN, QSA_RAW, QSA_COMPRESSED):
@@ -376,7 +376,7 @@ def _prepare_qsa_composite_groups(
 ) -> tuple[set[str], set[str], set[str]] | None:
     """Identify the three cache owners of every QSA source layer.
 
-    The six-region backing aliases main K/V and compressed-key pages by the
+    The Qwen4 hybrid backing aliases main K/V and compressed-key pages by the
     same physical block ID, while the raw-key ring has one request-lifetime
     block.  Grouping must therefore express those lifetimes before the main
     block manager and admission planner see the specs.
@@ -412,7 +412,7 @@ def _prepare_qsa_composite_groups(
     main = {source: all_main[source] for source in raw}
     compressed = {source: all_compressed[source] for source in raw}
     if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
-        raise ValueError("QSA six-region cache layout requires GDN state specs")
+        raise ValueError("Qwen4 QSA cache layout requires GDN state specs")
 
     main_names: set[str] = set()
     compressed_names: set[str] = set()

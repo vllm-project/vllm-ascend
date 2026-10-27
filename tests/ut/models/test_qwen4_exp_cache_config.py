@@ -191,7 +191,7 @@ def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> 
     assert layout.owner("model.cache_only_layers.0").role == HIDDEN
 
 
-def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None:
+def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> None:
     num_blocks = 3
     layout = build_qwen4_kv_cache_layout(
         _groups(),
@@ -512,7 +512,7 @@ def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
     assert raw[0].is_eagle_group
 
 
-def test_six_region_admission_matches_shared_planner_allocation() -> None:
+def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
     assert owners is not None

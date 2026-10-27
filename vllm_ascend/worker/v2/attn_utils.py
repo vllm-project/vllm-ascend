@@ -364,7 +364,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
         # to the Mamba page, while Mamba keeps its own page size. The
-        # six-region planner and the upstream page-size unification then
+        # Qwen4 hybrid planner and the upstream page-size unification then
         # receive the same geometry the Qwen4 cache planner requires.
         descriptor_native_attn = {
             name
@@ -1164,22 +1164,22 @@ def _allocate_kv_cache(
     is_step_model = getattr(text_config, "model_type", None) in ("step3p5", "step3p7")
     is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
-    # Six-region QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
+    # Qwen4 QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
     # build the layout from the cache groups themselves. Allocate
     # slot_count shared slabs plus one dense bank per PLE/hidden owner.
     # Reshape must preserve the physical byte strides used by this planner.
     if vllm_config.kv_transfer_config is None and not is_dsv4_model:
-        six_region_layout = build_qwen4_kv_cache_layout(
+        qwen4_cache_layout = build_qwen4_kv_cache_layout(
             kv_cache_config.kv_cache_groups,
             kv_cache_config.num_blocks,
         )
-        if six_region_layout is not None:
+        if qwen4_cache_layout is not None:
             backing = _allocate_int8_cache_tensor(
-                six_region_layout.slot_count * six_region_layout.slot_backing_size,
+                qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
                 alignment,
                 device,
             )
-            for owner in six_region_layout.owners:
+            for owner in qwen4_cache_layout.owners:
                 if owner.role in (PLE, HIDDEN):
                     # PLE indexed updates require dense blocks; r2's larger
                     # stride would materialize the entire state pool.
@@ -1647,12 +1647,12 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    # Six-region QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
+    # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
-    # slot_count contiguous slabs, each holding the six role regions.
-    six_region_layout = None
+    # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
+    qwen4_cache_layout = None
     if vllm_config.kv_transfer_config is None and not is_dsv4_model:
-        six_region_layout = build_qwen4_kv_cache_layout(
+        qwen4_cache_layout = build_qwen4_kv_cache_layout(
             kv_cache_config.kv_cache_groups,
             kv_cache_config.num_blocks,
         )
@@ -1704,18 +1704,18 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = mxfp_cache_views_for_spec(raw_cache, kv_cache_spec, kernel_block_size)
                 continue
 
-            if six_region_layout is not None:
-                # Model-owned six-region view construction: each
+            if qwen4_cache_layout is not None:
+                # Model-owned Qwen4 hybrid view construction: each
                 # owner addresses its role's regions inside its own slot of
                 # the shared contiguous backing.
-                owner = six_region_layout.owner(layer_name)
+                owner = qwen4_cache_layout.owner(layer_name)
                 raw_slab = kv_cache_raw_tensors[layer_name]
                 if not isinstance(raw_slab, torch.Tensor):
-                    raise ValueError(f"Six-region cache for {layer_name} must use one raw tensor.")
-                slot_offset = owner.slot * six_region_layout.slot_backing_size
+                    raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
+                slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
-                    region = six_region_layout.region("r0")
+                    region = qwen4_cache_layout.region("r0")
                     k_bytes = (
                         kv_cache_spec.block_size
                         * kv_cache_spec.num_kv_heads
@@ -1741,7 +1741,7 @@ def _reshape_kv_cache_v2(
                     # 768-token scheduler block; QSA_COMPRESSED stores
                     # block_size/ratio states per page.
                     storage_block_size = kv_cache_spec.block_size if owner.role == QSA_RAW else kv_cache_spec.num_states
-                    region = six_region_layout.region("r4" if owner.role == QSA_RAW else "r5")
+                    region = qwen4_cache_layout.region("r4" if owner.role == QSA_RAW else "r5")
                     expected_page_bytes = (
                         storage_block_size
                         * kv_cache_spec.num_kv_heads
@@ -1750,7 +1750,7 @@ def _reshape_kv_cache_v2(
                     )
                     if expected_page_bytes != region.page_size_bytes:
                         raise ValueError(
-                            f"{layer_name} six-region page mismatch: "
+                            f"{layer_name} Qwen4 hybrid page mismatch: "
                             f"view={expected_page_bytes}, "
                             f"region={region.page_size_bytes}."
                         )
@@ -1790,7 +1790,7 @@ def _reshape_kv_cache_v2(
                     region_names = ("r1", "r2")
                     if len(region_names) != len(kv_cache_spec.shapes):
                         raise RuntimeError(
-                            f"Invalid six-region Mamba role/shape for {layer_name}: "
+                            f"Invalid Qwen4 hybrid Mamba role/shape for {layer_name}: "
                             f"role={owner.role}, shapes={kv_cache_spec.shapes}."
                         )
                     kv_caches[layer_name] = [
@@ -1799,8 +1799,8 @@ def _reshape_kv_cache_v2(
                             dtype=dtype,
                             num_blocks=kv_cache_config.num_blocks,
                             item_shape=tuple(shape),
-                            storage_offset=slot_offset + six_region_layout.region(region_name).offset,
-                            block_stride=six_region_layout.region(region_name).block_stride,
+                            storage_offset=slot_offset + qwen4_cache_layout.region(region_name).offset,
+                            block_stride=qwen4_cache_layout.region(region_name).block_stride,
                         )
                         for shape, dtype, region_name in zip(
                             kv_cache_spec.shapes,
@@ -1811,7 +1811,7 @@ def _reshape_kv_cache_v2(
                     ]
                     continue
                 if owner.role != HIDDEN:
-                    raise RuntimeError(f"Unsupported six-region owner {owner}.")
+                    raise RuntimeError(f"Unsupported Qwen4 hybrid owner {owner}.")
 
             if layer_name in layer_tuple_strides:
                 # Descriptor-driven cache view construction
