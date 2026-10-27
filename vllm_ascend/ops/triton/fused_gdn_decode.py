@@ -61,6 +61,8 @@ def _fused_gdn_decode_kernel(
     THRESHOLD: tl.constexpr,
 ):
     num_value_tiles = tl.cdiv(V, BV)
+    first_token = tl.load(query_start_loc)
+    last_token = tl.load(query_start_loc + num_requests)
     for task in range(tl.program_id(0), num_tokens * HV * num_value_tiles, tl.num_programs(0)):
         value_tile = task % num_value_tiles
         token_head = task // num_value_tiles
@@ -72,8 +74,6 @@ def _fused_gdn_decode_kernel(
         key_mask = key_offsets < K
         value_mask = value_offsets < V
         output_offsets = (token * HV + head) * V + value_offsets
-        first_token = tl.load(query_start_loc)
-        last_token = tl.load(query_start_loc + num_requests)
         if (slot >= 0) & (token >= first_token) & (token < last_token):
             query = tl.load(q + token * q_token_stride + key_head * q_head_stride + key_offsets, key_mask, other=0).to(
                 tl.float32
