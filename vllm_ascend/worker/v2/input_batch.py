@@ -66,7 +66,9 @@ class AscendInputBuffers(InputBuffers):
             self.batch_metadata.numel(),
             dtype=torch.int32,
             device="cpu",
-            pin_memory=is_pin_memory_available(),
+            # CPU-only runners have no accelerator DMA and may not have the
+            # platform's pinned-memory hooks registered (e.g. CPU unit tests).
+            pin_memory=device.type != "cpu" and is_pin_memory_available(),
         )
         self.batch_metadata_cpu_np = self.batch_metadata_cpu.numpy()
         # Created on the first upload; CPU writers must wait before reusing it.
