@@ -279,7 +279,8 @@ def test_recomputed_output_precedes_regular_output():
         "recomputed-request",
         "regular-request",
     ]
-    assert outputs[0].outputs[0].stop_reason == "recomputed"
+    assert outputs[0].outputs[0].stop_reason == -1
+    assert outputs[0].outputs[0].new_token_ids == []
 
 
 def test_recompute_scheduler_variants_keep_offload_preemption():

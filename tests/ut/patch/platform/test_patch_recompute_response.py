@@ -29,7 +29,7 @@ def response(reason):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("reason", [None, "recomputed"])
+@pytest.mark.parametrize("reason", [None, "recomputed", "-1", 42, -1])
 @pytest.mark.parametrize("stop", [None, "recomputed", ["recomputed"]])
 async def test_response_contract(stream, reason, stop):
     original_response = response(reason)
@@ -53,13 +53,13 @@ async def test_response_contract(stream, reason, stop):
         assert closed == [True]
         assert actual[-1] == "data: [DONE]\n\n"
         payload = json.loads(actual[0][6:])
-        if reason != "recomputed" or stop is not None:
+        if reason != -1:
             assert actual == frames
     else:
         payload = result.model_dump()
-        if reason != "recomputed" or stop is not None:
+        if reason != -1:
             assert result is original_response
-    if reason == "recomputed" and stop is None:
+    if reason == -1:
         assert payload["error"]["type"] == "RecomputeRequiredError"
         assert payload["partial_response"] == original_response.model_dump(mode="json")
 
@@ -81,7 +81,7 @@ async def test_error_closes_source_before_delivery():
 
     async def source():
         try:
-            yield f"data: {response('recomputed').model_dump_json()}\n\n"
+            yield f"data: {response(-1).model_dump_json()}\n\n"
             raise AssertionError("must not request another event")
         finally:
             closed.set()
@@ -145,7 +145,7 @@ async def test_chat_closes_raw_and_result_before_error():
                     model="test",
                     choices=[
                         ChatCompletionResponseStreamChoice(
-                            index=0, delta=DeltaMessage(content=text), finish_reason="stop", stop_reason="recomputed"
+                            index=0, delta=DeltaMessage(content=text), finish_reason="stop", stop_reason=-1
                         )
                     ],
                 )
@@ -162,3 +162,68 @@ async def test_chat_closes_raw_and_result_before_error():
     assert await anext(stream) == "data: [DONE]\n\n"
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_marker_survives_native_output_processing_and_merge(interrupted):
+    import msgspec
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+    from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
+    from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+
+    request = EngineCoreRequest(
+        request_id="r",
+        external_req_id="r",
+        prompt_token_ids=[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            stop=["recomputed"], include_stop_str_in_output=True, output_kind=RequestOutputKind.DELTA
+        ),
+        pooling_params=None,
+    )
+
+    class Tokens(BaseIncrementalDetokenizer):
+        def decode_next(self, token_id):
+            return {1: "recom", 2: "puted"}[token_id]
+
+    processor = OutputProcessor(tokenizer=None, log_stats=False)
+    processor.add_request(request, prompt="test")
+    processor.request_states["r"].detokenizer = Tokens(request)
+    collector = RequestOutputCollector(RequestOutputKind.DELTA, "r")
+    terminal = EngineCoreOutput(request_id="r", new_token_ids=[], finish_reason=FinishReason.STOP, stop_reason=-1)
+    terminal = msgspec.msgpack.decode(msgspec.msgpack.encode(terminal), type=EngineCoreOutput)
+    for output in [
+        EngineCoreOutput(request_id="r", new_token_ids=[1]),
+        terminal if interrupted else EngineCoreOutput(request_id="r", new_token_ids=[2]),
+    ]:
+        for response in processor.process_outputs([output]).request_outputs:
+            collector.put(response)
+    merged = collector.get_nowait()
+    assert merged.finished
+    assert merged.outputs[0].stop_reason == (-1 if interrupted else "recomputed")
+    assert merged.outputs[0].text == ("recom" if interrupted else "recomputed")
+    assert processor.get_num_unfinished_requests() == 0
+
+
+def test_internal_marker_is_not_a_valid_user_stop_token():
+    from unittest.mock import Mock
+
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    params = SamplingParams(stop_token_ids=[patch.RECOMPUTE_STOP_REASON])
+    with pytest.raises(VLLMValidationError):
+        params._validate_stop_token_ids(Mock(get_vocab_size=lambda: 128))
+
+
+def test_nonzero_choice_marker_is_detected():
+    payload = response(None).model_dump(mode="json")
+    payload["choices"].append({**payload["choices"][0], "index": 1, "stop_reason": patch.RECOMPUTE_STOP_REASON})
+    error = patch._error(BaseServing, payload)
+    assert error.error.type == "RecomputeRequiredError"
+    assert error.partial_response == payload
