@@ -21,20 +21,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     _ssd_setup_kwargs,
     _validate_store_qos,
 )
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
-    RegistrationAcquisitionError,
-    global_te,
-)
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 from ..registration import (
     BufferRegistration,
-    BufferRegistrationError,
     Registration,
     rollback_buffer_registration,
 )
 from ..results import integer_result, integer_results, presence_results
 from .sessions import MooncakeSessions
+from .transfer_engine import transfer_engine as registered_engine
 
 
 class MooncakeBackend:
@@ -105,15 +101,8 @@ class MooncakeBackend:
         if self._use_fabric_mem:
             return BufferRegistration()
 
-        global_te.get_transfer_engine(get_ip(), device_name=None)
-        try:
-            return global_te.acquire_registration(addresses, sizes)
-        except RegistrationAcquisitionError as error:
-            raise BufferRegistrationError(
-                error.operation_error,
-                error.rollback_error,
-                error.registration,
-            ) from error
+        registered_engine.get_transfer_engine(get_ip(), device_name=None)
+        return registered_engine.acquire_registration(addresses, sizes)
 
     def close(self) -> None:
         if self._closed:
@@ -297,7 +286,7 @@ class MooncakeBackend:
             **setup_kwargs,
         }
         if not self._use_fabric_mem and not self._use_store_independent_te:
-            transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
+            transfer_engine = registered_engine.get_transfer_engine(local_hostname, device_name=None)
             self._local_segment = f"{local_hostname}:{transfer_engine.get_rpc_port()}"
             return store.setup(
                 local_hostname=self._local_segment,

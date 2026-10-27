@@ -105,6 +105,8 @@ infrastructure 可以包含领域规则。Reachability 必须理解不同缓存�
 
 原始 `group_id` 用于缓存组、buffer 和 key 的身份；`transfer_group_ids` 给出参与传输的组，掩码等紧凑数组使用这些组的排列位置。比如原始组 2、5 参与传输，掩码的第 0、1 项分别对应组 2、5，远端命名仍保留 2、5。
 
+v1 使用引擎解析出的 scheduler block size 和 hash block size，不在 connector 内重新计算更细的 hash。每个参与传输的 group block 必须是 hash block 的整数倍，并整除 scheduler block。当前 Ascend 上游在多组 KV、DCP 大于 1 且关闭 prefix caching 时返回 scheduler 粒度的 hash；若该粒度无法表示 group block，v1 会在配置解析阶段拒绝该组合。
+
 上下文并行还需要实际进程成员信息。初始化阶段收集 global rank、TP rank 和 DCP rank，形成 `ContextRank`；PCP 与 TP 的 CPU 通信组用于取得真实成员关系。DCP 为 1 时可直接使用已有 TP rank 列表。Worker 随后根据这些事实选 writer、建立发布协调组。配置层提供身份和关系，发布过程留在 Worker。
 
 `factory.py` 在创建 Backend 资源前解析访问方式、key 构造器和对象布局工厂。公共准入、具体 Backend 的格式要求、原生客户端配置各有明确入口，初始化失败也尽量发生在资源申请之前。
@@ -164,6 +166,8 @@ Store 钩子在调用线程记录来源就绪事件，再把工作交给队列�
 ### 4.7 Backend
 
 整对象接口用 key 和本地地址段传输完整对象。KeyRange 接口用 key、对象大小和对象内偏移访问部分字节。GVA 接口先通过对象会话取得受保护的远端地址，再按本地地址、远端地址和长度复制。当前 Mooncake Layerwise 使用 KeyRange，Memcache Layerwise 使用 GVA。
+
+Mooncake 的普通 TransferEngine 路径由 v1 Backend 持有进程级引擎和注册表，与旧 connector 的全局引擎隔离。多个 v1 客户端注册同一地址和大小时共享引用，最后一个注册句柄释放时才注销内存；失败的回滚或注销保留句柄供重试。引擎初始化复用上游 `GlobalTE` 的失败策略，原生初始化失败后需要重启进程。使用 Store 独立引擎或 fabric memory 的路径仍按各自原生契约处理。
 
 Backend 实现原生客户端调用、内存注册、对象保护和结果规范化。Worker 累计各层结果，判断对象完整性，并决定 commit 或 revoke。commit 发布完整对象；revoke 撤销未完成写入。适配器落实这些操作的原生语义。
 

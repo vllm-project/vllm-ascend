@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import unittest
-from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -32,18 +28,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     LoadCommand,
     RangeStoreCommand,
 )
-
-if TYPE_CHECKING:
-    from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import RegistrationAcquisitionError
-
-
-def _load_global_te_type():
-    source = Path(mooncake_adapter.__file__).resolve().parents[5] / "utils" / "mooncake_transfer_engine.py"
-    spec = importlib.util.spec_from_file_location("_ascend_store_test_global_te", source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.GlobalTE
 
 
 def test_named_mooncake_worker_unregisters_store_regions_before_client_close() -> None:
@@ -269,13 +253,7 @@ def test_mooncake_registration_rollback_failure_returns_retryable_owner() -> Non
     assert store.unregister_buffer.call_args_list == [call(100), call(100)]
 
 
-def test_mooncake_global_registration_preserves_incomplete_shared_owner() -> None:
-    class SharedRegistrationError(RuntimeError):
-        def __init__(self, operation_error, rollback_error, registration) -> None:
-            self.operation_error = operation_error
-            self.rollback_error = rollback_error
-            self.registration = registration
-
+def test_mooncake_registration_preserves_incomplete_v1_owner() -> None:
     store = MagicMock()
     backend = _make_mooncake_registration_backend(store)
     backend._use_store_independent_te = False
@@ -283,15 +261,14 @@ def test_mooncake_global_registration_preserves_incomplete_shared_owner() -> Non
     operation_error = RuntimeError("registration failed")
     rollback_error = RuntimeError("rollback failed")
     shared_manager = MagicMock()
-    shared_manager.acquire_registration.side_effect = SharedRegistrationError(
+    shared_manager.acquire_registration.side_effect = BufferRegistrationError(
         operation_error,
         rollback_error,
         shared_registration,
     )
 
     with (
-        patch.object(mooncake_adapter, "global_te", shared_manager),
-        patch.object(mooncake_adapter, "RegistrationAcquisitionError", SharedRegistrationError),
+        patch.object(mooncake_adapter, "registered_engine", shared_manager),
         pytest.raises(BufferRegistrationError, match="rollback is incomplete") as error,
     ):
         backend.register_buffer([100], [10])
@@ -348,103 +325,3 @@ def test_mooncake_setup_failure_closes_constructed_client() -> None:
         backend._setup_store()
 
     store.close.assert_called_once_with()
-
-
-class TestGlobalTransferEngineRegistration(unittest.TestCase):
-    def _make_global_te(self):
-        manager = _load_global_te_type()()
-        manager.transfer_engine = MagicMock()
-        manager.transfer_engine.register_memory.return_value = 0
-        manager.transfer_engine.unregister_memory.return_value = 0
-        return manager
-
-    def test_shared_region_is_natively_registered_once_and_reference_counted(self):
-        manager = self._make_global_te()
-
-        first = manager.acquire_registration([100], [10])
-        second = manager.acquire_registration([100], [10])
-        first.close()
-        manager.transfer_engine.unregister_memory.assert_not_called()
-        second.close()
-
-        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
-        manager.transfer_engine.unregister_memory.assert_called_once_with(100)
-        self.assertFalse(manager.is_register_buffer)
-
-    def test_classic_registration_retains_one_process_lifetime_lease(self):
-        manager = self._make_global_te()
-
-        self.assertIsNone(manager.register_buffer([100], [10]))
-        self.assertIsNone(manager.register_buffer([200], [20]))
-
-        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
-        manager.transfer_engine.unregister_memory.assert_not_called()
-        self.assertTrue(manager.is_register_buffer)
-
-    def test_classic_registration_protects_region_after_v1_lease_closes(self):
-        manager = self._make_global_te()
-
-        v1_registration = manager.acquire_registration([100], [10])
-        manager.register_buffer([100], [10])
-        v1_registration.close()
-
-        manager.transfer_engine.register_memory.assert_called_once_with(100, 10)
-        manager.transfer_engine.unregister_memory.assert_not_called()
-        self.assertTrue(manager.is_register_buffer)
-
-    def test_failed_initialization_does_not_publish_global_engine(self):
-        manager = _load_global_te_type()()
-        failed_engine = MagicMock()
-        failed_engine.initialize.return_value = -7
-        initialized_engine = MagicMock()
-        initialized_engine.initialize.return_value = 0
-        engine_factory = MagicMock(side_effect=(failed_engine, initialized_engine))
-
-        with patch.object(sys.modules["mooncake.engine"], "TransferEngine", engine_factory, create=True):
-            with self.assertRaisesRegex(RuntimeError, "initialization failed"):
-                manager.get_transfer_engine("host", None)
-            self.assertIsNone(manager.transfer_engine)
-            self.assertIs(manager.get_transfer_engine("host", None), initialized_engine)
-
-        self.assertEqual(engine_factory.call_count, 2)
-        failed_engine.initialize.assert_called_once_with("host", "P2PHANDSHAKE", "ascend", "")
-        initialized_engine.initialize.assert_called_once_with("host", "P2PHANDSHAKE", "ascend", "")
-
-    def test_partial_registration_failure_rolls_back_owned_prefix(self):
-        manager = self._make_global_te()
-        manager.transfer_engine.register_memory.side_effect = [0, -7]
-
-        with self.assertRaisesRegex(RuntimeError, "registration failed"):
-            manager.acquire_registration([100, 200], [10, 20])
-
-        manager.transfer_engine.unregister_memory.assert_called_once_with(100)
-        self.assertFalse(manager.is_register_buffer)
-
-    def test_partial_rollback_failure_returns_retryable_registration(self):
-        manager = self._make_global_te()
-        manager.transfer_engine.register_memory.side_effect = [0, -7]
-        manager.transfer_engine.unregister_memory.side_effect = [-9, 0]
-
-        with self.assertRaisesRegex(RuntimeError, "rollback is incomplete") as context:
-            manager.acquire_registration([100, 200], [10, 20])
-
-        # Isolated loading has a distinct exception class; narrow the known rollback-failure contract.
-        registration_error = cast("RegistrationAcquisitionError", context.exception)
-        self.assertEqual(
-            tuple((region.address, region.size) for region in registration_error.registration.regions),
-            ((100, 10),),
-        )
-        registration_error.registration.close()
-        self.assertFalse(manager.is_register_buffer)
-
-    def test_classic_partial_rollback_failure_retains_process_owner(self):
-        manager = self._make_global_te()
-        manager.transfer_engine.register_memory.side_effect = [0, -7]
-        manager.transfer_engine.unregister_memory.return_value = -9
-
-        with self.assertRaisesRegex(RuntimeError, "rollback is incomplete"):
-            manager.register_buffer([100, 200], [10, 20])
-        manager.register_buffer([300], [30])
-
-        self.assertTrue(manager.is_register_buffer)
-        self.assertEqual(manager.transfer_engine.register_memory.call_count, 2)

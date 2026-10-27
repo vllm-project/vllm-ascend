@@ -683,7 +683,6 @@ def _make_output(scheduler):
 
 
 def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_blocks=10000):
-    """Build a CPU test scheduler with mocked model setup and version-compatible runtime defaults."""
     from contextlib import ExitStack
     from unittest.mock import PropertyMock
 

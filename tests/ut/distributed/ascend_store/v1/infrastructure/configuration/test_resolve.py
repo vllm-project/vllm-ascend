@@ -3,6 +3,7 @@
 import sys
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -186,6 +187,26 @@ def test_invalid_block_geometry(configuration_case, monkeypatch, scheduler_size,
     monkeypatch.setattr(resolve.kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *_: (scheduler_size, hash_size))
     with pytest.raises(ValueError, match="block size"):
         resolve.resolve_kv_pool_config(config, cache)
+
+
+@pytest.mark.parametrize("prefix_caching,hash_size", ((False, 64), (True, 16)))
+def test_multigroup_dcp_uses_engine_hash_granularity(configuration_case, monkeypatch, prefix_caching, hash_size):
+    config, cache = configuration_case
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.parallel_config.decode_context_parallel_size = 2
+    original = cache.kv_cache_groups[0].kv_cache_spec
+    specs = tuple(replace(original, block_size=size) for size in (16, 32))
+    cache.kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec) for spec in specs]
+    # These are the Ascend resolver's results with DCP=2 and group sizes 16/32.
+    # v1 must reject incompatible engine hashes rather than invent finer hashes.
+    engine_resolver = Mock(return_value=(64, hash_size))
+    monkeypatch.setattr(resolve.kv_cache_utils, "resolve_kv_cache_block_sizes", engine_resolver)
+    if prefix_caching:
+        assert resolve._resolve_kv_pool_block_sizes(config, cache, specs, (0, 1)) == (64, 16)
+    else:
+        with pytest.raises(ValueError, match=r"group 0 block size \(16\).*hash block size \(64\)"):
+            resolve._resolve_kv_pool_block_sizes(config, cache, specs, (0, 1))
+    engine_resolver.assert_called_once_with(cache, config)
 
 
 @pytest.mark.parametrize("role,peer", (("kv_producer", "decode"), ("kv_consumer", "prefill")))
