@@ -117,7 +117,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
             padded_x = x.new_zeros((len(local_sizes), max_local_size, *x.shape[1:]))
             offset = 0
             for idx, size in enumerate(local_sizes):
-                padded_x[idx, :size] = x[offset: offset + size]
+                padded_x[idx, :size] = x[offset : offset + size]
                 offset += size
             reduced = ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
             # The collective needs equal-sized chunks, while the next
