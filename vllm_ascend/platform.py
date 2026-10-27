@@ -398,21 +398,6 @@ class NPUPlatform(Platform):
         return 24  # safe default (24 Cube Cores)
 
     @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
-        from math import lcm
-
-        model_config = vllm_config.model_config
-        if not model_config.use_mla:
-            for config_name in ("hf_text_config", "hf_config"):
-                config = getattr(model_config, config_name, None)
-                ratio = getattr(config, "indexer_compress_ratio", None)
-                if ratio is not None:
-                    if not isinstance(ratio, int) or ratio <= 0:
-                        raise ValueError("QSA indexer_compress_ratio must be a positive integer.")
-                    return lcm(128, ratio)
-        return super()._get_indexer_block_alignment(vllm_config)
-
-    @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
         if (
             vllm_config.model_config.use_mla
