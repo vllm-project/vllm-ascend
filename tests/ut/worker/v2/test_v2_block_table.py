@@ -205,6 +205,9 @@ def test_init_block_table_layout_tensors_builds_distinct_sizes():
     tables.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8)) for _ in range(2)]
     tables.input_block_tables = [torch.zeros(2, 8) for _ in range(2)]
     tables._slot_mapping_enabled = [True, False]
+    # vLLM main's ``init_block_table_layout_tensors`` reads this; ``__init__``
+    # normally sets it, but this stub bypasses ``__init__``.
+    tables._sliding_window_reach = [0, 0]
     tables.init_block_table_layout_tensors()
 
     if vllm_version_is("0.31.0"):

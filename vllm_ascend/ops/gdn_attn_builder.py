@@ -470,12 +470,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if non_spec_cache_indices is None:
             raise RuntimeError("Expected non_spec_cache_indices for Ascend GDN prefill conv1d path.")
         prefill_num_rows = attn_metadata.non_spec_query_start_loc.size(0) - 1
-        pcp_size = getattr(self.vllm_config.parallel_config, "prefill_context_parallel_size", 1)
-        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        if pcp_rank > 0 and attn_metadata.num_prefills > 0:
-            prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
-            initial_state_mode = initial_state_mode.clone()
-            initial_state_mode[prefill_seq_offset:] = True
+        # MRV2 builds complete request metadata for recurrent attention.
+        # Fresh requests must ignore reused convolution state on every rank.
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
@@ -1100,6 +1096,7 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             fast_build=fast_build,
             num_actual_reqs=num_actual_reqs,
         )
+        metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         if self._conv_output_buffer is not None:
             # Layers in this group consume the same decode rows in sequence.
             # Clear once per step, including inactive captured branches: rows

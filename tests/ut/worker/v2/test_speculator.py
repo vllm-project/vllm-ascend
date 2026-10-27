@@ -280,7 +280,7 @@ def test_prefill_filters_target_only_metadata():
     speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, slot_mappings))
     with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, slot_mappings, None)
-    parent_prefill.assert_called_once_with(
+    expected_args = [
         2,
         4,
         {"draft": draft_metadata},
@@ -288,7 +288,27 @@ def test_prefill_filters_target_only_metadata():
         None,
         CUDAGraphMode.NONE,
         None,
-    )
+    ]
+    if not vllm_version_is("0.31.0"):
+        # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
+        expected_args.append(False)
+    parent_prefill.assert_called_once_with(*expected_args)
+
+
+def test_prefill_forwards_skip_sample_on_main():
+    """main's propose passes `skip_sample`; the override must forward it upstream."""
+    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    draft_metadata = object()
+    attn_metadata = {"draft": draft_metadata}
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, None))
+    with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=True)
+    if vllm_version_is("0.31.0"):
+        assert "skip_sample" not in parent_prefill.call_args.kwargs
+        assert len(parent_prefill.call_args.args) == 7
+    else:
+        assert parent_prefill.call_args.args[-1] is True
 
 
 def test_build_uniform_attn_metadata_sets_decode_only():

@@ -17,14 +17,19 @@
 # This file is a part of the vllm-ascend project.
 #
 import copy
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import CompilationMode, VllmConfig
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
+    req_states: "RequestState | None" = None,
 ):
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
@@ -35,6 +40,17 @@ def init_speculator(
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if speculative_config.method in ("ngram", "ngram_gpu"):
+        if req_states is None:
+            raise ValueError("MRV2 n-gram speculative decoding requires request states")
+        # Older vLLM pins lack this module; MRV2 n-gram requires upstream #40704.
+        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (  # type: ignore[import-not-found]
+            NgramGPUSpeculator,
+        )
+
+        # MRV2 postprocess has already updated history. The MRV1 NPU kernel
+        # appends sampled tokens itself and cannot be used here unchanged.
+        return NgramGPUSpeculator(vllm_config, device, req_states)
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
@@ -73,6 +89,10 @@ def init_speculator(
         )
 
         return AscendMTPSpeculator(vllm_config, device)
+    if speculative_config.use_multi_module_mtp():
+        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+        return AscendMultiModuleMTPSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 

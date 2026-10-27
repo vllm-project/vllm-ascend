@@ -431,7 +431,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     from vllm_ascend.worker.dcp_utils import DCPManager
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.pcp_enabled = False
+    builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
     builder.speculative_config = SimpleNamespace(parallel_drafting=False)

@@ -449,7 +449,20 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
 
     dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
 
-    kernel.assert_called_once_with(*inputs, kv_cache_block_size=128)
+    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
+
+
+@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only num_reqs_override")
+def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
+    """vLLM main (#58984) forwards the DP-synced request count positionally."""
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    inputs = [object() for _ in range(28)]
+    inputs[-1] = True  # sample_from_anchor
+
+    dflash_module.prepare_dflash_inputs_factory(128)(*inputs, 5)
+
+    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=128)
 
 
 def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):

@@ -1,6 +1,6 @@
 # Installation Guide
 
-This document describes how to install vllm-ascend manually.
+This document describes how to install vLLM Ascend manually.
 
 ## Requirements {: #installation-requirements }
 
@@ -76,8 +76,7 @@ Choose one complete path based on your requirements. Container-based paths requi
     | vLLM + vLLM Ascend | ✓ | ○ | ○ |
     | Triton Ascend | ✓ | ○ | ○ |
 
-    - **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
-    - **Triton Ascend:** Installed only for A2, A3, and 950DT Products; it is not used on Atlas 300I DUO or Atlas 200I Pro.
+    **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 

@@ -69,7 +69,14 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     if direct_output:
         assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    if direct_output:
+        # write_recurrent_output zeroes the captured buffer before copying.
+        assert torch.count_nonzero(out[:, 3:]) == 0
+    else:
+        # The recurrent kernel writes valid rows only; padding rows are owned
+        # by the caller (index_copy_ / write_recurrent_output), so the sentinel
+        # NaNs written by the kernel must survive unchanged.
+        assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])

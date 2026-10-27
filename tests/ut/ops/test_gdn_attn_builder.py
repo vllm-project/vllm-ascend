@@ -39,6 +39,32 @@ from vllm_ascend.ops.triton.fla.utils import (
 )
 
 
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder])
+@pytest.mark.parametrize("pcp_size,pcp_rank", [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("has_initial", [[False], [True], [False, False], [True, False, True]])
+def test_prefill_preserves_request_convolution_history(monkeypatch, builder_cls, pcp_size, pcp_rank, has_initial):
+    builder = builder_cls.__new__(builder_cls)
+    builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+    monkeypatch.setattr(ascend_gdn_attn_builder, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=pcp_rank))
+    num_decodes = int(len(has_initial) == 3)
+    starts = torch.arange(len(has_initial) + 1, dtype=torch.int32) * 4
+    initial = torch.tensor(has_initial)
+    metadata = SimpleNamespace(
+        num_prefills=len(has_initial) - num_decodes,
+        non_spec_query_start_loc=starts,
+        prefill_query_start_loc=starts[num_decodes:] - starts[num_decodes],
+        has_initial_state=initial,
+    )
+
+    builder._attach_non_spec_prefill_metadata(metadata, object(), torch.arange(len(has_initial)))
+
+    # Fresh requests ignore reused cache blocks on every rank. Continuations
+    # and mixed decode rows must retain their actual request history.
+    conv = metadata.non_spec_prefill_metadata.causal_conv1d
+    torch.testing.assert_close(conv.initial_state_mode, torch.tensor(has_initial))
+    torch.testing.assert_close(initial, torch.tensor(has_initial))
+
+
 @pytest.mark.parametrize(
     "values",
     [[], [False], [True], [False] * 8, [True] * 8, [True, False, True, False, False, True]],
@@ -337,12 +363,12 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 
 def test_ascend_gdn_attention_uses_ascend_backend():
-    from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
+    from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBackend, Glm5NextLinearAttention
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendKimiK3DeltaAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
-    assert Glm5NextLinearAttention.get_attn_backend(object()) is AscendGDNHostMetadataBackend
+    assert Glm5NextLinearAttention.get_attn_backend(object()) is Glm5NextGDNHostMetadataBackend
     assert Glm5NextLinearAttention.use_contiguous_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
@@ -435,7 +461,8 @@ def test_host_metadata_skips_unused_chunk_helpers(monkeypatch):
     assert chunk_meta.chunk_indices_chunk64_host == tuple(expected.to(torch.int64).flatten().tolist())
 
 
-def test_host_builder_exposes_host_descriptors_without_device_chunks():
+@pytest.mark.parametrize("has_pcp_context", [False, True])
+def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_context):
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
@@ -447,7 +474,10 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks():
         block_size=16,
         device=torch.device("cpu"),
     )
+    context = object() if has_pcp_context else None
+    common_attn_metadata.pcp_context = context
     attn_metadata = builder.build(0, common_attn_metadata)
+    assert attn_metadata.pcp_context is context
     chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
     assert chunk_meta.chunk_indices_chunk64 is None
     assert chunk_meta.chunk_offsets_chunk64 is None

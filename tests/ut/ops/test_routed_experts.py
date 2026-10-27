@@ -74,6 +74,36 @@ def test_get_expert_weights_preserves_independent_expert_tensors():
     assert all(tensor.storage_offset() == 0 for tensor in buffer)
 
 
+def test_eplb_expert_tensor_list_supports_upstream_uint8_contract():
+    # vLLM main registers expert weights via
+    # `w.view(torch.uint8) if w.element_size() == 1 else w` (interfaces.py,
+    # #61786); the per-expert container must satisfy that contract.
+    expert_tensors = [
+        torch.ones(3, 4, dtype=torch.int8),
+        torch.ones(3, 4, dtype=torch.int8),
+    ]
+    weights = EplbExpertTensorList(expert_tensors)
+
+    assert weights.element_size() == 1
+
+    viewed = weights.view(torch.uint8)
+    assert isinstance(viewed, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in viewed)
+    assert all(
+        actual.untyped_storage().data_ptr() == expected.untyped_storage().data_ptr()
+        for actual, expected in zip(viewed, expert_tensors)
+    )
+
+    registered = [w.view(torch.uint8) if w.element_size() == 1 else w for w in [weights, torch.randn(2, 5)]]
+    assert isinstance(registered[0], EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in registered[0])
+    assert registered[1].dtype == torch.float32
+
+    buffer = torch.empty_like(registered[0])
+    assert isinstance(buffer, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in buffer)
+
+
 @pytest.mark.parametrize(
     "dtype,npu_formats",
     [

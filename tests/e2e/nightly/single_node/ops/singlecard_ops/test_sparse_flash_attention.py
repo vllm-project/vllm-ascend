@@ -4,11 +4,13 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 
 @pytest.mark.skipif(
-    "950" not in torch.npu.get_device_name(0),
+    get_ascend_device_type() != AscendDeviceType.A5,
     reason="Regression for the A5 SFA kernel",
 )
 @pytest.mark.parametrize("selected_count", [0, 1, 127, 128, 129, 257])

@@ -3,6 +3,8 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_kernel,
@@ -15,11 +17,13 @@ from vllm_ascend.ops.triton.reject_sample import (
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.sample.rejection_sampler import (
     expand_pytorch,
-    rejection_greedy_sample_pytorch,
-    rejection_greedy_sample_spec_len_1_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
     sample_recovered_tokens_pytorch,
+)
+from vllm_ascend.worker.v2.sample.rejection_greedy import (
+    rejection_greedy_sample_pytorch,
+    rejection_greedy_sample_spec_len_1_pytorch,
 )
 
 KERNEL_TEST_ITERS = 1
@@ -31,6 +35,9 @@ def setup_device_properties():
     yield
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 def test_expand_kernel():
     device = "npu"
@@ -72,6 +79,9 @@ def test_expand_kernel():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 def test_sample_recovered_tokens_kernel():
     device = "npu"
@@ -141,6 +151,9 @@ def test_sample_recovered_tokens_kernel():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("synthetic_mode", [False, True])
 @pytest.mark.parametrize("max_spec_len", [1, 2, 3])
 @pytest.mark.parametrize("vocab_size", [1024])
@@ -221,6 +234,9 @@ def test_rejection_random_sample(synthetic_mode, max_spec_len, vocab_size, batch
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("synthetic_mode", [False, True])
 @torch.inference_mode()
 def test_rejection_greedy_sample_spec_len_1_triton_kernel(synthetic_mode):
@@ -277,6 +293,9 @@ def test_rejection_greedy_sample_spec_len_1_triton_kernel(synthetic_mode):
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("synthetic_mode", [False, True])
 @torch.inference_mode()
 def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
@@ -361,6 +380,9 @@ def test_rejection_greedy_sample_triton_kernel(synthetic_mode):
 # - "mixed_first_random": request 0 sampling (lane 0 masked by is_greedy_mask).
 # The batch mixes all-match (bonus), first-token reject, mid reject, and
 # zero-draft-token requests.
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     "is_greedy_pattern",
     ["all_greedy_none", "all_greedy", "mixed_first_greedy", "mixed_first_random"],
@@ -452,6 +474,9 @@ def test_rejection_greedy_sample_triton_boundary(is_greedy_pattern):
 # Randomized mixed batch large enough to force BLOCK_SIZE > 1, so the
 # offset == 0 lane shares a program block with other lanes. Covers the
 # multi-lane layout where only lane 0 of the first block needs masking.
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("first_req_greedy", [True, False])
 @torch.inference_mode()
 def test_rejection_greedy_sample_triton_boundary_multilane(first_req_greedy):
@@ -527,6 +552,9 @@ def test_rejection_greedy_sample_triton_boundary_multilane(first_req_greedy):
 # - "mixed_first_greedy": request 0 greedy (lane 0 masked by not_greedy_mask).
 # Also exercises a -1 draft placeholder (always rejected -> recovered token),
 # a forced all-accept request (bonus), and a zero-draft-token request.
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("is_greedy_pattern", ["all_random", "mixed_first_random", "mixed_first_greedy"])
 @torch.inference_mode()
 def test_rejection_random_sample_boundary(is_greedy_pattern):
@@ -590,7 +618,6 @@ def test_rejection_random_sample_boundary(is_greedy_pattern):
         draft_token_ids,
         draft_probs,
         target_probs,
-        None,  # target_indices
         bonus_token_ids,
         recovered_token_ids,
         uniform_probs,
@@ -689,6 +716,9 @@ IS_GREEDY = torch.zeros(BATCH_SIZE, dtype=torch.bool, device=DEVICE)
 IS_GREEDY[4] = True
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("cu_num_draft_tokens", [CU_NUM_DRAFT_TOKENS])
 @pytest.mark.parametrize("draft_token_ids", [DRAFT_TOKEN_IDS])
 @pytest.mark.parametrize("draft_probs", [DRAFT_PROBS])

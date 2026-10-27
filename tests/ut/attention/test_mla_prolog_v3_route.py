@@ -134,8 +134,8 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     impl.qk_head_dim = 4
     impl.v_head_dim = 2
     impl.enable_mlapo = False
-    impl.pcp_enabled = False
-    impl.dcp_enabled = impl_type is AscendMlaDCPImpl
+    impl.use_pcp = False
+    impl.use_dcp = impl_type is AscendMlaDCPImpl
     impl.is_pcp_decode_sharded = False
     impl.speculative_config = None
     impl._prolog_v3_weights = None
@@ -179,13 +179,16 @@ def _make_post_load_impl(monkeypatch, impl_type=AscendMLAImpl):
     owner.indexer = None
     owner.kv_cache_dtype = "auto"
     owner.head_size = impl.kv_lora_rank + impl.qk_rope_head_dim
+    # vLLM main's ``MLAAttention.get_kv_cache_spec`` reads this instance
+    # attribute set by ``__init__``; this stub bypasses ``__init__``.
+    owner.topk_buffer_width = None
     owner.sliding_window = None
     owner.non_causal_multi_token_decode = False
     impl.vllm_config.compilation_config.static_forward_context[impl.layer_name] = owner
     monkeypatch.setattr(mla_v1, "maybe_trans_nz", lambda tensor: tensor)
     monkeypatch.setattr(torch_npu, "npu_format_cast", lambda tensor, _format: tensor)
     monkeypatch.setattr(mla_v1, "get_offloader", lambda: NoopOffloader())
-    monkeypatch.setattr(mla_v1, "enable_dcp", lambda: impl.dcp_enabled)
+    monkeypatch.setattr(mla_v1, "is_dcp_enabled", lambda: impl.use_dcp)
     monkeypatch.setattr(
         mla_v1,
         "get_ascend_config",
@@ -324,7 +327,7 @@ def test_post_load_skips_unused_prolog_weights(monkeypatch, excluded_path):
     elif excluded_path == "no_rope":
         impl.use_mla_rope = False
     elif excluded_path == "pcp":
-        impl.pcp_enabled = True
+        impl.use_pcp = True
     elif excluded_path == "sharded_pcp":
         impl.is_pcp_decode_sharded = True
     elif excluded_path == "nz":
@@ -419,8 +422,8 @@ def test_constructor_initializes_parallel_routing_flags(
 ):
     impl = _construct_impl(pcp_size, dcp_size)
 
-    assert impl.pcp_enabled is expected_pcp
-    assert impl.dcp_enabled is expected_dcp
+    assert impl.use_pcp is expected_pcp
+    assert impl.use_dcp is expected_dcp
     assert impl.is_pcp_decode_sharded is (expected_pcp and dcp_size == 1)
 
 
@@ -691,7 +694,7 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
 
 
 @pytest.mark.parametrize(
-    ("dcp_enabled", "pcp_enabled", "decode_sharded", "use_rope", "expected_buffers"),
+    ("use_dcp", "use_pcp", "decode_sharded", "use_rope", "expected_buffers"),
     [
         (False, False, False, True, "none"),
         (True, False, False, True, "both"),
@@ -702,17 +705,15 @@ def test_dcp_prefill_current_kv_capacity_uses_batched_tokens():
         (True, True, False, False, "decode"),
     ],
 )
-def test_dcp_post_load_allocates_only_consumed_workspaces(
-    dcp_enabled, pcp_enabled, decode_sharded, use_rope, expected_buffers
-):
+def test_dcp_post_load_allocates_only_consumed_workspaces(use_dcp, use_pcp, decode_sharded, use_rope, expected_buffers):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8192, max_num_seqs=32),
         cache_config=SimpleNamespace(block_size=BLOCK_SIZE),
     )
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=7)
-    impl.dcp_enabled = dcp_enabled
-    impl.pcp_enabled = pcp_enabled
+    impl.use_dcp = use_dcp
+    impl.use_pcp = use_pcp
     impl.is_pcp_decode_sharded = decode_sharded
     impl.enable_mlapo = True
     impl.fa_quant_layer = False
@@ -805,10 +806,17 @@ def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
     assert impl._dcp_prefill_current_kv_buffers is first_prefill_buffers
 
 
-@pytest.mark.parametrize("num_decode", [0, 2])
-@pytest.mark.parametrize("padding", [0, 3])
-def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding):
+@pytest.mark.parametrize(
+    "num_decode,padding,layerwise",
+    [(0, 0, False), (0, 3, False), (2, 0, False), (2, 3, False), (2, 0, True)],
+)
+def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode, padding, layerwise):
     impl = _make_impl()
+    order = []
+    if layerwise:
+        impl.layerwise_kv_cache_hook = SimpleNamespace(
+            layerwise=True, wait_for_layer=lambda name: order.append(("broadcast", name))
+        )
     num_prefill = 3
     total_tokens = num_decode + num_prefill + padding
     qkv_lora = torch.zeros(total_tokens, impl.q_lora_rank + FUSED_DIM)
@@ -838,6 +846,8 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     )
 
     def fake_prolog(**kwargs):
+        if layerwise:
+            order.append(("prolog", impl.layer_name))
         tokens = kwargs["token_x"].shape[0]
         return (
             torch.zeros(tokens, impl.num_heads * NOPE_DIM),
@@ -855,9 +865,17 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
         patch("torch_npu.npu_mla_prolog_v3", side_effect=fake_prolog) as mock_prolog,
         patch("torch_npu.npu_kv_rmsnorm_rope_cache") as mock_legacy,
         patch.object(mla_v1, "load_mla_cache_rows_by_slots", side_effect=_load_cache_rows_on_cpu),
+        patch.object(
+            mla_v1, "wait_for_kv_layer_from_connector", side_effect=lambda name: order.append(("load", name))
+        ) as wait_load,
     ):
         decode, prefill = impl.mla_preprocess_prolog_v3(hidden, (nope, rope), metadata)
 
+    wait_load.assert_called_once_with(impl.layer_name)
+    if layerwise:
+        assert order == [("load", impl.layer_name), ("broadcast", impl.layer_name)] + [("prolog", impl.layer_name)] * (
+            1 + bool(num_decode)
+        )
     assert mock_prolog.call_count == 1 + bool(num_decode)
     mock_legacy.assert_not_called()
     assert (decode is not None) == bool(num_decode)
@@ -882,9 +900,9 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
 
 @pytest.mark.parametrize(
     (
-        "dcp_enabled",
+        "use_dcp",
         "has_dcp_buffers",
-        "pcp_enabled",
+        "use_pcp",
         "is_pcp_decode_sharded",
         "requires_current_kv",
         "expects_prolog",
@@ -900,9 +918,9 @@ def test_mla_preprocess_prolog_v3_replaces_rmsnorm_rope_cache_writer(num_decode,
     ],
 )
 def test_forward_routes_strided_cache_with_runtime_exclusions(
-    dcp_enabled,
+    use_dcp,
     has_dcp_buffers,
-    pcp_enabled,
+    use_pcp,
     is_pcp_decode_sharded,
     requires_current_kv,
     expects_prolog,
@@ -910,19 +928,19 @@ def test_forward_routes_strided_cache_with_runtime_exclusions(
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = dcp_enabled
+    impl.use_dcp = use_dcp
     if has_dcp_buffers:
         impl._dcp_current_kv_buffers = (
             torch.empty(1, BLOCK_SIZE, 1, NOPE_DIM),
             torch.empty(1, BLOCK_SIZE, 1, ROPE_DIM),
             torch.arange(BLOCK_SIZE),
         )
-    impl.pcp_enabled = pcp_enabled
+    impl.use_pcp = use_pcp
     impl.is_pcp_decode_sharded = is_pcp_decode_sharded
     impl._decode_requires_current_kv = MagicMock(return_value=requires_current_kv)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
-    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None, None))
     impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
 
     hidden = torch.zeros(3, 128)
@@ -955,8 +973,8 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = True
-    impl.pcp_enabled = False
+    impl.use_dcp = True
+    impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),
@@ -966,7 +984,7 @@ def test_forward_falls_back_when_dcp_current_buffer_is_too_small():
     impl._decode_requires_current_kv = MagicMock(return_value=True)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
-    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None, None))
     impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
 
     hidden = torch.zeros(2, 128)
@@ -993,8 +1011,8 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
     impl = _make_impl()
     impl.use_output_gate = False
     impl.enable_mlapo = False
-    impl.dcp_enabled = True
-    impl.pcp_enabled = False
+    impl.use_dcp = True
+    impl.use_pcp = False
     impl.is_pcp_decode_sharded = False
     impl._dcp_current_kv_buffers = (
         torch.empty(1, 1, 1, NOPE_DIM),
@@ -1010,7 +1028,7 @@ def test_forward_falls_back_when_dcp_prefill_current_buffer_is_too_small():
     impl._prefill_requires_current_kv = MagicMock(return_value=True)
     impl._cache_requires_prolog_v3_writer = MagicMock(return_value=True)
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
-    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None, None))
     impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
 
     hidden = torch.zeros(2, 128)
@@ -1037,7 +1055,7 @@ def test_mla_preprocess_prolog_v3_preserves_dcp_prefill_current_kv():
     dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     dcp_impl.__dict__.update(impl.__dict__)
     impl = dcp_impl
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.speculative_config = None
     num_prefill_tokens = 4
     current_nope_cache = torch.zeros(1, BLOCK_SIZE, 1, NOPE_DIM)
@@ -1132,7 +1150,7 @@ def test_mla_preprocess_prolog_v3_keeps_mixed_dcp_current_kv_disjoint():
     dcp_impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     dcp_impl.__dict__.update(impl.__dict__)
     impl = dcp_impl
-    impl.dcp_enabled = True
+    impl.use_dcp = True
     impl.speculative_config = object()
     num_decode_tokens = 2
     num_prefill_tokens = 4
@@ -1353,8 +1371,8 @@ def _make_wide_draft_impl():
     impl.fused_qkv_a_proj = SimpleNamespace(input_size=14336, weight=torch.empty(1))
     impl.support_fp8_attention = True
     impl.is_draft_model = True
-    impl.pcp_enabled = False
-    impl.dcp_enabled = False
+    impl.use_pcp = False
+    impl.use_dcp = False
     impl.is_pcp_decode_sharded = False
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=257),
@@ -1373,7 +1391,7 @@ def test_prolog_writer_checks_projection_input_instead_of_model_hidden_size(inpu
     assert impl.supports_prolog_v3_writer() is (input_size in (7168, 8192))
 
 
-@pytest.mark.parametrize("excluded", ["pcp_enabled", "dcp_enabled", "enable_kv_nz", "fa_quant_layer"])
+@pytest.mark.parametrize("excluded", ["use_pcp", "use_dcp", "enable_kv_nz", "fa_quant_layer"])
 def test_wide_draft_adapter_preserves_existing_exclusions(excluded):
     impl = _make_wide_draft_impl()
     setattr(impl, excluded, True)
@@ -1518,7 +1536,7 @@ def test_wide_draft_forward_uses_regular_projection_for_fused_cache():
     impl.enable_mlapo = True  # The adapter must take priority even over the older decode fusion.
     impl.mla_preprocess_prolog_v3 = MagicMock(return_value=(None, None))
     impl.mla_preprocess_only_decode = MagicMock(return_value=(None, None))
-    impl._mla_preprocess = MagicMock(return_value=(None, None))
+    impl._mla_preprocess = MagicMock(return_value=(None, None, None))
     impl.o_proj = MagicMock(side_effect=lambda tensor, **_kwargs: (tensor,))
     hidden = torch.zeros(1, 14336)
     output = torch.empty(1, impl.num_heads * impl.v_head_dim)
