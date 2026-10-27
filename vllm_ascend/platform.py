@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+
 from __future__ import annotations
 
 import math
@@ -446,6 +447,21 @@ class NPUPlatform(Platform):
         return 24  # safe default (24 Cube Cores)
 
     @classmethod
+    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
+        from math import lcm
+
+        model_config = vllm_config.model_config
+        if not model_config.use_mla:
+            for config_name in ("hf_text_config", "hf_config"):
+                config = getattr(model_config, config_name, None)
+                ratio = getattr(config, "indexer_compress_ratio", None)
+                if ratio is not None:
+                    if not isinstance(ratio, int) or ratio <= 0:
+                        raise ValueError("QSA indexer_compress_ratio must be a positive integer.")
+                    return lcm(128, ratio)
+        return super()._get_indexer_block_alignment(vllm_config)
+
+    @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
         if (
             vllm_config.model_config.use_mla
@@ -457,6 +473,55 @@ class NPUPlatform(Platform):
             # Reuse Ascend's packed C8 geometry, including scale bytes and
             # compressed indexer alignment, after the backend selects its block size.
             HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
+            return
+
+        model_config = vllm_config.model_config
+        text_config = getattr(model_config, "hf_text_config", None)
+        if not model_config.use_mla and getattr(text_config, "indexer_compress_ratio", None) is not None:
+            from math import prod
+
+            from vllm.model_executor.models import ModelRegistry
+            from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+
+            cache_config = vllm_config.cache_config
+            model_cls, _ = ModelRegistry.resolve_model_cls(model_config.architecture, model_config=model_config)
+            if hasattr(model_cls, "get_mamba_specs_from_config"):
+                specs = model_cls.get_mamba_specs_from_config(vllm_config)
+                ssm_bytes = max(
+                    prod(spec.shapes[1]) * get_dtype_size(spec.dtypes[1]) for spec in specs if len(spec.shapes) == 2
+                )
+            else:
+                shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
+                dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+                ssm_bytes = prod(shapes[1]) * get_dtype_size(dtypes[1])
+            kv_dtype = (
+                model_config.dtype
+                if cache_config.cache_dtype == "auto"
+                else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            )
+            # QSA stores K and V together in the page shared with one SSM state.
+            kv_token_bytes = (
+                model_config.get_num_kv_heads(vllm_config.parallel_config)
+                * (2 * model_config.get_head_size())
+                * get_dtype_size(kv_dtype)
+            )
+            alignment = cls._get_indexer_block_alignment(vllm_config)
+            if cache_config.mamba_cache_mode == "all":
+                chunk_size = (
+                    cache_config.mamba_block_size
+                    if cache_config.user_specified_mamba_block_size
+                    else model_config.get_mamba_chunk_size()
+                )
+                alignment = math.lcm(alignment, chunk_size)
+            min_tokens = (ssm_bytes + kv_token_bytes - 1) // kv_token_bytes
+            cache_config.block_size = max(
+                cache_config.block_size, ((min_tokens + alignment - 1) // alignment) * alignment
+            )
+            if cache_config.mamba_cache_mode in ("align", "all"):
+                cache_config.mamba_block_size = cache_config.block_size
+            # The QSA planner gives convolution state its own slab. The generic
+            # aligner includes convolution bytes in the Mamba page and would
+            # unnecessarily grow an exact K+V/SSM fit by another block multiple.
             return
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
@@ -1826,6 +1891,14 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
     spec = vllm_config.speculative_config
     if spec is not None and model_config is spec.draft_model_config:
         model_config = spec.target_model_config
+    if model_config is not None and model_config.architecture in (
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+    ):
+        # Qwen4Exp PLE is managed by its model-specific implementation, not
+        # the DeepSeek V4.1 Engram runtime.
+        vllm_config.engram_config = None
+        return
     if engram_config is None:
         if (
             model_config is None

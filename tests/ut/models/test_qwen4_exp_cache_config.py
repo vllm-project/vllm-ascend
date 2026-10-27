@@ -1,0 +1,823 @@
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+import torch
+from vllm.model_executor.models import ModelRegistry
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    HiddenStateCacheSpec,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+
+from vllm_ascend.models.qwen4_exp.cache_config import (
+    GDN,
+    HIDDEN,
+    PLE,
+    _merge_mamba_state_groups,
+    _merge_qsa_composite_groups,
+    _prepare_qsa_composite_groups,
+    build_qwen4_kv_cache_layout,
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
+    get_qwen4_exp_pool_bytes_per_block,
+    make_slab_view,
+)
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_max_memory_usage_bytes_from_groups,
+)
+from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.worker.v1 import model_runner as model_runner_v1
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
+
+
+def _groups() -> list[KVCacheGroupSpec]:
+    sources = [
+        "model.layers.11.self_attn",
+        "model.layers.47.self_attn",
+        "model.mtp.layers.48.self_attn",
+    ]
+    main = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.bfloat16,
+    )
+    raw = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=32,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+    )
+    compressed = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    gdn = MambaSpec(
+        block_size=128,
+        shapes=((64, 4), (128, 128)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+    )
+    ple = MambaSpec(
+        block_size=128,
+        shapes=((128, 5),),
+        dtypes=(torch.bfloat16,),
+        tp_replicated=True,
+    )
+    hidden = HiddenStateCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    raw_sources = [sources[2], sources[0], sources[1]]
+    compressed_sources = [sources[1], sources[2], sources[0]]
+    return [
+        KVCacheGroupSpec(
+            [f"{source}.attn" for source in sources],
+            main,
+        ),
+        KVCacheGroupSpec(
+            [f"{source}.indexer.raw_key_cache" for source in raw_sources],
+            raw,
+        ),
+        KVCacheGroupSpec(
+            [f"{source}.indexer.compressed_key_cache" for source in compressed_sources],
+            compressed,
+        ),
+        KVCacheGroupSpec(
+            [
+                "model.layers.0.linear_attn",
+                "model.layers.1.linear_attn",
+            ],
+            gdn,
+        ),
+        KVCacheGroupSpec(["model.ple"], ple),
+        KVCacheGroupSpec(["model.cache_only_layers.0"], hidden),
+    ]
+
+
+def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
+    main = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.bfloat16,
+    )
+    raw = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=32,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+    )
+    compressed = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    gdn = MambaSpec(
+        block_size=128,
+        shapes=((64, 4), (128, 128)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    ple = MambaSpec(
+        block_size=128,
+        shapes=((128, 5),),
+        dtypes=(torch.bfloat16,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+        tp_replicated=True,
+    )
+    specs: dict[str, KVCacheSpec] = {}
+    for index in range(13):
+        source = f"model.layers.{index * 4 + 3}.self_attn"
+        # Deliberately register the compressed owner first: grouping must
+        # still choose the main attention spec as the scheduler representative.
+        specs[f"{source}.indexer.compressed_key_cache"] = compressed
+        specs[f"{source}.indexer.raw_key_cache"] = raw
+        specs[f"{source}.attn"] = main
+    for index in range(36):
+        specs[f"model.layers.{index}.linear_attn"] = gdn
+    specs["model.ple"] = ple
+    assert len(specs) == 76
+    return specs
+
+
+def test_six_region_offsets_are_contiguous_non_overlapping_slabs() -> None:
+    layout = build_qwen4_kv_cache_layout(_groups(), num_blocks=3)
+    assert layout is not None
+    assert layout.slot_count == 3
+    assert [(region.name, region.offset, region.page_size_bytes, region.size) for region in layout.regions] == [
+        ("r1", 0, 512, 1536),
+        ("r2", 1536, 32768, 98304),
+        ("r4", 99840, 512, 1536),
+        ("r5", 101376, 2048, 6144),
+    ]
+    assert layout.slot_backing_size == 107520
+    for left, right in zip(layout.regions, layout.regions[1:]):
+        assert right.offset >= left.end
+        assert right.offset % layout.alignment == 0
+
+    for slot, source in enumerate(
+        [
+            "model.layers.11.self_attn",
+            "model.layers.47.self_attn",
+            "model.mtp.layers.48.self_attn",
+        ]
+    ):
+        assert layout.owner(f"{source}.attn").slot == slot
+        assert layout.owner(f"{source}.indexer.raw_key_cache").slot == slot
+        assert layout.owner(f"{source}.indexer.compressed_key_cache").slot == slot
+    assert layout.owner("model.layers.0.linear_attn").role == GDN
+    assert layout.owner("model.ple").role == PLE
+    assert layout.owner("model.cache_only_layers.0").role == HIDDEN
+
+
+def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None:
+    num_blocks = 3
+    layout = build_qwen4_kv_cache_layout(
+        _groups(),
+        num_blocks=num_blocks,
+    )
+    assert layout is not None
+    backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
+
+    def view(region_name: str, shape: tuple[int, ...]) -> torch.Tensor:
+        return make_slab_view(
+            backing,
+            dtype=torch.bfloat16,
+            num_blocks=num_blocks,
+            item_shape=shape,
+            storage_offset=layout.region(region_name).offset,
+            block_stride=layout.region(region_name).page_size_bytes,
+        )
+
+    views = {
+        "raw": view("r4", (8, 1, 32)),
+        "compressed": view("r5", (32, 1, 32)),
+        "gdn_conv": view("r1", (64, 4)),
+        "gdn_ssm": view("r2", (128, 128)),
+    }
+    region_for_view = {
+        "raw": "r4",
+        "compressed": "r5",
+        "gdn_conv": "r1",
+        "gdn_ssm": "r2",
+    }
+    storage_ptr = backing.untyped_storage().data_ptr()
+    for name, slab in views.items():
+        region = layout.region(region_for_view[name])
+        assert slab.untyped_storage().data_ptr() == storage_ptr
+        assert slab[0].is_contiguous()
+        assert slab.is_contiguous()
+        assert slab.storage_offset() * slab.element_size() == region.offset
+        assert slab.stride(0) * slab.element_size() == region.page_size_bytes
+        assert slab[0].numel() * slab.element_size() <= region.page_size_bytes
+
+    packed = [
+        make_slab_view(
+            backing,
+            dtype=torch.bfloat16,
+            num_blocks=num_blocks,
+            item_shape=(128, 1, 64),
+            storage_offset=layout.region("r2").offset + offset,
+            block_stride=layout.region("r2").page_size_bytes,
+        )
+        for offset in (0, 16384)
+    ]
+    keys, values = packed
+    assert not keys.is_contiguous() and not values.is_contiguous()
+    assert keys.stride(0) * keys.element_size() == 32768
+    keys[1].fill_(7)
+    values[1].fill_(11)
+    ssm = views["gdn_ssm"]
+    assert torch.all(ssm[1].flatten()[:8192] == 7)
+    assert torch.all(ssm[1].flatten()[8192:] == 11)
+    assert torch.count_nonzero(ssm[[0, 2]]) == 0
+    ssm.zero_()
+
+    views["gdn_ssm"][:, 0, 0] = torch.tensor(
+        [1, 2, 3],
+        dtype=torch.bfloat16,
+    )
+    selected = views["gdn_ssm"][torch.tensor([0, 2])]
+    assert selected.shape == (2, 128, 128)
+    assert selected.numel() == 2 * 128 * 128
+    assert selected.is_contiguous()
+    assert selected.untyped_storage().data_ptr() != storage_ptr
+    assert selected.untyped_storage().nbytes() == (selected.numel() * selected.element_size())
+    assert selected[:, 0, 0].tolist() == [1, 3]
+    views["gdn_ssm"][:, 0, 0] = 0
+
+    views["raw"][1, 3, 0, 7] = 17
+    for name, slab in views.items():
+        if name != "raw":
+            assert torch.count_nonzero(slab).item() == 0
+
+
+def test_main_planner_uses_one_shared_backing_geometry() -> None:
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        _groups(),
+        10**9,
+    )
+    assert config is not None
+    assert config.num_blocks == 3
+    layout = build_qwen4_kv_cache_layout(
+        config.kv_cache_groups,
+        num_blocks=3,
+    )
+    assert layout is not None
+    role_tensors = config.kv_cache_tensors[:4]
+    ple_tensor = config.kv_cache_tensors[4]
+    hidden_tensor = config.kv_cache_tensors[5]
+    expected_backing_size = layout.slot_count * layout.slot_backing_size
+    assert all(tensor.size == expected_backing_size for tensor in role_tensors)
+    assert [tensor.offset for tensor in role_tensors] == [
+        layout.region(name).offset for name in ("r2", "r4", "r5", "r1")
+    ]
+    assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
+    assert ple_tensor.layers == ["model.ple"]
+    assert ple_tensor.size == 3 * 128 * 5 * 2
+    assert ple_tensor.block_stride == 128 * 5 * 2
+    assert ple_tensor.offset == 0
+    assert hidden_tensor.layers == ["model.cache_only_layers.0"]
+    assert hidden_tensor.size == 49152
+
+
+@pytest.mark.parametrize("kv_transfer_config", [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")])
+def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_config) -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
+    runner.dcp_size = 1
+    runner.use_sparse = False
+    runner.use_compress = False
+    runner.sparse_kv_offload_enabled = False
+    runner._get_layer_kv_cache_specs = Mock(return_value={})
+    runner._kv_cache_spec_attn_group_iterator = lambda: []
+    runner._uses_page_strided_shared_backing = Mock(return_value=False)
+    runner._allocate_int8_cache_tensor = Mock()
+    layout = SimpleNamespace(slot_count=1, slot_backing_size=16, owners=[])
+    monkeypatch.setattr(model_runner_v1, "build_qwen4_kv_cache_layout", lambda *args: layout)
+    monkeypatch.setattr(model_runner_v1, "vllm_version_is", lambda version: False)
+    monkeypatch.setattr(model_runner_v1, "get_layerwise_reuse_config", lambda config: None)
+    config = SimpleNamespace(num_blocks=1, kv_cache_groups=[], kv_cache_tensors=[])
+
+    assert runner._allocate_kv_cache_tensors(config) == {}
+
+    if kv_transfer_config is None:
+        assert runner._six_region_kv_cache_layout is layout
+        runner._allocate_int8_cache_tensor.assert_called_once_with(16, 2 * 1024 * 1024)
+    else:
+        assert runner._six_region_kv_cache_layout is None
+        runner._allocate_int8_cache_tensor.assert_not_called()
+    runner._uses_page_strided_shared_backing.assert_not_called()
+
+
+def _cpu_runner(config):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.ascend_config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        xlite_graph_config=SimpleNamespace(enabled=False),
+    )
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
+    runner.dcp_size = 1
+    runner.use_sparse = False
+    runner.use_compress = False
+    runner.use_hybrid_blocks = False
+    runner.runner_only_attn_layers = set()
+    runner.sparse_kv_offload_enabled = False
+    runner._kv_cache_spec_attn_group_iterator = lambda: [
+        SimpleNamespace(
+            backend=SimpleNamespace(is_sparse=lambda: False),
+            kv_cache_spec=group.kv_cache_spec,
+            layer_names=group.layer_names,
+        )
+        for group in config.kv_cache_groups
+    ]
+
+    return runner
+
+
+@pytest.mark.parametrize("runner_kind", ["v1", "v2", "v2_main"])
+def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind) -> None:
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        _groups(),
+        10**9,
+    )
+    assert config is not None
+    runner = _cpu_runner(config)
+
+    if runner_kind == "v1":
+        raw = runner._allocate_kv_cache_tensors(config)
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        layout = runner._six_region_kv_cache_layout
+    else:
+        vllm_config = SimpleNamespace(
+            additional_config={},
+            kv_transfer_config=None,
+            cache_config=SimpleNamespace(cache_dtype="auto"),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()),
+        )
+        monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
+        monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+        # These owned cache views are backend-independent; the main entry point
+        # uses only the backend identity to partition its attention groups.
+        backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+        layers = {
+            name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
+            for group in config.kv_cache_groups
+            for name in group.layer_names
+        }
+        monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
+        raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+        if runner_kind == "v2_main":
+            # Exercise upstream main's combined allocation+reshape adapter and
+            # retain its raw buffers for the same storage checks as v0.31.
+            monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
+            caches = attn_utils_v2.allocate_kv_cache_main(
+                config, torch.device("cpu"), None, [128] * len(config.kv_cache_groups)
+            )
+        else:
+            groups = [
+                SimpleNamespace(
+                    kv_cache_group_id=i, kv_cache_spec=g.kv_cache_spec, layer_names=g.layer_names, backend=backend
+                )
+                for i, g in enumerate(config.kv_cache_groups)
+            ]
+            caches = attn_utils_v2._reshape_kv_cache_v2(groups, raw, "auto", [128] * len(groups), {}, config)
+        layout = build_qwen4_kv_cache_layout(config.kv_cache_groups, config.num_blocks)
+        # Every physical byte is represented once by the planner, including
+        # the single PLE and hidden banks outside the shared slot backing.
+        allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
+        assert sum(allocations.values()) == config.num_blocks * get_qwen4_exp_pool_bytes_per_block(
+            config.kv_cache_groups
+        )
+    assert layout is not None
+
+    shared_names = [owner.layer_name for owner in layout.owners if owner.role not in (HIDDEN, PLE)]
+    backing = raw[shared_names[0]]
+    assert isinstance(backing, torch.Tensor)
+    assert all(raw[name] is backing for name in shared_names)
+    assert raw["model.cache_only_layers.0"] is not backing
+
+    expected_regions = {
+        "model.layers.0.linear_attn": ("r1", "r2"),
+        "model.layers.1.linear_attn": ("r1", "r2"),
+    }
+    for layer_name, region_names in expected_regions.items():
+        owner = layout.owner(layer_name)
+        states = caches[layer_name]
+        assert isinstance(states, list)
+        assert len(states) == len(region_names)
+        for state, region_name in zip(
+            states,
+            region_names,
+            strict=True,
+        ):
+            region = layout.region(region_name)
+            assert state[0].is_contiguous()
+            assert state.is_contiguous()
+            assert state.storage_offset() * state.element_size() == (
+                owner.slot * layout.slot_backing_size + region.offset
+            )
+            assert state.stride(0) * state.element_size() == region.page_size_bytes
+            assert state.untyped_storage().data_ptr() == (backing.untyped_storage().data_ptr())
+            assert state[0].numel() * state.element_size() <= region.page_size_bytes
+
+    ple = caches["model.ple"][0]
+    assert ple.is_contiguous()
+    assert ple.shape == (3, 128, 5)
+    assert ple.stride(0) == 128 * 5
+    assert raw["model.ple"] is not backing
+    assert raw["model.ple"].numel() == ple.numel() * ple.element_size()
+    # Indexed updates address only selected request blocks in the private bank.
+    indices = torch.tensor([0, 2])
+    selected = ple.index_select(0, indices)
+    selected.fill_(7)
+    ple.index_copy_(0, indices, selected)
+    assert torch.all(ple[indices] == 7)
+    assert torch.count_nonzero(ple[1]) == 0
+    assert torch.count_nonzero(backing) == 0
+
+    k, v = caches["model.layers.11.self_attn.attn"]
+    ssm = caches["model.layers.0.linear_attn"][1]
+    assert k.shape == v.shape == (3, 128, 1, 64)
+    assert k.stride() == v.stride() == (16384, 64, 64, 1)
+    assert v.data_ptr() - k.data_ptr() == 16384
+    assert k.data_ptr() == ssm.data_ptr()
+    k[2].fill_(5)
+    v[2].fill_(9)
+    torch.testing.assert_close(ssm[2].flatten()[:8192], torch.full((8192,), 5, dtype=ssm.dtype))
+    torch.testing.assert_close(ssm[2].flatten()[8192:], torch.full((8192,), 9, dtype=ssm.dtype))
+    assert torch.count_nonzero(ssm[:2]) == 0
+
+    raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
+    assert raw_qsa.shape == (3, 1, 8, 32)
+    assert raw_qsa.is_contiguous()
+
+    compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
+    assert compressed.shape == (3, 1, 32, 32)
+    assert compressed.is_contiguous()
+
+
+def test_qsa_source_sets_must_match() -> None:
+    groups = _groups()
+    groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
+    try:
+        build_qwen4_kv_cache_layout(groups, num_blocks=2)
+    except ValueError as error:
+        assert "one-to-one source-layer mapping" in str(error)
+    else:
+        raise AssertionError("mismatched QSA source owners were accepted")
+
+
+def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
+    specs = _ungrouped_qwen_specs()
+    groups = [
+        KVCacheGroupSpec(
+            [name],
+            spec,
+            is_eagle_group=name.startswith("model.layers.51.self_attn"),
+        )
+        for name, spec in specs.items()
+    ]
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    merged = _merge_qsa_composite_groups(
+        groups,
+        specs,
+        *owners,
+    )
+
+    assert len(merged) == 39
+    composite = [group for group in merged if any(name.endswith(".attn") for name in group.layer_names)]
+    raw = [group for group in merged if any(name.endswith(".indexer.raw_key_cache") for name in group.layer_names)]
+    assert len(composite) == 1
+    assert len(composite[0].layer_names) == 26
+    assert sum(name.endswith(".attn") for name in composite[0].layer_names) == 13
+    assert sum(name.endswith(".indexer.compressed_key_cache") for name in composite[0].layer_names) == 13
+    first_composite_spec = next(iter(composite[0].kv_cache_spec.kv_cache_specs.values()))
+    assert isinstance(first_composite_spec, FullAttentionSpec)
+    assert not isinstance(first_composite_spec, MLAAttentionSpec)
+    assert composite[0].is_eagle_group
+    assert len(raw) == 1
+    assert len(raw[0].layer_names) == 13
+    assert raw[0].is_eagle_group
+
+
+def test_six_region_admission_matches_shared_planner_allocation() -> None:
+    specs = _ungrouped_qwen_specs()
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    groups = _merge_qsa_composite_groups(
+        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        specs,
+        *owners,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=135168),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        max_in_flight_tokens=4096,
+    )
+    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
+        vllm_config,
+        groups,
+    )
+    required_blocks = sum(
+        (group.kv_cache_spec.max_memory_usage_bytes(vllm_config) + group.kv_cache_spec.page_size_bytes - 1)
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
+    planned = get_qwen4_exp_kv_cache_config(
+        vllm_config,
+        groups,
+        required_bytes,
+    )
+    assert planned is not None
+    assert planned.num_blocks == required_blocks
+    layout = build_qwen4_kv_cache_layout(
+        groups,
+        num_blocks=required_blocks,
+    )
+    assert layout is not None
+    assert layout.slot_count == 13
+    assert (
+        layout.slot_count * layout.slot_backing_size
+        + sum(owner.spec.real_page_size_bytes * required_blocks for owner in layout.owners if owner.role == PLE)
+    ) == required_bytes
+
+
+def test_mamba_state_groups_merge_shares_one_block_table() -> None:
+    """36 GDN layers use three block tables over 13 shared slots."""
+    specs = _ungrouped_qwen_specs()
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    groups = _merge_qsa_composite_groups(
+        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        specs,
+        *owners,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=135168),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        max_in_flight_tokens=4096,
+    )
+
+    def is_gdn_group(group) -> bool:
+        spec = group.kv_cache_spec
+        members = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
+        return all(isinstance(member, MambaSpec) and len(member.shapes) == 2 for member in members)
+
+    def required_blocks(group_list) -> int:
+        return sum(
+            (g.kv_cache_spec.max_memory_usage_bytes(vllm_config) + g.kv_cache_spec.page_size_bytes - 1)
+            // g.kv_cache_spec.page_size_bytes
+            for g in group_list
+        )
+
+    gdn_groups = [g for g in groups if is_gdn_group(g)]
+    assert len(gdn_groups) == 36
+    assert all(len(g.layer_names) == 1 for g in gdn_groups)
+    gdn_blocks_each = required_blocks(gdn_groups[:1])
+
+    blocks_before = required_blocks(groups)
+    bytes_before = _ascend_max_memory_usage_bytes_from_groups(vllm_config, groups)
+
+    merged = _merge_mamba_state_groups(groups, 13)
+
+    gdn_merged = [g for g in merged if is_gdn_group(g)]
+    assert [len(group.layer_names) for group in gdn_merged] == [13, 13, 10]
+    # PLE (single-shape MambaSpec) keeps its own group.
+    ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
+    assert len(ple_groups) == 1
+    assert len(merged) == len(groups) - 33
+
+    blocks_after = required_blocks(merged)
+    assert blocks_before - blocks_after == 33 * gdn_blocks_each
+
+    probe = build_qwen4_kv_cache_layout(merged, num_blocks=1)
+    assert probe is not None
+    assert probe.slot_count == 13
+    pool_block_bytes = probe.slot_count * probe.slot_backing_size + sum(
+        owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
+    )
+
+    bytes_after = _ascend_max_memory_usage_bytes_from_groups(vllm_config, merged)
+    assert bytes_after == blocks_after * pool_block_bytes
+    assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
+
+    # Every group reuses the same 13-slot backing, but its block table owns
+    # distinct live IDs. Verify both the alias and the non-overlapping writes.
+    layout = build_qwen4_kv_cache_layout(merged, num_blocks=3)
+    assert layout is not None
+    backing = torch.zeros(layout.slot_count * layout.slot_backing_size, dtype=torch.int8)
+    views = []
+    for group in gdn_merged:
+        slots = [layout.owner(name).slot for name in group.layer_names]
+        assert slots == list(range(len(group.layer_names)))
+        owner = layout.owner(group.layer_names[0])
+        region = layout.region("r2")
+        views.append(
+            make_slab_view(
+                backing,
+                storage_offset=owner.slot * layout.slot_backing_size + region.offset,
+                num_blocks=3,
+                item_shape=owner.spec.shapes[1],
+                dtype=owner.spec.dtypes[1],
+            )
+        )
+    assert len({view.data_ptr() for view in views}) == 1
+    for block_id, view in enumerate(views):
+        view[block_id].fill_(block_id + 1)
+    for view in views:
+        for block_id in range(3):
+            torch.testing.assert_close(view[block_id], torch.full_like(view[block_id], block_id + 1))
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        merged,
+        10**9,
+    )
+    assert config is not None
+    gdn_names = {name for group in gdn_merged for name in group.layer_names}
+    descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
+    assert [len(tensor.layers) for tensor in descriptors] == [13, 13, 10]
+    for tensor in descriptors:
+        assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
+
+    runner = _cpu_runner(config)
+    raw = runner._allocate_kv_cache_tensors(config)
+    caches = runner._reshape_kv_cache_tensors(config, raw)
+    names = [group.layer_names[0] for group in gdn_merged]
+    assert all(raw[name] is raw[names[0]] for name in names)
+    assert raw[names[0]].numel() == 13 * layout.slot_backing_size
+    states = [caches[name][1] for name in names]
+    assert all(state.is_contiguous() for state in states)
+    for block_id, state in enumerate(states):
+        state[block_id].fill_(block_id + 1)
+    for state in states:
+        for block_id in range(3):
+            torch.testing.assert_close(state[block_id], torch.full_like(state[block_id], block_id + 1))
+
+
+def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
+    spec = next(spec for name, spec in _ungrouped_qwen_specs().items() if name.endswith("linear_attn"))
+    groups = [
+        KVCacheGroupSpec(["target.0"], spec),
+        KVCacheGroupSpec(["draft.0"], spec, is_eagle_group=True),
+        KVCacheGroupSpec(["checkpoint.0"], replace(spec, num_prefill_checkpoint_blocks=1)),
+        KVCacheGroupSpec(["target.1"], spec),
+    ]
+    packed = _merge_mamba_state_groups(groups, 13)
+    assert [group.layer_names for group in packed] == [
+        ["target.0", "target.1"],
+        ["draft.0"],
+        ["checkpoint.0"],
+    ]
+    assert [group.is_eagle_group for group in packed] == [False, True, False]
+    assert _merge_mamba_state_groups(packed, 13) == packed
+
+
+@pytest.mark.parametrize("cache_mode", ["align", "all"])
+def test_qsa_block_alignment_uses_kv_pair_without_convolution_bytes(monkeypatch, cache_mode):
+    # 192 KiB SSM / (128 K + 128 V BF16 elements per token) = 384 tokens.
+    # Convolution has its own slab and must not force a second 384-token chunk.
+    model_class = SimpleNamespace(
+        get_mamba_specs_from_config=lambda config: [
+            MambaSpec(block_size=128, shapes=((256, 4), (6, 128, 128)), dtypes=(torch.bfloat16, torch.bfloat16))
+        ]
+    )
+    monkeypatch.setattr(ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_class, "test"))
+    cache = SimpleNamespace(
+        cache_dtype="auto",
+        block_size=128,
+        mamba_cache_mode=cache_mode,
+        mamba_block_size=None,
+        user_specified_mamba_block_size=False,
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            use_mla=False,
+            hf_text_config=SimpleNamespace(indexer_compress_ratio=4),
+            architecture="Qwen4ExpForConditionalGeneration",
+            dtype=torch.bfloat16,
+            get_num_kv_heads=lambda config: 1,
+            get_head_size=lambda: 128,
+            get_mamba_chunk_size=lambda: 64,
+        ),
+        cache_config=cache,
+        parallel_config=SimpleNamespace(tensor_parallel_size=8),
+    )
+    NPUPlatform._align_hybrid_block_size(config, None)
+    assert cache.block_size == 384
+    assert cache.mamba_block_size == 384
+
+
+def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots() -> None:
+    groups = _groups()
+    groups[4] = KVCacheGroupSpec(
+        ["model.ple"], replace(groups[4].kv_cache_spec, shapes=((20001,),), page_size_padded=65536)
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    runner = _cpu_runner(config)
+    raw = runner._allocate_kv_cache_tensors(config)
+    caches = runner._reshape_kv_cache_tensors(config, raw)
+    layout = runner._six_region_kv_cache_layout
+    assert layout.region("r2").page_size_bytes == 32768
+    ple = caches["model.ple"][0]
+    assert ple.is_contiguous()
+    assert ple.shape == (3, 20001)
+    assert raw["model.ple"].numel() == 3 * 20001 * 2
+    allocations = {tensor.data_ptr(): tensor.numel() for tensor in raw.values()}
+    assert sum(allocations.values()) == 3 * get_qwen4_exp_pool_bytes_per_block(groups)
+    keys = caches["model.layers.11.self_attn.attn"][0]
+    keys.fill_(7)
+    ids = torch.tensor([0, 2])
+    selected = ple.index_select(0, ids)
+    selected.fill_(3)
+    ple.index_copy_(0, ids, selected)
+    assert torch.all(keys == 7)
+    assert torch.all(ple[ids] == 3)
+    assert torch.count_nonzero(ple[1]) == 0
+
+
+def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
+    specs = _ungrouped_qwen_specs()
+    original_groups = [KVCacheGroupSpec([name], spec) for name, spec in specs.items()]
+    calls = []
+
+    def upstream(config, input_specs):
+        calls.append((config, input_specs))
+        return original_groups
+
+    config = object()
+    groups = get_qwen4_exp_kv_cache_groups(config, specs, upstream)
+    assert calls == [(config, specs)]
+    assert groups is not None
+    assert len(groups) == 6
+    assert sorted(name for group in groups for name in group.layer_names) == sorted(specs)
+    layout = build_qwen4_kv_cache_layout(groups, num_blocks=7)
+    assert layout is not None
+    assert layout.slot_count == 13
+    assert get_qwen4_exp_pool_bytes_per_block(groups) * 7 == (
+        layout.slot_count * layout.slot_backing_size
+        + 7 * next(owner.spec.real_page_size_bytes for owner in layout.owners if owner.role == PLE)
+    )
