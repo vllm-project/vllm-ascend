@@ -6096,7 +6096,7 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec,
                             FullAttentionSpec,
                         )
-                        region = six_region_layout.region("r2")
+                        region = six_region_layout.region("r0")
                         spec = current_kv_cache_spec
                         k_bytes = spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
                         kv_caches[layer_name] = tuple(

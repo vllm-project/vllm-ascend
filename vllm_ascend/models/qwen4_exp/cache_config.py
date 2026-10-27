@@ -93,7 +93,7 @@ class Qwen4KVCacheLayout:
 
     def region_name_for_owner(self, layer_name: str) -> str:
         return {
-            QSA_MAIN: "r2",
+            QSA_MAIN: "r0",
             QSA_RAW: "r4",
             QSA_COMPRESSED: "r5",
             GDN: "r1",
@@ -231,6 +231,7 @@ def build_qwen4_kv_cache_layout(
     alignment = math.lcm(16, *dtype_sizes)
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
     max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
+    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
     for layer_name, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
         kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
@@ -266,10 +267,8 @@ def build_qwen4_kv_cache_layout(
     main_pages = [
         _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
     ]
-    # r3 used to hold a separate V slab. V now occupies the tail of each
-    # r2 physical page, so GDN state aliases the complete K+V footprint.
-    # GBSA exposes K and V through 128-token views, including padding when
-    # a larger state determines the r2 stride. Each K/V subpage must align.
+    # Independent scheduler groups own disjoint block IDs. QSA uses the
+    # whole page; GDN interprets the same bytes as adjacent conv and SSM.
     subpage_alignment = math.lcm(
         *(
             128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
@@ -277,15 +276,11 @@ def build_qwen4_kv_cache_layout(
             for size in (spec.head_size, spec.head_size_v)
         )
     )
-    r2_bytes = max(max_ssm_bytes, *(k + v for k, v in main_pages))
-    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
-    state_bytes = round_up(r2_bytes, subpage_alignment)
-    # Conv and SSM share each physical block. QSA K/V aliases only its SSM
-    # component; whole-page stride padding preserves GBSA's virtual page map.
-    state_stride = round_up(conv_bytes + state_bytes, subpage_alignment)
+    state_stride = round_up(max(conv_bytes + max_ssm_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
     regions = [
+        SlabRegion("r0", 0, state_stride, num_blocks),
         SlabRegion("r1", 0, conv_bytes, num_blocks, state_stride),
-        SlabRegion("r2", conv_bytes, state_bytes, num_blocks, state_stride),
+        SlabRegion("r2", conv_bytes, max_ssm_bytes, num_blocks, state_stride),
     ]
     cursor = state_stride * num_blocks
     for name, page_size in {
@@ -324,7 +319,7 @@ def build_qwen4_kv_cache_layout(
     )
 
     assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
-    assert layout.region("r2").offset + state_bytes <= state_stride
+    assert layout.region("r2").offset + max_ssm_bytes <= state_stride
     assert layout.region("r4").offset >= state_stride * num_blocks
     assert layout.region("r5").offset >= layout.region("r4").end
     for region in layout.regions:
@@ -338,7 +333,7 @@ def build_qwen4_kv_cache_layout(
         assert all(region.offset % get_dtype_size(dtype) == 0 for dtype in dtypes)
     for _, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
-        assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r2").page_size_bytes
+        assert sum(_qsa_main_page_bytes(spec)) <= layout.region("r0").page_size_bytes
     return layout
 
 
@@ -647,9 +642,16 @@ def get_qwen4_exp_kv_cache_config(
     )
     assert layout is not None
     backing_size = layout.slot_count * layout.slot_backing_size
+    logger.info_once(
+        "Qwen4 cache pool: %d blocks, shared page %d bytes, pool block %d bytes, available %d bytes",
+        num_blocks,
+        layout.region("r0").page_size_bytes,
+        bytes_per_block,
+        available_memory,
+    )
 
     region_by_role = {
-        QSA_MAIN: "r2",
+        QSA_MAIN: "r0",
         QSA_RAW: "r4",
         QSA_COMPRESSED: "r5",
         GDN: "r1",

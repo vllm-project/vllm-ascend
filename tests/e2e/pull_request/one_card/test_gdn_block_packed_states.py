@@ -18,7 +18,7 @@ def states():
     device = torch.device("npu:0")
     conv_bytes = 6 * 2560 * 2
     ssm_bytes = 12 * 128 * 128 * 4
-    stride = 832 * 1024
+    stride = 896 * 1024
     backing = torch.full((10 * stride,), 90, dtype=torch.int8, device=device)
     conv = make_slab_view(
         backing, dtype=torch.bfloat16, num_blocks=10, item_shape=(6, 2560), storage_offset=0, block_stride=stride

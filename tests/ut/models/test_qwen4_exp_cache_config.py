@@ -241,7 +241,7 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
             dtype=torch.bfloat16,
             num_blocks=num_blocks,
             item_shape=(128, 1, 64),
-            storage_offset=layout.region("r2").offset + offset,
+            storage_offset=layout.region("r0").offset + offset,
             block_stride=layout.region("r2").block_stride,
         )
         for offset in (0, 16384)
@@ -252,10 +252,13 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
     keys[1].fill_(7)
     values[1].fill_(11)
     ssm = views["gdn_ssm"]
-    assert torch.all(ssm[1].flatten()[:8192] == 7)
-    assert torch.all(ssm[1].flatten()[8192:] == 11)
+    assert torch.all(views["gdn_conv"][1] == 7)
+    assert torch.all(ssm[1].flatten()[:7936] == 7)
+    assert torch.all(ssm[1].flatten()[7936:16128] == 11)
+    assert torch.count_nonzero(ssm[1].flatten()[16128:]) == 0
     assert torch.count_nonzero(ssm[[0, 2]]) == 0
     ssm.zero_()
+    views["gdn_conv"].zero_()
 
     views["gdn_ssm"][:, 0, 0] = torch.tensor(
         [1, 2, 3],
@@ -300,7 +303,7 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
     expected_backing_size = layout.slot_count * layout.slot_backing_size
     assert all(tensor.size == expected_backing_size for tensor in role_tensors)
     assert [tensor.offset for tensor in role_tensors] == [
-        layout.region(name).offset for name in ("r2", "r4", "r5", "r1")
+        layout.region(name).offset for name in ("r0", "r4", "r5", "r1")
     ]
     assert all(tensor.layer_stride == layout.slot_backing_size for tensor in role_tensors)
     assert ple_tensor.layers == ["model.ple"]
@@ -491,11 +494,12 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert k.shape == v.shape == (3, 128, 1, 64)
     assert k.stride() == v.stride() == (24576, 64, 64, 1)
     assert v.data_ptr() - k.data_ptr() == 16384
-    assert k.data_ptr() == ssm.data_ptr()
+    assert k.data_ptr() == caches["model.layers.0.linear_attn"][0].data_ptr()
+    assert ssm.data_ptr() - k.data_ptr() == 512
     k[2].fill_(5)
     v[2].fill_(9)
-    torch.testing.assert_close(ssm[2].flatten()[:8192], torch.full((8192,), 5, dtype=ssm.dtype))
-    torch.testing.assert_close(ssm[2].flatten()[8192:], torch.full((8192,), 9, dtype=ssm.dtype))
+    torch.testing.assert_close(ssm[2].flatten()[:7936], torch.full((7936,), 5, dtype=ssm.dtype))
+    torch.testing.assert_close(ssm[2].flatten()[7936:16128], torch.full((8192,), 9, dtype=ssm.dtype))
     assert torch.count_nonzero(ssm[:2]) == 0
 
     raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
@@ -736,12 +740,11 @@ def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
 
 
 @pytest.mark.parametrize("cache_mode", ["align", "all"])
-def test_qsa_block_alignment_uses_kv_pair_without_convolution_bytes(monkeypatch, cache_mode):
-    # 192 KiB SSM / (128 K + 128 V BF16 elements per token) = 384 tokens.
-    # Convolution has its own slab and must not force a second 384-token chunk.
+def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_mode):
+    # Actual TP4 GDN: 30KiB conv + 768KiB SSM, rounded to 896 token pairs.
     model_class = SimpleNamespace(
         get_mamba_specs_from_config=lambda config: [
-            MambaSpec(block_size=128, shapes=((256, 4), (6, 128, 128)), dtypes=(torch.bfloat16, torch.bfloat16))
+            MambaSpec(block_size=128, shapes=((6, 2560), (12, 128, 128)), dtypes=(torch.bfloat16, torch.float32))
         ]
     )
     monkeypatch.setattr(ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_class, "test"))
@@ -751,6 +754,7 @@ def test_qsa_block_alignment_uses_kv_pair_without_convolution_bytes(monkeypatch,
         mamba_cache_mode=cache_mode,
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
+        mamba_page_size_padded=None,
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -758,16 +762,19 @@ def test_qsa_block_alignment_uses_kv_pair_without_convolution_bytes(monkeypatch,
             hf_text_config=SimpleNamespace(indexer_compress_ratio=4),
             architecture="Qwen4ExpForConditionalGeneration",
             dtype=torch.bfloat16,
-            get_num_kv_heads=lambda config: 1,
+            get_num_kv_heads=lambda config: 2,
             get_head_size=lambda: 128,
             get_mamba_chunk_size=lambda: 64,
         ),
         cache_config=cache,
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
     )
-    NPUPlatform._align_hybrid_block_size(config, None)
-    assert cache.block_size == 384
-    assert cache.mamba_block_size == 384
+    from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
+    NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
+    assert cache.block_size == 896
+    assert cache.mamba_block_size == 896
+    assert cache.mamba_page_size_padded == 896 * 1024
 
 
 def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots() -> None:
@@ -953,3 +960,62 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         assert selected.data_ptr() == expected.data_ptr()
         selected.fill_(token_row + 1)
         torch.testing.assert_close(expected, torch.full_like(expected, token_row + 1))
+
+
+def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():
+    groups = _groups()
+    groups[0] = KVCacheGroupSpec(
+        groups[0].layer_names,
+        replace(groups[0].kv_cache_spec, block_size=896, num_kv_heads=2, head_size=128, head_size_v=128),
+    )
+    groups[2] = KVCacheGroupSpec(groups[2].layer_names, replace(groups[2].kv_cache_spec, block_size=896))
+    groups[3] = KVCacheGroupSpec(
+        groups[3].layer_names,
+        replace(
+            groups[3].kv_cache_spec,
+            block_size=896,
+            shapes=((6, 2560), (12, 128, 128)),
+            dtypes=(torch.bfloat16, torch.float32),
+        ),
+    )
+    layout = build_qwen4_kv_cache_layout(groups, 3)
+    whole, conv, ssm = (layout.region(name) for name in ("r0", "r1", "r2"))
+    assert whole.offset == conv.offset == 0
+    assert ssm.offset == 30 * 1024
+    assert whole.page_size_bytes == whole.block_stride == conv.block_stride == ssm.block_stride == 896 * 1024
+    assert ssm.page_size_bytes == 768 * 1024
+    assert layout.region("r4").offset == 3 * whole.block_stride
+    backing = torch.zeros(layout.slot_backing_size, dtype=torch.int8)
+    qsa = make_slab_view(
+        backing,
+        dtype=torch.bfloat16,
+        num_blocks=3,
+        item_shape=(896, 2, 256),
+        storage_offset=0,
+        block_stride=whole.block_stride,
+    )
+    gdn_conv = make_slab_view(
+        backing,
+        dtype=torch.bfloat16,
+        num_blocks=3,
+        item_shape=(6, 2560),
+        storage_offset=conv.offset,
+        block_stride=conv.block_stride,
+    )
+    gdn_ssm = make_slab_view(
+        backing,
+        dtype=torch.float32,
+        num_blocks=3,
+        item_shape=(12, 128, 128),
+        storage_offset=ssm.offset,
+        block_stride=ssm.block_stride,
+    )
+    # Different groups have disjoint live pool IDs; after recycling a QSA
+    # page, GDN initialization must overwrite both components of that page.
+    qsa[1].fill_(7)
+    assert torch.all(gdn_conv[1] == 7)
+    assert torch.count_nonzero(gdn_ssm[1]) == gdn_ssm[1].numel()
+    gdn_conv[1].zero_()
+    gdn_ssm[1].zero_()
+    assert torch.count_nonzero(qsa[1].flatten()[: 798 * 1024 // 2]) == 0
+    assert torch.count_nonzero(qsa[[0, 2]]) == 0

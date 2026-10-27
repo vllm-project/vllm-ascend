@@ -72,6 +72,12 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
+    @classmethod
+    def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
+        # vLLM uses these specs to align attention pages. PLE has a private
+        # dense bank; only GDN's complete conv+SSM state shares QSA pages.
+        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
+
     @staticmethod
     def get_model_state_cls():
         from .model_state import AscendQwen4ExpModelState
@@ -81,6 +87,10 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
 
 class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    @classmethod
+    def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
+        return AscendQwen4ExpForCausalLM.get_mamba_specs_from_config(vllm_config)
 
     @staticmethod
     def get_model_state_cls():

@@ -468,55 +468,6 @@ class NPUPlatform(Platform):
             HybridAttentionMambaModelConfig.verify_and_update_config(vllm_config)
             return
 
-        model_config = vllm_config.model_config
-        text_config = getattr(model_config, "hf_text_config", None)
-        if not model_config.use_mla and getattr(text_config, "indexer_compress_ratio", None) is not None:
-            from math import prod
-
-            from vllm.model_executor.models import ModelRegistry
-            from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-
-            cache_config = vllm_config.cache_config
-            model_cls, _ = ModelRegistry.resolve_model_cls(model_config.architecture, model_config=model_config)
-            if hasattr(model_cls, "get_mamba_specs_from_config"):
-                specs = model_cls.get_mamba_specs_from_config(vllm_config)
-                ssm_bytes = max(
-                    prod(spec.shapes[1]) * get_dtype_size(spec.dtypes[1]) for spec in specs if len(spec.shapes) == 2
-                )
-            else:
-                shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
-                dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
-                ssm_bytes = prod(shapes[1]) * get_dtype_size(dtypes[1])
-            kv_dtype = (
-                model_config.dtype
-                if cache_config.cache_dtype == "auto"
-                else STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-            )
-            # QSA stores K and V together in the page shared with one SSM state.
-            kv_token_bytes = (
-                model_config.get_num_kv_heads(vllm_config.parallel_config)
-                * (2 * model_config.get_head_size())
-                * get_dtype_size(kv_dtype)
-            )
-            alignment = cls._get_indexer_block_alignment(vllm_config)
-            if cache_config.mamba_cache_mode == "all":
-                chunk_size = (
-                    cache_config.mamba_block_size
-                    if cache_config.user_specified_mamba_block_size
-                    else model_config.get_mamba_chunk_size()
-                )
-                alignment = math.lcm(alignment, chunk_size)
-            min_tokens = (ssm_bytes + kv_token_bytes - 1) // kv_token_bytes
-            cache_config.block_size = max(
-                cache_config.block_size, ((min_tokens + alignment - 1) // alignment) * alignment
-            )
-            if cache_config.mamba_cache_mode in ("align", "all"):
-                cache_config.mamba_block_size = cache_config.block_size
-            # The QSA planner gives convolution state its own slab. The generic
-            # aligner includes convolution bytes in the Mamba page and would
-            # unnecessarily grow an exact K+V/SSM fit by another block multiple.
-            return
-
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
