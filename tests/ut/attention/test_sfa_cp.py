@@ -726,6 +726,7 @@ def test_sfa_pcp_gathers_nope_kv_without_rope() -> None:
     attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1, num_input_tokens=2)
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     slots = torch.tensor([0, 1, 0, 5], dtype=torch.int64)
+    attn_metadata.pcp_slot_mapping = slots
     gathered_prefill_kv = torch.tensor([[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]])
     gathered_kv = torch.cat((kv_no_split[:1], gathered_prefill_kv))
     gathered_slots = torch.tensor([0, 1, 5])
@@ -773,6 +774,7 @@ def test_sfa_pcp_gathers_nope_kv_with_padded_rank_slots(packed_cache: bool, num_
     # Slot mapping keeps eight positions per PCP rank, while NoPE KV has five.
     slots = torch.tensor([0, 1, 2, 3, 4, -1, -1, -1, 8, 9, 10, 11, 12, -1, -1, -1])
     slots[8 : 8 + num_decode_tokens] = slots[:num_decode_tokens]
+    attn_metadata.pcp_slot_mapping = slots
     kv_cache = (torch.empty(1),)
 
     def all_gather(tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
@@ -842,6 +844,7 @@ def test_sfa_pcp_gathers_nope_kv_when_local_rank_has_no_prefill() -> None:
         pcp_has_global_prefill=True,
     )
     slots = torch.tensor([-1] * 8 + [8, 9, 10, -1, -1, -1, -1, -1])
+    metadata.pcp_slot_mapping = slots
     group = SimpleNamespace(
         world_size=2,
         all_gather=lambda tensor, dim=0: torch.cat((tensor, torch.arange(10, 18).view(8, 1).float()), dim=dim),
