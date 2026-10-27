@@ -120,6 +120,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.enable_sparse_li_c8 = False
         indexer.enable_sparse_li_c4 = False
         indexer.use_torch_npu_lightning_indexer = False
+        indexer._use_fused_cache_store = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer.use_pcp = False
