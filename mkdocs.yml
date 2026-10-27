@@ -178,7 +178,7 @@ extra:
   release_pytorch_version: "2.10.0"
   release_torch_npu_version: "2.10.0.post7"
   release_nnal_version: "9.2.0"
-  release_triton_ascend_version: "3.6.0"    
+  release_triton_ascend_version: "3.6.0"
   # ================== Current main development stack ==========================
   # The compatibility policy and CPU-only build instructions use these values.
   # Update this group when repository requirements or the verified main build image changes.
