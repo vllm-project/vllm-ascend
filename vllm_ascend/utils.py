@@ -971,7 +971,10 @@ def register_ascend_fla_customop():
 
 
 def lmhead_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
+    # A size of 1 shards nothing, so it is "disabled" — same convention as
+    # oproj (and vLLM's ParallelConfig size semantics, where tp_size=1 means
+    # no sharding). 0 and 1 both disable the knob.
+    return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 1
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
@@ -998,7 +1001,8 @@ def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch
 
 
 def embedding_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 0
+    # See lmhead_tp_enable(): 0 and 1 both mean disabled.
+    return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 1
 
 
 def oproj_tp_enable() -> bool:
@@ -1006,7 +1010,8 @@ def oproj_tp_enable() -> bool:
 
 
 def mlp_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
+    # See lmhead_tp_enable(): 0 and 1 both mean disabled.
+    return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
 
 def enable_sp(vllm_config=None) -> bool:

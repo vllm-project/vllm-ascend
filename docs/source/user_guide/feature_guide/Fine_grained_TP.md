@@ -215,12 +215,14 @@ After the instance starts, check which knobs passed startup validation:
 
 All knobs live under `finegrained_tp_config` inside `--additional-config`. The default `0` disables a knob.
 
+Every knob follows the same convention: **`0` and `1` both disable it**, because a size of `1` shards nothing. Only values greater than `1` enable sharding.
+
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
-| `oproj_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `mlp_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `lmhead_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the LM head (shards the vocabulary dimension). |
-| `embedding_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `oproj_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` greater than 1 | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `mlp_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` greater than 1 | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `lmhead_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` greater than 1 | TP size of the LM head (shards the vocabulary dimension). |
+| `embedding_tensor_parallel_size` | int | 0 | No | 0 or 1 (disabled), or a divisor of `data_parallel_size` greater than 1 | TP size of the token embedding table. |
 
 ## Experimental Results
 

@@ -202,13 +202,15 @@ def init_ascend_model_parallel(
 
     global _OTP, _LMTP, _EMBED_TP, _MLP_TP
 
+    # A size of 1 shards nothing, so it is treated as disabled everywhere —
+    # matching oproj and vLLM's ParallelConfig size semantics.
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
-    if lmhead_tp_size > 0:
+    if lmhead_tp_size > 1:
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
-    if embedding_tp_size > 0:
+    if embedding_tp_size > 1:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
-    if mlp_tp_size > 0:
+    if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
 

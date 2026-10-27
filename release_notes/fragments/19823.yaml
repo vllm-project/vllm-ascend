@@ -1,0 +1,11 @@
+pr: 19923
+entries:
+  - category: config
+    text: >-
+      Fine-grained TP knobs now treat a size of 1 as disabled, matching
+      `oproj_tensor_parallel_size` and vLLM's `ParallelConfig` semantics.
+      Previously `lmhead_tensor_parallel_size`,
+      `embedding_tensor_parallel_size` and `mlp_tensor_parallel_size`
+      activated the sharded path even though a size of 1 shards nothing,
+      which could create single-rank TP groups and conflict with
+      batch-sharded sampling.

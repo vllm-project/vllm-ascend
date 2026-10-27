@@ -263,3 +263,63 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
         assert upstream.get_engram_dp_group() is not group
     parallel_state.destroy_ascend_model_parallel()
     upstream.destroy_model_parallel()
+
+
+@pytest.mark.parametrize(
+    "knob, group_name, getter",
+    [
+        ("oproj_tensor_parallel_size", "otp", "get_otp_group"),
+        ("lmhead_tensor_parallel_size", "lmheadtp", "get_lmhead_tp_group"),
+        ("embedding_tensor_parallel_size", "emtp", "get_embed_tp_group"),
+        ("mlp_tensor_parallel_size", "mlptp", "get_mlp_tp_group"),
+    ],
+)
+@pytest.mark.parametrize("size, creates_group", [(0, False), (1, False), (2, True)])
+def test_finegrained_tp_size_one_creates_no_group(monkeypatch, knob, group_name, getter, size, creates_group):
+    """A size of 1 shards nothing, so no fine-grained TP group is created for it."""
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    sizes = {
+        "oproj_tensor_parallel_size": 0,
+        "lmhead_tensor_parallel_size": 0,
+        "embedding_tensor_parallel_size": 0,
+        "mlp_tensor_parallel_size": 0,
+    }
+    sizes[knob] = size
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(**sizes),
+    )
+    calls = {}
+
+    def init_group(ranks, local_rank, backend, *, group_name):
+        calls[group_name] = ranks
+        return MagicMock()
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+            prefill_context_parallel_size=1,
+        )
+    )
+    if creates_group:
+        assert group_name in calls
+        assert getattr(parallel_state, getter)() is not None
+    else:
+        assert group_name not in calls
+        with pytest.raises(AssertionError):
+            getattr(parallel_state, getter)()
+    parallel_state.destroy_ascend_model_parallel()

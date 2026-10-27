@@ -173,13 +173,91 @@ class TestAscendConfig(TestBase):
                     },
                     "scheduler_config": {"recompute_scheduler_enable": False},
                 }
-                if otp_size > 1 or mlp_size > 0:
+                if otp_size > 1 or mlp_size > 1:
                     with self.assertRaisesRegex((AssertionError, ValueError), "recompute_scheduler_enable=true"):
                         init_ascend_config(config)
                 else:
                     result = init_ascend_config(config)
                     self.assertFalse(result.scheduler_config.recompute_scheduler_enable)
                     self.assertEqual(result.finegrained_tp_config.oproj_tensor_parallel_size, otp_size)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_finegrained_tp_size_one_counts_as_disabled(self, mock_fix_incompatible_config):
+        """0 and 1 both disable a knob, for every knob, at config load time."""
+        for knob in (
+            "oproj_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+        ):
+            for size in (0, 1):
+                with self.subTest(knob=knob, size=size):
+                    clear_ascend_config()
+                    config = VllmConfig()
+                    config.model_config.is_moe = True
+                    config.additional_config = {
+                        "finegrained_tp_config": {knob: size},
+                        "scheduler_config": {"recompute_scheduler_enable": False},
+                    }
+                    # A size of 1 shards nothing, so the recompute scheduler is
+                    # not required and the config must load.
+                    result = init_ascend_config(config)
+                    self.assertFalse(result.scheduler_config.recompute_scheduler_enable)
+                    self.assertEqual(getattr(result.finegrained_tp_config, knob), size)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_lmhead_tp_size_one_does_not_conflict_with_batch_sharded_sampling(self, mock_fix_incompatible_config):
+        """lmhead TP of size 1 is disabled, so it cannot clash with batch-sharded sampling."""
+        clear_ascend_config()
+        config = VllmConfig()
+        config.model_config.is_moe = True
+        config.parallel_config.enable_batch_sharded_sampling = True
+        config.additional_config = {
+            "finegrained_tp_config": {"lmhead_tensor_parallel_size": 1},
+        }
+        result = init_ascend_config(config)
+        self.assertEqual(result.finegrained_tp_config.lmhead_tensor_parallel_size, 1)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_finegrained_tp_size_one_skips_the_moe_only_check(self, mock_fix_incompatible_config):
+        """A size of 1 is disabled, so it must not trip the MOE-only precondition.
+
+        The MOE-only check used to test ``size > 0``, so a dense model with a
+        size of 1 was rejected even though nothing was sharded.
+        """
+        for knob in (
+            "oproj_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+        ):
+            with self.subTest(knob=knob):
+                clear_ascend_config()
+                config = VllmConfig()
+                config.model_config.is_moe = False
+                config.additional_config = {
+                    "finegrained_tp_config": {knob: 1},
+                    "scheduler_config": {"recompute_scheduler_enable": False},
+                }
+                # A dense model is fine as long as the knob stays disabled.
+                result = init_ascend_config(config)
+                self.assertEqual(getattr(result.finegrained_tp_config, knob), 1)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_finegrained_tp_size_above_one_still_requires_a_moe_model(self, mock_fix_incompatible_config):
+        """The MOE-only precondition must still fire for a size that shards."""
+        clear_ascend_config()
+        config = VllmConfig()
+        config.model_config.is_moe = False
+        config.additional_config = {
+            "finegrained_tp_config": {"lmhead_tensor_parallel_size": 2},
+        }
+        with self.assertRaisesRegex(AssertionError, "only for MOE models"):
+            init_ascend_config(config)
 
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
         config = self._make_sparse_li_c8_config(
