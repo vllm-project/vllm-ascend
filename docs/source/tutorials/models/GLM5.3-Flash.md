@@ -10,7 +10,7 @@
 
 [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) is the first natively multimodal model in the GLM-5 series. Built on a hybrid architecture that combines sparse and linear attention for the first time in the GLM series, it adopts Manifold-Constrained Hyper-Connections (mHC) and is trained on a 30T-token multimodal pre-training corpus. With 320B total parameters and only 18B active parameters, it outperforms GLM-5.2 across benchmarks and real-world workloads at one-tenth the price, while approaching Claude Opus 4.8 on coding and agentic benchmarks. GLM-5.3-Flash also supports controlling the thinking budget through the `reasoning_effort` parameter (`low`, `high`, `max`).
 
-This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, 1P1D Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
+This document shows the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, Prefill-Decode (PD) disaggregated deployment, multi-node deployment, and accuracy and performance evaluation.
 
 ## 2 Supported Features
 
@@ -19,7 +19,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 GLM-5.3-Flash model currently supports only model runner V1 on Ascend, so
-all A3 series scripts set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
+all deployment scripts on this page set `VLLM_USE_V2_MODEL_RUNNER=0` explicitly.
 
 ## 3 Prerequisites
 
@@ -29,11 +29,13 @@ Download the checkpoint from ModelScope for the hardware shown below. A3 and 950
 
 | Checkpoint | Hardware | Deployment | Download | Notes |
 | --- | --- | --- | --- | --- |
-| `GLM-5.3-Flash-w8a8-mxfp8` | 950DT products (96GB × 8 per node) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache; no separate C8 checkpoint is required. |
-| `GLM-5.3-Flash-w8a8` | A3 series (16 logical devices × 64GB per node) | 1 node for single-node deployment; 2 nodes for 1P1D PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
+| `GLM-5.3-Flash-w8a8-mxfp8` | 950DT products (96GB × 8 per node) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache; no separate C8 checkpoint is required. |
+| `GLM-5.3-Flash-w8a8` | A3 series (16 logical devices × 64GB per node) | 1 node for single-node deployment; 2 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype int8` in the serving command to enable INT8 KV cache; no separate C8 checkpoint is required. |
 | `GLM-5.3-Flash-w8a8` | A2 series (64GB × 8 per node) | 2 nodes for colocated deployment; 4 nodes for PD | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | / |
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
+
+The checkpoints linked above are already quantized and can be served directly. For self-quantization, follow the installation and command examples in the [msModelSlim quantization guide](https://www.hiascend.com/document/detail/en/mindstudio/2610/TITools/msModelSlim/docs/en/user_guide/feature_guide/quick_quantization_v1/usage.md) and select the configuration for the exact model and target hardware from the [model recipes](https://gitcode.com/Ascend/msmodelslim/tree/master/lab_practice). Do not reuse a different model's YAML file.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -213,6 +215,8 @@ are not interchangeable.
 | `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
 | `--reasoning-parser` | Separates reasoning from the final answer. Use `glm47` for all examples on this page. |
+
+`--safetensors-load-strategy prefetch` reads checkpoint files into the operating system page cache before workers load them. It can help with network or high-latency storage and needs sufficient host memory; it does not preload weights into NPU memory. See [vLLM weight-loading options](https://docs.vllm.ai/en/latest/configuration/engine_args/#--safetensors-load-strategy).
 
 ### 5.1 Single-Node Online Deployment
 
@@ -428,7 +432,11 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
-### 5.3 1P1D PD Disaggregated Deployment
+After starting all nodes of the selected deployment, open another terminal and run `curl --fail http://<API_HOST>:<API_PORT>/health` against every API endpoint. For single-node deployment use that node's API; for colocated A2 use the API-serving master, since the headless node has no API. Wait for successful responses before sending the [functional verification requests](#6-functional-verification). Check the launch terminals on all nodes if initialization fails.
+
+### 5.3 PD Disaggregated Deployment {: #53-1p1d-pd-disaggregated-deployment }
+
+Before starting any role script, verify [multi-node communication](../../getting_started/installation.md#installation-multi-node-interconnect), select the matching host IP and interface on every node, and allow the DP RPC, API, HCCL socket, Mooncake handshake/control, and transfer-engine ports through the firewall. Use the port settings in the selected hardware tab; allowing only the proxy port is insufficient. Physical node count and the number of DP engines are different: follow each tab's topology and endpoint mapping.
 
 The 950DT products, A3 series and A2 series deployments use the same `launch_online_dp.py` script to
 start one vLLM process per local DP rank. Save it on every Prefill and Decode
@@ -725,6 +733,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     device RoCE ports down. They explicitly select `hccs:device` for device
     communication; the socket interface variables still select the host
     network. Adjust the resource configuration for other network topologies.
+
+    Start Decode first, then Prefill. In another terminal, check `http://<DECODE_NODE_IP>:9900/health` through port `9903` and `http://<PREFILL_NODE_IP>:9081/health` through port `9082` with `curl --fail`. Start the proxy only after all six endpoints respond successfully; inspect each launcher terminal if a rank fails to initialize.
 
     ##### A3 series Serving Scripts and Startup Commands
 
@@ -1357,6 +1367,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     configuration uses `device_sdma`, which requires LingQu Computing Network
     1.5 or later. Also check the HDK and CANN requirements in the guide's
     [HDK and CANN Version Compatibility Reference](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#hdk-and-cann-version-compatibility-reference).
+
+    LingQu Computing Network is a host-side platform prerequisite for `device_sdma`, not the version of the Memcache Python package. Before starting the containers, have the platform administrator check the installed LingQu release against the server's vendor installation records and confirm version 1.5 or later together with the HDK/CANN compatibility matrix linked above. Installing or upgrading `memcache-hybrid` alone does not establish this prerequisite.
+
     **When starting the A3 series containers on both Prefill and Decode nodes, you must include the following read-only mount in the Docker command from Section 4:**
 
     ```shell
@@ -1549,12 +1562,16 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     4. Start the A3 series proxy from Section 5.3. Send inference requests to
        `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
 
+    <a id="glm53-flash-pool-reuse"></a>
+
     ##### Verify KV Cache Reuse
 
     Warm up the pool through the proxy with a prompt longer than one cache
     block, then repeat requests with the same prefix. Check Prefill output for
     successful pool saves, lookups, loads, and cache hits, and check Decode
     output for successful P→D transfers.
+
+    Capture the Prefill launcher's standard output and standard error when starting the service. Compare `vllm:ascend_store_load_get_keys_total` at each Prefill API's `/metrics` endpoint before and after repeating the prefix on the other Prefill rank: an increase records pool GET keys, unlike a local prefix-cache hit alone. Also verify that requests complete successfully; a GET counter alone does not prove a successful transfer or an accuracy result.
 
     The proxy distributes requests across two Prefill engines. A repeated
     request can also hit an engine's local prefix cache; confirm pool load/hit
@@ -1752,12 +1769,12 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Verify KV Cache Reuse
 
-    Follow the KV Cache reuse verification steps in the A3 series subsection. The proxy
+    Follow the [A3 KV Cache reuse verification steps](#glm53-flash-pool-reuse). The proxy
     sends requests to the P0 API while the DP group uses both Prefill ranks. A
     repeated request can hit a local prefix cache, so confirm pool load/hit
     information on the other Prefill rank to verify shared pool reuse.
 
-## 6 Functional Verification
+## 6 Functional Verification {: #6-functional-verification }
 
 Once the selected deployment is ready, query its service endpoint. For the
 950DT products PD deployment, use the separate proxy host and port `8000`.
