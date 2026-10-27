@@ -66,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk imp
     BulkWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk import worker as bulk_worker_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.completion import (
     LoadCompletion,
     StoreCompletion,
@@ -429,7 +428,6 @@ def test_bulk_async_load_mixed_results_are_consumed_independently(monkeypatch, c
 
     monkeypatch.setattr(worker, "_execute_bulk_load", load)
     monkeypatch.setattr(worker, "_accept_load_completion", accept)
-    monkeypatch.setattr(bulk_worker_module.logger, "propagate", True)
     try:
         for index, request_id in enumerate(request_ids):
             command = LoadCommand(request_id, 0, 4, ((7 + index,),), (request_id.encode(),))

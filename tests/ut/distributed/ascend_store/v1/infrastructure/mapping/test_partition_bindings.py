@@ -37,6 +37,7 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
         group_num_layers={0: 2},
         group_block_len={0: [16, 4, 16, 4]},
         use_block_key_layerwise=False,
+        use_layerwise_transfer=True,
         total_layers=7,
         pp_size=pp_rank + 1,
         layerwise_key_layer_offset=3 if pp_rank else 0,
@@ -48,6 +49,7 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
     production._global_group_alloc_size = lambda group: pool_worker.KVPoolWorker._global_group_alloc_size(
         production, group
     )
+    production._group_pp_byte_offset = lambda group: pool_worker.KVPoolWorker._group_pp_byte_offset(production, group)
     monkeypatch.setattr(
         pool_worker, "LayerBatchBuilder", lambda _db, size, _layers, **kw: SimpleNamespace(size=size, **kw)
     )
