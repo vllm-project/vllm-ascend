@@ -409,7 +409,6 @@ Key Parameter Descriptions:
 - `--kv-cache-dtype turboquant_4bit_nc` enables 4-bit TurboQuant quantization for DeepSeek-V4's Compress-4 attention KV cache to reduce memory usage. It is suited to ultra-long-context workloads such as AI coding, especially when KV cache memory limits concurrency. It is independent of weight and indexer cache quantization and requires compatible TurboQuant and fused attention operators. P/D disaggregated deployments are not currently supported.
 - `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling work with model execution.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
 
@@ -744,6 +743,8 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 
     - `--enforce-eager` forces eager execution on Prefill nodes instead of graph compilation.
+
+    - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling work with model execution.
 
     - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
 
