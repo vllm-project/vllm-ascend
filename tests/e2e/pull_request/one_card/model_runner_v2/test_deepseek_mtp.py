@@ -16,7 +16,7 @@
 #
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm import SamplingParams
@@ -75,11 +75,26 @@ def test_mtp_spec_decoding(
     assert len(outputs) == len(prompts)
 
 
-@pytest.mark.parametrize("entropy", [False, True])
+def _entropy_verify_calls(worker, start):
+    # Import in the worker process, where the Ascend replacement is registered.
+    from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils as utils
+
+    if start:
+        worker._entropy_kernel = utils._entropy_partials_kernel
+        spy = MagicMock()
+        spy.__getitem__.side_effect = worker._entropy_kernel.__getitem__
+        utils._entropy_partials_kernel = spy
+        return None
+    calls = utils._entropy_partials_kernel.__getitem__.call_count
+    utils._entropy_partials_kernel = worker._entropy_kernel
+    del worker._entropy_kernel
+    return calls
+
+
 @pytest.mark.parametrize("enforce_eager,logprobs_mode", [(True, "raw_logprobs"), (False, "processed_logprobs")])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_mtp_entropy_verify(entropy, enforce_eager, logprobs_mode):
+def test_mtp_entropy_verify(enforce_eager, logprobs_mode):
     """Exercise random verification, ragged completions and reuse of request state.
 
     Random MTP weights cannot establish acceptance/quality improvements. The
@@ -105,25 +120,27 @@ def test_mtp_entropy_verify(entropy, enforce_eager, logprobs_mode):
         enforce_eager=enforce_eager,
         async_scheduling=True,
         enable_expert_parallel=True,
-        disable_log_stats=False,
         logprobs_mode=logprobs_mode,
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
         additional_config={
             "rejection_sampler_config": {
-                "enable_entropy_verify": entropy,
+                "enable_entropy_verify": True,
             }
         },
     ) as runner:
-        for _ in range(2):
-            outputs = runner.model.generate(prompts, params)
-            assert len(outputs) == len(prompts)
-            for request, param in zip(outputs, params):
-                completion = request.outputs[0]
-                assert len(completion.token_ids) == param.max_tokens
-                assert completion.logprobs is not None
-                assert len(completion.logprobs) == len(completion.token_ids)
-                assert all(token >= 0 for token in completion.token_ids)
-                assert all(token in scores for token, scores in zip(completion.token_ids, completion.logprobs))
-        num_drafts = sum(m.value for m in runner.model.get_metrics() if m.name == "vllm:spec_decode_num_drafts")
-        assert num_drafts > 0
+        runner.model.collective_rpc(_entropy_verify_calls, args=(True,))
+        try:
+            for _ in range(2):
+                outputs = runner.model.generate(prompts, params)
+                assert len(outputs) == len(prompts)
+                for request, param in zip(outputs, params):
+                    completion = request.outputs[0]
+                    assert len(completion.token_ids) == param.max_tokens
+                    assert completion.logprobs is not None
+                    assert len(completion.logprobs) == len(completion.token_ids)
+                    assert all(token >= 0 for token in completion.token_ids)
+                    assert all(token in scores for token, scores in zip(completion.token_ids, completion.logprobs))
+        finally:
+            calls = runner.model.collective_rpc(_entropy_verify_calls, args=(False,))
+        assert calls and all(count > 0 for count in calls)
