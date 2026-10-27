@@ -1,4 +1,4 @@
-import torchectorStage
+import torch
 import torch_npu
 from vllm.triton_utils import tl, triton
 
@@ -35,9 +35,7 @@ def ngram_spec_decode_kernel(
 
         # ── Filter phase ────────────────────────────────────────────────
         s_off = tl.arange(0, max_new_tokens)
-        sampled_vals = tl.load(
-            sampled_ptr + batch_idx * max_new_tokens + s_off
-        )
+        sampled_vals = tl.load(sampled_ptr + batch_idx * max_new_tokens + s_off)
 
         if discard != 0:
             filtered = tl.full([max_new_tokens], -1, tl.int32)
