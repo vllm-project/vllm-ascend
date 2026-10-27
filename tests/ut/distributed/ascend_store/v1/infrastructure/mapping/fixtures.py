@@ -1,6 +1,7 @@
 """CPU Tensor fixtures: real storage, resolved topology facts, no Worker or Backend."""
 
 import ctypes
+import inspect
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -28,7 +29,7 @@ class MappingCase:
         return module.BulkMapping(binding) if hasattr(module, "bind_mapping") else binding
 
     def bind_layers(self, module=mapping, *, group_id=None, **options):
-        if module is not mapping:
+        if "topology" not in inspect.signature(module.LayerwiseMapping).parameters:
             # Compare complete initialization, including the historical local
             # binding, instead of timing only the old Layerwise view constructor.
             bind = getattr(module, "bind_mapping", module.BulkMapping)

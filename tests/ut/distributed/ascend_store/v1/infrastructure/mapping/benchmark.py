@@ -2,14 +2,19 @@
 
 Run in the UT environment with --baseline /path/to/snapshot/__init__.py.
 The snapshot must expose BulkMapping and, with --layerwise, LayerwiseMapping.
-Old BulkMapping.store is resolved OUTSIDE timing; current callers use BulkMapping
-directly. Both sides use the same tensors, keys, block IDs, masks and layer order.
+Historical interfaces are resolved outside timing; current calls use Worker
+argument adapters. Both sides use the same tensors, keys, block IDs, masks and layer order.
 Exact argument-list equality is checked before every measured workload.
 
-Binding, keys + arguments, arguments alone, keys + Layerwise.prepare, prepared
+Binding, keys + arguments, arguments alone, keys + selection preparation, prepared
 layer sweeps and complete layer sweeps are measured separately. Scenarios cover
 64-row full/mixed/all-false selection, zero rows and one row. Layer sweeps always
 visit all 32 layers, including layers with no selected keys.
+
+Current adapters include construction of their test batches; historical Mapping
+interfaces do not. Use worker.layerwise.load_plan_benchmark for matched production
+Worker costs with batch construction outside timing. These adapter comparisons
+verify geometry and expose construction costs, not isolated serving regressions.
 
 Samples alternate before/after order, with GC disabled. Short operations are
 batched to reduce timer noise; timing includes output allocation and disposal.

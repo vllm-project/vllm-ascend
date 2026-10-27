@@ -359,6 +359,8 @@ KeyRange Worker 将这些偏移作为范围参数传给 Backend。GVA Worker 则
 
 每层通过绑定布局确定参与分片，再取对应切片。只有 group 与分片集合都相同的层才共享同一份 Key 列表。空选择和没有本地段的层不产生地址参数；压紧或重新构造批次后必须重新准备 plan。
 
+GVA Worker 在每个参与分片上直接形成地址矩阵，并展平为 Backend 所需的一维列表，不生成逐对象的小列表或无用的 Key 返回值。本地地址保持 uint64 运算；远端基址加偏移使用 Python 整数语义的 NumPy 加法，避免将原本大于 uint64 上限的结果静默回绕。实际远端基址仍由有效 Session 提供，源就绪等待与复制完成流程不变。
+
 ### 5.10 Backend 格式
 
 Backend 的格式差异通过 `BackendSpec` 接入。其可选 `layerwise_key_factory` 接收 `KeyNamingConfig`，返回 key 构造器；`layerwise_layout_factory` 接收 Topology，返回对象布局工厂。factory 在申请 Backend 资源前准备这些能力，Worker 绑定 Mapping 时传入。Mapping 按接口组合它们，具体格式由相应 Backend 模块实现。

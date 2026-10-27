@@ -9,6 +9,7 @@ import argparse
 import gc
 import importlib
 import importlib.util
+import inspect
 import json
 import platform
 import random
@@ -29,6 +30,7 @@ from tests.ut.distributed.ascend_store.v1.helpers import (
     make_reachability,
     make_topology,
 )
+from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.benchmark import measure
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.fixtures import FakeGVABackend, make_gva_spec
 
 _PACKAGE = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1"
@@ -125,7 +127,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         layerwise = importlib.import_module(package + ".worker.layerwise")
         worker_type = layerwise.GVALayerwiseWorker if route == "gva" else layerwise.KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=make_reachability(topology), store_enabled=False)
-    if package == _PACKAGE:
+    if "topology" in inspect.signature(mapping.LayerwiseMapping).parameters:
         mapping_type = mapping.BulkMapping if route == "bulk" else mapping.LayerwiseMapping
         worker._mappings = {0: mapping_type(topology, *registration_arrays)}
     else:
@@ -196,6 +198,44 @@ def constructor_counts(operation):
     return dict(counts)
 
 
+def capture_arguments(worker, batch, route):
+    """Capture native call arguments before timing, without copying any KV bytes."""
+    method = {"bulk": "load", "key_range": "copy_key_range_load", "gva": "copy_from_gva"}[route]
+    original = getattr(worker._backend, method)
+    calls = []
+
+    def capture(*args):
+        calls.append(args)
+        return original(*args)
+
+    setattr(worker._backend, method, capture)
+    try:
+        if route == "bulk":
+            worker._execute_bulk_load(batch)
+        else:
+            run_layers(worker, batch)
+    finally:
+        setattr(worker._backend, method, original)
+    return calls
+
+
+def phase_operations(worker, batch, route, package):
+    if route == "bulk":
+        return {"native_arguments": partial(worker._materialize_bulk_arguments, batch)}
+    worker._prepare_load_layers(batch)
+    module_name = ".worker.layerwise.gva.worker" if route == "gva" else ".worker.layerwise.key_range"
+    module = importlib.import_module(package + module_name)
+    materialize = module.materialize_layer_gva if route == "gva" else module.materialize_load_layer_ranges
+
+    def all_layer_arguments():
+        return tuple(materialize(worker._mappings, worker._load_plan, layer) for layer in range(_LAYERS))
+
+    return {
+        "plan_preparation": partial(worker._prepare_load_layers, batch),
+        "all_layer_native_arguments": all_layer_arguments,
+    }
+
+
 def compare(request_count, route, repeats, baseline):
     cases = {}
     timings: dict[str, list[float]] = {"before": [], "after": []}
@@ -206,6 +246,15 @@ def compare(request_count, route, repeats, baseline):
             worker, batch = make_case(request_count, route, package)
             worker_base = importlib.import_module(package + ".worker.base")
             cases[name] = worker, batch, worker_base.KVPoolStepContext, worker_base.KVTransferStep()
+        assert capture_arguments(*cases["before"][:2], route) == capture_arguments(*cases["after"][:2], route)
+        phase_runs = {
+            name: phase_operations(*cases[name][:2], route, package)
+            for name, package in (("before", baseline), ("after", _PACKAGE))
+        }
+        phases = {
+            phase: measure(phase_runs["before"][phase], phase_runs["after"][phase], repeats, 2)
+            for phase in phase_runs["before"]
+        }
         gc.collect()
         gc.disable()
         for iteration in range(repeats + 3):
@@ -243,6 +292,7 @@ def compare(request_count, route, repeats, baseline):
         "max_ms": {name: max(values) for name, values in timings.items()},
         "reduction_percent": 100 * (1 - medians["after"] / medians["before"]),
         "constructors_per_invocation": allocations,
+        "phases": phases,
     }
 
 

@@ -184,16 +184,11 @@ def materialize_layer_gva(
                 group.selected_transfer_slices_by_partition[partition_index]
             ]
             segments = layout.local_segments
-            local_rows = segments.addresses(ids).tolist()
-            lengths = np.broadcast_to(
-                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
-            ).tolist()
-            offsets = layout.remote_segment_offsets_bytes.tolist()
-            size_rows = [lengths.copy() for _ in ids]
-            offset_rows = [offsets.copy() for _ in ids]
-            remote_addresses.extend(
-                int(base) + offset for base, positions in zip(bases, offset_rows, strict=True) for offset in positions
-            )
-            local_addresses.extend(address for row in local_rows for address in row)
-            sizes.extend(size for row in size_rows for size in row)
+            local = segments.addresses(ids)
+            # Remote addition previously used Python integers. Preserve that
+            # range instead of silently wrapping large GVA sums to uint64.
+            remote = np.add(bases[:, None], layout.remote_segment_offsets_bytes[None, :], dtype=object)
+            remote_addresses.extend(remote.ravel().tolist())
+            local_addresses.extend(local.ravel().tolist())
+            sizes.extend(np.broadcast_to(segments.segment_lengths_bytes, local.shape).ravel().tolist())
     return remote_addresses, local_addresses, sizes

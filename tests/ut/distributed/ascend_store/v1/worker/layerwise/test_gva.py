@@ -118,6 +118,19 @@ def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
     assert not store.leases
 
 
+def test_gva_remote_addition_retains_python_integer_range() -> None:
+    worker, batch, store, sessions = make_gva_binding()
+    first, second = batch.selected_keys()
+    base = (1 << 64) - 16
+    store.objects.update({first: (base, 64, True), second: (1 << 63, 64, True)})
+    assert sessions.start_load([first, second], [64, 64]) == (0, 0)
+    worker._prepare_load_layers(batch)
+    assert worker._copy_load_layer(1)[0].failures == ()
+    copy = next(call for call in store.calls if call[0] == "copy")
+    assert copy[1] == ((1 << 64) + 16, (1 << 63) + 32)
+    sessions.finish_load([first, second])
+
+
 def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
     worker, batch, store, sessions = make_gva_binding(local_block_ids=(1,))
     key = batch.selected_keys()[0]
