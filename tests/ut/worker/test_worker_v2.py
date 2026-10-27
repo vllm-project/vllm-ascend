@@ -2,8 +2,14 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.config import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 
 from tests.ut.base import TestBase
 
@@ -331,3 +337,61 @@ class TestNPUWorkerV2(TestBase):
             self.assertEqual(model_runner_output.execution_time_ms, 125.0)
             self.assertIsNone(model_runner._cpp_execution_time_ms)
             model_runner.sample_tokens.assert_called_once_with(grammar_output)
+
+
+def test_mrv2_page_strided_compressed_hybrid_budget_is_not_scaled():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    compressed_spec = MLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        tokens_per_state=4,
+    )
+    mamba_spec = MambaSpec(
+        block_size=8,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=["compressed_attn"],
+            kv_cache_spec=compressed_spec,
+        ),
+        KVCacheGroupSpec(
+            layer_names=["linear_attn"],
+            kv_cache_spec=mamba_spec,
+        ),
+    ]
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.use_v2_model_runner = True
+    worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_block_outermost=True,
+                is_layer_compact=False,
+                is_block_compact=False,
+            )
+        ),
+        kv_transfer_config=None,
+    )
+    worker.get_kv_cache_spec = MagicMock(
+        return_value={
+            "compressed_attn": compressed_spec,
+            "linear_attn": mamba_spec,
+        }
+    )
+    for use_sparse in (False, True):
+        worker.model_runner = SimpleNamespace(
+            supports_page_strided_shared_kv_backing=True,
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=use_sparse,
+            use_compress=True,
+        )
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
+        ):
+            assert worker._scale_kv_cache_memory_for_multi_group(12345) == 12345

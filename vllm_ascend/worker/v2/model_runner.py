@@ -143,7 +143,7 @@ class NPUModelRunner(GPUModelRunner):
     # Block-outermost main descriptors (QSA/CSA packed layouts) are logical
     # page-strided views into one physical allocation. The V2 runner
     # materializes those views without multiplying the backing once per
-    # descriptor/layer, same contract as model_runner_v1.
+    # descriptor/layer, the model-owned planner contract.
     supports_page_strided_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None

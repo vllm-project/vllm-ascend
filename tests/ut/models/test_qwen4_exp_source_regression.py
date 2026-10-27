@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Source-level ownership and integration guards for Qwen4Exp on Ascend."""
+"""Source-level ownership and MRV2 integration guards for Qwen4Exp."""
 
-import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -40,56 +39,27 @@ def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
         assert f"vllm_ascend.models.qwen4_exp:{wrapper}" in registry
 
 
-def test_runner_uses_spec_decode_capabilities_not_qwen_type_checks() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
-    # The concrete class is part of the static drafter union so mypy can see
-    # the inherited proposer methods. Runtime dispatch still uses capabilities.
-    assert "AscendQwen4ExpMTPProposer" in runner
-    tree = ast.parse(runner)
-    concrete_qwen_checks = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "isinstance"
-        and len(node.args) == 2
-        and "AscendQwen4ExpMTPProposer" in ast.unparse(node.args[1])
-    ]
-    assert concrete_qwen_checks == []
-    assert "SupportsPerGroupAttentionMetadata" in runner
-    assert "SupportsPerGroupBlockTables" in runner
-    assert "SupportsPerGroupKernelBlockSizes" in runner
-    assert "SupportsAttentionBackendInitialization" in runner
-    assert "SupportsCUDAGraphInitialization" in runner
+def test_qwen4_exp_is_wired_only_through_mrv2() -> None:
+    model = _source("vllm_ascend/models/qwen4_exp/model.py")
+    model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
+    v2_attn = _source("vllm_ascend/worker/v2/attn_utils.py")
+    v2_speculator = _source("vllm_ascend/worker/v2/spec_decode/autoregressive/speculator.py")
+    v1_runner = _source("vllm_ascend/worker/v1/model_runner.py")
+    v1_spec_init = _source("vllm_ascend/worker/v1/spec_decode/__init__.py")
 
-    for proposer in (
-        "vllm_ascend/worker/v1/spec_decode/qwen4_exp.py",
-        "vllm_ascend/worker/v1/spec_decode/dspark_proposer.py",
-        "vllm_ascend/worker/v1/spec_decode/gemma4_proposer.py",
-    ):
-        assert "def uses_per_group_kernel_block_sizes" in _source(proposer)
+    assert "get_model_state_cls" in model
+    assert "AscendQwen4ExpModelState" in model
+    assert "Qwen4ExpModelState" in model_state
+    assert "AscendMambaHybridModelState" in model_state
+    assert "build_qwen4_kv_cache_layout" in v2_attn
+    assert "QSAMetadataBuilder" in v2_attn
+    assert "AscendQSABackend" in v2_speculator
+    assert 'self.attn_architecture = "QSA"' in v2_speculator
 
-
-def test_qwen4_exp_proposer_is_owned_by_qwen_spec_decode_module() -> None:
-    qwen = _source("vllm_ascend/worker/v1/spec_decode/qwen4_exp.py")
-    eagle = _source("vllm_ascend/worker/v1/spec_decode/eagle_proposer.py")
-
-    assert "class AscendQwen4ExpMTPProposer" in qwen
-    assert "Qwen4ExpMTPProposer" not in eagle
-    assert "class AscendEagleProposer" in eagle
-
-
-def test_runner_customizes_compressed_attention_cache_specs() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
-    branch_start = runner.index("elif self.use_compress:")
-    branch_end = runner.index(
-        "elif isinstance(attn_module, Attention):",
-        branch_start,
-    )
-    branch = runner[branch_start:branch_end]
-
-    assert "isinstance(spec, AttentionSpec)" in branch
-    assert "attn_module.get_attn_backend().customize_spec(spec)" in branch
+    assert "AscendQwen4ExpMTPProposer" not in v1_runner + v1_spec_init
+    assert "build_qwen4_exp_input_adapter" not in v1_runner
+    assert not (ROOT / "vllm_ascend/models/qwen4_exp/input_adapter.py").exists()
+    assert not (ROOT / "vllm_ascend/worker/v1/spec_decode/qwen4_exp.py").exists()
 
 
 def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
@@ -107,14 +77,14 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
-    runner = _source("vllm_ascend/worker/v1/model_runner.py")
-    branch_start = runner.index("isinstance(builder, QSAMetadataBuilder)")
-    branch_end = runner.index("if is_gdn_noop:", branch_start)
-    branch = runner[branch_start:branch_end]
+    attn_utils = _source("vllm_ascend/worker/v2/attn_utils.py")
+    branch_start = attn_utils.index("isinstance(attn_metadata_builder, QSAMetadataBuilder)")
+    branch_end = attn_utils.index("metadata_variants =", branch_start)
+    branch = attn_utils[branch_start:branch_end]
 
-    assert "num_reqs_padded > num_reqs" in branch
+    assert "num_reqs > num_actual_reqs" in branch
     assert "query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[" in branch
-    assert ": num_reqs + 1" in branch
+    assert ": num_actual_reqs + 1" in branch
 
 
 def test_qsa_uses_only_fused_runtime_backends() -> None:

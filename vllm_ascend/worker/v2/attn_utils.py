@@ -361,11 +361,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     if mamba_specs:
         # QSA/CSA hybrid models (descriptor-native cache owners) need
-        # model_runner_v1's tail alignment: every align_kv_cache_with_mamba
+        # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
         # to the Mamba page, while Mamba keeps its own page size. The
         # six-region planner and the upstream page-size unification then
-        # receive the same geometry model_runner_v1 produces.
+        # receive the same geometry the Qwen4 cache planner requires.
         descriptor_native_attn = {
             name
             for name, layer in attn_layers.items()
@@ -1164,7 +1164,7 @@ def _allocate_kv_cache(
     is_step_model = getattr(text_config, "model_type", None) in ("step3p5", "step3p7")
     is_glm5_next = any(getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values())
 
-    # Six-region QSA hybrids (Qwen3.8 Flash Next): mirror model_runner_v1 and
+    # Six-region QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
     # build the layout from the cache groups themselves. Allocate
     # slot_count shared slabs plus one dense bank per PLE/hidden owner.
     # Reshape must preserve the physical byte strides used by this planner.
@@ -1705,7 +1705,7 @@ def _reshape_kv_cache_v2(
                 continue
 
             if six_region_layout is not None:
-                # Same six-region view construction as model_runner_v1: each
+                # Model-owned six-region view construction: each
                 # owner addresses its role's regions inside its own slot of
                 # the shared contiguous backing.
                 owner = six_region_layout.owner(layer_name)
@@ -1814,7 +1814,7 @@ def _reshape_kv_cache_v2(
                     raise RuntimeError(f"Unsupported six-region owner {owner}.")
 
             if layer_name in layer_tuple_strides:
-                # Same view construction as model_runner_v1
+                # Descriptor-driven cache view construction
                 block_stride = layer_tuple_strides[layer_name]
                 initial_offset = 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(

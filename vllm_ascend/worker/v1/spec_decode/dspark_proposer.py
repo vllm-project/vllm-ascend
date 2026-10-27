@@ -28,9 +28,6 @@ class AscendDSparkProposer(AscendDflashProposer):
     anchor-first query block emits all speculative tokens.
     """
 
-    def uses_per_group_kernel_block_sizes(self) -> bool:
-        return True
-
     def __init__(
         self,
         vllm_config: VllmConfig,

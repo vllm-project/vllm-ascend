@@ -1,6 +1,5 @@
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -33,8 +32,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_max_memory_usage_bytes_from_groups,
 )
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.worker.v1 import model_runner as model_runner_v1
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -314,75 +311,72 @@ def test_main_planner_uses_one_shared_backing_geometry() -> None:
     assert hidden_tensor.size == 49152
 
 
-@pytest.mark.parametrize("kv_transfer_config", [None, SimpleNamespace(kv_connector="MooncakeConnectorV1")])
-def test_six_region_allocation_requires_no_kv_transfer(monkeypatch, kv_transfer_config) -> None:
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.ascend_config = SimpleNamespace(
-        kvpp_config=SimpleNamespace(size=1),
-        xlite_graph_config=SimpleNamespace(enabled=False),
-    )
-    runner.vllm_config = SimpleNamespace(
-        kv_transfer_config=kv_transfer_config,
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
-    runner.dcp_size = 1
-    runner.use_sparse = False
-    runner.use_compress = False
-    runner.sparse_kv_offload_enabled = False
-    runner._get_layer_kv_cache_specs = Mock(return_value={})
-    runner._kv_cache_spec_attn_group_iterator = lambda: []
-    runner._uses_page_strided_shared_backing = Mock(return_value=False)
-    runner._allocate_int8_cache_tensor = Mock()
-    layout = SimpleNamespace(slot_count=1, slot_backing_size=16, owners=[])
-    monkeypatch.setattr(model_runner_v1, "build_qwen4_kv_cache_layout", lambda *args: layout)
-    monkeypatch.setattr(model_runner_v1, "vllm_version_is", lambda version: False)
-    monkeypatch.setattr(model_runner_v1, "get_layerwise_reuse_config", lambda config: None)
-    config = SimpleNamespace(num_blocks=1, kv_cache_groups=[], kv_cache_tensors=[])
-
-    assert runner._allocate_kv_cache_tensors(config) == {}
-
-    if kv_transfer_config is None:
-        assert runner._six_region_kv_cache_layout is layout
-        runner._allocate_int8_cache_tensor.assert_called_once_with(16, 2 * 1024 * 1024)
-    else:
-        assert runner._six_region_kv_cache_layout is None
-        runner._allocate_int8_cache_tensor.assert_not_called()
-    runner._uses_page_strided_shared_backing.assert_not_called()
-
-
-def _cpu_runner(config):
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.device = torch.device("cpu")
-    runner.ascend_config = SimpleNamespace(
-        kvpp_config=SimpleNamespace(size=1),
-        xlite_graph_config=SimpleNamespace(enabled=False),
-    )
-    runner.vllm_config = SimpleNamespace(
+def _allocate_mrv2_kv_cache(
+    config,
+    monkeypatch,
+    *,
+    use_main: bool = False,
+    kernel_block_sizes: list[int] | None = None,
+):
+    """Allocate and materialize Qwen4Exp cache views through MRV2 only."""
+    vllm_config = SimpleNamespace(
+        additional_config={},
         kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype="auto"),
-        compilation_config=SimpleNamespace(static_forward_context={}),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(),
+        ),
     )
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
-    runner.dcp_size = 1
-    runner.use_sparse = False
-    runner.use_compress = False
-    runner.use_hybrid_blocks = False
-    runner.runner_only_attn_layers = set()
-    runner.sparse_kv_offload_enabled = False
-    runner._kv_cache_spec_attn_group_iterator = lambda: [
-        SimpleNamespace(
-            backend=SimpleNamespace(is_sparse=lambda: False),
-            kv_cache_spec=group.kv_cache_spec,
-            layer_names=group.layer_names,
-        )
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+    backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
         for group in config.kv_cache_groups
-    ]
+        for name in group.layer_names
+    }
+    monkeypatch.setattr(
+        attn_utils_v2,
+        "get_layers_from_vllm_config",
+        lambda *_: layers,
+    )
+    raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+    block_sizes = kernel_block_sizes or [128] * len(config.kv_cache_groups)
+    if use_main:
+        monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
+        caches = attn_utils_v2.allocate_kv_cache_main(
+            config,
+            torch.device("cpu"),
+            None,
+            block_sizes,
+        )
+    else:
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=i,
+                kv_cache_spec=group.kv_cache_spec,
+                layer_names=group.layer_names,
+                backend=backend,
+            )
+            for i, group in enumerate(config.kv_cache_groups)
+        ]
+        caches = attn_utils_v2._reshape_kv_cache_v2(
+            groups,
+            raw,
+            "auto",
+            block_sizes,
+            {},
+            config,
+        )
+    layout = build_qwen4_kv_cache_layout(
+        config.kv_cache_groups,
+        config.num_blocks,
+    )
+    return raw, caches, layout
 
-    return runner
 
-
-@pytest.mark.parametrize("runner_kind", ["v1", "v2", "v2_main"])
+@pytest.mark.parametrize("runner_kind", ["v2", "v2_main"])
 def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind) -> None:
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(
@@ -395,53 +389,15 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
         10**9,
     )
     assert config is not None
-    runner = _cpu_runner(config)
-
-    if runner_kind == "v1":
-        raw = runner._allocate_kv_cache_tensors(config)
-        caches = runner._reshape_kv_cache_tensors(config, raw)
-        layout = runner._six_region_kv_cache_layout
-    else:
-        vllm_config = SimpleNamespace(
-            additional_config={},
-            kv_transfer_config=None,
-            cache_config=SimpleNamespace(cache_dtype="auto"),
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()),
-        )
-        monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: vllm_config)
-        monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-        # These owned cache views are backend-independent; the main entry point
-        # uses only the backend identity to partition its attention groups.
-        backend = SimpleNamespace(full_cls_name=lambda: "qwen-cache-test")
-        layers = {
-            name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
-            for group in config.kv_cache_groups
-            for name in group.layer_names
-        }
-        monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: layers)
-        raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-        if runner_kind == "v2_main":
-            # Exercise upstream main's combined allocation+reshape adapter and
-            # retain its raw buffers for the same storage checks as v0.31.
-            monkeypatch.setattr(attn_utils_v2, "_allocate_kv_cache", lambda *_, **__: raw)
-            caches = attn_utils_v2.allocate_kv_cache_main(
-                config, torch.device("cpu"), None, [128] * len(config.kv_cache_groups)
-            )
-        else:
-            groups = [
-                SimpleNamespace(
-                    kv_cache_group_id=i, kv_cache_spec=g.kv_cache_spec, layer_names=g.layer_names, backend=backend
-                )
-                for i, g in enumerate(config.kv_cache_groups)
-            ]
-            caches = attn_utils_v2._reshape_kv_cache_v2(groups, raw, "auto", [128] * len(groups), {}, config)
-        layout = build_qwen4_kv_cache_layout(config.kv_cache_groups, config.num_blocks)
-        # Every physical byte is represented once by the planner, including
-        # the single PLE and hidden banks outside the shared slot backing.
-        allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
-        assert sum(allocations.values()) == config.num_blocks * get_qwen4_exp_pool_bytes_per_block(
-            config.kv_cache_groups
-        )
+    raw, caches, layout = _allocate_mrv2_kv_cache(
+        config,
+        monkeypatch,
+        use_main=runner_kind == "v2_main",
+    )
+    # Every physical byte is represented once by the planner, including the
+    # single PLE and hidden banks outside the shared slot backing.
+    allocations = {t.untyped_storage().data_ptr(): t.numel() for t in raw.values()}
+    assert sum(allocations.values()) == config.num_blocks * get_qwen4_exp_pool_bytes_per_block(config.kv_cache_groups)
     assert layout is not None
 
     shared_names = [owner.layer_name for owner in layout.owners if owner.role not in (HIDDEN, PLE)]
@@ -603,7 +559,7 @@ def test_six_region_admission_matches_shared_planner_allocation() -> None:
     ) == required_bytes
 
 
-def test_mamba_state_groups_merge_shares_one_block_table() -> None:
+def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     """36 GDN layers use three block tables over 13 shared slots."""
     specs = _ungrouped_qwen_specs()
     owners = _prepare_qsa_composite_groups(specs)
@@ -706,9 +662,7 @@ def test_mamba_state_groups_merge_shares_one_block_table() -> None:
     for tensor in descriptors:
         assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
 
-    runner = _cpu_runner(config)
-    raw = runner._allocate_kv_cache_tensors(config)
-    caches = runner._reshape_kv_cache_tensors(config, raw)
+    raw, caches, _ = _allocate_mrv2_kv_cache(config, monkeypatch)
     names = [group.layer_names[0] for group in gdn_merged]
     assert all(raw[name] is raw[names[0]] for name in names)
     assert raw[names[0]].numel() == 13 * layout.slot_backing_size
@@ -768,16 +722,22 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
         ),
         cache_config=cache,
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
 
+    monkeypatch.setattr(
+        NPUPlatform,
+        "_find_non_ssm_backends",
+        classmethod(lambda cls, config: [AscendQSABackend]),
+    )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    assert cache.mamba_block_size == 896
+    assert cache.mamba_block_size == (896 if cache_mode == "align" else None)
     assert cache.mamba_page_size_padded == 896 * 1024
 
 
-def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots() -> None:
+def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatch) -> None:
     groups = _groups()
     groups[4] = KVCacheGroupSpec(
         ["model.ple"], replace(groups[4].kv_cache_spec, shapes=((20001,),), page_size_padded=65536)
@@ -788,10 +748,7 @@ def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots() -> None:
         10**9,
     )
     assert config is not None
-    runner = _cpu_runner(config)
-    raw = runner._allocate_kv_cache_tensors(config)
-    caches = runner._reshape_kv_cache_tensors(config, raw)
-    layout = runner._six_region_kv_cache_layout
+    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
     assert layout.region("r2").page_size_bytes == 32768
     ple = caches["model.ple"][0]
     assert ple.is_contiguous()
@@ -835,8 +792,7 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
 
 
 @pytest.mark.parametrize("manager_block_size", [128, 384, 768])
-@pytest.mark.parametrize("runner_kind", ["v1", "v2"])
-def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size, runner_kind):
+def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
@@ -861,32 +817,30 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         additional_config={},
         kv_transfer_config=None,
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=manager_block_size),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(), hf_text_config=SimpleNamespace()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(),
+            max_model_len=4096,
+        ),
         compilation_config=SimpleNamespace(static_forward_context={}),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
-        use_v2_model_runner=runner_kind == "v2",
+        use_v2_model_runner=True,
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
     backend = qsa.qsa_cache.QSAStateBackend
-    if runner_kind == "v1":
-        runner = _cpu_runner(config)
-        raw = runner._allocate_kv_cache_tensors(config)
-        caches = runner._reshape_kv_cache_tensors(config, raw)
-        builder = backend.get_builder_cls()(spec, compressed_group.layer_names, runtime_config, torch.device("cpu"))
-    else:
-        monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
-        monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
-        raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-        attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
-        caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
-        # Exercise the actual MRV2 factory, which rewrites the builder spec.
-        group = attn_groups[2]
-        group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
-        builder = group.get_metadata_builder(0)
+    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
+    monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
+    raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
+    attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
+    caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
+    # Exercise the actual MRV2 factory, which rewrites the builder spec.
+    group = attn_groups[2]
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+    builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
     layer = qsa.qsa_cache.QSACompressedKeyCache(
         head_size=spec.head_size,
@@ -896,14 +850,9 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         compress_ratio=4,
         vllm_config=runtime_config,
     )
-    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache, bind_kv_cache_to_layers
+    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache_to_layers
 
-    if runner_kind == "v1":
-        runner_caches = []
-        bind_kv_cache({name: caches[name]}, {name: layer}, runner_caches)
-        assert any(cache is caches[name] for cache in runner_caches)
-    else:
-        bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
+    bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
     raw_name = groups[1].layer_names[0]
     raw_layer = qsa.qsa_cache.QSAKeyStateCache(
@@ -922,9 +871,9 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     positions = torch.tensor([2**40, 2**40 + 1, 2**40 + 2], dtype=torch.int64)
     raw_layer.rope_position_cache[2, 7, 0] = positions
     torch.testing.assert_close(raw_layer.rope_position_cache[2, 7, 0], positions)
-    keys_per_page = (128 if runner_kind == "v2" else manager_block_size) // 4
+    keys_per_page = 128 // 4
     factor = manager_block_size // 128
-    assert layer.kv_cache.shape == (3 * (factor if runner_kind == "v2" else 1), keys_per_page, 1, spec.head_size)
+    assert layer.kv_cache.shape == (3 * factor, keys_per_page, 1, spec.head_size)
     assert builder.storage_block_size == keys_per_page
     assert layer.kv_cache.untyped_storage().data_ptr() == raw[name].untyped_storage().data_ptr()
     manager = torch.tensor([[2, 0]], dtype=torch.int32)
@@ -945,7 +894,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
     monkeypatch.setattr(qsa.qsa_cache, "build_qsa_metadata", qsa.qsa_cache._build_qsa_metadata_torch)
     metadata = builder.build(0, common)
-    torch.testing.assert_close(metadata.block_table, virtual if runner_kind == "v2" else manager)
+    torch.testing.assert_close(metadata.block_table, virtual)
     # Cross the manager-block boundary: flattened storage addresses must agree
     # for metadata writes and PA_BSND indexer reads in both runners.
     for token_row in (3, 7):

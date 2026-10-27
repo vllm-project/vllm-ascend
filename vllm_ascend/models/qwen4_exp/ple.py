@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 def _get_allow_internal_format() -> bool:
     raw_value = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
-    # NPUModelRunner enables this option before model construction. Preserve
+    # Ascend worker initialization enables this option before model construction. Preserve
     # the torch-npu default when the model is instantiated in isolation.
     return raw_value is None or raw_value.decode() == "enable"
 
