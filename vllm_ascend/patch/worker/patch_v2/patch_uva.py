@@ -81,16 +81,20 @@ def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int
 class MonitoredNumPyArray:
     """A wrapper around a NumPy array that monitors modifications."""
 
-    def __init__(self, array: np.ndarray, callback: Callable):
+    def __init__(self, array: np.ndarray, callback: Callable, callback_many: Callable | None = None):
         self._array = array
         self._callback = callback
+        self._callback_many = callback_many
 
     def __setitem__(self, key, value):
         self._array[key] = value
         dim_size = self._array.shape[0]
         row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        if self._callback_many is not None:
+            self._callback_many(row_indices)
+        else:
+            for row in row_indices:
+                self._callback(row)
 
     def __getitem__(self, key):
         return self._array[key]
@@ -102,16 +106,20 @@ class MonitoredNumPyArray:
 class MonitoredTorchTensor:
     """A wrapper around a torch tensor that monitors modifications."""
 
-    def __init__(self, tensor: torch.Tensor, callback: Callable):
+    def __init__(self, tensor: torch.Tensor, callback: Callable, callback_many: Callable | None = None):
         self._tensor = tensor
         self._callback = callback
+        self._callback_many = callback_many
 
     def __setitem__(self, key, value):
         self._tensor[key] = value
         dim_size = self._tensor.size(0)
         row_indices = get_row_indices_from_key(key, dim_size)
-        for row in row_indices:
-            self._callback(row)
+        if self._callback_many is not None:
+            self._callback_many(row_indices)
+        else:
+            for row in row_indices:
+                self._callback(row)
 
     def __getitem__(self, key):
         return self._tensor[key]
@@ -164,13 +172,20 @@ class UvaBufferWrapper:
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
+    def _mark_cpu_modified_many(self, keys):
+        self._modified_indices.update(keys)
+
     @property
     def cpu(self):
-        return self._cpu if self._use_real_uva else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        if self._use_real_uva:
+            return self._cpu
+        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified, self._mark_cpu_modified_many)
 
     @property
     def np(self):
-        return self._np if self._use_real_uva else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        if self._use_real_uva:
+            return self._np
+        return MonitoredNumPyArray(self._np, self._mark_cpu_modified, self._mark_cpu_modified_many)
 
     def _sync_dirty_rows(self) -> None:
         if not self._use_real_uva and self._modified_indices:
