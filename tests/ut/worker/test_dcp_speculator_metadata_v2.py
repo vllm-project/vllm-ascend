@@ -12,7 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
-    TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    TargetDependentARSpeculator,
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -325,10 +325,10 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
         yield
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_factory",
         factory,
     )
-    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(TargetDependentARSpeculator, "_build_attn_metadata", lambda *a, **k: None)
     batch = SimpleNamespace(num_tokens=2, num_reqs=2)
     seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
     dcp_local = spec.input_buffers.dcp_local_seq_lens

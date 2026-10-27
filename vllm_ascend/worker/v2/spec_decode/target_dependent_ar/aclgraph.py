@@ -60,7 +60,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         )
 
         # Upstream constructs graph managers without a speculator reference.
-        # AscendAutoRegressiveSpeculator attaches it after construction so replay
+        # AscendTargetDependentARSpeculator attaches it after construction so replay
         # can rebuild draft metadata and update graph parameters.
         self.speculator: Any = None
         # The attention backend keys its per-size graph params by the actual

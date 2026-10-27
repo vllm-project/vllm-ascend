@@ -38,11 +38,11 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
-)
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
+)
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -1013,7 +1013,7 @@ def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
     # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
     dp_sync_param = "dp_sync_state"
     for speculator_cls in (
-        AscendAutoRegressiveSpeculator,
+        AscendTargetDependentARSpeculator,
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
     ):

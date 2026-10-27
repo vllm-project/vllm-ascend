@@ -33,10 +33,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
 
@@ -140,7 +140,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         )
         # The Ascend manager needs this speculator to rebuild draft metadata
         # and FIA graph-update params on replay (mirrors
-        # AscendAutoRegressiveSpeculator.init_cudagraph_manager).
+        # AscendTargetDependentARSpeculator.init_cudagraph_manager).
         self.cudagraph_manager.speculator = self
         self.cudagraph_manager.update_stream = self.update_stream
         # Backend class used to select the replay parameter-update path.

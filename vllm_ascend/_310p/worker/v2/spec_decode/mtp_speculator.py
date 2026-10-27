@@ -28,19 +28,19 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
-    TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    TargetDependentARSpeculator,
 )
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_factory
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
-class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
+class AscendMTPSpeculator310(AscendTargetDependentARSpeculator, MTPSpeculator):
     """Ascend MTP speculator for 310P MRv2 (Triton-free draft loop)."""
 
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -274,7 +274,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
         # Call GPU AR generate_draft (sample + update_draft_inputs) without the
         # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
-        AutoRegressiveSpeculator._generate_draft(
+        TargetDependentARSpeculator._generate_draft(
             self,
             num_reqs,
             num_tokens_padded,

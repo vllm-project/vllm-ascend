@@ -18,6 +18,6 @@
 
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as vllm_speculator_module
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import AutoRegressiveAclGraphManager
 
 vllm_speculator_module.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager

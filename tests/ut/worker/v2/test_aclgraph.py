@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
 
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
 
@@ -36,13 +36,13 @@ def test_init_draft_prefill_graph():
         patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
         patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=True),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
             return_value=[4, 8],
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params"
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_prefill_params"
         ) as set_prefill,
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_params") as set_decode,
+        patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2)
     assert manager.capture_sizes == [4, 8]
@@ -58,13 +58,13 @@ def test_init_draft_decode_graph():
         patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
         patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=True),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.collect_sorted_captured_token_sizes",
             return_value=[4, 8],
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params"
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_prefill_params"
         ) as set_prefill,
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_params") as set_decode,
+        patch("vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1)
     assert manager.is_draft_model_prefill is False
@@ -89,7 +89,7 @@ def test_run_fullgraph_uses_updatable_graph():
     manager._graph_replay = MagicMock()
     desc = SimpleNamespace(num_tokens=8, num_reqs=2)
     with patch(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.use_updatable_graph",
         return_value=True,
     ):
         result = manager.run_fullgraph(desc)
@@ -119,7 +119,7 @@ def test_run_fullgraph_uses_legacy_graph():
     manager._graph_replay = MagicMock(return_value="result")
     desc = SimpleNamespace(num_tokens=8, num_reqs=2)
     with patch(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.use_updatable_graph",
         return_value=False,
     ):
         result = manager.run_fullgraph(desc)
@@ -148,11 +148,11 @@ def test_capture_draft_prefill_delegates_to_parent():
     kv_cache_config = object()
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
             return_value=nullcontext(),
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.model_capture_wrapper",
             return_value=nullcontext(),
         ),
         patch.object(SpeculatorCudaGraphManager, "capture") as parent_capture,
@@ -197,16 +197,18 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.communicator_switch",
             return_value=nullcontext(),
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.model_capture_wrapper",
             return_value=nullcontext(),
         ),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.prepare_inputs_to_capture") as prepare_inputs,
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.prepare_inputs_to_capture"
+        ) as prepare_inputs,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.CudaGraphManager.capture",
             side_effect=capture_side_effect,
         ),
     ):
@@ -261,7 +263,7 @@ def test_graph_replay_updates_full_graph_params():
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
         ),
         patch.object(
@@ -270,22 +272,24 @@ def test_graph_replay_updates_full_graph_params():
             return_value="result",
         ) as parent_replay,
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_current_vllm_config",
             return_value=nullcontext(),
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_forward_context",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.set_forward_context",
             return_value=nullcontext(),
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_forward_context",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.get_forward_context",
             return_value=forward_context,
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph._EXTRA_CTX",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph._EXTRA_CTX",
             extra_ctx,
         ),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params") as update_params,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.update_full_graph_params"
+        ) as update_params,
     ):
         result = manager._graph_replay(
             desc,
@@ -335,15 +339,15 @@ def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_p
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.UpdatableGraph",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.UpdatableGraph",
             MagicMock,
         ),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.SharedSource",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.SharedSource",
             return_value=source,
         ) as shared_source,
         patch(
-            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
+            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
         ),
         patch.object(

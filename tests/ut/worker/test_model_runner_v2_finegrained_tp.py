@@ -22,8 +22,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 
 def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
@@ -304,7 +304,7 @@ def test_finegrained_tp_guard_contract():
     NPUModelRunner._check_finegrained_tp_graph_step(runner, CUDAGraphMode.FULL)
 
 
-class _ConcreteSpeculator(AscendAutoRegressiveSpeculator):
+class _ConcreteSpeculator(AscendTargetDependentARSpeculator):
     # Concrete stub: the base class keeps load_draft_model abstract.
 
     def load_draft_model(self, *args, **kwargs):
