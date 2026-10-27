@@ -782,19 +782,31 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             )
         return self.decode_cu_seqlens_q_buffers[query_len][: num_reqs + 1]
 
-    def _prepare_decode_gbsa_metadata(self, metadata: AscendMiniMaxM3SparseDecodeMetadata) -> None:
+    def _prepare_decode_gbsa_metadata(
+        self,
+        metadata: AscendMiniMaxM3SparseDecodeMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> None:
         if metadata.decode_query_len not in (1, 4) or metadata.seq_lens.numel() == 0:
             return
         assert metadata.cu_seqlens_q is not None
         assert metadata.gbsa_metadata_cache is not None
-        num_tokens = metadata.seq_lens.numel() * metadata.decode_query_len
+        seq_lens = metadata.seq_lens
+        cu_seqlens_q = metadata.cu_seqlens_q
+        if getattr(common_attn_metadata, "graph_pad_size", -1) > 0:
+            # FULL graphs retain the schedule for their padded query shape.
+            # Updating an unpadded shape would leave that captured buffer stale.
+            num_reqs = common_attn_metadata.num_reqs
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            cu_seqlens_q = self._get_decode_cu_seqlens_q(num_reqs, metadata.decode_query_len)
+        num_tokens = seq_lens.numel() * metadata.decode_query_len
         for num_heads, num_kv_heads, head_size, topk in self.decode_gbsa_configs:
             key = _decode_gbsa_metadata_key(
                 num_tokens, num_heads, num_kv_heads, head_size, topk, metadata.decode_query_len
             )
             schedule = prepare_decode_gbsa_metadata(
-                metadata.seq_lens,
-                metadata.cu_seqlens_q,
+                seq_lens,
+                cu_seqlens_q,
                 metadata.decode_query_len,
                 num_heads,
                 num_kv_heads,
@@ -892,7 +904,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 gbsa_metadata_cache={} if get_ascend_device_type() == AscendDeviceType.A3 else None,
             )
             if self.decode_gbsa_configs:
-                self._prepare_decode_gbsa_metadata(decode_metadata)
+                self._prepare_decode_gbsa_metadata(decode_metadata, common_attn_metadata)
 
         return AscendMiniMaxM3SparseMetadata(
             seq_lens=seq_lens,

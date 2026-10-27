@@ -1783,6 +1783,53 @@ def test_sparse_builder_prepares_gbsa_before_layers_and_refreshes_in_place(query
     torch.testing.assert_close(metadata_op.call_args.args[1], expected_counts, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("actual_reqs,padded_reqs", [(1, 2), (3, 4), (15, 16)])
+def test_sparse_builder_refreshes_captured_gbsa_buffer_for_padded_decode(
+    query_len, actual_reqs, padded_reqs, mock_gbsa_ops, monkeypatch
+):
+    metadata_op, _ = mock_gbsa_ops
+    monkeypatch.setattr(msa_m3_module, "get_ascend_device_type", lambda: AscendDeviceType.A3)
+    monkeypatch.setattr(
+        msa_m3_module,
+        "split_decodes_and_prefills",
+        lambda common, **kwargs: (common.num_reqs, 0, common.num_actual_tokens, 0),
+    )
+    builder = _make_sparse_builder(torch.device("cpu"))
+
+    def make_schedule(*args, **kwargs):
+        return torch.full((1024,), metadata_op.call_count, dtype=torch.int32)
+
+    metadata_op.side_effect = make_schedule
+    captured_common = _create_common_attn_metadata(
+        BatchSpec([128] * padded_reqs, [query_len] * padded_reqs), 128, torch.device("cpu")
+    )
+    captured_common.graph_pad_size = padded_reqs * query_len
+    captured = builder.build(0, captured_common).decode
+    buffer = next(iter(captured.gbsa_metadata_cache.values()))
+    runtime_common = _create_common_attn_metadata(
+        BatchSpec(
+            [257] * actual_reqs + [0] * (padded_reqs - actual_reqs),
+            [query_len] * actual_reqs + [0] * (padded_reqs - actual_reqs),
+        ),
+        128,
+        torch.device("cpu"),
+    )
+    runtime_common.graph_pad_size = padded_reqs * query_len
+    runtime_common.num_input_tokens = padded_reqs * query_len
+    runtime = builder.build(0, runtime_common).decode
+    assert runtime.seq_lens.numel() == actual_reqs
+    assert runtime.gbsa_metadata_prepared
+    assert next(iter(runtime.gbsa_metadata_cache.values())).data_ptr() == buffer.data_ptr()
+    assert torch.all(buffer == 2) and metadata_op.call_count == 2
+    assert metadata_op.call_args.args[0].shape == (2, padded_reqs * query_len, 16)
+    expected_counts = _decode_gbsa_block_counts(
+        runtime_common.seq_lens, query_len, 2, 16, runtime_common.block_table_tensor.shape[-1]
+    )
+    torch.testing.assert_close(metadata_op.call_args.args[1], expected_counts, rtol=0, atol=0)
+    assert metadata_op.call_args.kwargs["cu_seqlens_q"].shape == (padded_reqs + 1,)
+
+
 @pytest.mark.parametrize(
     "dtype,block_size,query_len", [(torch.float16, 128, 1), (torch.bfloat16, 64, 1), (torch.bfloat16, 128, 2)]
 )
