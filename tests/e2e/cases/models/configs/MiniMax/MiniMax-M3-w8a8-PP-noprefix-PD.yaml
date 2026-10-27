@@ -236,17 +236,6 @@ templates:
             "decode":{"dp_size":8,"tp_size":4,"pp_size":1}}}'
 
 benchmarks:
-  perf_prefix_0_warm_up:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_MiniMax_M3_w8a8_0626
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 16
-    max_out_len: 1024
-    batch_size: 8
-    request_rate: 0
-    baseline: 0
-    threshold: 0.97
   perf_prefix_0:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_MiniMax_M3_w8a8_0626
