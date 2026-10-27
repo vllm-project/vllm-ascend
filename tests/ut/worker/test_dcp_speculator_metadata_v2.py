@@ -298,7 +298,7 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     builder.dcp_local_seq_lens_buf = torch.empty(4, dtype=torch.int32)
     builder.decode_threshold = 4
     builder.vllm_config = None
-    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "dcp_enabled", False, raising=False)
+    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "use_dcp", False, raising=False)
     monkeypatch.setattr(sfa_cp, "split_decodes_and_prefills", lambda *a, **kw: (4, 0, 4, 0))
     block_table = torch.zeros((4, 2), dtype=torch.int32)
     slots = torch.arange(4)

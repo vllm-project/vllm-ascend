@@ -488,8 +488,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.kv_cache_config = kv_cache_config
                 self.pcp_manager.global_input_buffers = self.input_buffers
                 self.model_state.pcp_manager = self.pcp_manager
-                if self.speculator is not None:
-                    self.speculator.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
@@ -1195,8 +1193,8 @@ class NPUModelRunner(GPUModelRunner):
         previous_max_num_reqs = self.max_num_reqs
         try:
             self.input_buffers.profile_cpp = True
-            # CPP profiles the target prefill. This also matches MRV1, where the
-            # drafter dummy run is explicitly skipped for profile_cpp.
+            # CPP profiles only the target prefill, so skip the drafter dummy
+            # run while the profiling marker is active.
             self.speculator = None
             self.max_num_reqs = 1
             yield

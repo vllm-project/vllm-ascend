@@ -18,6 +18,7 @@ from tests.ut.distributed.eplb.test_hixl_communicator import _shared_models
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.patch.platform import patch_eplb
+from vllm_ascend.utils import vllm_version_is
 
 
 class _FakeNpuPlatform:
@@ -669,7 +670,9 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert result == "moved"
     refresh.assert_called_once_with(model_state, layer_idx)
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
-    if is_last_layer:
+    # On main the cycle-committed log is emitted by the async worker wrapper
+    # (`_wrap_async_worker`); v0.31.0 still emits it from the workspace move.
+    if is_last_layer and vllm_version_is("0.31.0"):
         log_info.assert_called_once_with(
             "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d cross_node_transfers=%d",
             patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,

@@ -872,6 +872,9 @@ async def stream_service_response(
 ):
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
+    req_data = req_data.copy()
+    if not req_data.get("stream", False):
+        req_data.pop("stream_options", None)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
         try:

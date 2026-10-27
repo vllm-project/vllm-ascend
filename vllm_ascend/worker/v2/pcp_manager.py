@@ -159,6 +159,9 @@ class AscendPCPManager(PCPManager):
             dcp_world_size: int = 1,
             dcp_rank: int = 0,
             cp_interleave: int = 1,
+            # vLLM #60946 (main) added this argument and
+            # `maybe_build_pcp_manager` always passes it.
+            moe_gathers_tokens: bool = False,
         ) -> None:
             super().__init__(
                 pcp_world_size=pcp_world_size,
@@ -171,6 +174,7 @@ class AscendPCPManager(PCPManager):
                 dcp_world_size=dcp_world_size,
                 dcp_rank=dcp_rank,
                 cp_interleave=cp_interleave,
+                moe_gathers_tokens=moe_gathers_tokens,
             )
             # PCP supplies its own output buffers to compute_slot_mappings, so their
             # dtype must match Ascend block-table slots for cache-write operators.
@@ -417,23 +421,48 @@ class AscendPCPManager(PCPManager):
         )
         return local_batch
 
-    def prepare_inputs_to_capture(
-        self,
-        input_batch: AscendInputBatch,
-    ) -> AscendInputBatch:
-        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-        if not getattr(input_batch, "is_cpp_profile", False):
-            staged = super().prepare_inputs_to_capture(input_batch)
-            assert isinstance(staged, AscendInputBatch)
-            return staged
+    # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
+    # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
+    # ``is_padding`` to the rows the MoE routes.
+    if vllm_version_is("0.31.0"):
 
-        # The parent implementation only copies a dummy into PCP-local buffers.
-        # CPP instead supplies a global prompt, so use the real prefill splitter
-        # before those buffers are overwritten with the rank-local layout.
-        return self.partition_batch(
-            input_batch,
-            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-        )
+        def prepare_inputs_to_capture(
+            self,
+            input_batch: AscendInputBatch,
+        ) -> AscendInputBatch:
+            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+            if not getattr(input_batch, "is_cpp_profile", False):
+                staged = super().prepare_inputs_to_capture(input_batch)
+                assert isinstance(staged, AscendInputBatch)
+                return staged
+
+            # The parent implementation only copies a dummy into PCP-local buffers.
+            # CPP instead supplies a global prompt, so use the real prefill splitter
+            # before those buffers are overwritten with the rank-local layout.
+            return self.partition_batch(
+                input_batch,
+                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
+            )
+
+    else:
+
+        def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
+            self,
+            input_batch: AscendInputBatch,
+        ) -> AscendInputBatch:
+            """Stage ordinary dummies, but partition CPP's global prefill dummy."""
+            if not getattr(input_batch, "is_cpp_profile", False):
+                staged = super().prepare_inputs_for_capture_or_profile(input_batch)
+                assert isinstance(staged, AscendInputBatch)
+                return staged
+
+            # The parent implementation only copies a dummy into PCP-local buffers.
+            # CPP instead supplies a global prompt, so use the real prefill splitter
+            # before those buffers are overwritten with the rank-local layout.
+            return self.partition_batch(
+                input_batch,
+                BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
+            )
 
     def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
         """Extend restore indices to the global padded extent.
@@ -650,25 +679,6 @@ class AscendPCPManager(PCPManager):
         local_num_tokens_padded = self._padded_gather_idx.shape[0] // self.pcp_world_size
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
-
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
-        """Return capture views backed by the persistent PCP-local tables.
-
-        FULL graph replay cannot rebind SFA's captured block-table pointer, so
-        capture must use the same storage that ``prepare_attn`` updates at
-        runtime instead of the model runner's global block-table buffers.
-        """
-        if self._local_block_tables is None:
-            raise RuntimeError("PCP-local block tables are not initialized.")
-
-        dummy_block_tables = []
-        for block_table in self._local_block_tables:
-            if num_reqs > block_table.shape[0]:
-                raise RuntimeError(
-                    f"PCP graph request count exceeds the local block table: {num_reqs} > {block_table.shape[0]}."
-                )
-            dummy_block_tables.append(block_table[:num_reqs].zero_())
-        return tuple(dummy_block_tables)
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         """Pad PCP slot mappings to the fixed FULL-decode graph layout.

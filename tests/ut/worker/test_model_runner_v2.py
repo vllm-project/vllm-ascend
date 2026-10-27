@@ -24,6 +24,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_v_scale_cache_shape,
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -58,6 +59,9 @@ def _make_runner(need_timing: bool = True):
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
+    # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
+    # attribute must exist on every runner built here.
+    runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
@@ -864,13 +868,16 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
         impl.enable_mlapo = False
         impl.fa_quant_layer = False
         impl.use_flashmla = False
-        impl.pcp_enabled = False
-        impl.dcp_enabled = False
+        impl.use_pcp = False
+        impl.use_dcp = False
         impl.supports_prolog_v3_writer = lambda: True
         layer.impl = impl
         layer.indexer = None
         layer.kv_cache_dtype = "auto"
         layer.head_size = 3
+        # Set by ``MLAAttention.__init__`` on vLLM main; this stub bypasses
+        # ``__init__`` but ``get_kv_cache_spec`` reads it.
+        layer.topk_buffer_width = None
         layer.sliding_window = None
         layer.non_causal_multi_token_decode = False
 
@@ -1001,7 +1008,8 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
     # execute_model stages dummy inputs before preparing attention metadata.
-    staged = manager.prepare_inputs_to_capture(dummy)
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
+    staged = getattr(manager, stage_name)(dummy)
     block_tables, slots = runner.prepare_dummy_attn(staged)
 
     for name, value in captured.items():
@@ -1331,7 +1339,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
-    assert runner.speculator.pcp_manager is runner.pcp_manager
 
 
 def test_initialize_kv_cache_forwards_allocation_context():

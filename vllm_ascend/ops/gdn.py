@@ -50,6 +50,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
+from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
@@ -88,12 +89,21 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
         .to(device=packed_param.device, dtype=packed_param.dtype)
         .contiguous()
     )
-    replace_parameter(
-        conv1d,
-        _PACKED_CONV_WEIGHT_NAME,
-        packed_weight,
-        prefer_copy=True,
-    )
+    # vLLM main (#62326) keeps the parameter object by default and drops
+    # `prefer_copy`; v0.31.0 still requires `prefer_copy=True`.
+    if vllm_version_is("0.31.0"):
+        replace_parameter(
+            conv1d,
+            _PACKED_CONV_WEIGHT_NAME,
+            packed_weight,
+            prefer_copy=True,
+        )
+    else:
+        replace_parameter(
+            conv1d,
+            _PACKED_CONV_WEIGHT_NAME,
+            packed_weight,
+        )
 
 
 def initialize_packed_conv_weight(layer: nn.Module) -> None:
