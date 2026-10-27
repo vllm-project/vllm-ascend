@@ -1371,8 +1371,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
                 )
-        # pooling model branch
-        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
+        # pooling model branch. ENCODER_ONLY layers are bidirectional even when the metadata of a
+        # hybrid model still says causal (they never go through the EncoderOnlyAttention wrapper).
+        if attn_metadata.model_runner_type == "pooling" and (
+            not attn_metadata.causal or self.attn_type == AttentionType.ENCODER_ONLY
+        ):
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
