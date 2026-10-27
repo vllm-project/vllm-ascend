@@ -20,6 +20,20 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 import torch
+import torch_npu
+
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+
+
+def _is_nz_batched_weight(layer: torch.nn.Module, attr_name: str, tensor: torch.Tensor) -> bool:
+    """Identify grouped wo_a weights without inspecting CPU or symbolic storage."""
+    return (
+        attr_name == "weight"
+        and getattr(layer, "prefix", "").endswith("wo_a")
+        and tensor.ndim == 3
+        and tensor.device.type == "npu"
+        and torch_npu.get_npu_format(tensor) != ACL_FORMAT_FRACTAL_ND
+    )
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,7 @@ class WeightSwitchGatherPart:
     gather_input: torch.Tensor
     gather_output: torch.Tensor
     full_tensor: torch.Tensor
+    is_nz_weight: bool = False
 
 
 @dataclass
@@ -455,7 +470,20 @@ class WeightSwitchMixin:
                     f"with shape {tuple(tensor.shape)}."
                 )
 
-            local_tensor = tensor.clone().detach().contiguous() if clone_local_tensors else tensor.detach()
+            is_nz_weight = _is_nz_batched_weight(layer, gather_spec.attr_name, tensor)
+            if is_nz_weight:
+                # Format casts allocate new storage. Reuse the ND conversion
+                # for communication and, when needed, an independent NZ clone.
+                # Generic NZ clone/copy_ is unsupported on Ascend 950.
+                communication_tensor = torch_npu.npu_format_cast(tensor.detach(), ACL_FORMAT_FRACTAL_ND)
+                local_tensor = (
+                    torch_npu.npu_format_cast(communication_tensor, ACL_FORMAT_FRACTAL_NZ, customize_dtype=tensor.dtype)
+                    if clone_local_tensors
+                    else tensor.detach()
+                )
+            else:
+                local_tensor = tensor.clone().detach().contiguous() if clone_local_tensors else tensor.detach()
+                communication_tensor = local_tensor
             if clone_local_tensors:
                 with torch.no_grad():
                     tensor.set_(local_tensor)
@@ -463,9 +491,9 @@ class WeightSwitchMixin:
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
             if dim == 0:
-                gather_input = local_tensor
+                gather_input = communication_tensor
             else:
-                gather_input = torch.movedim(local_tensor, dim, 0).contiguous()
+                gather_input = torch.movedim(communication_tensor, dim, 0).contiguous()
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
@@ -487,12 +515,24 @@ class WeightSwitchMixin:
                 full_tensor = gather_output
             else:
                 full_tensor = torch.movedim(gather_output, 0, dim)
+            if is_nz_weight:
+                # Keep HCCL output in ND and reuse a separate NZ compute pool.
+                nz_pool_key = (*pool_key, "nz")
+                nz_full_tensor = None if pool is None else pool.get(nz_pool_key)
+                if nz_full_tensor is None:
+                    nz_full_tensor = torch_npu.npu_format_cast(
+                        full_tensor.contiguous(), ACL_FORMAT_FRACTAL_NZ, customize_dtype=local_tensor.dtype
+                    )
+                    if pool is not None:
+                        pool[nz_pool_key] = nz_full_tensor
+                full_tensor = nz_full_tensor
             state.gather_parts[gather_spec.attr_name] = WeightSwitchGatherPart(
                 spec=gather_spec,
                 local_tensor=local_tensor,
                 gather_input=gather_input,
                 gather_output=gather_output,
                 full_tensor=full_tensor,
+                is_nz_weight=is_nz_weight,
             )
 
         for repeat_spec in repeat_specs:
@@ -532,6 +572,10 @@ class WeightSwitchMixin:
         if state.handles:
             raise RuntimeError("Weight all-gather is still pending; wait before launching another one.")
         for part in state.gather_parts.values():
+            if part.is_nz_weight:
+                local_nd = torch_npu.npu_format_cast(part.local_tensor, ACL_FORMAT_FRACTAL_ND)
+                dim = part.spec.gather_dim
+                part.gather_input.copy_(torch.movedim(local_nd, dim, 0).contiguous())
             _, handle = all_gather_async(
                 part.gather_input,
                 config.group,
@@ -558,6 +602,16 @@ class WeightSwitchMixin:
     ) -> None:
         """Switch layer tensor attributes between local and full views."""
         for attr_name, gather_part in state.gather_parts.items():
+            if use_full_weight and gather_part.is_nz_weight:
+                # Callers wait for HCCL before switching. Convert the current
+                # gather result, then copy equal-layout storage asynchronously
+                # so the NZ compute address remains stable for graph replay.
+                dim = gather_part.spec.gather_dim
+                full_nd = torch.movedim(gather_part.gather_output, 0, dim).contiguous()
+                full_nz = torch_npu.npu_format_cast(
+                    full_nd, ACL_FORMAT_FRACTAL_NZ, customize_dtype=gather_part.local_tensor.dtype
+                )
+                torch.ops.npu.copy_memory_(gather_part.full_tensor, full_nz, non_blocking=True)
             target = gather_part.full_tensor if use_full_weight else gather_part.local_tensor
             with torch.no_grad():
                 getattr(layer, attr_name).set_(target)
