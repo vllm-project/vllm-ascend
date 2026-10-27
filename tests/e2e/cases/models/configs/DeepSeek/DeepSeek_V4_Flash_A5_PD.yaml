@@ -2,6 +2,7 @@ test_name: "DeepSeek_V4_Flash_A5_PD_Performance_Test_01"
 model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
 num_nodes: 2
 npu_per_node: 8
+dp_load_balancing: external
 
 routing:
   type: "disaggregated_prefill"
@@ -143,7 +144,6 @@ benchmarks:
     max_out_len: 128
     batch_size: 128
     request_rate: 0
-    #baseline: 2073.0287
     baseline: 1
     threshold: 0.95
     ignore_eos: True
