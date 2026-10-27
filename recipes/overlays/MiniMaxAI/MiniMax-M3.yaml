@@ -1,0 +1,256 @@
+# Source: https://github.com/vllm-project/vllm-ascend/blob/86add7adfd1194c225fd8880699d5be7a248c3ce/docs/source/tutorials/models/MiniMax-M3.md
+# Extracted with vllm-project/recipes@9ffe8f5da08b1f2ae862464805ebc487529c34d4.
+variants:
+  ascend_bf16:
+    label: BF16 (Ascend A3)
+    precision: bf16
+    vram_minimum_gb: 1025
+    description: Native MiniMaxAI/MiniMax-M3 BF16 on one Atlas 800 A3 node (16x Ascend 910C) - tutorial layout TP8 + DP2 + EP. Two nodes add one data-parallel replica per node.
+    tp:
+      ascend_910c: 8
+    supported_hardware:
+      - ascend_910c
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '2'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '16'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2}'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        install:
+          pip: false
+        # 427B BF16 weights are 854 GB; the 1025 GB above is the params x bytes x 1.2
+        # rule of thumb, which would hide the variant on a 1024 GB node.
+        vram_minimum_gb: 854
+  ascend_w8a8:
+    model_id: Eco-Tech/MiniMax-M3-w8a8-0626
+    label: W8A8 (Ascend A3)
+    precision: int8
+    vram_minimum_gb: 513
+    description: ModelSlim INT8 W8A8 for one Atlas 800 A3 node (16x Ascend 910C) - tutorial layout TP4 + DP4 + EP with the Eagle3 GQA head. Requires --quantization ascend; weights come from ModelScope.
+    tp:
+      ascend_910c: 4
+    supported_hardware:
+      - ascend_910c
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '4'
+      - '--quantization'
+      - ascend
+      - '--api-server-count'
+      - '1'
+      - '--max-num-batched-tokens'
+      - '32768'
+      - '--long-prefill-token-threshold'
+      - '4096'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a3
+        install:
+          pip: false
+  ascend_mxfp8:
+    model_id: MiniMaxAI/MiniMax-M3-MXFP8
+    label: MXFP8 (Ascend A5)
+    precision: mxfp8
+    vram_minimum_gb: 513
+    description: NPU MXFP8 (W8A8C8, where C8 is dynamic KV-cache quantization) for one 950DT node (8x Ascend 950DT) - tutorial layout TP4 + DP2 + EP with the Eagle3 GQA head. Requires --quantization mxfp8 and --kv-cache-dtype fp8.
+    tp:
+      ascend_950dt_8x: 4
+    supported_hardware:
+      - ascend_950dt_8x
+    default_modes:
+      spec_decoding: eagle3_gqa
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--data-parallel-size'
+      - '2'
+      - '--dtype'
+      - bfloat16
+      - '--quantization'
+      - mxfp8
+      - '--kv-cache-dtype'
+      - fp8
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--max-num-seqs'
+      - '500'
+      - '--async-scheduling'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--limit-mm-per-prompt'
+      - '{"image":1,"video":0}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}'
+    extra_env:
+      HCCL_BUFFSIZE: '512'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc2-a5
+        install:
+          pip: false
+meta:
+  hardware:
+    ascend_910c: verified
+    ascend_950dt_8x: verified
+guide_sections:
+  ascend: |
+    ### Huawei Ascend (vLLM Ascend)
+
+    The variants above reproduce the tutorial's single-node commands on Atlas 800
+    A3 (16 x 64 GB Ascend 910C) and 950DT products (8 x 96 GB), with the images
+    the tutorial pins: `v0.30.0rc2-a3` and `v0.30.0rc2-a5`.
+
+    | Weights | Hardware | Layout |
+    | --- | --- | --- |
+    | `MiniMaxAI/MiniMax-M3` (BF16) | 1 Atlas 800 A3 | TP8 / DP2 / EP |
+    | `Eco-Tech/MiniMax-M3-w8a8-0626` (W8A8) | 1 Atlas 800 A3 | TP4 / DP4 / EP + Eagle3 |
+    | `MiniMaxAI/MiniMax-M3-MXFP8` (MXFP8) | 1 950DT | TP4 / DP2 / EP + Eagle3 |
+
+    Weights and the draft head (`Inferact/MiniMax-M3-EAGLE3-GQA`) come from
+    ModelScope, not Hugging Face:
+
+    - https://www.modelscope.cn/collections/MiniMax/MiniMax-M3
+    - https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626
+    - https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8
+    - https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA
+
+    Export `VLLM_USE_MODELSCOPE=True` (already set for W8A8) or pass a local
+    weight directory. `--quantization` only applies to quantized weights and has
+    to match the checkpoint - `ascend` for W8A8, `mxfp8` for MXFP8, and nothing
+    for BF16, where a stray quant method makes the load fail.
+
+    Scenarios the command generator cannot express, kept in the tutorial:
+
+    - 1M-token context: single-node layouts are A3 W8A8 TP4 / PP4 / DP1 at
+      `--max-model-len 1049600`, and 950DT MXFP8 TP8 / PP1 / DP1 or TP4 / PP2 /
+      DP1 at 1048576. They add `--pipeline-parallel-size`,
+      `VLLM_PP_LAYER_PARTITION`, `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` on A3, and on
+      950DT the `experimental_950_transformer` vendor package.
+    - Prefill/decode disaggregation, including the KV-cache pool: pool split,
+      ports and `MooncakeConnectorV1` / Memcache settings live in the scripts.
+    - Dual-node BF16: the tutorial runs TP8 / DP4; the generator keeps TP inside
+      a node with one replica per node, so two nodes render as TP16 / DP2.
+
+    Source: https://github.com/vllm-project/vllm-ascend/blob/86add7adfd1194c225fd8880699d5be7a248c3ce/docs/source/tutorials/models/MiniMax-M3.md
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--trust-remote-code'
+      - '--distributed_executor_backend'
+      - mp
+    extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+hardware_notes:
+  ascend_910c:
+    title: Ascend-specific switches
+    body: Each variant carries its own single --additional-config, so shared-expert DP, multistream overlap and the ascend compilation knobs travel together. enable_mlapo is not set - the tutorial never passes it and the support matrix marks MLAPO unavailable on A3. Adding a second --quantization value breaks the BF16 variant, whose checkpoint is unquantized. KV pooling is not offered on the KV Offload row for Ascend NPU; the tutorial covers the Mooncake and Memcache backends.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+  ascend_950dt_8x:
+    title: Ascend-specific switches
+    body: This profile is the tutorial's "950DT products". Same switches as A3, with enable_mlapo left unset for the same reason. The 1M long-context layouts and the PD pool are documented in the guide; both need the experimental_950_transformer vendor package sourced before launch. KV pooling is not offered on the KV Offload row for Ascend NPU; the tutorial covers the Mooncake and Memcache backends.
+    link:
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html
+      label: MiniMax-M3 on vLLM-Ascend
+features:
+  spec_decoding:
+    modes:
+      eagle3:
+        hardware:
+          npu: unsupported
+      eagle3_gqa:
+        hardware:
+          npu: supported
+        hardware_overrides:
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3}'
+          ascend_950dt_8x:
+            args:
+              - '--speculative-config'
+              - '{"model":"Inferact/MiniMax-M3-EAGLE3-GQA","method":"eagle3","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}'
+  encoder_parallel:
+    hardware_overrides:
+      npu:
+        args:
+          - '--mm-encoder-tp-mode'
+          - data
+strategy_hardware:
+  # The variants already carry the tutorial's DP size, so every strategy that
+  # would add its own DP or PP on top is opted out; single_node_tp and pd_cluster
+  # keep the inherited default and are the shapes the tutorial documents.
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp_dp:
+    npu: supported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+strategy_overrides:
+  multi_node_tp_dp:
+    hardware_overrides:
+      npu:
+        # strategy_overrides replaces the npu generation block, so the shared
+        # Ascend flags are restated here next to the HCCL rendezvous settings.
+        extra_args:
+          - '--trust-remote-code'
+          - '--distributed_executor_backend'
+          - mp
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: AIV
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          HCCL_IF_IP: $LOCAL_IP
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
