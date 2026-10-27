@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -217,104 +218,6 @@ def test_pp_ipc_cached_request_data_fills_empty_confirmed_token_only_for_async(
     assert scheduler.scheduler_config.async_scheduling is async_scheduling
 
 
-def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v1.model_runner.get_pp_group",
-        lambda: SimpleNamespace(is_last_rank=False),
-    )
-
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.is_kv_producer = False
-    runner.is_kv_consumer = False
-    runner.use_async_scheduling = True
-    runner.device = torch.device("cpu")
-    runner.discard_request_mask = SimpleNamespace(
-        np=np.zeros(2, dtype=bool),
-    )
-    runner.input_batch = SimpleNamespace(
-        num_reqs=2,
-        req_ids=["req-0", "req-1"],
-        prev_sampled_token_ids=None,
-        prev_req_id_to_index={},
-        num_tokens_no_spec=np.array([3, 5], dtype=np.int64),
-        is_token_ids=np.zeros((2, 8), dtype=bool),
-    )
-    runner.requests = {
-        "req-0": SimpleNamespace(output_token_ids=[31]),
-        "req-1": SimpleNamespace(output_token_ids=[41, 42]),
-    }
-    scheduler_output = SimpleNamespace(
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0", "req-1"],
-            new_token_ids=[[101], [202]],
-            num_output_tokens=[1, 2],
-        ),
-    )
-
-    runner._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-
-    assert runner.input_batch.prev_req_id_to_index == {
-        "req-0": 0,
-        "req-1": 1,
-    }
-    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]
-    assert runner.requests["req-0"].output_token_ids == [
-        31,
-        PLACEHOLDER_TOKEN_ID,
-    ]
-    assert runner.requests["req-1"].output_token_ids == [
-        41,
-        42,
-        PLACEHOLDER_TOKEN_ID,
-    ]
-    assert runner.input_batch.is_token_ids[0, 3]
-    assert runner.input_batch.is_token_ids[1, 5]
-    assert runner.input_batch.num_tokens_no_spec.tolist() == [4, 6]
-
-
-def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v1.model_runner.get_pp_group",
-        lambda: SimpleNamespace(is_last_rank=False),
-    )
-
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.is_kv_producer = False
-    runner.is_kv_consumer = False
-    runner.use_async_scheduling = False
-    runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(
-        num_reqs=1,
-        req_ids=["req-0"],
-        prev_sampled_token_ids="keep",
-        prev_req_id_to_index={"keep": 0},
-        num_tokens_no_spec=np.array([3], dtype=np.int64),
-        is_token_ids=np.zeros((1, 8), dtype=bool),
-    )
-    runner.requests = {
-        "req-0": SimpleNamespace(output_token_ids=[31]),
-    }
-    scheduler_output = SimpleNamespace(
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_token_ids=[[101]],
-            num_output_tokens=[1],
-        ),
-    )
-
-    runner._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-
-    assert runner.input_batch.prev_req_id_to_index == {"keep": 0}
-    assert runner.input_batch.prev_sampled_token_ids == "keep"
-    assert runner.requests["req-0"].output_token_ids == [31]
-    assert not runner.input_batch.is_token_ids[0, 3]
-    assert runner.input_batch.num_tokens_no_spec.tolist() == [3]
-
-
 @pytest.mark.parametrize("async_scheduling", [False, True])
 def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_async(
     async_scheduling,
@@ -478,3 +381,46 @@ def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
         req_to_new_blocks={"req-0": blocks},
     )
     assert cached.new_token_ids == [[]]
+
+
+@pytest.mark.parametrize(
+    ("computed", "scheduled", "prompt_len", "expected"),
+    [
+        (0, 4096, 8192, False),
+        (4096, 4096, 8192, True),
+        (8192, 4, 8192, True),
+    ],
+)
+def test_pp_feedback_skips_only_non_final_prefill(
+    computed, scheduled, prompt_len, expected
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={"req-0": 0},
+        num_computed_tokens_cpu=np.array([computed], dtype=np.int32),
+        num_prompt_tokens=np.array([prompt_len], dtype=np.int32),
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req-0": scheduled}
+    )
+    assert runner._pp_step_needs_sampled_feedback(scheduler_output) is expected
+
+
+def test_pp_feedback_ignores_unscheduled_or_unknown_requests():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={"req-0": 0},
+        num_computed_tokens_cpu=np.array([8192], dtype=np.int32),
+        num_prompt_tokens=np.array([8192], dtype=np.int32),
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req-0": 0, "unknown": 4}
+    )
+    assert runner._pp_step_needs_sampled_feedback(scheduler_output) is False
+
+
+def test_pp_feedback_is_posted_before_last_stage_state_correction() -> None:
+    block = inspect.getsource(NPUModelRunner.sample_tokens)
+    assert block.index(
+        "self._pp_broadcast_sampled_tokens_and_accepted_counts("
+    ) < block.index("self._update_states_after_model_execute(")
