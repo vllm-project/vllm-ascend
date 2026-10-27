@@ -19,9 +19,7 @@ from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-)
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_profiling_chunk_for_draft
 
 # Upstream uses the attention kernel block size for DCP ownership, which is
 # incorrect when physical KV blocks are larger than kernel blocks. Bind the
