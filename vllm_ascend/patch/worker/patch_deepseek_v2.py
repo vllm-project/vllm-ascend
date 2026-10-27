@@ -176,12 +176,7 @@ def _deepseek_v2_mla_attention_init(
 
     if config.rope_parameters["rope_type"] != "default":
         config.rope_parameters["rope_type"] = (
-            "deepseek_yarn"
-            if config.rope_parameters.get(
-                "apply_yarn_scaling",
-                True,
-            )
-            else "deepseek_llama_scaling"
+            "deepseek_llama_scaling" if config.rope_parameters.get("attention_factor") == 1.0 else "deepseek_yarn"
         )
 
     self.rotary_emb = get_rope(
