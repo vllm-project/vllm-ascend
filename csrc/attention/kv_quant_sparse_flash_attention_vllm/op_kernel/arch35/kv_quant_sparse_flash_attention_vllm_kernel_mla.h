@@ -598,25 +598,38 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
                     runParam, this->constInfo, gS1Index, this->actualSeqQlenAddr);
                 bool s2NoNeedCalc =
                     ComputeS2LoopInfo<TEMPLATE_INTF_ARGS>(runParam, this->constInfo);
-                if (!s1NoNeedCalc && !s2NoNeedCalc && sharedParams.returnSoftmaxLse) {
-                    // CP compacts valid indices followed by -1 padding. Both
+                if (!s1NoNeedCalc && !s2NoNeedCalc) {
+                    // Valid indices precede -1 padding. The compute length must
+                    // exclude padding regardless of whether LSE is requested.
                     // AIC and AIV must use the same valid task length.
                     uint64_t queryOffset = runParam.boIdx * constInfo.s1Size + runParam.s1oIdx;
                     if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
                         queryOffset = (runParam.boIdx == 0 ? 0 : actualSeqQlenAddr[runParam.boIdx - 1]) + runParam.s1oIdx;
                     }
                     const uint64_t offset = queryOffset * constInfo.sparseBlockCount;
-                    int64_t lo = 0;
-                    int64_t hi = runParam.s2LineEndIdx;
-                    while (lo < hi) {
-                        const int64_t mid = lo + (hi - lo) / 2;
-                        if (sparseIndicesGm.GetValue(offset + mid) >= 0) { lo = mid + 1; }
-                        else { hi = mid; }
+                    int64_t lo = runParam.s2LineEndIdx;
+                    // Avoid the binary search for the common unpadded case.
+                    if (lo > 0 && sparseIndicesGm.GetValue(offset + lo - 1) < 0) {
+                        int64_t hi = lo;
+                        lo = 0;
+                        while (lo < hi) {
+                            const int64_t mid = lo + (hi - lo) / 2;
+                            if (sparseIndicesGm.GetValue(offset + mid) >= 0) {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
                     }
                     runParam.s2LineEndIdx = lo;
                     runParam.kvLoopEndIdx = (lo + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
                     runParam.s2LoopEndIdx = runParam.kvLoopEndIdx;
                     s2NoNeedCalc = lo == 0;
+                    if ASCEND_IS_AIV {
+                        if (s2NoNeedCalc) {
+                            this->vecBlock.ClearEmptyQueryOutput(runParam, this->constInfo);
+                        }
+                    }
                 }
                 // s1和s2有任意一个不需要算, 则continue, 如果是当前核最后一次循环，则补充计算taskIdx+2的部分
                 if (s1NoNeedCalc || s2NoNeedCalc) {

@@ -80,6 +80,7 @@ public:
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,
         __gm__ uint8_t *blockTable);
     __aicore__ inline void InitOutputSingleCore(ConstInfo &constInfo);
+    __aicore__ inline void ClearEmptyQueryOutput(const RunParamStr &runParam, const ConstInfo &constInfo);
     __aicore__ inline void ProcessVec0(Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &outputL1,
         Buffer<BufferType::GM, SyncType::CROSS_CORE_SYNC_BACKWARD> &v0ResGm,
         const RunInfo &runInfo, ConstInfo &constInfo);
@@ -846,6 +847,18 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::InitOutputSingleCore(Co
         }
     }
     SyncAll();
+}
+
+TEMPLATES_DEF_NO_DEFAULT
+__aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::ClearEmptyQueryOutput(
+    const RunParamStr &runParam, const ConstInfo &constInfo)
+{
+    // LSE mode and needInit already clear the complete output before processing.
+    // Otherwise, clear only this vector core's disjoint query/head range.
+    if (!returnSoftmaxLse && !constInfo.needInit && runParam.halfMRealSize > 0) {
+        matmul::InitOutput<OUTPUT_T>(attentionOutGm[runParam.attentionOutOffset],
+            runParam.halfMRealSize * constInfo.dSizeV, 0);
+    }
 }
 
 TEMPLATES_DEF_NO_DEFAULT
