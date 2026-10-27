@@ -483,7 +483,7 @@ def test_mla_replicated_draft_decode_skips_pcp_kv_gather() -> None:
     metadata.num_input_tokens = 1
     metadata.slot_mapping = torch.tensor([5], dtype=torch.int64)
     with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
-        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None)
+        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None, None)
     assert impl.mla_preprocess_decode.call_args.args[-1] is None
 
 
@@ -501,7 +501,7 @@ def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
     metadata.num_input_tokens = 1
     metadata.slot_mapping = torch.tensor([-1, 7], dtype=torch.int64)
     with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
-        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None)
+        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None, None)
     impl.layerwise_kv_cache_hook.wait_for_layer.assert_called_once_with("target")
     impl.exec_kv_prefill.assert_called_once()
 
