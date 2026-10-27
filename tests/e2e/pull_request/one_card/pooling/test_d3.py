@@ -9,6 +9,11 @@ import torch
 from transformers import AutoModel
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, cleanup_dist_env_and_memory
+from vllm_ascend.utils import vllm_version_is
+
+pytestmark = pytest.mark.skipif(
+    vllm_version_is("0.31.0"), reason="D3 needs a vLLM revision with native D3 support (not in v0.31.0)"
+)
 
 MODEL = "vllm-sr/d3-edge"
 MODELS = ("vllm-sr/d3-edge", "vllm-sr/d3-nano")
