@@ -91,16 +91,16 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     "vllm.v1.worker.gpu.sample.penalties.apply_penalties": apply_penalties,
     "vllm.v1.worker.gpu.sample.penalties.bincount": bincount,
     "vllm.v1.worker.gpu.sample.bad_words.apply_bad_words": apply_bad_words,
-    "vllm.v1.worker.gpu.sample.logprob.compute_token_logprobs": (compute_token_logprobs),
+    "vllm.v1.worker.gpu.sample.logprob.compute_token_logprobs": compute_token_logprobs,
     # Upstream renamed compute_topk_logprobs to compute_topk_scores and
     # moved the definition into logprob.py; the other three modules
     # from-import it. One registration covers the three from-import copies
     # of the retired patch. The impl keeps our historical name; its
     # signature matches the upstream compute_topk_scores.
-    "vllm.v1.worker.gpu.sample.logprob.compute_topk_scores": (compute_topk_logprobs),
+    "vllm.v1.worker.gpu.sample.logprob.compute_topk_scores": compute_topk_logprobs,
     # TODO: Remove when upstream guards empty launch grids (Ascend
     # rejects an empty grid with coreDim=0).
-    "vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens": (apply_trace_tokens),
+    "vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens": apply_trace_tokens,
     # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported
     # version.
     "vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel": (  # noqa: E501
@@ -112,10 +112,10 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # Rationale: strided vocab-dimension loads over-allocate NPU UB.
     # TODO: Remove when Triton-Ascend can compile and efficiently lower
     # the upstream kernel.
-    "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": (sampling_mask_from_logits_npu),
+    "vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits": sampling_mask_from_logits_npu,
     # TODO: Remove once the compiler and Triton-Ascend toolkit support the
     # upstream fill_logprob_token_ids_kernel.
-    "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": (fill_logprob_token_ids_npu),
+    "vllm.v1.worker.gpu.sample.logprob._fill_logprob_token_ids_kernel": fill_logprob_token_ids_npu,
     # Defined in metrics/logits.py; sampler.py and rejection_sampler.py are
     # copy sites (retired patch: two assignments).
     # TODO: Remove once the compiler and Triton-Ascend toolkit support the
@@ -125,13 +125,13 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
     # rejection_sample is defined in rejection_sampler_utils; the
     # rejection_sampler module only from-imports it. One registration
     # covers both retired assignments.
-    "vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils.rejection_sample": (npu_rejection_sample),
+    "vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils.rejection_sample": npu_rejection_sample,
     # ---- other upstream modules --------------------------------------------
     # Defined in topk_topp_triton.py; topk_topp_sampler only from-imports
     # it. The identity sweep covers every copy site.
-    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": (apply_top_k_top_p_npu),
-    "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": (apply_grammar_bitmask_npu),
-    "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": (precopy_mamba_align_fused_npu),
+    "vllm.v1.sample.ops.topk_topp_triton.apply_top_k_top_p_triton": apply_top_k_top_p_npu,
+    "vllm.v1.worker.gpu.structured_outputs._apply_grammar_bitmask_kernel": apply_grammar_bitmask_npu,
+    "vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel": precopy_mamba_align_fused_npu,
 }
 
 
@@ -147,7 +147,7 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
 # into the override table and delete the manual swap.
 _DEVICE_FUNCTION_SWAPS: dict[str, Callable[..., Any]] = {
     # TODO: Remove after the new Q4 Triton-Ascend release is available.
-    "vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token": (_load_effective_token_ascend),
+    "vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token": _load_effective_token_ascend,
 }
 
 
