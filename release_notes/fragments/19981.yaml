@@ -1,0 +1,4 @@
+pr: 19981
+entries:
+  - category: bugfix
+    text: Fixed Kimi KDA prefill state-copy launches with Triton Ascend 3.6.0 while retaining compatibility with 3.2.2.
