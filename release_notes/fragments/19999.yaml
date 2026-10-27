@@ -1,0 +1,4 @@
+pr: 19999
+entries:
+  - category: feature
+    text: Added experimental GLM-5.3-Flash sequence parallelism with pipeline parallelism on Model Runner V2 for single-node BF16 deployments; model accuracy validation remains pending.
