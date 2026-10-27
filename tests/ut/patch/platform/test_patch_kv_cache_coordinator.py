@@ -217,7 +217,7 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     ],
 )
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="the pluggable KV cache builder is main-only",
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(kv_transfer_config):
