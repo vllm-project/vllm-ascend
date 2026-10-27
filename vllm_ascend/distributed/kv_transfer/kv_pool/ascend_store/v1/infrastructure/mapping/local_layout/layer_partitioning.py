@@ -91,6 +91,6 @@ def slice_layer_segments(
     strides = strides if len(strides) == 1 else strides[start:end]
     lengths = lengths if len(lengths) == 1 else lengths[start:end]
     return tuple(
-        LocalMemorySegments(segments.block_zero_addresses[start:end], strides, lengths)
+        LocalMemorySegments(segments.block_zero_segment_addresses[start:end], strides, lengths)
         for segments in segments_by_head_slice
     )

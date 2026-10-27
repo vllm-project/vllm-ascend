@@ -9,7 +9,7 @@ import numpy as np
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
-from ..transfer.rows import StoreCandidateRows
+from ..transfer.rows import StoreTransferRecords
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,13 +21,13 @@ class BulkBackendArguments:
     sizes: list[list[int]]
 
 
-def select_store_writer_rows(
+def select_store_writer_records(
     topology: KVPoolTopology,
-    rows: StoreCandidateRows,
+    rows: StoreTransferRecords,
     *,
     tp_mismatch: bool,
     align_state: bool = False,
-) -> StoreCandidateRows:
+) -> StoreTransferRecords:
     """Partition rows only among ranks proven to publish the same key and bytes."""
 
     if tp_mismatch or align_state:
@@ -43,9 +43,9 @@ def select_store_writer_rows(
     shard_count = topology.pcp_size * replica_count
     if shard_count <= 1:
         return rows
-    counts, hashes, block_ids = rows
+    counts, hashes, local_block_ids = rows
     selection = slice(shard_rank, len(counts), shard_count)
-    return counts[selection], hashes[selection], block_ids[selection]
+    return counts[selection], hashes[selection], local_block_ids[selection]
 
 
 def _bulk_load_completions(batch: KVTransferBatch, result_codes: tuple[int, ...]) -> tuple[LoadCompletion, ...]:
@@ -57,9 +57,9 @@ def _bulk_load_completions(batch: KVTransferBatch, result_codes: tuple[int, ...]
         (group, index)
         for group in batch.groups
         for index in (
-            range(group.object_count)
-            if group.selected_objects is None
-            else np.flatnonzero(group.selected_objects).tolist()
+            range(group.transfer_candidate_count)
+            if group.transfer_candidate_mask is None
+            else np.flatnonzero(group.transfer_candidate_mask).tolist()
         )
     )
     failures = tuple(

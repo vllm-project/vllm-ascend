@@ -14,7 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     resolve_key_naming_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.local_layout import (
-    ObjectCoordinate,
+    ObjectPartitionCoordinate,
 )
 
 
@@ -48,7 +48,7 @@ def test_resolved_codec_matches_legacy_and_snapshots_all_inputs(backend, legacy,
         builder = backend.create_key_builder(facts)
         for group in range(group_count):
             coordinates = tuple(
-                ObjectCoordinate(stage, 0, head) for stage in reversed(range(pp_size)) for head in (1, 0)
+                ObjectPartitionCoordinate(stage, 0, head) for stage in reversed(range(pp_size)) for head in (1, 0)
             )
             for lookup_heads in (0, 1, 2):
                 naming = builder.bind(group, coordinates, lookup_head_count=lookup_heads)
@@ -92,7 +92,7 @@ def test_runtime_only_joins_precompiled_parts(backend, legacy, pp_size, group_co
         monkeypatch.setattr(backend, name, fail)
     monkeypatch.setattr(backend, "create_key_builder", fail)
     monkeypatch.setattr(legacy, "bind_layerwise_keys", fail)
-    bound = builder.bind(group, (ObjectCoordinate(stage, 0, 1),), lookup_head_count=2)
+    bound = builder.bind(group, (ObjectPartitionCoordinate(stage, 0, 1),), lookup_head_count=2)
     assert bound.keys((b"a", "61")) == ((key, key),)
     assert bound.lookup_keys((b"a",)) == lookup
     fail.assert_not_called()
@@ -141,7 +141,7 @@ def test_mooncake_identity_normalizes_cache_size_and_group_representation():
     assert represented == facts
     builder = mooncake.create_key_builder(facts)
     for group in (0, 1):
-        naming = builder.bind(group, (ObjectCoordinate(1, 0, 1),), lookup_head_count=2)
+        naming = builder.bind(group, (ObjectPartitionCoordinate(1, 0, 1),), lookup_head_count=2)
         assert naming.keys(("a",)) == ((expected.make_full_key(group, "a", 1, 1),),)
     changed = mooncake.create_key_builder(replace(facts, speculative_hash="different-draft"))
     assert changed.prefixes_by_group_stage != builder.prefixes_by_group_stage
@@ -157,7 +157,7 @@ def test_memcache_does_not_read_unused_layout_identity():
         group_block_sizes=(16, 32),
         requires_layout_identity=False,
     )
-    naming = memcache.create_key_builder(facts).bind(1, (ObjectCoordinate(1, 0, 1),), lookup_head_count=1)
+    naming = memcache.create_key_builder(facts).bind(1, (ObjectPartitionCoordinate(1, 0, 1),), lookup_head_count=1)
     assert naming.keys(("a",)) == (("model@1@pp1@a@1",),)
     assert naming.lookup_keys(("a",)) == (("model@1@pp0@a@0",), ("model@1@pp1@a@0",))
 

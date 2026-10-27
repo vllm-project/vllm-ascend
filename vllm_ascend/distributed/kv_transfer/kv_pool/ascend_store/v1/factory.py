@@ -98,10 +98,10 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
             requires_layout_identity=backend_spec.key_requires_layout_identity,
         )
         key_builder = backend_spec.layerwise_key_factory(naming_config)
-    object_layout_factory = None
+    remote_object_layout_factory = None
     layout_factory = backend_spec.layerwise_layout_factory
     if config.use_layerwise and layout_factory is not None:
-        object_layout_factory = layout_factory(topology)
+        remote_object_layout_factory = layout_factory(topology)
     align_shared_storage = (
         config.use_layerwise
         and backend_spec.layerwise_access is LayerwiseAccessKind.GVA
@@ -135,7 +135,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                     kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                     layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                     key_builder=key_builder,
-                    object_layout_factory=object_layout_factory,
+                    remote_object_layout_factory=remote_object_layout_factory,
                     store_collective=collective,
                 )
             return KeyRangeLayerwiseWorker(
@@ -146,7 +146,7 @@ def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfi
                 kv_cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT,
                 layerwise_prefetch_layers=config.layerwise_prefetch_layers,
                 key_builder=key_builder,
-                object_layout_factory=object_layout_factory,
+                remote_object_layout_factory=remote_object_layout_factory,
             )
         return BulkWorker(
             topology,

@@ -100,7 +100,7 @@ def test_layerwise_capability_binding_failure_precedes_registration_and_closes_b
         resources,
         reachability=make_reachability(topology),
         key_builder=SimpleNamespace(bind=fail) if phase == "naming" else None,
-        object_layout_factory=fail if phase == "object_layout" else None,
+        remote_object_layout_factory=fail if phase == "object_layout" else None,
     )
     with pytest.raises(RuntimeError, match="capability binding failed"):
         worker.bind_kv_caches(make_caches(topology))
@@ -635,14 +635,14 @@ def test_store_admission_preserves_missing_rows_in_each_group(layerwise) -> None
 
 
 @pytest.mark.parametrize(
-    "topology,presence,key_axis",
+    "topology,presence,partition_keys",
     (
         (make_topology(tp_mismatch=True), [1, 0], "@head_or_tp_rank:1@"),
         (make_topology(consumer_pipeline_partitions=(1, 1)), [0, 1], "@pp_rank:0@"),
     ),
     ids=("tp_head", "pipeline_stage"),
 )
-def test_store_admission_selects_only_the_missing_effective_key_axis(topology, presence, key_axis) -> None:
+def test_store_admission_selects_only_the_missing_effective_key_axis(topology, presence, partition_keys) -> None:
     backend = FakeBackend()
     backend.presence = presence
     worker, resources, _ = make_worker(backend, topology=topology, requires_exists_before_put=True)
@@ -651,10 +651,10 @@ def test_store_admission_selects_only_the_missing_effective_key_axis(topology, p
         candidates = next(call[1] for call in backend.calls if call[0] == "exists")
         put_call = next(call for call in backend.calls if call[0] == "put")
         assert put_call[1] == (candidates[presence.index(0)],)
-        assert key_axis in put_call[1][0]
+        assert partition_keys in put_call[1][0]
         (evidence,) = completion.evidence.transfer_evidence
         assert evidence.source.key == put_call[1][0]
-        assert (evidence.source.group_id, evidence.source.block_id) == (0, 1)
+        assert (evidence.source.group_id, evidence.source.local_block_id) == (0, 1)
         assert evidence.result_code == 0
         assert worker.take_released_store_job_ids() == {17}
     finally:
@@ -689,7 +689,7 @@ def test_checkpoint_store_uses_exact_state_source_after_admission() -> None:
         assert len(put_call[1]) == 1 and "@group:1@" in put_call[1][0]
         assert put_call[2:] == (((12448,),), ((32,),))
         (evidence,) = completion.evidence.transfer_evidence
-        assert (evidence.source.group_id, evidence.source.block_id) == (1, 7)
+        assert (evidence.source.group_id, evidence.source.local_block_id) == (1, 7)
         assert evidence.result_code == 0
         assert worker.take_released_store_job_ids() == {23}
     finally:

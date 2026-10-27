@@ -149,15 +149,15 @@ def test_backend_supplied_binders_are_resolved_before_registration_and_applied_o
             layer.layer_names[0]: (torch.zeros(8, 4), torch.zeros(8, 4)) for layer in topology.transfer_groups[0].layers
         }
         worker.bind_kv_caches(caches)
-        local = worker._mappings[0].local
+        local = worker._mappings[0].local_layout
         bind_names.assert_called_once_with(
             0,
-            tuple(source.coordinate for source in local.objects),
+            tuple(source.coordinate for source in local.partitions),
             lookup_head_count=topology.tp_partition.key_rank_count,
         )
         bind_objects.assert_called_once_with(local)
-        assert worker._mappings[0].naming is names
-        assert worker._mappings[0].naming.keys((b"a",)) == (("custom-wire-key",),)
+        assert worker._mappings[0].key_namer is names
+        assert worker._mappings[0].key_namer.keys((b"a",)) == (("custom-wire-key",),)
     finally:
         worker.close()
 
@@ -508,7 +508,7 @@ def test_factory_default_keys_share_complete_objects(
         assert all(completion.evidence.succeeded for completion in completions)
         assert writer.take_released_store_job_ids() == {17}
         writer.end_step()
-        keys = {mapping.naming.keys((b"a",))[0][0] for mapping in writer._mappings.values()}
+        keys = {mapping.key_namer.keys((b"a",))[0][0] for mapping in writer._mappings.values()}
         assert set(objects) == keys
         assert all(ctypes.sizeof(value) == 40 for value in objects.values())
         assert all(f"@pp_rank:{pp_rank}@" in key for key in keys)
@@ -519,7 +519,7 @@ def test_factory_default_keys_share_complete_objects(
                 for layer in topology.groups[group_id].layers
                 for tensor in source[layer.layer_names[0]]
             )
-            assert objects[mapping.naming.keys((b"a",))[0][0]].raw == expected_bytes
+            assert objects[mapping.key_namer.keys((b"a",))[0][0]].raw == expected_bytes
     finally:
         writer.close()
     assert write_sdk.closed
@@ -529,7 +529,7 @@ def test_factory_default_keys_share_complete_objects(
         for tensors in destination.values():
             for tensor in tensors:
                 tensor.fill_(-1)
-        assert {mapping.naming.keys((b"a",))[0][0] for mapping in reader._mappings.values()} == keys
+        assert {mapping.key_namer.keys((b"a",))[0][0] for mapping in reader._mappings.values()} == keys
         if pp_rank == 0:
             assert reader.lookup(LookupRequest(0, 4, (0, 3), (b"a",))).available_end_token == 4
         target_ids = tuple((6,) if group_id in topology.transfer_group_ids else () for group_id in range(4))
@@ -623,7 +623,7 @@ def test_private_groups_are_projected_out_of_scheduler_worker_and_backend(config
     assert len(put_call[1]) == 1 and "@group:0@" in put_call[1][0]
     assert put_call[2:] == (((1448,),), ((32,),))
     assert [item.source.group_id for item in completion.evidence.transfer_evidence] == [0]
-    assert [item.source.block_id for item in completion.evidence.transfer_evidence] == [7]
+    assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [7]
 
     worker.close()
     assert resources.closed

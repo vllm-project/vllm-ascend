@@ -1,4 +1,4 @@
-"""Carry one Worker transfer's rows from Worker selection to Backend I/O.
+"""Carry transfer records from Worker selection to Backend I/O.
 
 The batch values retain dynamic Block IDs, token counts, keys, request
 ownership, and current object selection together with the minimal bound facts
@@ -15,63 +15,71 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from .rows import StoreCandidateRows
+from .rows import StoreTransferRecords
 
-ByteArray: TypeAlias = NDArray[np.uint64]
+UInt64Array: TypeAlias = NDArray[np.uint64]
 IndexArray: TypeAlias = NDArray[np.intp]
 BoolArray: TypeAlias = NDArray[np.bool_]
-KeyAxes: TypeAlias = tuple[tuple[str, ...], ...]
+KeysByPartition: TypeAlias = tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class KVGroupBatch:
-    """One cache Group's dynamic row axis, shared across every layer."""
+    """One group's records: request ownership, content identity and local block ID.
+
+    Each partition pairs with every record to form a transfer candidate. Candidate
+    positions remain stable through selection, including repeated keys/block IDs.
+    """
 
     group_id: int
-    block_ids: ByteArray
-    token_counts: ByteArray
-    key_axes: KeyAxes
-    request_splits: IndexArray
+    local_block_ids: UInt64Array
+    token_counts: UInt64Array
+    keys_by_partition: KeysByPartition
+    request_transfer_record_boundaries: IndexArray
     physical_layer_ids: tuple[int, ...]
-    object_size: int
-    selected_objects: BoolArray | None = None
+    remote_object_size_bytes: int
+    transfer_candidate_mask: BoolArray | None = None
     selected_key_values: tuple[str, ...] | None = None
-    physical_layer_ids_by_axis: tuple[tuple[int, ...], ...] | None = None
+    physical_layer_ids_by_partition: tuple[tuple[int, ...], ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.physical_layer_ids_by_axis is not None and len(self.physical_layer_ids_by_axis) != len(self.key_axes):
-            raise ValueError("Per-axis physical layers must align the key axes")
+        if self.physical_layer_ids_by_partition is not None and len(self.physical_layer_ids_by_partition) != len(
+            self.keys_by_partition
+        ):
+            raise ValueError("Per-partition physical layers must align keys_by_partition")
 
     @property
-    def row_count(self) -> int:
-        return len(self.block_ids)
+    def transfer_record_count(self) -> int:
+        return len(self.local_block_ids)
 
     @property
-    def object_count(self) -> int:
-        return len(self.key_axes) * self.row_count
+    def transfer_candidate_count(self) -> int:
+        return len(self.keys_by_partition) * self.transfer_record_count
 
     def selected_keys(self) -> tuple[str, ...]:
         if self.selected_key_values is not None:
             return self.selected_key_values
-        if self.selected_objects is None:
-            return tuple(key for axis in self.key_axes for key in axis)
+        if self.transfer_candidate_mask is None:
+            return tuple(key for axis in self.keys_by_partition for key in axis)
         return tuple(
             key
-            for axis_index, axis in enumerate(self.key_axes)
-            for row_index, key in enumerate(axis)
-            if self.selected_objects[axis_index * self.row_count + row_index]
+            for partition_index, axis in enumerate(self.keys_by_partition)
+            for transfer_record_index, key in enumerate(axis)
+            if self.transfer_candidate_mask[partition_index * self.transfer_record_count + transfer_record_index]
         )
 
     def select_keys(self, accepted: set[str], claimed: set[str] | None = None) -> KVGroupBatch:
         current: BoolArray = (
-            np.ones(self.object_count, dtype=np.bool_) if self.selected_objects is None else self.selected_objects
+            np.ones(self.transfer_candidate_count, dtype=np.bool_)
+            if self.transfer_candidate_mask is None
+            else self.transfer_candidate_mask
         )
-        selected: BoolArray = np.zeros(self.object_count, dtype=np.bool_)
+        selected: BoolArray = np.zeros(self.transfer_candidate_count, dtype=np.bool_)
         selected_keys: list[str] = []
-        for axis_index, axis in enumerate(self.key_axes):
-            axis_offset = axis_index * self.row_count
-            for row_index, key in enumerate(axis):
-                index = axis_offset + row_index
+        for partition_index, axis in enumerate(self.keys_by_partition):
+            partition_candidate_start = partition_index * self.transfer_record_count
+            for transfer_record_index, key in enumerate(axis):
+                index = partition_candidate_start + transfer_record_index
                 if not current[index] or key not in accepted or (claimed is not None and key in claimed):
                     continue
                 selected[index] = True
@@ -79,30 +87,32 @@ class KVGroupBatch:
                 if claimed is not None:
                     claimed.add(key)
         selected.flags.writeable = False
-        return replace(self, selected_objects=selected, selected_key_values=tuple(selected_keys))
+        return replace(self, transfer_candidate_mask=selected, selected_key_values=tuple(selected_keys))
 
-    def request_index(self, object_index: int) -> int:
-        row_index = object_index % self.row_count
-        return int(np.searchsorted(self.request_splits, row_index, side="right") - 1)
+    def request_index(self, transfer_candidate_index: int) -> int:
+        transfer_record_index = transfer_candidate_index % self.transfer_record_count
+        return int(np.searchsorted(self.request_transfer_record_boundaries, transfer_record_index, side="right") - 1)
 
-    def source(self, object_index: int, layer_id: int | None, *, request_index: int | None = None) -> TransferSource:
-        axis_index, row_index = divmod(object_index, self.row_count)
+    def source(
+        self, transfer_candidate_index: int, layer_id: int | None, *, request_index: int | None = None
+    ) -> TransferSource:
+        partition_index, transfer_record_index = divmod(transfer_candidate_index, self.transfer_record_count)
         layer_ids: tuple[int, ...]
         if layer_id is not None:
             layer_ids = (layer_id,)
-        elif self.physical_layer_ids_by_axis is None:
+        elif self.physical_layer_ids_by_partition is None:
             layer_ids = self.physical_layer_ids
         else:
-            layer_ids = self.physical_layer_ids_by_axis[axis_index]
+            layer_ids = self.physical_layer_ids_by_partition[partition_index]
         if request_index is None:
-            request_index = self.request_index(object_index)
-        key = self.key_axes[axis_index][row_index]
-        return TransferSource(self, object_index, row_index, request_index, layer_ids, key)
+            request_index = self.request_index(transfer_candidate_index)
+        key = self.keys_by_partition[partition_index][transfer_record_index]
+        return TransferSource(self, transfer_candidate_index, transfer_record_index, request_index, layer_ids, key)
 
 
 @dataclass(frozen=True, slots=True)
 class KVTransferBatch:
-    """One Worker invocation with request ownership retained on Group rows."""
+    """One Worker invocation with request ownership retained on group records."""
 
     request_ids: tuple[str, ...]
     groups: tuple[KVGroupBatch, ...]
@@ -135,8 +145,8 @@ class TransferSource:
     """Immutable request and cache provenance for one Backend object result."""
 
     group: KVGroupBatch
-    object_index: int
-    row_index: int
+    transfer_candidate_index: int
+    transfer_record_index: int
     request_index: int
     physical_layer_ids: tuple[int, ...]
     key: str
@@ -146,41 +156,41 @@ class TransferSource:
         return self.group.group_id
 
     @property
-    def block_id(self) -> int:
-        return int(self.group.block_ids[self.row_index])
+    def local_block_id(self) -> int:
+        return int(self.group.local_block_ids[self.transfer_record_index])
 
 
 @dataclass(frozen=True, slots=True)
-class StoreGroupCandidates:
-    """One cache Group's list-backed rows and object-key coordinates."""
+class StoreGroupTransferCandidates:
+    """One group's list-backed transfer records and keys by partition."""
 
     group_id: int
-    rows_by_request: tuple[StoreCandidateRows, ...]
-    key_axes: KeyAxes
+    transfer_records_by_request: tuple[StoreTransferRecords, ...]
+    keys_by_partition: KeysByPartition
 
     @property
-    def row_count(self) -> int:
-        return sum(len(rows[0]) for rows in self.rows_by_request)
+    def transfer_record_count(self) -> int:
+        return sum(len(rows[0]) for rows in self.transfer_records_by_request)
 
     @property
-    def object_count(self) -> int:
-        return len(self.key_axes) * self.row_count
+    def transfer_candidate_count(self) -> int:
+        return len(self.keys_by_partition) * self.transfer_record_count
 
 
 @dataclass(frozen=True, slots=True)
-class StoreCandidates:
-    """All pre-admission Store objects in canonical group/axis/row order."""
+class StoreTransferCandidates:
+    """Pre-admission Store candidates in group/partition/transfer-record order."""
 
-    groups: tuple[StoreGroupCandidates, ...]
-
-
-def store_candidate_keys(candidates: StoreCandidates) -> tuple[str, ...]:
-    """Flatten candidate keys in their canonical group/axis/row order."""
-
-    return tuple(key for group in candidates.groups for axis in group.key_axes for key in axis)
+    groups: tuple[StoreGroupTransferCandidates, ...]
 
 
-def select_store_candidate_objects(
+def store_transfer_candidate_keys(candidates: StoreTransferCandidates) -> tuple[str, ...]:
+    """Flatten candidate keys in group/partition/transfer-record order."""
+
+    return tuple(key for group in candidates.groups for axis in group.keys_by_partition for key in axis)
+
+
+def select_store_transfer_candidates(
     candidate_keys: tuple[str, ...], accepted: set[str], *, claim_once: bool
 ) -> tuple[bool, ...]:
     """Map key admission back to ordered candidate objects."""

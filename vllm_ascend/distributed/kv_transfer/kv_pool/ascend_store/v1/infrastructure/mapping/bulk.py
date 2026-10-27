@@ -38,7 +38,7 @@ class BulkMapping:
         kv_caches: Mapping[str, torch.Tensor | Sequence[torch.Tensor]] | None = None,
         key_builder: KeyBuilder | None = None,
     ) -> None:
-        self.local = bind_local_layout(
+        self.local_layout = bind_local_layout(
             topology,
             entry_addresses_by_group,
             entry_block_payload_bytes_by_group,
@@ -48,19 +48,19 @@ class BulkMapping:
             kv_cache_layout=kv_cache_layout,
             kv_caches=kv_caches,
         )
-        coordinates = tuple(source.coordinate for source in self.local.objects)
-        self.naming: KeyNamer = (
-            bind_canonical_keys(topology, self.local.group_id, coordinates)
+        coordinates = tuple(source.coordinate for source in self.local_layout.partitions)
+        self.key_namer: KeyNamer = (
+            bind_canonical_keys(topology, self.local_layout.group_id, coordinates)
             if key_builder is None
             else key_builder.bind(
-                self.local.group_id, coordinates, lookup_head_count=topology.tp_partition.key_rank_count
+                self.local_layout.group_id, coordinates, lookup_head_count=topology.tp_partition.key_rank_count
             )
         )
 
     def arguments(
         self,
         keys: Sequence[Sequence[str]],
-        block_ids: Sequence[int] | UInt64Array,
+        local_block_ids: Sequence[int] | UInt64Array,
         *,
         selected_keys: Sequence[bool] | None = None,
     ) -> BulkTransferArguments:
@@ -70,39 +70,49 @@ class BulkMapping:
         flat mask is object-major, then input-row-major. Repeated IDs and input
         order are preserved. Callers ensure allocation bounds and object validity.
         """
-        ids = np.asarray(block_ids, dtype=np.uint64)
+        ids = np.asarray(local_block_ids, dtype=np.uint64)
         if ids.ndim != 1:
             raise ValueError("Block IDs must be one-dimensional rows")
-        row_count = len(ids)
-        objects = self.local.objects
-        if len(keys) != len(objects) or any(len(object_keys) != row_count for object_keys in keys):
+        transfer_record_count = len(ids)
+        objects = self.local_layout.partitions
+        if len(keys) != len(objects) or any(len(object_keys) != transfer_record_count for object_keys in keys):
             raise ValueError("Keys must align local objects and Block ID rows")
         selections = None
         if selected_keys is not None:
             selections = np.asarray(selected_keys, dtype=np.bool_)
-            if selections.ndim != 1 or selections.size != len(keys) * row_count:
+            if selections.ndim != 1 or selections.size != len(keys) * transfer_record_count:
                 raise ValueError("Key selection must be a flat object-major row mask")
-            selections = selections.reshape(len(keys), row_count)
+            selections = selections.reshape(len(keys), transfer_record_count)
 
         backend_keys: list[str] = []
         backend_addresses: list[list[int]] = []
         backend_lengths: list[list[int]] = []
-        if not row_count:
+        if not transfer_record_count:
             return backend_keys, backend_addresses, backend_lengths
 
-        for object_index, (object_keys, obj) in enumerate(zip(keys, objects, strict=True)):
-            segments = obj.memory_segments
-            selected_rows = None
+        for partition_index, (object_keys, obj) in enumerate(zip(keys, objects, strict=True)):
+            segments = obj.local_segments
+            selected_transfer_record_indices = None
             if selections is not None:
-                selected_count = np.count_nonzero(selections[object_index])
+                selected_count = np.count_nonzero(selections[partition_index])
                 if not selected_count:
                     continue
-                if selected_count != row_count:
-                    selected_rows = np.flatnonzero(selections[object_index])
-            selected_block_ids = ids if selected_rows is None else ids[selected_rows]
-            backend_keys.extend(object_keys if selected_rows is None else (object_keys[row] for row in selected_rows))
-            addresses = selected_block_ids[:, None] * segments.group_block_strides_bytes + segments.block_zero_addresses
-            lengths = np.broadcast_to(segments.segment_lengths_bytes, segments.block_zero_addresses.shape).tolist()
+                if selected_count != transfer_record_count:
+                    selected_transfer_record_indices = np.flatnonzero(selections[partition_index])
+            selected_block_ids = (
+                ids if selected_transfer_record_indices is None else ids[selected_transfer_record_indices]
+            )
+            backend_keys.extend(
+                object_keys
+                if selected_transfer_record_indices is None
+                else (object_keys[row] for row in selected_transfer_record_indices)
+            )
+            addresses = (
+                selected_block_ids[:, None] * segments.group_block_strides_bytes + segments.block_zero_segment_addresses
+            )
+            lengths = np.broadcast_to(
+                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
+            ).tolist()
             backend_addresses.extend(addresses.tolist())
             # Lists belong to individual Backend rows, even when their lengths match.
             backend_lengths.extend(lengths.copy() for _ in selected_block_ids)

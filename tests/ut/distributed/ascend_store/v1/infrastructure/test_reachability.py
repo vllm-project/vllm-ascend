@@ -26,7 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     checkpoint_companion_indices,
     store_block_range,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.rows import lookup_chunk_rows
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer.rows import lookup_chunk_ranges
 
 
 @pytest.mark.parametrize(
@@ -118,7 +118,7 @@ def test_sparse_lookup_keeps_upstream_alignment_and_window_requirements() -> Non
     for window_boundaries, expected_end in (({48, 64, 112, 128}, 128), ({48, 64, 112}, 64)):
         observations = []
         for group, mask in zip(topology.transfer_groups, masks, strict=True):
-            rows = lookup_chunk_rows(128, block_hashes, block_size=16, hash_block_size=16, mask=mask)
+            rows = lookup_chunk_ranges(128, block_hashes, block_size=16, hash_block_size=16, mask=mask)
             available = tuple(
                 group.group_id == 1 or int.from_bytes(block_hash, "big") * 16 in window_boundaries
                 for block_hash in rows[2]

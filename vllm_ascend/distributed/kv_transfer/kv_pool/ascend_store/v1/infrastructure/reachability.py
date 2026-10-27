@@ -37,10 +37,10 @@ from .configuration.topology import KVPoolGroupTopology
 from .protocol.messages import TailKeyBoundary
 
 BlockHashes = Sequence[BlockHash | str]
-ChunkRows: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
+LookupChunkRanges: TypeAlias = tuple[NDArray[np.uint64], NDArray[np.uint64], tuple[BlockHash | str, ...]]
 ChunkMask: TypeAlias = tuple[bool, ...] | None
 ChunkMasks: TypeAlias = tuple[ChunkMask, ...]
-LookupObservation: TypeAlias = tuple[ChunkRows, tuple[bool, ...]]
+LookupObservation: TypeAlias = tuple[LookupChunkRanges, tuple[bool, ...]]
 
 
 # =============================================================================

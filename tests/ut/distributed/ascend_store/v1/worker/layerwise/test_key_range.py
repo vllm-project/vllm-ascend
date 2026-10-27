@@ -46,7 +46,7 @@ def test_key_range_merged_failure_identifies_every_original_request_destination(
         for completion, block_id in zip(completions, expected_blocks, strict=True):
             (failure,) = completion.failures
             assert failure.result_code == -7
-            assert (failure.source.group_id, failure.source.block_id) == (failed_group, block_id)
+            assert (failure.source.group_id, failure.source.local_block_id) == (failed_group, block_id)
             assert failure.source.physical_layer_ids == (2,)
         copy = next(call for call in backend.calls if call[0] == "batch_copy_get")
         assert len(copy[1]) == 2  # Two Group keys, each merged across both requests.

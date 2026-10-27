@@ -68,10 +68,10 @@ def test_bound_layout_matches_production_global_allocation_and_offsets(
 def test_runtime_reuses_layout_and_does_not_mutate_bulk():
     case = make_case(layers=(3, 4), heads=1, head_slices=1)
     bulk = case.bind()
-    keys = bulk.naming.keys(["hash"])
+    keys = bulk.key_namer.keys(["hash"])
     before = bulk.arguments(keys, [1])
     mapping = case.bind_layers(
-        object_layout_factory=partial(
+        remote_object_layout_factory=partial(
             build_memcache_object_layouts,
             pp_partition=PPPartitionSpec(global_layer_count=7),
             cp_partition=CPPartitionSpec(1, 2, 2, 2 * 1024 * 1024),
@@ -81,7 +81,7 @@ def test_runtime_reuses_layout_and_does_not_mutate_bulk():
         ),
     )
     selection = mapping.prepare(keys, [1])
-    assert tuple(obj.size_bytes for obj in mapping.object_layouts) == (4 * 1024 * 1024,)
+    assert tuple(obj.size_bytes for obj in mapping.remote_object_layouts) == (4 * 1024 * 1024,)
     with (
         patch.object(memcache_layout, "bind_layer_object_span", side_effect=AssertionError("rebind PP")),
         patch.object(memcache_layout, "bind_context_object_span", side_effect=AssertionError("rebind CP")),
@@ -91,7 +91,7 @@ def test_runtime_reuses_layout_and_does_not_mutate_bulk():
         assert mapping.arguments(selection, layer_id=3) == first
     assert bulk.arguments(keys, [1]) == before
     assert all(
-        not layout.object_offsets_bytes.flags.writeable
+        not layout.remote_segment_offsets_bytes.flags.writeable
         for layers in mapping.layer_layouts.values()
         for layout in layers
     )
@@ -101,7 +101,7 @@ def test_registered_nonuniform_layer_payloads_cannot_use_uniform_global_offsets(
     case = make_case(layers=(3, 4), head_slices=1, stored_tokens=(2, 4))
     with pytest.raises(ValueError, match="uniform"):
         case.bind_layers(
-            object_layout_factory=partial(
+            remote_object_layout_factory=partial(
                 build_memcache_object_layouts,
                 pp_partition=PPPartitionSpec(global_layer_count=7),
                 cp_partition=CPPartitionSpec(),
@@ -119,7 +119,7 @@ def test_head_then_stage_then_context_changes_only_remote_coordinates(layout, he
     bulk = case.bind()
     local = case.bind_layers()
     partitioned = case.bind_layers(
-        object_layout_factory=partial(
+        remote_object_layout_factory=partial(
             build_memcache_object_layouts,
             pp_partition=PPPartitionSpec(global_layer_count=7),
             cp_partition=CPPartitionSpec(1, 2, 2, 1024),
@@ -128,43 +128,46 @@ def test_head_then_stage_then_context_changes_only_remote_coordinates(layout, he
             object_shard_index=shard_index,
         ),
     )
-    keys = partitioned.naming.keys((b"a", b"b"))
-    assert keys == local.naming.keys((b"a", b"b"))
-    assert partitioned.naming.lookup_keys((b"a",)) == bulk.naming.lookup_keys((b"a",))
+    keys = partitioned.key_namer.keys((b"a", b"b"))
+    assert keys == local.key_namer.keys((b"a", b"b"))
+    assert partitioned.key_namer.lookup_keys((b"a",)) == bulk.key_namer.lookup_keys((b"a",))
     before = local.prepare(keys, (2, 0))
     after = partitioned.prepare(keys, (2, 0))
-    layer_bytes = tuple(obj.payload_bytes for obj in bulk.local.objects)[0] // 2
+    layer_bytes = tuple(obj.payload_bytes for obj in bulk.local_layout.partitions)[0] // 2
     stride = ((layer_bytes * 7 + 1023) // 1024) * 1024
     origin = shard_index * stride + 3 * layer_bytes
-    assert tuple(obj.size_bytes for obj in partitioned.object_layouts) == (stride * 2,) * head_slices
+    assert tuple(obj.size_bytes for obj in partitioned.remote_object_layouts) == (stride * 2,) * head_slices
     for layer_id in (3, 4):
         old_keys, old_addresses, old_lengths, old_offsets = local.arguments(before, layer_id=layer_id)
         new_keys, new_addresses, new_lengths, new_offsets = partitioned.arguments(after, layer_id=layer_id)
         assert (new_keys, new_addresses, new_lengths) == (old_keys, old_addresses, old_lengths)
         assert new_offsets == [[offset + origin for offset in row] for row in old_offsets]
         for layer in partitioned.layer_layouts[layer_id]:
-            original = tuple(obj.memory_segments for obj in partitioned.local.objects)[layer.object_index]
-            assert np.shares_memory(layer.local_memory_segments.block_zero_addresses, original.block_zero_addresses)
+            original = tuple(obj.local_segments for obj in partitioned.local_layout.partitions)[layer.partition_index]
+            assert np.shares_memory(
+                layer.local_segments.block_zero_segment_addresses, original.block_zero_segment_addresses
+            )
 
 
 def test_unequal_target_pp_spans_keep_sizes_on_their_own_head_axes():
     case = make_case(head_slices=2, pp_layer_counts=(1, 3))
     bulk = case.bind()
     mapping = case.bind_layers(
-        object_layout_factory=partial(
+        remote_object_layout_factory=partial(
             build_memcache_object_layouts,
             pp_partition=PPPartitionSpec(),
             cp_partition=CPPartitionSpec(1, 2, 2),
             object_shard_index=1,
         ),
     )
-    assert tuple(obj.size_bytes for obj in mapping.object_layouts) == tuple(
-        size * 2 for size in tuple(obj.payload_bytes for obj in bulk.local.objects)
+    assert tuple(obj.size_bytes for obj in mapping.remote_object_layouts) == tuple(
+        size * 2 for size in tuple(obj.payload_bytes for obj in bulk.local_layout.partitions)
     )
     for layouts in mapping.layer_layouts.values():
         for layout in layouts:
             assert (
-                layout.object_size_bytes == tuple(obj.size_bytes for obj in mapping.object_layouts)[layout.object_index]
+                layout.remote_object_size_bytes
+                == tuple(obj.size_bytes for obj in mapping.remote_object_layouts)[layout.partition_index]
             )
 
 
@@ -173,8 +176,8 @@ def test_bound_names_share_the_geometry_axis():
     parts = (("head0@", "@stage1"), ("head1@", "@stage1"))
     bound = BoundLayerwiseKeys(parts, parts + (("head2@", "@stage0"),))
     mapping = case.bind_layers(key_builder=SimpleNamespace(bind=lambda *_args, **_kwargs: bound))
-    assert mapping.naming.keys((b"a",)) == (("head0@61@stage1",), ("head1@61@stage1",))
-    assert len(mapping.naming.lookup_keys((b"a",))) == 3
+    assert mapping.key_namer.keys((b"a",)) == (("head0@61@stage1",), ("head1@61@stage1",))
+    assert len(mapping.key_namer.lookup_keys((b"a",))) == 3
 
 
 def test_extra_registered_layer_cannot_overrun_the_global_layer_span():
@@ -182,7 +185,7 @@ def test_extra_registered_layer_cannot_overrun_the_global_layer_span():
     case = make_case(layers=(3, 4, 5, 6, 7), head_slices=1)
     with pytest.raises(ValueError, match="exceeds"):
         case.bind_layers(
-            object_layout_factory=partial(
+            remote_object_layout_factory=partial(
                 build_memcache_object_layouts,
                 pp_partition=PPPartitionSpec(global_layer_count=7),
                 cp_partition=CPPartitionSpec(),

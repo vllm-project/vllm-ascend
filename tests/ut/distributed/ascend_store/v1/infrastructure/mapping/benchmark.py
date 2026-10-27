@@ -85,16 +85,16 @@ def measure(before, after, samples, target_sample_ms):
     }
 
 
-def bulk_workload(bound, row_count, mask_kind):
+def bulk_workload(bound, transfer_record_count, mask_kind):
     # Compatibility belongs only to the benchmark, never to production mapping.
     transfer = getattr(bound, "store", bound)
-    naming = getattr(transfer, "naming", transfer)
-    hashes = tuple(index.to_bytes(4, "little") for index in range(row_count))
-    ids = np.zeros(row_count, dtype=np.uint64)
+    naming = getattr(transfer, "key_namer", getattr(transfer, "naming", transfer))
+    hashes = tuple(index.to_bytes(4, "little") for index in range(transfer_record_count))
+    ids = np.zeros(transfer_record_count, dtype=np.uint64)
     keys = naming.keys(hashes)
     mask = None
     if mask_kind != "full":
-        mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(keys) * row_count)]
+        mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(keys) * transfer_record_count)]
 
     def keys_and_arguments():
         return transfer.arguments(naming.keys(hashes), ids, selected_keys=mask)
@@ -106,19 +106,19 @@ def bulk_workload(bound, row_count, mask_kind):
 
 
 def selection_signature(selection):
-    selections = getattr(selection, "by_object", getattr(selection, "by_key_prefix", None))
+    selections = getattr(selection, "by_partition", getattr(selection, "by_key_prefix", None))
     if selections is None:
         selections = selection.partitions
-    return tuple(None if item is None else (item.keys, item.block_ids.tolist()) for item in selections)
+    return tuple(None if item is None else (item.keys, item.local_block_ids.tolist()) for item in selections)
 
 
 def layer_workload(layer_mapping, bulk_work):
     transfer, hashes, ids, mask, _, _ = bulk_work
-    naming = getattr(transfer, "naming", transfer)
-    if hasattr(layer_mapping, "local"):
-        layer_ids = layer_mapping.local.physical_layer_ids
+    naming = getattr(transfer, "key_namer", getattr(transfer, "naming", transfer))
+    if hasattr(layer_mapping, "local_layout") or hasattr(layer_mapping, "local"):
+        layer_ids = layer_mapping.local_layout.physical_layer_ids
     elif hasattr(layer_mapping, "binding"):
-        layer_ids = layer_mapping.binding.local.physical_layer_ids
+        layer_ids = layer_mapping.binding.local_layout.physical_layer_ids
     else:
         layer_ids = layer_mapping.bulk.physical_layer_ids
 
@@ -185,7 +185,7 @@ def main():
             continue
         case = make_case(layers=tuple(range(32)), block_size=128, vector=16, blocks=1, fill=False, **options)
         before, after = case.bind(baseline), case.bind()
-        assert getattr(before, "naming", before).lookup_keys(["a", "b"]) == after.naming.lookup_keys(["a", "b"])
+        assert getattr(before, "naming", before).lookup_keys(["a", "b"]) == after.key_namer.lookup_keys(["a", "b"])
         result = {
             "route": name,
             "bulk_binding": measure(
@@ -202,14 +202,17 @@ def main():
                 args.target_sample_ms,
             )
         workloads = {}
-        for scenario, row_count, mask_kind in (
+        for scenario, transfer_record_count, mask_kind in (
             ("full", 64, "full"),
             ("mixed", 64, "mixed"),
             ("all_false", 64, "none"),
             ("empty", 0, "full"),
             ("single_row", 1, "full"),
         ):
-            old_bulk, new_bulk = bulk_workload(before, row_count, mask_kind), bulk_workload(after, row_count, mask_kind)
+            old_bulk, new_bulk = (
+                bulk_workload(before, transfer_record_count, mask_kind),
+                bulk_workload(after, transfer_record_count, mask_kind),
+            )
             assert old_bulk[4]() == new_bulk[4]()
             measurements = {
                 "bulk_keys_arguments": measure(old_bulk[4], new_bulk[4], args.samples, args.target_sample_ms),

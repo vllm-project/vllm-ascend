@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from . import contiguous, head_slicing, layer_partitioning
-from .types import LocalLayout, LocalMemorySegments, ObjectCoordinate, ObjectSourceSegments
+from .types import LocalLayout, LocalMemorySegments, LocalPartitionLayout, ObjectPartitionCoordinate
 
 if TYPE_CHECKING:
     import torch
@@ -96,26 +96,26 @@ def bind_local_layout(
             )
     else:
         segments_by_head_slice = (contiguous.bind_segments(addresses, payload_bytes, strides_bytes),)
-    layer_segment_boundaries = (
+    layer_segment_index_boundaries = (
         tuple(layer_entry_boundaries)
         if entry_segment_boundaries is None
         else tuple(entry_segment_boundaries[index] for index in layer_entry_boundaries)
     )
 
     # ========================================
-    # Assign local segments to numeric objects
+    # Assign local segments to numeric partitions
     # ========================================
 
     first_head_rank = metadata.head_or_tp_rank * head_slices_per_rank
-    objects = []
+    partitions = []
     if not pp_partitions:
         for head_index, segments in enumerate(segments_by_head_slice):
-            objects.append(
-                ObjectSourceSegments(
-                    ObjectCoordinate(metadata.pp_rank, metadata.dcp_rank, first_head_rank + head_index),
+            partitions.append(
+                LocalPartitionLayout(
+                    ObjectPartitionCoordinate(metadata.pp_rank, metadata.dcp_rank, first_head_rank + head_index),
                     physical_layer_ids,
                     segments,
-                    layer_segment_boundaries,
+                    layer_segment_index_boundaries,
                     local_group_block_bytes // head_slices_per_rank,
                 )
             )
@@ -133,19 +133,19 @@ def bind_local_layout(
                 // head_slices_per_rank
             )
             if len(pp_partitions) == 1:
-                boundaries = layer_segment_boundaries
+                boundaries = layer_segment_index_boundaries
             else:
-                segment_start = layer_segment_boundaries[partition.local_layer_start_index]
+                segment_start = layer_segment_index_boundaries[partition.local_layer_start_index]
                 boundaries = tuple(
                     boundary - segment_start
-                    for boundary in layer_segment_boundaries[
+                    for boundary in layer_segment_index_boundaries[
                         partition.local_layer_start_index : partition.local_layer_end_index + 1
                     ]
                 )
             for head_index, segments in enumerate(pp_segments):
-                objects.append(
-                    ObjectSourceSegments(
-                        ObjectCoordinate(partition.pp_rank, metadata.dcp_rank, first_head_rank + head_index),
+                partitions.append(
+                    LocalPartitionLayout(
+                        ObjectPartitionCoordinate(partition.pp_rank, metadata.dcp_rank, first_head_rank + head_index),
                         partition.physical_layer_ids,
                         segments,
                         boundaries,
@@ -158,6 +158,6 @@ def bind_local_layout(
         topology.hash_block_size,
         physical_layer_ids,
         local_group_block_bytes,
-        tuple(objects),
-        tuple(obj.physical_layer_ids for obj in objects),
+        tuple(partitions),
+        tuple(obj.physical_layer_ids for obj in partitions),
     )

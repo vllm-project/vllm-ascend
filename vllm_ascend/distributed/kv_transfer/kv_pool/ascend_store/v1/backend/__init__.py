@@ -24,7 +24,7 @@ from .registration import (
 if TYPE_CHECKING:
     from ..infrastructure.configuration.naming import KeyNamingConfig
     from ..infrastructure.configuration.topology import KVPoolTopology
-    from ..infrastructure.mapping.object_layout import ObjectLayoutFactory
+    from ..infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
     from ..infrastructure.mapping.object_naming import KeyBuilder
 
 BackendFactory = Callable[..., KVStoreBackend]
@@ -77,7 +77,7 @@ class BackendSpec:
     layerwise_access: LayerwiseAccessKind | None
     requires_exists_before_put: bool
     layerwise_key_factory: Callable[[KeyNamingConfig], KeyBuilder] | None = None
-    layerwise_layout_factory: Callable[[KVPoolTopology], ObjectLayoutFactory] | None = None
+    layerwise_layout_factory: Callable[[KVPoolTopology], RemoteObjectLayoutFactory] | None = None
     key_requires_layout_identity: bool = False
 
     def create(

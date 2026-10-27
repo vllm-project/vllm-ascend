@@ -164,11 +164,11 @@ def test_factory_round_trip_matches_production_identity_and_bytes(
         assert set(objects) == expected_keys
         for group_id in group_ids:
             key = production_keys.make_full_key(group_id, "61", 0, pp_rank)
-            assert worker._mappings[group_id].naming.keys([b"a"]) == ((key,),)
+            assert worker._mappings[group_id].key_namer.keys([b"a"]) == ((key,),)
             assert not hasattr(worker._mappings[group_id], "binding")
             assert (
                 worker._group_object_layout(group_id)[1]
-                is worker._mappings[group_id].local.physical_layer_ids_by_object
+                is worker._mappings[group_id].local_layout.physical_layer_ids_by_partition
             )
             assert ctypes.sizeof(objects[key]) == object_size
             payload = b"".join(

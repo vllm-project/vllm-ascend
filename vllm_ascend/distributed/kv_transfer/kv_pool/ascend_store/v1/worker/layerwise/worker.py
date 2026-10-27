@@ -19,20 +19,20 @@ from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.execution.executor import Executor
 from ...infrastructure.execution.session import Session
 from ...infrastructure.mapping import LayerwiseMapping
-from ...infrastructure.mapping.object_layout import ObjectLayoutFactory
+from ...infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
 from ...infrastructure.mapping.object_naming import KeyBuilder
 from ...infrastructure.protocol.messages import CheckpointStoreCommand, StoreCommand
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
-    KeyAxes,
+    KeysByPartition,
     KVTransferBatch,
-    StoreCandidates,
-    StoreGroupCandidates,
+    StoreGroupTransferCandidates,
+    StoreTransferCandidates,
     TransferSource,
-    select_store_candidate_objects,
-    store_candidate_keys,
+    select_store_transfer_candidates,
+    store_transfer_candidate_keys,
 )
 from ..transfer.completion import (
     LoadCompletion,
@@ -43,10 +43,10 @@ from ..transfer.completion import (
     _store_command_completions,
 )
 from ..transfer.rows import (
-    StoreCandidateRows,
-    empty_candidate_rows,
-    merge_key_axes,
-    store_candidate_rows,
+    StoreTransferRecords,
+    empty_store_transfer_records,
+    merge_keys_by_partition,
+    store_transfer_records,
 )
 from .transfer import LayerStoreResult, LayerTransferPlan
 
@@ -62,7 +62,7 @@ class _StoreState:
     commands: tuple[StoreCommand, ...]
     batch: KVTransferBatch | None = None
     opened_keys: tuple[str, ...] = ()
-    keys_by_layer: dict[int, list[str]] = field(default_factory=dict)
+    selected_keys_by_layer: dict[int, list[str]] = field(default_factory=dict)
     failure_codes: dict[str, int | None] = field(default_factory=dict)
     unsafe_keys: set[str] = field(default_factory=set)
     errors_by_key: dict[str, Exception] = field(default_factory=dict)
@@ -84,10 +84,10 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
         key_builder: KeyBuilder | None = None,
-        object_layout_factory: ObjectLayoutFactory | None = None,
+        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
     ) -> None:
         self._key_builder = key_builder
-        self._object_layout_factory = object_layout_factory
+        self._remote_object_layout_factory = remote_object_layout_factory
         self._load_plan: LayerTransferPlan | None = None
         self._store_plan: LayerTransferPlan | None = None
         self._backend_sessions = backend_sessions
@@ -131,7 +131,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
                 kv_cache_layout=self._kv_cache_layout,
                 kv_caches=self._resources.kv_caches,
                 key_builder=self._key_builder,
-                object_layout_factory=self._object_layout_factory,
+                remote_object_layout_factory=self._remote_object_layout_factory,
             )
             for group_id in self._groups
         }
@@ -139,7 +139,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
     def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
         mapping = self._mappings[group_id]
         # Admission excludes TP mismatch and target-PP splitting: each group has one local object axis.
-        return mapping.object_layouts[0].size_bytes, mapping.local.physical_layer_ids_by_object
+        return mapping.remote_object_layouts[0].size_bytes, mapping.local_layout.physical_layer_ids_by_partition
 
     @abstractmethod
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]: ...
@@ -195,8 +195,8 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         if not opened_keys:
             return ()
         selected = batch if not failed_codes else batch.select_keys(opened_keys)
-        keys_by_layer = self._prepare_load_layers(selected)
-        return tuple(sorted(layer_id for layer_id, keys in keys_by_layer.items() if keys))
+        selected_keys_by_layer = self._prepare_load_layers(selected)
+        return tuple(sorted(layer_id for layer_id, keys in selected_keys_by_layer.items() if keys))
 
     def _finish_load(self) -> None:
         self._load_plan = None
@@ -224,38 +224,42 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             )
         return self._session
 
-    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreCandidates:
-        rows_by_group: list[list[StoreCandidateRows]] = [[] for _group_id in self._topology.transfer_group_ids]
-        keys_by_group: list[list[KeyAxes]] = [[] for _group_id in self._topology.transfer_group_ids]
+    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreTransferCandidates:
+        transfer_records_by_group: list[list[StoreTransferRecords]] = [
+            [] for _group_id in self._topology.transfer_group_ids
+        ]
+        keys_by_group: list[list[KeysByPartition]] = [[] for _group_id in self._topology.transfer_group_ids]
         for command in commands:
             for group_index, (group_id, rows) in enumerate(
-                zip(self._topology.transfer_group_ids, self._store_candidate_rows(command), strict=True)
+                zip(self._topology.transfer_group_ids, self._store_transfer_records(command), strict=True)
             ):
-                rows_by_group[group_index].append(rows)
-                keys_by_group[group_index].append(self._mappings[group_id].naming.keys(rows[1]))
-        return StoreCandidates(
+                transfer_records_by_group[group_index].append(rows)
+                keys_by_group[group_index].append(self._mappings[group_id].key_namer.keys(rows[1]))
+        return StoreTransferCandidates(
             tuple(
-                StoreGroupCandidates(group_id, tuple(rows), merge_key_axes(group_id, keys_by_group[group_index]))
+                StoreGroupTransferCandidates(
+                    group_id, tuple(rows), merge_keys_by_partition(group_id, keys_by_group[group_index])
+                )
                 for group_index, (group_id, rows) in enumerate(
-                    zip(self._topology.transfer_group_ids, rows_by_group, strict=True)
+                    zip(self._topology.transfer_group_ids, transfer_records_by_group, strict=True)
                 )
             )
         )
 
-    def _store_candidate_rows(self, command: StoreCommand) -> tuple[StoreCandidateRows, ...]:
+    def _store_transfer_records(self, command: StoreCommand) -> tuple[StoreTransferRecords, ...]:
         if isinstance(command, CheckpointStoreCommand):
             raise ValueError("Layerwise transfer does not support state checkpoint Store")
 
         if not self._layerwise_store_leader:
-            return tuple(empty_candidate_rows() for _group_id in self._topology.transfer_group_ids)
+            return tuple(empty_store_transfer_records() for _group_id in self._topology.transfer_group_ids)
         masks = self._reachability.select_for_store(command.block_hashes, command.end_token, command.num_prompt_tokens)
         return tuple(
-            store_candidate_rows(
+            store_transfer_records(
                 command.end_token,
                 command.block_hashes,
                 command.block_ids_by_group[group_id],
-                block_size=self._mappings[group_id].local.group_block_size,
-                hash_block_size=self._mappings[group_id].local.hash_block_size,
+                block_size=self._mappings[group_id].local_layout.group_block_size,
+                hash_block_size=self._mappings[group_id].local_layout.hash_block_size,
                 start_token=command.start_token,
                 mask=mask,
             )
@@ -274,16 +278,16 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
 
     def _open_store(self, state: _StoreState) -> None:
         candidates = self._build_store_candidates(state.commands)
-        candidate_keys = store_candidate_keys(candidates)
+        candidate_keys = store_transfer_candidate_keys(candidates)
         accepted, claim_once = self._admitted_store_keys(candidate_keys)
         if accepted is not None and not accepted:
             return
-        selected_objects = (
+        transfer_candidate_mask = (
             None
             if accepted is None
-            else select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
+            else select_store_transfer_candidates(candidate_keys, accepted, claim_once=claim_once)
         )
-        batch = self._materialize_store_candidates(state.commands, candidates, selected_objects)
+        batch = self._materialize_store_candidates(state.commands, candidates, transfer_candidate_mask)
         state.batch = batch
         # Admission has already chosen one source owner per key, including duplicates across requests.
         keys: list[str] = []
@@ -291,7 +295,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         for group in batch.groups:
             group_keys = group.selected_keys()
             keys.extend(group_keys)
-            object_sizes.extend([group.object_size] * len(group_keys))
+            object_sizes.extend([group.remote_object_size_bytes] * len(group_keys))
         self._store_plan = None
         try:
             result_codes = self._backend_sessions.start_store(keys, object_sizes)
@@ -314,13 +318,13 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             return
         selected = batch if len(state.opened_keys) == len(keys) else batch.select_keys(set(state.opened_keys))
         try:
-            state.keys_by_layer = self._prepare_store_layers(selected)
+            state.selected_keys_by_layer = self._prepare_store_layers(selected)
         except Exception as error:
             state.failure_codes.update((key, None) for key in state.opened_keys)
             state.errors_by_key.update((key, error) for key in state.opened_keys)
 
     def _store_layer(self, source_ready: Any, layer_id: int, state: _StoreState) -> None:
-        keys = state.keys_by_layer.get(layer_id)
+        keys = state.selected_keys_by_layer.get(layer_id)
         if keys:
             result = self._copy_store_layer(source_ready, layer_id)
             self._record_store_result(state, keys, result)
@@ -349,14 +353,16 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             except (BrokenExecutor, CancelledError):
                 raise
             except Exception as error:
-                self._record_store_result(state, state.keys_by_layer[layer_id], LayerStoreResult(None, False, error))
+                self._record_store_result(
+                    state, state.selected_keys_by_layer[layer_id], LayerStoreResult(None, False, error)
+                )
         self._store_plan = None
         if state.batch is None:
             self._complete_shared_store(state, [])
             return _store_command_completions(state.commands)
 
         # Preparation succeeded and every submitted Future was observed; no second layer ledger is needed.
-        missing_layers = state.keys_by_layer.keys() - layers.keys()
+        missing_layers = state.selected_keys_by_layer.keys() - layers.keys()
         if missing_layers:
             incomplete = RuntimeError(f"Layerwise Store did not reach physical layers {sorted(missing_layers)}")
             for key in state.opened_keys:
@@ -378,7 +384,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
                         state.failure_codes[key] = code
         revoke_keys = [key for key in state.opened_keys if key in state.failure_codes]
         self._revoke_store_keys(state, revoke_keys, final_codes)
-        observed_layers = state.keys_by_layer.keys() & layers.keys()
+        observed_layers = state.selected_keys_by_layer.keys() & layers.keys()
         return self._build_store_completions(state, observed_layers, final_codes)
 
     def _complete_shared_store(self, state: _StoreState, commit_keys: list[str]) -> list[str]:
@@ -435,22 +441,32 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         for group in batch.groups:
             physical_layer_ids = tuple(layer_id for layer_id in group.physical_layer_ids if layer_id in observed_layers)
             for request_index in range(len(state.commands)):
-                start = int(group.request_splits[request_index])
-                end = int(group.request_splits[request_index + 1])
-                for axis_index, axis in enumerate(group.key_axes):
-                    axis_offset = axis_index * group.row_count
-                    for row_index in range(start, end):
-                        object_index = axis_offset + row_index
-                        if group.selected_objects is not None and not group.selected_objects[object_index]:
+                start = int(group.request_transfer_record_boundaries[request_index])
+                end = int(group.request_transfer_record_boundaries[request_index + 1])
+                for partition_index, axis in enumerate(group.keys_by_partition):
+                    partition_candidate_start = partition_index * group.transfer_record_count
+                    for transfer_record_index in range(start, end):
+                        transfer_candidate_index = partition_candidate_start + transfer_record_index
+                        if (
+                            group.transfer_candidate_mask is not None
+                            and not group.transfer_candidate_mask[transfer_candidate_index]
+                        ):
                             continue
-                        key = axis[row_index]
+                        key = axis[transfer_record_index]
                         if key in state.failure_codes:
                             failed_requests.add(request_index)
                         if key in state.errors_by_key:
                             errors_by_request.setdefault(request_index, state.errors_by_key[key])
                         if key not in opened_keys or not physical_layer_ids:
                             continue
-                        source = TransferSource(group, object_index, row_index, request_index, physical_layer_ids, key)
+                        source = TransferSource(
+                            group,
+                            transfer_candidate_index,
+                            transfer_record_index,
+                            request_index,
+                            physical_layer_ids,
+                            key,
+                        )
                         evidence_by_request[request_index].append(
                             TransferEvidence(
                                 source, final_codes.get(key, state.failure_codes.get(key)), key not in state.unsafe_keys
@@ -520,7 +536,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             return True
         if opening.cancelled() or opening.exception() is not None:
             return False  # Finalization owns preparation errors; no source needs handing off.
-        return layer_id in state.keys_by_layer
+        return layer_id in state.selected_keys_by_layer
 
     def _wait_for_layer_load(self, layer_name: str) -> tuple[LoadCompletion, ...]:
         context = self._active_step
@@ -574,8 +590,8 @@ def collect_object_sizes(batch: KVTransferBatch) -> dict[str, int]:
     object_sizes: dict[str, int] = {}
     for group in batch.groups:
         for key in group.selected_keys():
-            previous = object_sizes.setdefault(key, group.object_size)
-            if previous != group.object_size:
+            previous = object_sizes.setdefault(key, group.remote_object_size_bytes)
+            if previous != group.remote_object_size_bytes:
                 raise ValueError(f"Layerwise key {key!r} has inconsistent object sizes")
     return object_sizes
 
@@ -597,15 +613,15 @@ def _load_session_failures(batch: KVTransferBatch, failed_codes: dict[str, int])
     evidence_by_request: list[list[TransferEvidence]] = [[] for _ in batch.request_ids]
     for group in batch.groups:
         selected = (
-            range(group.object_count)
-            if group.selected_objects is None
-            else np.flatnonzero(group.selected_objects).tolist()
+            range(group.transfer_candidate_count)
+            if group.transfer_candidate_mask is None
+            else np.flatnonzero(group.transfer_candidate_mask).tolist()
         )
-        for object_index in selected:
-            axis_index, row_index = divmod(object_index, group.row_count)
-            code = failed_codes.get(group.key_axes[axis_index][row_index], 0)
+        for transfer_candidate_index in selected:
+            partition_index, transfer_record_index = divmod(transfer_candidate_index, group.transfer_record_count)
+            code = failed_codes.get(group.keys_by_partition[partition_index][transfer_record_index], 0)
             if code != 0:
-                source = group.source(object_index, None)
+                source = group.source(transfer_candidate_index, None)
                 evidence_by_request[source.request_index].append(TransferEvidence(source, code))
     return tuple(
         LoadCompletion(request_id, tuple(evidence))

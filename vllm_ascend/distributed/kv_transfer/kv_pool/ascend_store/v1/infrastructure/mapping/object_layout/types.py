@@ -8,7 +8,7 @@ from ..types import UInt64Array
 
 
 @dataclass(frozen=True, slots=True)
-class ObjectLayout:
+class RemoteObjectLayout:
     """One local object's segment positions in a complete remote object, in bytes.
 
     Offsets are read-only. The final offset is the end of the payload, allowing
@@ -16,10 +16,10 @@ class ObjectLayout:
     """
 
     size_bytes: int
-    segment_offsets_bytes: UInt64Array
+    segment_boundary_offsets_bytes: UInt64Array
 
 
-class ObjectLayoutFactory(Protocol):
+class RemoteObjectLayoutFactory(Protocol):
     """Return one layout per local object, preserving object and segment order."""
 
-    def __call__(self, local: LocalLayout) -> tuple[ObjectLayout, ...]: ...
+    def __call__(self, local: LocalLayout) -> tuple[RemoteObjectLayout, ...]: ...

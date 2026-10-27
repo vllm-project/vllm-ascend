@@ -20,22 +20,22 @@ from ..infrastructure.protocol.messages import KVTransferStep, LoadCommand, Look
 from ..infrastructure.reachability import HybridReachability, UnitaryReachability
 from ..infrastructure.resources import KVPoolResources
 from .transfer.batch import (
-    KeyAxes,
+    KeysByPartition,
     KVGroupBatch,
     KVTransferBatch,
-    StoreCandidates,
-    StoreGroupCandidates,
+    StoreGroupTransferCandidates,
+    StoreTransferCandidates,
     TransferSource,
 )
 from .transfer.completion import LoadCompletion, StoreCompletion
 from .transfer.result import LoadFailureLocation, LoadResult
 from .transfer.rows import (
-    compact_single_axis_rows,
+    compact_single_partition_records,
     concat_uint64,
-    fine_lookup_chunk_rows,
-    load_block_rows,
-    lookup_chunk_rows,
-    merge_key_axes,
+    fine_lookup_chunk_ranges,
+    load_transfer_records,
+    lookup_chunk_ranges,
+    merge_keys_by_partition,
     readonly_bool,
     readonly_indices,
     readonly_uint64,
@@ -138,26 +138,29 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
             )
         masks = self._reachability.select_for_lookup(request.block_hashes, request.end_token)
         observations = []
-        chunk_rows = fine_lookup_chunk_rows if self._fine_grained_lookup else lookup_chunk_rows
+        chunk_rows = fine_lookup_chunk_ranges if self._fine_grained_lookup else lookup_chunk_ranges
         for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
             starts, counts, hashes = chunk_rows(
                 request.end_token,
                 request.block_hashes,
-                block_size=mapping.local.group_block_size,
-                hash_block_size=mapping.local.hash_block_size,
+                block_size=mapping.local_layout.group_block_size,
+                hash_block_size=mapping.local_layout.hash_block_size,
                 start_token=request.start_token,
                 mask=mask,
             )
-            keys = self._mappings[group_id].naming.lookup_keys(hashes)
+            keys = self._mappings[group_id].key_namer.lookup_keys(hashes)
             try:
                 observed = self._exists([key for axis in keys for key in axis])
             except Exception as error:
                 logger.error("Remote Lookup failed. type=%s, error=%s", type(error).__name__, error)
                 return LookupResult(0)
-            row_count = len(hashes)
+            transfer_record_count = len(hashes)
             available = tuple(
-                all(observed[axis_index * row_count + row_index] for axis_index in range(len(keys)))
-                for row_index in range(row_count)
+                all(
+                    observed[partition_index * transfer_record_count + transfer_record_index]
+                    for partition_index in range(len(keys))
+                )
+                for transfer_record_index in range(transfer_record_count)
             )
             observations.append(((starts, counts, hashes), available))
         reachable = self._reachability.resolve_available_end(
@@ -166,7 +169,7 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
         return LookupResult(reachable.end_token, reachable.tail_key_boundaries)
 
     def _build_load_batch(self, commands: tuple[LoadCommand, ...]) -> KVTransferBatch:
-        rows_by_request = []
+        transfer_records_by_request = []
         for command in commands:
             masks = self._reachability.select_for_load(command.block_hashes, command.end_token)
             boundaries = {item.group_id: item.boundary_token for item in command.tail_key_boundaries}
@@ -175,14 +178,14 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
             unknown = set(boundaries).difference(self._groups)
             if unknown:
                 raise ValueError(f"Load tail-key boundaries contain unknown cache groups {sorted(unknown)}")
-            rows_by_request.append(
+            transfer_records_by_request.append(
                 {
-                    group_id: load_block_rows(
+                    group_id: load_transfer_records(
                         command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
-                        block_size=mapping.local.group_block_size,
-                        hash_block_size=mapping.local.hash_block_size,
+                        block_size=mapping.local_layout.group_block_size,
+                        hash_block_size=mapping.local_layout.hash_block_size,
                         start_token=command.start_token,
                         tail_boundary_token=boundaries.get(group_id),
                         mask=mask,
@@ -193,22 +196,22 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
             )
         groups = []
         for group_id, mapping in self._mappings.items():
-            build_keys = self._mappings[group_id].naming.keys
-            rows = [request_rows[group_id] for request_rows in rows_by_request]
+            build_keys = self._mappings[group_id].key_namer.keys
+            rows = [request_rows[group_id] for request_rows in transfer_records_by_request]
             splits = [0]
-            for counts, hashes, block_ids in rows:
-                splits.append(splits[-1] + len(block_ids))
-            object_size, physical_layer_ids_by_axis = self._group_object_layout(group_id)
+            for counts, hashes, local_block_ids in rows:
+                splits.append(splits[-1] + len(local_block_ids))
+            remote_object_size_bytes, physical_layer_ids_by_partition = self._group_object_layout(group_id)
             groups.append(
                 KVGroupBatch(
                     group_id,
                     concat_uint64([row[2] for row in rows]),
                     concat_uint64([row[0] for row in rows]),
-                    merge_key_axes(group_id, [build_keys(row[1]) for row in rows]),
+                    merge_keys_by_partition(group_id, [build_keys(row[1]) for row in rows]),
                     readonly_indices(splits),
-                    mapping.local.physical_layer_ids,
-                    object_size,
-                    physical_layer_ids_by_axis=physical_layer_ids_by_axis,
+                    mapping.local_layout.physical_layer_ids,
+                    remote_object_size_bytes,
+                    physical_layer_ids_by_partition=physical_layer_ids_by_partition,
                 )
             )
         return KVTransferBatch(tuple(command.request_id for command in commands), tuple(groups))
@@ -270,7 +273,7 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
             frozenset(context.failed_block_ids),
             tuple(
                 dict.fromkeys(
-                    LoadFailureLocation(source.group_id, source.block_id) for source in context.failed_sources
+                    LoadFailureLocation(source.group_id, source.local_block_id) for source in context.failed_sources
                 )
             ),
         )
@@ -483,17 +486,19 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
     def _materialize_store_candidates(
         self,
         commands: tuple[StoreCommand, ...],
-        candidates: StoreCandidates,
-        selected_objects: tuple[bool, ...] | None,
+        candidates: StoreTransferCandidates,
+        transfer_candidate_mask: tuple[bool, ...] | None,
     ) -> KVTransferBatch:
         groups = []
         object_offset = 0
         for group_candidates in candidates.groups:
-            next_offset = object_offset + group_candidates.object_count
-            group_selection = None if selected_objects is None else selected_objects[object_offset:next_offset]
+            next_offset = object_offset + group_candidates.transfer_candidate_count
+            group_selection = (
+                None if transfer_candidate_mask is None else transfer_candidate_mask[object_offset:next_offset]
+            )
             groups.append(self._materialize_store_group(group_candidates, group_selection))
             object_offset = next_offset
-        if selected_objects is not None and object_offset != len(selected_objects):
+        if transfer_candidate_mask is not None and object_offset != len(transfer_candidate_mask):
             raise RuntimeError("Store candidate selection does not match the candidate object count")
 
         selected_keys = tuple(key for group in groups for key in group.selected_keys())
@@ -506,43 +511,51 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
 
     def _materialize_store_group(
         self,
-        candidates: StoreGroupCandidates,
-        selected_objects: tuple[bool, ...] | None,
+        candidates: StoreGroupTransferCandidates,
+        transfer_candidate_mask: tuple[bool, ...] | None,
     ) -> KVGroupBatch:
-        row_count = candidates.row_count
-        for counts, hashes, block_ids in candidates.rows_by_request:
-            if len(hashes) != len(counts) or len(block_ids) != len(counts):
+        transfer_record_count = candidates.transfer_record_count
+        for counts, hashes, local_block_ids in candidates.transfer_records_by_request:
+            if len(hashes) != len(counts) or len(local_block_ids) != len(counts):
                 raise RuntimeError(f"Cache group {candidates.group_id} produced misaligned Store candidate rows")
-        if any(len(axis) != row_count for axis in candidates.key_axes):
+        if any(len(axis) != transfer_record_count for axis in candidates.keys_by_partition):
             raise RuntimeError(f"Cache group {candidates.group_id} produced misaligned Store candidate keys")
-        if selected_objects is not None and len(selected_objects) != candidates.object_count:
+        if transfer_candidate_mask is not None and len(transfer_candidate_mask) != candidates.transfer_candidate_count:
             raise RuntimeError(
                 f"Cache group {candidates.group_id} Store selection does not match its candidate objects"
             )
 
-        key_axes: KeyAxes
-        if selected_objects is not None and len(candidates.key_axes) == 1:
-            token_counts, block_ids, request_splits, selected_axis = compact_single_axis_rows(
-                candidates.rows_by_request,
-                candidates.key_axes[0],
-                selected_objects,
+        keys_by_partition: KeysByPartition
+        if transfer_candidate_mask is not None and len(candidates.keys_by_partition) == 1:
+            token_counts, local_block_ids, request_transfer_record_boundaries, selected_axis = (
+                compact_single_partition_records(
+                    candidates.transfer_records_by_request,
+                    candidates.keys_by_partition[0],
+                    transfer_candidate_mask,
+                )
             )
-            key_axes = (selected_axis,)
+            keys_by_partition = (selected_axis,)
             materialized_selection = None
             selected_keys = selected_axis
-        elif selected_objects is None:
+        elif transfer_candidate_mask is None:
             keep_rows: tuple[bool, ...] | None = None
-            key_axes = candidates.key_axes
+            keys_by_partition = candidates.keys_by_partition
             materialized_selection = None
-            selected_keys = tuple(key for axis in key_axes for key in axis)
+            selected_keys = tuple(key for axis in keys_by_partition for key in axis)
         else:
             selections_by_axis = tuple(
-                selected_objects[axis_index * row_count : (axis_index + 1) * row_count]
-                for axis_index in range(len(candidates.key_axes))
+                transfer_candidate_mask[
+                    partition_index * transfer_record_count : (partition_index + 1) * transfer_record_count
+                ]
+                for partition_index in range(len(candidates.keys_by_partition))
             )
-            keep_rows = tuple(any(axis[row_index] for axis in selections_by_axis) for row_index in range(row_count))
-            key_axes = tuple(
-                tuple(key for key, keep in zip(axis, keep_rows, strict=True) if keep) for axis in candidates.key_axes
+            keep_rows = tuple(
+                any(axis[transfer_record_index] for axis in selections_by_axis)
+                for transfer_record_index in range(transfer_record_count)
+            )
+            keys_by_partition = tuple(
+                tuple(key for key, keep in zip(axis, keep_rows, strict=True) if keep)
+                for axis in candidates.keys_by_partition
             )
             compact_selection = tuple(
                 include for axis in selections_by_axis for include, keep in zip(axis, keep_rows, strict=True) if keep
@@ -550,41 +563,47 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
             materialized_selection = None if all(compact_selection) else readonly_bool(compact_selection)
             selected_keys = tuple(
                 key
-                for axis, selection in zip(key_axes, split_selection(compact_selection, len(key_axes)), strict=True)
+                for axis, selection in zip(
+                    keys_by_partition, split_selection(compact_selection, len(keys_by_partition)), strict=True
+                )
                 for key, include in zip(axis, selection, strict=True)
                 if include
             )
 
-        if selected_objects is None or len(candidates.key_axes) != 1:
+        if transfer_candidate_mask is None or len(candidates.keys_by_partition) != 1:
             token_counts = []
-            block_ids = []
-            request_splits = [0]
-            row_offset = 0
-            for counts, _hashes, ids in candidates.rows_by_request:
-                request_row_count = len(counts)
+            local_block_ids = []
+            request_transfer_record_boundaries = [0]
+            transfer_record_start = 0
+            for counts, _hashes, ids in candidates.transfer_records_by_request:
+                request_transfer_record_count = len(counts)
                 if keep_rows is None:
                     token_counts.extend(counts)
-                    block_ids.extend(ids)
+                    local_block_ids.extend(ids)
                 else:
-                    request_selection = keep_rows[row_offset : row_offset + request_row_count]
+                    request_selection = keep_rows[
+                        transfer_record_start : transfer_record_start + request_transfer_record_count
+                    ]
                     token_counts.extend(count for count, keep in zip(counts, request_selection, strict=True) if keep)
-                    block_ids.extend(block_id for block_id, keep in zip(ids, request_selection, strict=True) if keep)
-                request_splits.append(len(block_ids))
-                row_offset += request_row_count
+                    local_block_ids.extend(
+                        block_id for block_id, keep in zip(ids, request_selection, strict=True) if keep
+                    )
+                request_transfer_record_boundaries.append(len(local_block_ids))
+                transfer_record_start += request_transfer_record_count
 
         topology = self._groups[candidates.group_id]
-        object_size, physical_layer_ids_by_axis = self._group_object_layout(candidates.group_id)
+        remote_object_size_bytes, physical_layer_ids_by_partition = self._group_object_layout(candidates.group_id)
         return KVGroupBatch(
             candidates.group_id,
-            readonly_uint64(block_ids),
+            readonly_uint64(local_block_ids),
             readonly_uint64(token_counts),
-            key_axes,
-            readonly_indices(request_splits),
+            keys_by_partition,
+            readonly_indices(request_transfer_record_boundaries),
             tuple(layer.physical_layer_id for layer in topology.layers),
-            object_size,
+            remote_object_size_bytes,
             materialized_selection,
             selected_keys,
-            physical_layer_ids_by_axis,
+            physical_layer_ids_by_partition,
         )
 
     def _admitted_store_keys(self, selected_keys: tuple[str, ...]) -> tuple[set[str] | None, bool]:
@@ -602,7 +621,7 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
         return {key for key, include in zip(keys, admitted, strict=True) if include}, has_duplicates
 
     @abstractmethod
-    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreCandidates:
+    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreTransferCandidates:
         """Build request rows and keys before Store admission."""
 
     def _raise_store_fatal_error(self) -> None:
@@ -617,21 +636,21 @@ class KVPoolWorker(ABC, Generic[_MappingT]):
         if self._transfer_group_count > 1:
             context.failed_request_ids.add(completion.request_id)
         else:
-            context.failed_block_ids.update(source.block_id for source in failed_sources)
+            context.failed_block_ids.update(source.local_block_id for source in failed_sources)
 
     def _raise_load_error(self, context: KVPoolStepContext) -> None:
         if not context.failed_request_ids:
             return
         self._abort_load()
-        failed_locations = sorted({(source.group_id, source.block_id) for source in context.failed_sources})
+        failed_locations = sorted({(source.group_id, source.local_block_id) for source in context.failed_sources})
         raise RuntimeError(
             f"Hybrid KV Load failed for requests {sorted(context.failed_request_ids)}; "
             f"cache group/block failures {failed_locations}"
         )
 
     def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
-        local = self._mappings[group_id].local
-        return local.local_group_block_bytes, local.physical_layer_ids_by_object
+        local = self._mappings[group_id].local_layout
+        return local.local_group_block_bytes, local.physical_layer_ids_by_partition
 
     @property
     def _transfer_group_count(self) -> int:

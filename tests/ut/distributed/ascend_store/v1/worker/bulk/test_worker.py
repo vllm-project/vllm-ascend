@@ -196,7 +196,9 @@ def test_memcache_multi_spec_store_lookup_load_preserves_payloads_and_private_st
         command = RangeStoreCommand("producer", 0, 32, ((1,), (private_block,), (3,)), (b"a",), 32, 17)
         completion = store_one(worker, command)
         assert completion.evidence.succeeded
-        assert [(item.source.group_id, item.source.block_id) for item in completion.evidence.transfer_evidence] == [
+        assert [
+            (item.source.group_id, item.source.local_block_id) for item in completion.evidence.transfer_evidence
+        ] == [
             (0, 1),
             (2, 3),
         ]
@@ -647,7 +649,7 @@ def test_tp_mismatch_bulk_binds_effective_keys_to_exact_local_slices(
     ) * len(expected_ranks)
     assert put_call[2] == expected_addresses
     assert put_call[3] == expected_sizes
-    assert [item.source.block_id for item in completion.evidence.transfer_evidence] == [2] * len(expected_ranks)
+    assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [2] * len(expected_ranks)
 
     worker.close()
     assert resources.closed
@@ -671,7 +673,7 @@ def test_tp_mismatch_bulk_preserves_axis_result_provenance() -> None:
     (completion,) = worker._execute_bulk_load(batch)
 
     assert [item.result_code for item in completion.failures] == [-1]
-    assert [item.source.block_id for item in completion.failures] == [2]
+    assert [item.source.local_block_id for item in completion.failures] == [2]
     assert "@head_or_tp_rank:3@" in completion.failures[0].source.key
 
     worker.close()
@@ -818,13 +820,13 @@ def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group
     topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5))
     worker, _, _ = make_worker(topology=topology)
     events = []
-    key_type = type(worker._mappings[0].naming)
-    key_group_ids = {id(binding.naming): group_id for group_id, binding in worker._mappings.items()}
-    make_rows, make_keys = bulk_module.store_candidate_rows, key_type.keys
+    key_type = type(worker._mappings[0].key_namer)
+    key_group_ids = {id(binding.key_namer): group_id for group_id, binding in worker._mappings.items()}
+    make_rows, make_keys = bulk_module.store_transfer_records, key_type.keys
 
-    def rows(end_token, hashes, block_ids, **kwargs):
-        events.append(("rows", tuple(block_ids)))
-        return make_rows(end_token, hashes, block_ids, **kwargs)
+    def rows(end_token, hashes, local_block_ids, **kwargs):
+        events.append(("rows", tuple(local_block_ids)))
+        return make_rows(end_token, hashes, local_block_ids, **kwargs)
 
     def keys(naming, hashes):
         events.append(("keys", key_group_ids[id(naming)]))
@@ -833,9 +835,9 @@ def test_range_store_builds_rows_and_keys_together_without_an_intermediate_group
     def reject_unused_empty_rows():
         raise AssertionError("Present ordinary groups must not allocate fallback empty rows")
 
-    monkeypatch.setattr(bulk_module, "store_candidate_rows", rows)
+    monkeypatch.setattr(bulk_module, "store_transfer_records", rows)
     monkeypatch.setattr(key_type, "keys", keys)
-    monkeypatch.setattr(bulk_module, "empty_candidate_rows", reject_unused_empty_rows)
+    monkeypatch.setattr(bulk_module, "empty_store_transfer_records", reject_unused_empty_rows)
     command = RangeStoreCommand("request", 0, 4, ((1,), (), (), (7,)), (b"a",), 4, 17)
     try:
         candidates = worker._build_store_candidates((command,))
@@ -1057,7 +1059,7 @@ def test_ordinary_bulk_worker_owns_lookup_load_store_rows_and_ranges() -> None:
     assert put_call[1][0].endswith("@62")
     assert put_call[2:] == (((1192, 2192),), ((32, 32),))
     (evidence,) = completion.evidence.transfer_evidence
-    assert evidence.source.block_id == 3
+    assert evidence.source.local_block_id == 3
     assert evidence.source.physical_layer_ids == (0, 1)
 
     worker.close()
@@ -1094,7 +1096,7 @@ def test_sparse_hybrid_groups_keep_original_identity_through_public_worker(put_r
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert put_call[1:] == (get_call[1], get_call[2], get_call[3])
     assert [item.source.group_id for item in completion.evidence.transfer_evidence] == [1, 1, 3, 3]
-    assert [item.source.block_id for item in completion.evidence.transfer_evidence] == [11, 12, 31, 32]
+    assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [11, 12, 31, 32]
     assert [item.source.physical_layer_ids for item in completion.evidence.transfer_evidence] == [
         (0,),
         (0,),
@@ -1184,11 +1186,11 @@ def test_hybrid_checkpoint_requires_unique_exact_align_state_sources() -> None:
 
     null_source = CheckpointStoreCommand("null", ((3,), (99,)), (b"a",), 0, (StateCheckpointSource(1, 0, 4),), 20)
     null_candidates = worker._build_store_candidates((null_source,))
-    assert [group.row_count for group in null_candidates.groups] == [0, 0]
+    assert [group.transfer_record_count for group in null_candidates.groups] == [0, 0]
 
     aligned = CheckpointStoreCommand("aligned", ((3,), (99,)), (b"a", b"b"), 0, (StateCheckpointSource(1, 7, 8),), 21)
     aligned_candidates = worker._build_store_candidates((aligned,))
-    assert [group.row_count for group in aligned_candidates.groups] == [0, 1]
+    assert [group.transfer_record_count for group in aligned_candidates.groups] == [0, 1]
 
     worker.close()
     assert resources.closed
@@ -1229,7 +1231,7 @@ def test_ordinary_bulk_partitions_writers_after_candidate_filtering() -> None:
     put_call = next(call for call in backend.calls if call[0] == "put")
     assert len(put_call[1]) == 1 and put_call[1][0].endswith("@64")
     assert put_call[2] == ((1256,),)
-    assert completion.evidence.transfer_evidence[0].source.block_id == 4
+    assert completion.evidence.transfer_evidence[0].source.local_block_id == 4
 
     worker.close()
     assert resources.closed
@@ -1246,7 +1248,7 @@ def test_dcp_bulk_keeps_every_row_of_its_distinct_key_shard() -> None:
     assert len(put_call[1]) == 2
     assert all("@dcp:1@" in key for key in put_call[1])
     assert put_call[2] == ((1064,), (1128,))
-    assert [item.source.block_id for item in completion.evidence.transfer_evidence] == [1, 2]
+    assert [item.source.local_block_id for item in completion.evidence.transfer_evidence] == [1, 2]
 
     worker.close()
     assert resources.closed

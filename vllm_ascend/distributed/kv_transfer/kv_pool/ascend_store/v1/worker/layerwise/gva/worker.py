@@ -12,7 +12,7 @@ from .....attention_fence import reset_attention_compute_start_gate
 from ....backend import GVABackend, GVAObjectSessions, GVARegion
 from ....infrastructure.configuration.topology import KVPoolTopology
 from ....infrastructure.mapping import LayerwiseMapping
-from ....infrastructure.mapping.object_layout import ObjectLayoutFactory
+from ....infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
 from ....infrastructure.mapping.object_naming import KeyBuilder
 from ....infrastructure.reachability import HybridReachability, UnitaryReachability
 from ....infrastructure.resources import KVPoolResources
@@ -45,7 +45,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
         key_builder: KeyBuilder | None = None,
-        object_layout_factory: ObjectLayoutFactory | None = None,
+        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
         store_collective: StoreCollective | None = None,
     ) -> None:
         backend = cast(GVABackend, resources.backend)
@@ -62,7 +62,7 @@ class GVALayerwiseWorker(LayerwiseWorker):
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
             key_builder=key_builder,
-            object_layout_factory=object_layout_factory,
+            remote_object_layout_factory=remote_object_layout_factory,
         )
 
         self._shared_writes = (
@@ -74,11 +74,11 @@ class GVALayerwiseWorker(LayerwiseWorker):
 
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._load_plan = prepare_layer_load(batch, self._mappings, self._resolve_load_bases)
-        return self._load_plan.keys_by_layer
+        return self._load_plan.selected_keys_by_layer
 
     def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._store_plan = prepare_layer_store(batch, self._mappings, self._resolve_store_bases)
-        return self._store_plan.keys_by_layer
+        return self._store_plan.selected_keys_by_layer
 
     def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
         plan = self._prepared_load_plan()
@@ -113,11 +113,13 @@ class GVALayerwiseWorker(LayerwiseWorker):
 
     def _resolve_store_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
         return self._region_bases(
-            cast(GVAObjectSessions, self._backend_sessions).store_regions(keys, group.object_size)
+            cast(GVAObjectSessions, self._backend_sessions).store_regions(keys, group.remote_object_size_bytes)
         )
 
     def _resolve_load_bases(self, group: KVGroupBatch, keys: tuple[str, ...]) -> np.ndarray:
-        return self._region_bases(cast(GVAObjectSessions, self._backend_sessions).load_regions(keys, group.object_size))
+        return self._region_bases(
+            cast(GVAObjectSessions, self._backend_sessions).load_regions(keys, group.remote_object_size_bytes)
+        )
 
     def _complete_shared_store(self, state: _StoreState, commit_keys: list[str]) -> list[str]:
         if self._shared_writes is None:
@@ -131,7 +133,9 @@ class GVALayerwiseWorker(LayerwiseWorker):
                     keys = tuple(key for key in group.selected_keys() if key in selected)
                     regions.update(
                         (key, (region.address, region.size))
-                        for key, region in zip(keys, sessions.store_regions(keys, group.object_size), strict=True)
+                        for key, region in zip(
+                            keys, sessions.store_regions(keys, group.remote_object_size_bytes), strict=True
+                        )
                     )
         except Exception as error:
             # Still participate: peers must learn that this writer cannot prove completion.
@@ -165,8 +169,8 @@ def materialize_layer_gva(
 ) -> tuple[list[int], list[int], list[int]]:
     """Evaluate only layer-dependent GVA arrays from prepared objects."""
 
-    object_bases_by_group = plan.object_bases_by_group
-    assert object_bases_by_group is not None
+    remote_object_bases_by_group = plan.remote_object_bases_by_group
+    assert remote_object_bases_by_group is not None
     remote_addresses: list[int] = []
     local_addresses: list[int] = []
     sizes: list[int] = []
@@ -174,7 +178,7 @@ def materialize_layer_gva(
         _, local_rows, size_rows, offset_rows = mappings[group.group_id].arguments(group.selection, layer_id=layer_id)
         remote_addresses.extend(
             int(base) + offset
-            for base, offsets in zip(object_bases_by_group[group.group_id], offset_rows, strict=True)
+            for base, offsets in zip(remote_object_bases_by_group[group.group_id], offset_rows, strict=True)
             for offset in offsets
         )
         local_addresses.extend(address for row in local_rows for address in row)

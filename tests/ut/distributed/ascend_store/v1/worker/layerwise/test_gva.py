@@ -119,7 +119,7 @@ def test_gva_load_copies_each_layer_at_its_leased_object_offset() -> None:
 
 
 def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
-    worker, batch, store, sessions = make_gva_binding(block_ids=(1,))
+    worker, batch, store, sessions = make_gva_binding(local_block_ids=(1,))
     key = batch.selected_keys()[0]
     store.objects[key] = (1000, 64, True)
 
@@ -131,7 +131,11 @@ def test_gva_load_copy_exception_becomes_unknown_source_evidence() -> None:
     assert len(completion.failures) == 1
     evidence = completion.failures[0]
     assert evidence.result_code is None
-    assert (evidence.source.group_id, evidence.source.block_id, evidence.source.physical_layer_ids) == (0, 1, (0,))
+    assert (evidence.source.group_id, evidence.source.local_block_id, evidence.source.physical_layer_ids) == (
+        0,
+        1,
+        (0,),
+    )
     sessions.finish_load([key])
     assert not store.leases
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..infrastructure.mapping.local_layout import ObjectCoordinate
+from ..infrastructure.mapping.local_layout import ObjectPartitionCoordinate
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +16,7 @@ class WireKeyBuilder:
     head_suffixes: tuple[str, ...]
 
     def bind(
-        self, group_id: int, coordinates: Sequence[ObjectCoordinate], *, lookup_head_count: int
+        self, group_id: int, coordinates: Sequence[ObjectPartitionCoordinate], *, lookup_head_count: int
     ) -> BoundLayerwiseKeys:
         prefixes = self.prefixes_by_group_stage[group_id]
         return BoundLayerwiseKeys(

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ...infrastructure.mapping import LayerwiseMapping, LayerwiseSelection
-from ..transfer.batch import ByteArray, IndexArray, KVGroupBatch, KVTransferBatch
+from ..transfer.batch import IndexArray, KVGroupBatch, KVTransferBatch, UInt64Array
 from ..transfer.completion import LoadCompletion, TransferEvidence, _load_completions
 
 
@@ -20,7 +20,7 @@ class LayerTransferGroup:
     keys: tuple[str, ...]
     selection: LayerwiseSelection
     # Load resolves ownership after session admission; Store does not need this lowering.
-    object_indices: range | IndexArray | None = None
+    selected_transfer_candidate_indices: range | IndexArray | None = None
     request_indices: tuple[int, ...] | None = None
 
     @property
@@ -39,8 +39,8 @@ class LayerTransferPlan:
     batch: KVTransferBatch
     groups: tuple[LayerTransferGroup, ...]
     groups_by_layer: dict[int, tuple[LayerTransferGroup, ...]]
-    keys_by_layer: dict[int, list[str]]
-    object_bases_by_group: dict[int, ByteArray] | None = None
+    selected_keys_by_layer: dict[int, list[str]]
+    remote_object_bases_by_group: dict[int, UInt64Array] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,20 +83,22 @@ def _prepare_layer_plan(
     resolve_requests: bool,
 ) -> LayerTransferPlan:
     groups = []
-    object_bases_by_group: dict[int, ByteArray] | None = {} if resolve_object_bases is not None else None
+    remote_object_bases_by_group: dict[int, UInt64Array] | None = {} if resolve_object_bases is not None else None
     for batch_group in batch.groups:
         keys = batch_group.selected_keys()
         if not keys:
             continue
         selection = mappings[batch_group.group_id].prepare(
-            batch_group.key_axes, batch_group.block_ids, selected_keys=batch_group.selected_objects
+            batch_group.keys_by_partition,
+            batch_group.local_block_ids,
+            selected_keys=batch_group.transfer_candidate_mask,
         )
         group = make_layer_transfer_group(batch_group, keys, selection, resolve_requests=resolve_requests)
         groups.append(group)
         if resolve_object_bases is not None:
-            assert object_bases_by_group is not None
-            object_bases_by_group[group.group_id] = resolve_object_bases(batch_group, group.keys)
-    return make_layer_transfer_plan(batch, tuple(groups), object_bases_by_group)
+            assert remote_object_bases_by_group is not None
+            remote_object_bases_by_group[group.group_id] = resolve_object_bases(batch_group, group.keys)
+    return make_layer_transfer_plan(batch, tuple(groups), remote_object_bases_by_group)
 
 
 def make_layer_transfer_group(
@@ -109,33 +111,33 @@ def make_layer_transfer_group(
     """Retain Mapping's selected rows; lower request ownership only for Load."""
     if not resolve_requests:
         return LayerTransferGroup(group, keys, selection)
-    object_indices: range | IndexArray
-    if selection.selected_row_count == group.object_count:
-        object_indices = range(group.object_count)
-    elif len(selection.by_object) == 1:
-        selected = selection.by_object[0]
+    selected_transfer_candidate_indices: range | IndexArray
+    if selection.selected_transfer_count == group.transfer_candidate_count:
+        selected_transfer_candidate_indices = range(group.transfer_candidate_count)
+    elif len(selection.by_partition) == 1:
+        selected = selection.by_partition[0]
         assert selected is not None
-        object_indices = selected.row_indices
+        selected_transfer_candidate_indices = selected.selected_transfer_record_indices
     else:
-        object_indices = np.fromiter(
+        selected_transfer_candidate_indices = np.fromiter(
             (
-                axis * group.row_count + row
-                for axis, selected in enumerate(selection.by_object)
+                axis * group.transfer_record_count + row
+                for axis, selected in enumerate(selection.by_partition)
                 if selected is not None
-                for row in selected.row_indices
+                for row in selected.selected_transfer_record_indices
             ),
             dtype=np.intp,
-            count=selection.selected_row_count,
+            count=selection.selected_transfer_count,
         )
-        object_indices.flags.writeable = False
-    request_indices = tuple(group.request_index(int(index)) for index in object_indices)
-    return LayerTransferGroup(group, keys, selection, object_indices, request_indices)
+        selected_transfer_candidate_indices.flags.writeable = False
+    request_indices = tuple(group.request_index(int(index)) for index in selected_transfer_candidate_indices)
+    return LayerTransferGroup(group, keys, selection, selected_transfer_candidate_indices, request_indices)
 
 
 def make_layer_transfer_plan(
     batch: KVTransferBatch,
     groups: tuple[LayerTransferGroup, ...],
-    object_bases_by_group: dict[int, ByteArray] | None = None,
+    remote_object_bases_by_group: dict[int, UInt64Array] | None = None,
 ) -> LayerTransferPlan:
     """Compile reusable group membership and key axes without touching object rows."""
 
@@ -146,14 +148,14 @@ def make_layer_transfer_plan(
 
     groups_by_layer = {}
     keys_by_membership: dict[tuple[int, ...], list[str]] = {}
-    keys_by_layer = {}
+    selected_keys_by_layer = {}
     for layer_id, layer_groups in mutable_groups_by_layer.items():
         groups_by_layer[layer_id] = tuple(layer_groups)
         membership = tuple(group.group_id for group in layer_groups)
         if membership not in keys_by_membership:
             keys_by_membership[membership] = [key for group in layer_groups for key in group.keys]
-        keys_by_layer[layer_id] = keys_by_membership[membership]
-    return LayerTransferPlan(batch, groups, groups_by_layer, keys_by_layer, object_bases_by_group)
+        selected_keys_by_layer[layer_id] = keys_by_membership[membership]
+    return LayerTransferPlan(batch, groups, groups_by_layer, selected_keys_by_layer, remote_object_bases_by_group)
 
 
 def _layer_load_completions(
@@ -173,8 +175,10 @@ def _layer_load_completions(
     failures = []
     for group in plan.groups_by_layer[layer_id]:
         assert group.request_indices is not None
-        assert group.object_indices is not None
-        for index, request_index, key in zip(group.object_indices, group.request_indices, group.keys, strict=True):
+        assert group.selected_transfer_candidate_indices is not None
+        for index, request_index, key in zip(
+            group.selected_transfer_candidate_indices, group.request_indices, group.keys, strict=True
+        ):
             code = failed_codes.get(key, 0) if isinstance(failed_codes, dict) else failed_codes
             if code != 0:
                 source = group.batch.source(int(index), layer_id, request_index=request_index)

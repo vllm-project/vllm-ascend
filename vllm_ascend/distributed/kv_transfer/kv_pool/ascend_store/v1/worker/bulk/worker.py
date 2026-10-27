@@ -17,12 +17,12 @@ from ...infrastructure.reachability import HybridReachability, UnitaryReachabili
 from ...infrastructure.resources import KVPoolResources
 from ..base import KVPoolStepContext, KVPoolWorker, PendingStore
 from ..transfer.batch import (
-    KeyAxes,
+    KeysByPartition,
     KVTransferBatch,
-    StoreCandidates,
-    StoreGroupCandidates,
-    select_store_candidate_objects,
-    store_candidate_keys,
+    StoreGroupTransferCandidates,
+    StoreTransferCandidates,
+    select_store_transfer_candidates,
+    store_transfer_candidate_keys,
 )
 from ..transfer.completion import (
     LoadCompletion,
@@ -33,11 +33,11 @@ from ..transfer.completion import (
     _store_command_completions,
 )
 from ..transfer.rows import (
-    StoreCandidateRows,
+    StoreTransferRecords,
     boundary_hash,
-    empty_candidate_rows,
-    merge_key_axes,
-    store_candidate_rows,
+    empty_store_transfer_records,
+    merge_keys_by_partition,
+    store_transfer_records,
 )
 from .transfer import (
     BulkBackendArguments,
@@ -45,7 +45,7 @@ from .transfer import (
     _empty_store_completions,
     _failed_store_completions,
     _store_completions,
-    select_store_writer_rows,
+    select_store_writer_records,
 )
 
 
@@ -163,18 +163,18 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         for future in self._pending_loads:
             self._load_batch_completions(future, self._load_batches[future])
 
-    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreCandidates:
-        rows_by_group: dict[int, list[StoreCandidateRows]] = {group_id: [] for group_id in self._groups}
-        keys_by_group: dict[int, list[KeyAxes]] = {group_id: [] for group_id in self._groups}
+    def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreTransferCandidates:
+        transfer_records_by_group: dict[int, list[StoreTransferRecords]] = {group_id: [] for group_id in self._groups}
+        keys_by_group: dict[int, list[KeysByPartition]] = {group_id: [] for group_id in self._groups}
         for command in commands:
             if isinstance(command, CheckpointStoreCommand):
                 request_rows = self._checkpoint_rows(command)
                 for group_id, mapping in self._mappings.items():
                     rows = request_rows.get(group_id)
                     if rows is None:
-                        rows = empty_candidate_rows()
-                    rows_by_group[group_id].append(rows)
-                    keys_by_group[group_id].append(mapping.naming.keys(rows[1]))
+                        rows = empty_store_transfer_records()
+                    transfer_records_by_group[group_id].append(rows)
+                    keys_by_group[group_id].append(mapping.key_namer.keys(rows[1]))
                 continue
 
             masks = self._reachability.select_for_store(
@@ -182,26 +182,28 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
             )
             for (group_id, mapping), mask in zip(self._mappings.items(), masks, strict=True):
                 if group_id in self._state_group_ids:
-                    rows = empty_candidate_rows()
+                    rows = empty_store_transfer_records()
                 else:
-                    rows = store_candidate_rows(
+                    rows = store_transfer_records(
                         command.end_token,
                         command.block_hashes,
                         command.block_ids_by_group[group_id],
-                        block_size=mapping.local.group_block_size,
-                        hash_block_size=mapping.local.hash_block_size,
+                        block_size=mapping.local_layout.group_block_size,
+                        hash_block_size=mapping.local_layout.hash_block_size,
                         start_token=command.start_token,
                         mask=mask,
                     )
-                    rows = select_store_writer_rows(
+                    rows = select_store_writer_records(
                         self._topology, rows, tp_mismatch=self._topology.tp_partition.tp_mismatch
                     )
-                rows_by_group[group_id].append(rows)
-                keys_by_group[group_id].append(mapping.naming.keys(rows[1]))
-        return StoreCandidates(
+                transfer_records_by_group[group_id].append(rows)
+                keys_by_group[group_id].append(mapping.key_namer.keys(rows[1]))
+        return StoreTransferCandidates(
             tuple(
-                StoreGroupCandidates(
-                    group_id, tuple(rows_by_group[group_id]), merge_key_axes(group_id, keys_by_group[group_id])
+                StoreGroupTransferCandidates(
+                    group_id,
+                    tuple(transfer_records_by_group[group_id]),
+                    merge_keys_by_partition(group_id, keys_by_group[group_id]),
                 )
                 for group_id in self._groups
             )
@@ -210,7 +212,7 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
     def _checkpoint_rows(
         self,
         command: CheckpointStoreCommand,
-    ) -> dict[int, StoreCandidateRows]:
+    ) -> dict[int, StoreTransferRecords]:
         if not self._state_group_ids:
             raise ValueError("State checkpoint Store requires an align-state cache group")
         source_group_ids = tuple(source.group_id for source in command.sources)
@@ -225,7 +227,7 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         boundary = next(iter(boundaries))
         checkpoint_hash = boundary_hash(boundary, command.block_hashes, self._topology.hash_block_size)
 
-        rows_by_group: dict[int, StoreCandidateRows] = {}
+        transfer_records_by_group: dict[int, StoreTransferRecords] = {}
         accepted_state_groups = []
         for source in command.sources:
             group = self._groups[source.group_id]
@@ -233,7 +235,7 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                 continue
             accepted_state_groups.append(group)
             rows = ([group.block_size], [checkpoint_hash], [source.block_id])
-            rows_by_group[group.group_id] = select_store_writer_rows(
+            transfer_records_by_group[group.group_id] = select_store_writer_records(
                 self._topology,
                 rows,
                 tp_mismatch=False,
@@ -243,29 +245,29 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         if accepted_state_groups and any(boundary % group.block_size for group in accepted_state_groups):
             for group_id in self._companion_group_ids:
                 group = self._groups[group_id]
-                block_ids = command.block_ids_by_group[group.group_id]
+                local_block_ids = command.block_ids_by_group[group.group_id]
                 logical_count = (boundary + group.block_size - 1) // group.block_size
-                block_offset = max(logical_count - len(block_ids), 0)
+                block_offset = max(logical_count - len(local_block_ids), 0)
                 counts: list[int] = []
                 hashes = []
                 selected_block_ids: list[int] = []
                 for local_index in checkpoint_companion_indices(
-                    boundary, command.published_store_end_token, group.block_size, len(block_ids)
+                    boundary, command.published_store_end_token, group.block_size, len(local_block_ids)
                 ):
-                    block_id = block_ids[local_index]
+                    block_id = local_block_ids[local_index]
                     if block_id < 0:
                         continue
                     block_end = min((local_index + block_offset + 1) * group.block_size, boundary)
                     counts.append(group.block_size)
                     hashes.append(boundary_hash(block_end, command.block_hashes, self._topology.hash_block_size))
                     selected_block_ids.append(block_id)
-                rows_by_group[group_id] = select_store_writer_rows(
+                transfer_records_by_group[group_id] = select_store_writer_records(
                     self._topology,
                     (counts, hashes, selected_block_ids),
                     tp_mismatch=False,
                     align_state=False,
                 )
-        return rows_by_group
+        return transfer_records_by_group
 
     def _execute_bulk_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         try:
@@ -298,16 +300,16 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         selected: KVTransferBatch | None = None
         try:
             candidates = self._build_store_candidates(commands)
-            candidate_keys = store_candidate_keys(candidates)
+            candidate_keys = store_transfer_candidate_keys(candidates)
             accepted, claim_once = self._admitted_store_keys(candidate_keys)
             if accepted is not None and not accepted:
                 return _store_command_completions(commands)
-            selected_objects = (
+            transfer_candidate_mask = (
                 None
                 if accepted is None
-                else select_store_candidate_objects(candidate_keys, accepted, claim_once=claim_once)
+                else select_store_transfer_candidates(candidate_keys, accepted, claim_once=claim_once)
             )
-            selected = self._materialize_store_candidates(commands, candidates, selected_objects)
+            selected = self._materialize_store_candidates(commands, candidates, transfer_candidate_mask)
             if selected is None:
                 return _store_command_completions(commands)
         except Exception as error:
@@ -339,7 +341,7 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         keys, addresses, sizes = [], [], []
         for group in batch.groups:
             group_keys, group_addresses, group_sizes = self._mappings[group.group_id].arguments(
-                group.key_axes, group.block_ids, selected_keys=group.selected_objects
+                group.keys_by_partition, group.local_block_ids, selected_keys=group.transfer_candidate_mask
             )
             keys.extend(group_keys)
             addresses.extend(group_addresses)

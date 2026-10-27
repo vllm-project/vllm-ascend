@@ -177,17 +177,19 @@ Mapping 使用三个相互配合的对象，将“本地有哪些字节”“这
 
 | 部分 | 主要类型 | 绑定结果 |
 | --- | --- | --- |
-| 本地布局 | `LocalLayout`、`ObjectSourceSegments` | 原始组、对象坐标、物理层顺序、层到段的边界，以及各段的基址、步长和长度 |
+| 本地布局 | `LocalLayout`、`LocalPartitionLayout` | 原始组、对象坐标、物理层顺序、层到段的边界，以及各段的基址、步长和长度 |
 | 对象命名 | `KeyBuilder`、`KeyNamer` | 用配置和对象坐标绑定命名规则，再由内容 hash 生成具体 key |
-| 对象布局 | `ObjectLayout` | 完整对象大小，以及各个本地段在对象内的字节偏移 |
+| 对象布局 | `RemoteObjectLayout` | 完整对象大小，以及各个本地段在对象内的字节偏移 |
 
-`LocalLayout.objects` 按本地对象顺序保存来源。每个来源用 `ObjectCoordinate` 表达 PP、DCP 和 head 身份，用 `LocalMemorySegments` 表达本地字节。层边界将这一段序列切成逐层视图。
+`LocalLayout` 描述当前 Worker 上一个原始缓存组的布局。`LocalLayout.partitions` 按绑定顺序保存各分片的来源，`partition_index` 是该序列中的位置。每个分片用 `ObjectPartitionCoordinate` 表达固定的 PP、DCP 和 head 身份，并不表示本次选择哪个轴；`LocalMemorySegments` 描述其本地字节，层边界将段序列切成逐层布局。
+
+Worker 的一条 `transfer_record` 保留请求归属、内容身份和本地 block ID；它与一个 partition 配对后构成一条 `transfer_candidate`。`keys_by_partition[p][r]` 对应分片位置 `p` 与记录位置 `r`，展平位置为 `transfer_candidate_index = p * transfer_record_count + r`。筛选后的紧凑位置称为 `selected_transfer_index`，不能替代原始候选位置来追溯请求。
 
 `KeyBuilder.bind()` 接受原始组 ID、对象坐标和 Lookup 需要的 head 覆盖范围，产生 `KeyNamer`。其 `keys()` 为本地对象生成 key，`lookup_keys()` 覆盖查询所需的对象身份。Lookup 可能需要查询本 rank 没有本地来源的 PP 或 head 分片。
 
-`ObjectLayout` 将相同顺序的本地段放到远端对象中。默认布局紧凑拼接；具体 Backend 可以为全局层、上下文分片或对齐预留空间。因此，本地载荷长度之和与远端对象大小分别保留。
+`RemoteObjectLayout` 将相同顺序的本地段放到远端对象中。`segment_boundary_offsets_bytes` 保存各段起点和末尾载荷终点；`size_bytes` 保存完整对象大小，两者不要求相等。默认布局紧凑拼接；具体 Backend 可以为全局层、上下文分片或对齐预留空间。
 
-Bulk 直接使用本地整体视图生成完整对象参数。Layerwise 从同一套本地段与层边界切出 `LayerTransferLayout`，再配上对象偏移。默认紧凑格式下，按对象顺序重组各层字节即可恢复 Bulk 的完整载荷。带预留空间的格式保持本地字节及层归属，并由对象布局明确远端放置位置。
+Bulk 直接使用本地整体视图生成完整对象参数。Layerwise 从同一套本地段与层边界切出 `LayerPartitionLayout`，再配上对象偏移。默认紧凑格式下，按对象顺序重组各层字节即可恢复 Bulk 的完整载荷。带预留空间的格式保持本地字节及层归属，并由对象布局明确远端放置位置。
 
 ### 5.2 坐标与单位
 
@@ -290,7 +292,7 @@ LBHNC 在这里使用已注册的逐层 view 检查布局。上述路径不执�
 
 | 字段 | 含义 | 可共享的条件 |
 | --- | --- | --- |
-| `block_zero_addresses` | 每段在物理 block 0 中的本地起点，已包含 Entry 基址与切片偏移 | 各 head slice 使用对应地址行 |
+| `block_zero_segment_addresses` | 每段在物理 block 0 中的本地起点，已包含 Entry 基址与切片偏移 | 各 head slice 使用对应地址行 |
 | `group_block_strides_bytes` | 每段从一个物理块移到下一块的步长 | 全部相同时可用单元素数组广播；不同 slice 可共享 |
 | `segment_lengths_bytes` | 每段的有效字节数 | 全部相同时可用单元素数组广播；不同 slice 可共享 |
 
@@ -355,7 +357,7 @@ KeyRange Worker 将这些偏移作为范围参数传给 Backend。GVA Worker 则
 
 | 数据 | 何时形成 | 是否跨层复用 | 是否包含具体本地地址矩阵 |
 | --- | --- | --- | --- |
-| `LayerTransferLayout` | Mapping 绑定时 | 是，按物理层索引 | 否，只有 block 0 段起点、步长等描述 |
+| `LayerPartitionLayout` | Mapping 绑定时 | 是，按物理层索引 | 否，只有 block 0 段起点、步长等描述 |
 | `LayerwiseSelection` | 本次批次准备时 | 是，同一 Mapping 的各层共享本次选择 | 否，保存具体 key 与 block ID |
 | 本层传输参数 | 本层执行准备时 | 不作为永久布局缓存 | 是，并带长度与对象内偏移 |
 

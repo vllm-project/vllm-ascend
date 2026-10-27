@@ -4,11 +4,11 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from ..local_layout.types import ObjectSourceSegments
+from ..local_layout.types import LocalPartitionLayout
 from ..types import UInt64Array
 
 
-def build_segment_offsets(sources: Sequence[ObjectSourceSegments]) -> tuple[UInt64Array, ...]:
+def build_segment_offsets(sources: Sequence[LocalPartitionLayout]) -> tuple[UInt64Array, ...]:
     """Return each source's read-only segment boundaries, including its payload end.
 
     Equal head slices share the same lengths array and therefore the same compiled
@@ -17,8 +17,8 @@ def build_segment_offsets(sources: Sequence[ObjectSourceSegments]) -> tuple[UInt
     offsets_by_layout: dict[tuple[int, int], UInt64Array] = {}
     result = []
     for source in sources:
-        segments = source.memory_segments
-        segment_count = len(segments.block_zero_addresses)
+        segments = source.local_segments
+        segment_count = len(segments.block_zero_segment_addresses)
         layout_key = (id(segments.segment_lengths_bytes), segment_count)
         offsets = offsets_by_layout.get(layout_key)
         if offsets is None:

@@ -137,7 +137,7 @@ def test_store_admission_keeps_failed_requests_separate_from_copy_sources(start_
             evidence = completion.evidence.transfer_evidence
             assert len(evidence) == int(copied)
             if copied:
-                assert evidence[0].source.block_id == commands[index].block_ids_by_group[0][0]
+                assert evidence[0].source.local_block_id == commands[index].block_ids_by_group[0][0]
                 assert evidence[0].source.physical_layer_ids == (2, 5, 9)
                 assert evidence[0].result_code == 0
             elif failure_stage == "start" or start_codes[index] == 0:
@@ -826,7 +826,7 @@ def test_layerwise_store_aggregates_terminal_evidence_across_layers(observed_lay
         for request_index, completion in enumerate(completions):
             evidence = completion.evidence.transfer_evidence
             assert [
-                (item.source.group_id, item.source.block_id, item.source.physical_layer_ids) for item in evidence
+                (item.source.group_id, item.source.local_block_id, item.source.physical_layer_ids) for item in evidence
             ] == [
                 (group_id, commands[request_index].block_ids_by_group[group_id][0], layers)
                 for group_id, layers in expected_layers.items()
@@ -905,7 +905,9 @@ def test_all_successful_session_admission_reuses_batch_without_reselecting_objec
     commands = (LoadCommand("first", 0, 4, ((1,),), (b"same",)), LoadCommand("second", 0, 4, ((7,),), (b"same",)))
     batch = worker._build_load_batch(commands)
     if gva:
-        backend.objects.update({key: (10000, batch.groups[0].object_size, True) for key in batch.selected_keys()})
+        backend.objects.update(
+            {key: (10000, batch.groups[0].remote_object_size_bytes, True) for key in batch.selected_keys()}
+        )
     select = Mock(side_effect=AssertionError("Successful admission must reuse its input selection"))
     monkeypatch.setattr(KVTransferBatch, "select_keys", select)
     try:
@@ -955,7 +957,7 @@ def test_layer_copy_failure_preserves_unknown_code_and_releases_load_sessions(ro
         if route == "key_range":
             assert sum(call[0] == "batch_get_end" for call in backend.calls) == 1
         context = worker._active_step
-        assert [(source.block_id, source.physical_layer_ids) for source in context.failed_sources] == [
+        assert [(source.local_block_id, source.physical_layer_ids) for source in context.failed_sources] == [
             (3, (2,)),
             (3, (5,)),
         ]
@@ -1023,10 +1025,10 @@ def test_all_present_store_exits_before_materialization_or_backend_sessions(use_
         command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)
         candidates = worker._build_store_candidates((command,))
         for group in candidates.groups:
-            object_size = worker._mappings[group.group_id].local.local_group_block_bytes
-            for axis in group.key_axes:
+            remote_object_size_bytes = worker._mappings[group.group_id].local_layout.local_group_block_bytes
+            for axis in group.keys_by_partition:
                 for key in axis:
-                    backend.objects[key] = (10000, object_size, True)
+                    backend.objects[key] = (10000, remote_object_size_bytes, True)
     else:
         worker, resources, backend = make_worker(layerwise=True, requires_exists_before_put=True)
         command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)

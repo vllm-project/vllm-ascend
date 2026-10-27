@@ -43,26 +43,28 @@ class LayerwiseMappingTests(unittest.TestCase):
     def test_layer_layout_distinguishes_local_segments_from_object_byte_offsets(self):
         case = make_case(layers=(0,), block_size=2, heads=4, vector=1, head_slices=2)
         bulk = case.bind()
-        mapping = case.bind_layers(group_id=bulk.local.group_id)
+        mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
         self.assertFalse(hasattr(layerwise, "LayerwiseView"))
         self.assertFalse(hasattr(layerwise, "LayerRange"))
-        keys = bulk.naming.keys(["a", "a"])
+        keys = bulk.key_namer.keys(["a", "a"])
         selection = mapping.prepare(keys, [1, 1])
-        self.assertEqual(selection.selected_row_count, 4)  # Duplicate keys are still distinct input rows.
+        self.assertEqual(selection.selected_transfer_count, 4)  # Duplicate keys are still distinct input rows.
         for prefix_index, layout in enumerate(mapping.layer_layouts[0]):
-            self.assertEqual(layout.object_index, prefix_index)
-            self.assertEqual(tuple(obj.layer_segment_boundaries for obj in bulk.local.objects)[prefix_index], (0, 4))
-            self.assertEqual(layout.object_size_bytes, 32)
-            self.assertEqual(layout.object_offsets_bytes.tolist(), [0, 8, 16, 24])
-            segments = layout.local_memory_segments
+            self.assertEqual(layout.partition_index, prefix_index)
+            self.assertEqual(
+                tuple(obj.layer_segment_index_boundaries for obj in bulk.local_layout.partitions)[prefix_index], (0, 4)
+            )
+            self.assertEqual(layout.remote_object_size_bytes, 32)
+            self.assertEqual(layout.remote_segment_offsets_bytes.tolist(), [0, 8, 16, 24])
+            segments = layout.local_segments
             self.assertEqual(segments.segment_lengths_bytes.tolist(), [8])
             self.assertEqual(segments.group_block_strides_bytes.tolist(), [32])
             k_base, v_base = case.registration_arrays[0][3]
             self.assertEqual(
-                segments.block_zero_addresses.tolist(),
+                segments.block_zero_segment_addresses.tolist(),
                 [base + prefix_index * 8 + token * 16 for base in (k_base, v_base) for token in range(2)],
             )
-        peer = case.bind_layers(group_id=bulk.local.group_id)
+        peer = case.bind_layers(group_id=bulk.local_layout.group_id)
         self.assertEqual(peer.arguments(selection, layer_id=0), mapping.arguments(selection, layer_id=0))
 
     def test_layers_reassemble_exact_bulk_and_tensor_bytes(self):
@@ -78,10 +80,10 @@ class LayerwiseMappingTests(unittest.TestCase):
                 pp_layer_counts=(1, 3) if pp else None,
             )
             bulk = case.bind()
-            layers = case.bind_layers(group_id=bulk.local.group_id)
-            self.assertIsNot(layers.local, bulk.local)
+            layers = case.bind_layers(group_id=bulk.local_layout.group_id)
+            self.assertIsNot(layers.local_layout, bulk.local_layout)
             ids = [2, 0, 2, 1]
-            keys = bulk.naming.keys(["a", "b", "c", "d"])
+            keys = bulk.key_namer.keys(["a", "b", "c", "d"])
             for mask_kind in ("none", "all", "empty", "mixed"):
                 with self.subTest(
                     layout=layout, head_slices=head_slices, padding=padding, kernels=kernels, pp=pp, mask=mask_kind
@@ -100,7 +102,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                             case, physical_layers, prefix_index % head_slices, block_id
                         )
                         for prefix_index, physical_layers in enumerate(
-                            tuple(obj.physical_layer_ids for obj in bulk.local.objects)
+                            tuple(obj.physical_layer_ids for obj in bulk.local_layout.partitions)
                         )
                         for row, block_id in enumerate(ids)
                         if mask is None or mask[prefix_index * len(ids) + row]
@@ -110,7 +112,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                         expected,
                     )
                     selection = layers.prepare(keys, ids, selected_keys=mask)
-                    self.assertEqual(selection.selected_row_count, len(actual_keys))
+                    self.assertEqual(selection.selected_transfer_count, len(actual_keys))
                     self.assertEqual(
                         assemble_layers(layers, selection, {k: len(v) for k, v in expected.items()}), expected
                     )
@@ -119,7 +121,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                         selected = [
                             (prefix_index, row)
                             for prefix_index, physical_layers in enumerate(
-                                tuple(obj.physical_layer_ids for obj in bulk.local.objects)
+                                tuple(obj.physical_layer_ids for obj in bulk.local_layout.partitions)
                             )
                             if layer_id in physical_layers
                             for row in range(len(ids))
@@ -142,35 +144,35 @@ class LayerwiseMappingTests(unittest.TestCase):
             split = case.bind()
             split_layers = case.bind_layers()
             self.assertEqual(
-                tuple(obj.physical_layer_ids for obj in split.local.objects),
+                tuple(obj.physical_layer_ids for obj in split.local_layout.partitions),
                 ((4,),) * case.head_slices + ((5, 6, 7),) * case.head_slices,
             )
             for bound, layer_map in ((whole, whole_layers), (split, split_layers)):
                 for prefix_index, (ids, boundaries, segments) in enumerate(
                     zip(
-                        tuple(obj.physical_layer_ids for obj in bound.local.objects),
-                        tuple(obj.layer_segment_boundaries for obj in bound.local.objects),
-                        tuple(obj.memory_segments for obj in bound.local.objects),
+                        tuple(obj.physical_layer_ids for obj in bound.local_layout.partitions),
+                        tuple(obj.layer_segment_index_boundaries for obj in bound.local_layout.partitions),
+                        tuple(obj.local_segments for obj in bound.local_layout.partitions),
                         strict=True,
                     )
                 ):
                     self.assertEqual(len(boundaries), len(ids) + 1)
                     self.assertEqual(boundaries[0], 0)
-                    self.assertEqual(boundaries[-1], len(segments.block_zero_addresses))
+                    self.assertEqual(boundaries[-1], len(segments.block_zero_segment_addresses))
                     for index, layer_id in enumerate(ids):
                         layer_layout = next(
-                            v for v in layer_map.layer_layouts[layer_id] if v.object_index == prefix_index
+                            v for v in layer_map.layer_layouts[layer_id] if v.partition_index == prefix_index
                         )
                         preceding = expected_head_bytes(case, ids[:index], prefix_index % case.head_slices, 0)
-                        self.assertEqual(int(layer_layout.object_offsets_bytes[0]), len(preceding))
+                        self.assertEqual(int(layer_layout.remote_segment_offsets_bytes[0]), len(preceding))
                         self.assertEqual(
-                            layer_layout.object_size_bytes,
-                            tuple(obj.payload_bytes for obj in bound.local.objects)[prefix_index],
+                            layer_layout.remote_object_size_bytes,
+                            tuple(obj.payload_bytes for obj in bound.local_layout.partitions)[prefix_index],
                         )
-            self.assertGreater(int(whole_layers.layer_layouts[5][0].object_offsets_bytes[0]), 0)
-            self.assertEqual(int(split_layers.layer_layouts[5][0].object_offsets_bytes[0]), 0)
+            self.assertGreater(int(whole_layers.layer_layouts[5][0].remote_segment_offsets_bytes[0]), 0)
+            self.assertEqual(int(split_layers.layer_layouts[5][0].remote_segment_offsets_bytes[0]), 0)
             self.assertEqual(
-                int(split_layers.layer_layouts[6][0].object_offsets_bytes[0]),
+                int(split_layers.layer_layouts[6][0].remote_segment_offsets_bytes[0]),
                 len(expected_head_bytes(case, (5,), 0, 0)),
             )
 
@@ -179,33 +181,37 @@ class LayerwiseMappingTests(unittest.TestCase):
             case = make_case(head_slices=4, padding=padding, pp_layer_counts=(1, 3))
             bulk = case.bind()
             layouts = {
-                (id(r.segment_lengths_bytes), len(r.block_zero_addresses))
-                for r in tuple(obj.memory_segments for obj in bulk.local.objects)
+                (id(r.segment_lengths_bytes), len(r.block_zero_segment_addresses))
+                for r in tuple(obj.local_segments for obj in bulk.local_layout.partitions)
             }
             with (
                 patch.object(head_slicing, "inspect_entries", wraps=head_slicing.inspect_entries) as inspect,
                 patch.object(head_slicing, "compile_geometries", wraps=head_slicing.compile_geometries) as compile,
                 patch.object(layerwise.np, "cumsum", wraps=np.cumsum) as scans,
             ):
-                mapping = case.bind_layers(group_id=bulk.local.group_id)
+                mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
             self.assertEqual(scans.call_count, len(layouts))
             inspect.assert_called_once()
             compile.assert_called_once()
             for layer_layouts in mapping.layer_layouts.values():
                 for layer_layout in layer_layouts:
-                    source = tuple(obj.memory_segments for obj in mapping.local.objects)[layer_layout.object_index]
-                    for name in ("block_zero_addresses", "group_block_strides_bytes", "segment_lengths_bytes"):
-                        array = getattr(layer_layout.local_memory_segments, name)
+                    source = tuple(obj.local_segments for obj in mapping.local_layout.partitions)[
+                        layer_layout.partition_index
+                    ]
+                    for name in ("block_zero_segment_addresses", "group_block_strides_bytes", "segment_lengths_bytes"):
+                        array = getattr(layer_layout.local_segments, name)
                         self.assertTrue(np.shares_memory(array, getattr(source, name)))
                         self.assertFalse(array.flags.writeable)
-                    self.assertFalse(layer_layout.object_offsets_bytes.flags.writeable)
+                    self.assertFalse(layer_layout.remote_segment_offsets_bytes.flags.writeable)
                     self.assertTrue(
-                        np.shares_memory(layer_layout.object_offsets_bytes, layer_layouts[0].object_offsets_bytes)
+                        np.shares_memory(
+                            layer_layout.remote_segment_offsets_bytes, layer_layouts[0].remote_segment_offsets_bytes
+                        )
                     )
             with self.assertRaises(TypeError):
                 mapping.layer_layouts[100] = ()
-            selection = mapping.prepare(bulk.naming.keys(["a", "b"]), [0, 2])
-            self.assertIs(selection.by_object[0].block_ids, selection.by_object[1].block_ids)
+            selection = mapping.prepare(bulk.key_namer.keys(["a", "b"]), [0, 2])
+            self.assertIs(selection.by_partition[0].local_block_ids, selection.by_partition[1].local_block_ids)
             with (
                 patch.object(layerwise.np, "cumsum", side_effect=AssertionError("runtime offsets")),
                 patch.object(layerwise.np, "flatnonzero", side_effect=AssertionError("runtime selection")),
@@ -234,10 +240,10 @@ class LayerwiseMappingTests(unittest.TestCase):
 
         case = make_case(head_slices=2, pp_layer_counts=(1, 3))
         bulk = case.bind()
-        mapping = case.bind_layers(group_id=bulk.local.group_id)
-        selection = mapping.prepare(bulk.naming.keys(["a", "b"]), [0, 1])
-        prefix_selections = CountedPrefixSelections(selection.by_object)
-        selection = replace(selection, by_object=prefix_selections)
+        mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
+        selection = mapping.prepare(bulk.key_namer.keys(["a", "b"]), [0, 1])
+        prefix_selections = CountedPrefixSelections(selection.by_partition)
+        selection = replace(selection, by_partition=prefix_selections)
         with patch.object(type(bulk), "arguments", side_effect=AssertionError("no all-layer arguments")):
             mapping.arguments(selection, layer_id=0)
             self.assertEqual(prefix_selections.visits, [0, 1])
@@ -250,8 +256,8 @@ class LayerwiseMappingTests(unittest.TestCase):
             case = make_case(pp_layer_counts=pp_layer_counts)
             case.registration_arrays[1][3][:] = [length - 1 for length in case.registration_arrays[1][3]]
             bulk = case.bind()
-            mapping = case.bind_layers(group_id=bulk.local.group_id)
-            keys = bulk.naming.keys(["a", "b"])
+            mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
+            keys = bulk.key_namer.keys(["a", "b"])
             names, addresses, lengths = bulk.arguments(keys, [0, 2])
             expected = {key: read_bytes(a, n) for key, a, n in zip(names, addresses, lengths, strict=True)}
             selection = mapping.prepare(keys, [0, 2])
@@ -265,16 +271,16 @@ class LayerwiseMappingTests(unittest.TestCase):
                 del array[3][2:4]
             case.registration_arrays[3][3] = [0, 2, 2, 4, 6]
             bulk = case.bind()
-            mapping = case.bind_layers(group_id=bulk.local.group_id)
+            mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
             self.assertNotIn(1, mapping.layer_layouts)
             self.assertEqual(
-                tuple(obj.layer_segment_boundaries for obj in bulk.local.objects)[0][-1],
-                tuple(obj.layer_segment_boundaries for obj in bulk.local.objects)[0][-2],
+                tuple(obj.layer_segment_index_boundaries for obj in bulk.local_layout.partitions)[0][-1],
+                tuple(obj.layer_segment_index_boundaries for obj in bulk.local_layout.partitions)[0][-2],
             )
-            keys = bulk.naming.keys(["a"])
+            keys = bulk.key_namer.keys(["a"])
             all_rows = mapping.prepare(keys, [0])
             no_rows = mapping.prepare(keys, [0], selected_keys=[False] * len(keys))
-            empty_rows = mapping.prepare(bulk.naming.keys([]), [])
+            empty_rows = mapping.prepare(bulk.key_namer.keys([]), [])
             only_pp0 = mapping.prepare(keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))])
             with (
                 patch.object(layerwise.np, "broadcast_to", side_effect=AssertionError("unused segments")),
@@ -292,8 +298,8 @@ class LayerwiseMappingTests(unittest.TestCase):
     def test_preparation_snapshots_inputs_and_outputs_do_not_alias(self):
         case = make_case(head_slices=2)
         bulk = case.bind()
-        mapping = case.bind_layers(group_id=bulk.local.group_id)
-        keys = [list(prefix_keys) for prefix_keys in bulk.naming.keys(["same", "other", "same"])]
+        mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
+        keys = [list(prefix_keys) for prefix_keys in bulk.key_namer.keys(["same", "other", "same"])]
         ids = np.array([2, 1, 2], dtype=np.uint64)
         mask = [True, False, True, True, True, True]
         selection = mapping.prepare(keys, ids, selected_keys=mask)
@@ -304,8 +310,8 @@ class LayerwiseMappingTests(unittest.TestCase):
         self.assertEqual(mapping.arguments(selection, layer_id=0), expected)
         self.assertEqual(expected[0][0], expected[0][1])  # Duplicate input selection are not silently deduplicated.
         self.assertEqual(expected[1][0], expected[1][1])
-        for row in selection.by_object:
-            self.assertFalse(row.block_ids.flags.writeable)
+        for row in selection.by_partition:
+            self.assertFalse(row.local_block_ids.flags.writeable)
         result = mapping.arguments(selection, layer_id=0)
         for field in result[1:]:
             first = field[0][0]
@@ -316,8 +322,8 @@ class LayerwiseMappingTests(unittest.TestCase):
     def test_invalid_rows_are_rejected(self):
         case = make_case(head_slices=2)
         bulk = case.bind()
-        mapping = case.bind_layers(group_id=bulk.local.group_id)
-        keys = bulk.naming.keys(["a", "b"])
+        mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
+        keys = bulk.key_namer.keys(["a", "b"])
         for ids, mask, key_rows in (
             ([[0, 1]], None, keys),
             ([0], None, keys),
@@ -334,12 +340,12 @@ class LayerwiseMappingTests(unittest.TestCase):
         case = make_hybrid_case(pp_layer_counts=(2, 2), tp_rank=3)
         for group_id, ids in ((3, [2, 0]), (9, [1, 2, 0])):
             bulk = case.bind(group_id=group_id)
-            mapping = case.bind_layers(group_id=bulk.local.group_id)
-            keys = bulk.naming.keys([str(i) for i in range(len(ids))])
+            mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
+            keys = bulk.key_namer.keys([str(i) for i in range(len(ids))])
             selection = mapping.prepare(keys, ids)
             expected = {
                 keys[p][i]: expected_group_bytes(case, group_id, layer_ids, block_id)
-                for p, layer_ids in enumerate(tuple(obj.physical_layer_ids for obj in bulk.local.objects))
+                for p, layer_ids in enumerate(tuple(obj.physical_layer_ids for obj in bulk.local_layout.partitions))
                 for i, block_id in enumerate(ids)
             }
             self.assertEqual(assemble_layers(mapping, selection, {k: len(v) for k, v in expected.items()}), expected)
@@ -375,7 +381,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             originals = {}
             for case in producers + consumers:
                 bulk = case.bind()
-                bindings[id(case)] = bulk, case.bind_layers(group_id=bulk.local.group_id)
+                bindings[id(case)] = bulk, case.bind_layers(group_id=bulk.local_layout.group_id)
                 group = case.topology.transfer_groups[0]
                 for layer in group.layers:
                     for kind, tensor in enumerate(case.caches[layer.layer_names[0]]):
@@ -397,12 +403,12 @@ class LayerwiseMappingTests(unittest.TestCase):
                     objects: dict[str, bytes] = {}
                     for case in sources:
                         bulk, mapping = bindings[id(case)]
-                        keys = bulk.naming.keys(["a", "b"])
+                        keys = bulk.key_namer.keys(["a", "b"])
                         if source_layerwise:
                             sizes = {
                                 key: size
                                 for prefix_keys, size in zip(
-                                    keys, tuple(obj.payload_bytes for obj in bulk.local.objects), strict=True
+                                    keys, tuple(obj.payload_bytes for obj in bulk.local_layout.partitions), strict=True
                                 )
                                 for key in prefix_keys
                             }
@@ -419,7 +425,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                             for tensor in tensors:
                                 tensor.zero_()
                         bulk, mapping = bindings[id(case)]
-                        keys = bulk.naming.keys(["a", "b"])
+                        keys = bulk.key_namer.keys(["a", "b"])
                         if source_layerwise:
                             names, addresses, lengths = bulk.arguments(keys, [1, 2])
                             for key, destinations, sizes in zip(names, addresses, lengths, strict=True):

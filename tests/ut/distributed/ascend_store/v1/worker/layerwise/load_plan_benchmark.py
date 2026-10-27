@@ -103,7 +103,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
     )
     count = request_count * _BLOCKS_PER_REQUEST
     keys = tuple(f"key-{index:064x}" for index in range(count))
-    object_size = 2 * _LAYERS * _SEGMENT_BYTES
+    remote_object_size_bytes = 2 * _LAYERS * _SEGMENT_BYTES
     group = batches.KVGroupBatch(
         0,
         np.arange(count, dtype=np.uint64),
@@ -111,7 +111,7 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         (keys,),
         np.arange(0, count + 1, _BLOCKS_PER_REQUEST, dtype=np.intp),
         tuple(range(_LAYERS)),
-        object_size,
+        remote_object_size_bytes,
     )
     batch = batches.KVTransferBatch(tuple(f"request-{index}" for index in range(request_count)), (group,)).select_keys(
         set(keys)
@@ -142,9 +142,12 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         # Lease synthetic addresses once; no tensor or native memory is read.
         assert isinstance(backend, ConstantGVABackend) and backend.native_store is not None
         backend.native_store.objects.update(
-            {key: (0x10000000000 + index * object_size, object_size, True) for index, key in enumerate(keys)}
+            {
+                key: (0x10000000000 + index * remote_object_size_bytes, remote_object_size_bytes, True)
+                for index, key in enumerate(keys)
+            }
         )
-        assert worker._backend_sessions.start_load(list(keys), [object_size] * count) == (0,) * count
+        assert worker._backend_sessions.start_load(list(keys), [remote_object_size_bytes] * count) == (0,) * count
     return worker, batch
 
 

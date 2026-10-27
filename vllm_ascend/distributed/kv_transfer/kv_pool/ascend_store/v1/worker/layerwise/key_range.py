@@ -12,7 +12,7 @@ from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import LayerwiseMapping
-from ...infrastructure.mapping.object_layout import ObjectLayoutFactory
+from ...infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
 from ...infrastructure.mapping.object_naming import KeyBuilder
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
 from ...infrastructure.resources import KVPoolResources
@@ -44,7 +44,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         start_gate_factory: Callable[[], Any] = reset_attention_compute_start_gate,
         source_ready_event_factory: Callable[[], Any] | None = None,
         key_builder: KeyBuilder | None = None,
-        object_layout_factory: ObjectLayoutFactory | None = None,
+        remote_object_layout_factory: RemoteObjectLayoutFactory | None = None,
     ) -> None:
         backend = cast(KeyRangeBackend, resources.backend)
         sessions = backend.create_sessions()
@@ -60,18 +60,18 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
             start_gate_factory=start_gate_factory,
             source_ready_event_factory=source_ready_event_factory,
             key_builder=key_builder,
-            object_layout_factory=object_layout_factory,
+            remote_object_layout_factory=remote_object_layout_factory,
         )
 
         self._attention_store_layers = _attention_store_layer_ids(topology) if store_enabled else frozenset()
 
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._load_plan = prepare_layer_load(batch, self._mappings)
-        return self._load_plan.keys_by_layer
+        return self._load_plan.selected_keys_by_layer
 
     def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
         self._store_plan = prepare_layer_store(batch, self._mappings)
-        return self._store_plan.keys_by_layer
+        return self._store_plan.selected_keys_by_layer
 
     def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
         plan = self._prepared_load_plan()
@@ -111,7 +111,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
     def _prepared_store_layer(self, layer_id: int) -> tuple[tuple[LayerTransferGroup, ...], list[str]]:
         plan = self._prepared_store_plan()
         try:
-            return plan.groups_by_layer[layer_id], plan.keys_by_layer[layer_id]
+            return plan.groups_by_layer[layer_id], plan.selected_keys_by_layer[layer_id]
         except KeyError as error:
             raise RuntimeError(f"Layerwise Store layer {layer_id} was not prepared") from error
 
@@ -164,7 +164,7 @@ def materialize_load_layer_ranges(
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
-    keys = plan.keys_by_layer[layer_id]
+    keys = plan.selected_keys_by_layer[layer_id]
     if len(set(keys)) == len(keys):
         return KeyRangeArguments(keys, addresses, sizes, offsets)
 
