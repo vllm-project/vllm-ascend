@@ -36,6 +36,10 @@ DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
 @pytest.mark.parametrize(
     "compilation_config",
     [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            id="full_decode_only",
+        ),
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
