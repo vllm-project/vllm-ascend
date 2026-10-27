@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.fused_moe.prepare_finalize import _pad_and_split_tokens
+from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

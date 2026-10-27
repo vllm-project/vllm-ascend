@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe import prepare_finalize as module
 
 
@@ -19,7 +20,7 @@ def test_local_shard_matches_full_padding(tp_size, num_tokens, dtype, extra_rows
     x = torch.arange(num_tokens * 16, dtype=dtype).reshape(num_tokens, 16)[:, ::2]
     reference = F.pad(x, (0, 0, 0, padded_len - num_tokens))
     for rank, expected in enumerate(torch.tensor_split(reference, tp_size, dim=0)):
-        actual = module._pad_and_split_tokens(x, padded_len, tp_size, rank)
+        actual = moe_utils._pad_and_split_tokens(x, padded_len, tp_size, rank)
         assert actual.dtype == x.dtype
         assert actual.device == x.device
         assert actual.is_contiguous()
@@ -48,9 +49,9 @@ def test_prepare_preserves_mask_and_global_shape(monkeypatch, num_tokens, padded
 
 def test_zero_shards_do_not_share_mutable_storage():
     x = torch.ones(1, 8)
-    first = module._pad_and_split_tokens(x, 4, 4, 1)
+    first = moe_utils._pad_and_split_tokens(x, 4, 4, 1)
     first.fill_(9)
-    second = module._pad_and_split_tokens(x, 4, 4, 1)
+    second = moe_utils._pad_and_split_tokens(x, 4, 4, 1)
     assert torch.count_nonzero(second) == 0
     assert torch.equal(x, torch.ones_like(x))
 
@@ -59,8 +60,8 @@ def test_fully_valid_shard_does_not_launch_padding(monkeypatch):
     def unexpected_pad(*args):
         raise AssertionError("A fully valid local shard must not pad the full tensor")
 
-    monkeypatch.setattr(module, "_pad_tokens_with_cat", unexpected_pad)
+    monkeypatch.setattr(moe_utils, "_pad_tokens_with_cat", unexpected_pad)
     x = torch.arange(8).reshape(1, 8)
-    result = module._pad_and_split_tokens(x, 4, 4, 0)
+    result = moe_utils._pad_and_split_tokens(x, 4, 4, 0)
     assert result.data_ptr() == x.data_ptr()
     assert torch.equal(result, x)

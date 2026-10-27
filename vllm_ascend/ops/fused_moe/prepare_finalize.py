@@ -32,27 +32,9 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
-from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-
-
-def _pad_and_split_tokens(x: torch.Tensor, padded_len: int, tp_size: int, tp_rank: int) -> torch.Tensor:
-    """Return one TP shard of zero-padded tokens without materializing other shards.
-
-    Match tensor_split's uneven split rule. Fully valid shards are views, as
-    in the existing unpadded path; zero-only shards own fresh storage so that
-    consumers and graph captures cannot mutate a shared padding buffer.
-    """
-    shard_rows, remainder = divmod(padded_len, tp_size)
-    start = tp_rank * shard_rows + min(tp_rank, remainder)
-    shard_rows += int(tp_rank < remainder)
-    if start >= x.shape[0]:
-        return x.new_zeros((shard_rows, *x.shape[1:]))
-    local = x[start : min(start + shard_rows, x.shape[0])]
-    if local.shape[0] == shard_rows:
-        return local.contiguous()
-    return _pad_tokens_with_cat(local, shard_rows)
 
 
 class PrepareAndFinalize(ABC):
