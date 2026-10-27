@@ -30,6 +30,12 @@ def inputs():
 @pytest.fixture
 def launches(monkeypatch):
     """Exercise host dispatch on CPU; numerical kernels have separate NPU tests."""
+    # The CPU Triton placeholder does not provide next_power_of_2.
+    monkeypatch.setattr(
+        utils,
+        "triton",
+        SimpleNamespace(cdiv=utils.triton.cdiv, next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
+    )
     mocks = {}
     for name in (
         "_compute_block_stats_kernel",
