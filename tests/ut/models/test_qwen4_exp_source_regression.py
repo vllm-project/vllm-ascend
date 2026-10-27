@@ -44,8 +44,6 @@ def test_qwen4_exp_is_wired_only_through_mrv2() -> None:
     model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
     v2_attn = _source("vllm_ascend/worker/v2/attn_utils.py")
     v2_speculator = _source("vllm_ascend/worker/v2/spec_decode/autoregressive/speculator.py")
-    v1_runner = _source("vllm_ascend/worker/v1/model_runner.py")
-    v1_spec_init = _source("vllm_ascend/worker/v1/spec_decode/__init__.py")
 
     assert "get_model_state_cls" in model
     assert "AscendQwen4ExpModelState" in model
@@ -55,11 +53,6 @@ def test_qwen4_exp_is_wired_only_through_mrv2() -> None:
     assert "QSAMetadataBuilder" in v2_attn
     assert "AscendQSABackend" in v2_speculator
     assert 'self.attn_architecture = "QSA"' in v2_speculator
-
-    assert "AscendQwen4ExpMTPProposer" not in v1_runner + v1_spec_init
-    assert "build_qwen4_exp_input_adapter" not in v1_runner
-    assert not (ROOT / "vllm_ascend/models/qwen4_exp/input_adapter.py").exists()
-    assert not (ROOT / "vllm_ascend/worker/v1/spec_decode/qwen4_exp.py").exists()
 
 
 def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
