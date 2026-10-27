@@ -45,13 +45,27 @@ def _mxfp8_query_padding(projection: Any) -> tuple[int, int] | None:
     return expected
 
 
+def is_unquantized_query_projection(projection: Any) -> bool:
+    # AscendUnquantizedLinearMethod inherits this class. A missing/unknown
+    # quant_method is not evidence of an unquantized linear.
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    return isinstance(getattr(projection, "quant_method", None), UnquantizedLinearMethod)
+
+
 def prolog_query_unsupported_reasons(
-    projection: Any, q_lora_rank: int, producer_quant_type: type | None = None
+    projection: Any,
+    q_lora_rank: int,
+    producer_quant_type: type | None = None,
+    *,
+    allow_unquantized: bool = False,
 ) -> list[str]:
     """Check configuration before either query or MLA weights are transformed.
 
     Only stable layer attributes are used; weight shape changes during loading.
     Runtime scale widths and bucket coverage still need output validation.
+    Unquantized consumers require the caller to dequantize Prolog's query;
+    keep them disabled for callers that pass prepared quantized inputs.
     """
     # Lazy imports avoid cycles through quantization's model/operator registration.
     from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -61,9 +75,14 @@ def prolog_query_unsupported_reasons(
     scheme = getattr(getattr(projection, "quant_method", None), "quant_method", None)
     scheme_type = type(scheme)
     supported = (AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod)
-    if scheme_type not in supported:
+    unquantized = allow_unquantized and is_unquantized_query_projection(projection)
+    if unquantized:
+        weight = getattr(projection, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            reasons.append("Prolog unquantized query linear requires floating-point weights.")
+    elif scheme_type not in supported:
         reasons.append("Prolog query requires a W8A8_DYNAMIC or W8A8_MXFP8 query linear.")
-    if not hasattr(projection, "weight_scale"):
+    if not unquantized and not hasattr(projection, "weight_scale"):
         reasons.append("Prolog query requires weight_scale on the query linear.")
     if type(q_lora_rank) is not int or q_lora_rank <= 0:
         reasons.append("Prolog query requires a positive integer q_lora_rank.")
@@ -73,7 +92,7 @@ def prolog_query_unsupported_reasons(
         reasons.append("Prolog query linear must consume the complete q_c input width.")
     if getattr(projection, "input_is_parallel", True) is False:
         reasons.append("Prolog prepared query cannot be split by the query linear.")
-    if producer_quant_type is not None and producer_quant_type is not scheme_type:
+    if not unquantized and producer_quant_type is not None and producer_quant_type is not scheme_type:
         reasons.append("Prolog query producer and query linear must use the same quantization scheme.")
     if scheme_type is AscendW8A8MXFP8DynamicLinearMethod:
         if getattr(scheme, "group_size", None) != MXFP8_QUERY_GROUP_SIZE:

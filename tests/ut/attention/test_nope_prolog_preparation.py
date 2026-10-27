@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch import nn
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.linear import ReplicatedLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod
 
 import vllm_ascend.attention.indexer_kpool as kpool
 import vllm_ascend.attention.sfa_v1 as sfa
@@ -182,6 +182,19 @@ class _QuantizedProjection(nn.Module):
     def forward(self, value):
         self.inputs.append(value)
         return self.quant_method.quant_method.apply(self, value), None
+
+
+class _FloatProjection(nn.Module):
+    def __init__(self, width, dtype=torch.bfloat16):
+        super().__init__()
+        self.quant_method = UnquantizedLinearMethod()
+        self.input_size = width
+        self.weight = (torch.arange(4 * width).view(4, width) % 13 - 6).to(dtype) / 32
+        self.inputs = []
+
+    def forward(self, value):
+        self.inputs.append(value)
+        return torch.nn.functional.linear(value, self.weight), None
 
 
 def _query_backend(kind):
@@ -667,6 +680,72 @@ def test_nope_opt_in_selects_prolog_before_weight_loading(monkeypatch, family, r
     assert impl._get_fused_type_unsupported_reasons(PreprocessType.MLAPO)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("rank", [1536, 2048])
+def test_nope_float_indexer_selects_prolog_without_weight_scale(monkeypatch, dtype, rank):
+    monkeypatch.setattr(sfa, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    impl = _nope_routing_impl()
+    impl.q_lora_rank = rank
+    impl.indexer.wq_b = _FloatProjection(rank, dtype)
+    weight = impl.indexer.wq_b.weight
+    assert not hasattr(impl.indexer.wq_b, "weight_scale")
+    assert not impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+    mark_fused_preprocess_weights(impl)
+    assert impl._fused_preprocess_planned_type is PreprocessType.PROLOG_V3
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed
+    assert impl.q_proj._fused_preprocess_managed
+    assert sfa.AscendSFAImpl._resolve_preprocess_type(impl, dtype) is PreprocessType.PROLOG_V3
+    impl._process_weights_for_fused_prolog_v3.assert_called_once()
+    assert impl.indexer.wq_b.weight is weight
+
+
+@pytest.mark.parametrize("invalid", ["method", "missing_method", "dtype", "width", "partition", "split_input"])
+def test_nope_float_indexer_invalid_contract_still_falls_back(monkeypatch, invalid):
+    monkeypatch.setattr(sfa, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    impl = _nope_routing_impl()
+    projection = _FloatProjection(impl.q_lora_rank)
+    impl.indexer.wq_b = projection
+    if invalid == "method":
+        projection.quant_method = SimpleNamespace(quant_method=object())
+    elif invalid == "missing_method":
+        projection.quant_method = None
+    elif invalid == "dtype":
+        projection.weight = projection.weight.to(torch.int8)
+    elif invalid == "width":
+        projection.input_size = 64
+    elif invalid == "partition":
+        projection.input_size_per_partition = 768
+    else:
+        projection.input_is_parallel = False
+    assert impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+    mark_fused_preprocess_weights(impl)
+    assert not impl.fused_qkv_a_proj._fused_preprocess_managed
+    assert sfa.AscendSFAImpl._resolve_preprocess_type(impl, torch.bfloat16) is PreprocessType.NATIVE
+    impl._process_weights_for_fused_prolog_v3.assert_not_called()
+
+
+def test_float_indexer_support_does_not_relax_rope_or_prepared_query_contracts():
+    impl = _routing_impl("int8", rank=64)
+    impl.indexer.wq_b = _FloatProjection(64)
+    assert impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+    query = torch.zeros(4, 64, dtype=torch.int8)
+    with pytest.raises(ValueError, match="KPool query configuration"):
+        impl.indexer._project_query((query, torch.ones(4)), 4, torch.bfloat16)
+    assert not impl.indexer.wq_b.inputs
+
+
+def test_nope_admission_accepts_unquantized_method_subclasses(monkeypatch):
+    # Ascend's FLOAT method subclasses vLLM's unquantized linear method.
+    class FloatMethod(UnquantizedLinearMethod):
+        pass
+
+    monkeypatch.setattr(sfa, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
+    impl = _nope_routing_impl()
+    impl.indexer.wq_b = _FloatProjection(impl.q_lora_rank)
+    impl.indexer.wq_b.quant_method = FloatMethod()
+    assert not impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
+
+
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -780,11 +859,80 @@ def test_nope_adapter_calls_operator_with_zero_width_rope_and_c8(monkeypatch, ro
     op.assert_called_once()
 
 
+@pytest.mark.parametrize("rows,valid_rows", [(0, 0), (1, 1), (4, 1), (4, 3), (4, 4)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("scale_ndim", [1, 2])
+def test_nope_prolog_dequantized_query_reaches_float_kpool_projection(monkeypatch, rows, valid_rows, dtype, scale_ndim):
+    impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch, rows)
+    hidden = hidden.to(dtype)
+    backend = impl.indexer
+    backend.q_lora_rank = impl.q_lora_rank
+    backend.wq_b = _FloatProjection(impl.q_lora_rank, dtype)
+    weight_before = backend.wq_b.weight.clone()
+    values = list(op.return_value)
+    quantized = (torch.arange(rows * impl.q_lora_rank).view(rows, impl.q_lora_rank) % 255 - 127).to(torch.int8)
+    scales = torch.tensor([0.00311, 0.417, 1.1, 2.7])[:rows]
+    values[3], values[4] = quantized, scales if scale_ndim == 1 else scales[:, None]
+    op.return_value = tuple(values)
+    before_q, before_scale = quantized.clone(), scales.clone()
+
+    raw, query, rope, qc = sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, hidden, (cache,), None, None, slots)
+    assert raw is hidden
+    assert query.shape == (rows, 2, 512) and rope.shape == (rows, 2, 0)
+    assert isinstance(qc, torch.Tensor) and qc.dtype == dtype and qc.shape == (rows, impl.q_lora_rank)
+    # A double-precision reference detects incorrect row broadcasting, missing
+    # scales, and casts performed before rather than after FP32 multiplication.
+    expected_q = (quantized.double() * scales.double()[:, None]).to(dtype)
+    torch.testing.assert_close(qc, expected_q)
+    result = backend._project_query(qc, valid_rows, dtype)
+    expected = torch.nn.functional.linear(expected_q[:valid_rows], weight_before).view(valid_rows, 2, 2)
+    torch.testing.assert_close(result, expected)
+    assert backend.wq_b.inputs[0].shape == (valid_rows, impl.q_lora_rank)
+    torch.testing.assert_close(quantized, before_q)
+    torch.testing.assert_close(scales, before_scale)
+    torch.testing.assert_close(backend.wq_b.weight, weight_before)
+    op.assert_called_once()
+
+
+@pytest.mark.parametrize("invalid", ["missing_scale", "scale_dtype", "query_dtype", "scale_device"])
+def test_float_indexer_does_not_bypass_prolog_query_encoding_checks(monkeypatch, invalid):
+    impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch)
+    impl.indexer.wq_b = _FloatProjection(impl.q_lora_rank)
+    values = list(op.return_value)
+    if invalid == "missing_scale":
+        values[4] = None
+    elif invalid == "scale_dtype":
+        values[4] = values[4].bfloat16()
+    elif invalid == "query_dtype":
+        values[3] = values[3].float()
+    else:
+        values[4] = values[4].to("meta")
+    op.return_value = tuple(values)
+    with pytest.raises(RuntimeError, match="missing its scale|INT8 query|same device"):
+        sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, hidden, (cache,), None, None, slots)
+    assert not impl.indexer.wq_b.inputs
+
+
+def test_float_indexer_accepts_already_floating_prolog_query(monkeypatch):
+    impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch)
+    impl.indexer.wq_b = _FloatProjection(impl.q_lora_rank)
+    values = list(op.return_value)
+    values[3] = torch.randn(hidden.shape[0], impl.q_lora_rank, dtype=hidden.dtype)
+    values[4] = None
+    op.return_value = tuple(values)
+    qc = sfa.AscendSFAImpl._sfa_preprocess_prolog_v3(impl, hidden, (cache,), None, None, slots)[-1]
+    torch.testing.assert_close(qc, values[3])
+    assert qc.data_ptr() == values[3].data_ptr()
+
+
+@pytest.mark.parametrize("floating_indexer", [False, True])
 @pytest.mark.parametrize(
     "invalid", ["q_rows", "q_width", "rope_none", "rope_rows", "rope_width", "qc_rows", "scale_rows"]
 )
-def test_nope_output_must_cover_full_bucket(monkeypatch, invalid):
+def test_nope_output_must_cover_full_bucket(monkeypatch, invalid, floating_indexer):
     impl, hidden, cache, slots, op = _nope_operator_case(monkeypatch)
+    if floating_indexer:
+        impl.indexer.wq_b = _FloatProjection(impl.q_lora_rank)
     values = list(op.return_value)
     if invalid == "q_rows":
         values[0] = values[0][:3]

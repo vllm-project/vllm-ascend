@@ -29,7 +29,11 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
-from vllm_ascend.attention.prolog_query import normalize_prolog_query, prolog_query_unsupported_reasons
+from vllm_ascend.attention.prolog_query import (
+    is_unquantized_query_projection,
+    normalize_prolog_query,
+    prolog_query_unsupported_reasons,
+)
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -1100,6 +1104,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             self._process_weights_for_fused_prolog_v3()
             if self.qk_rope_head_dim == 0:
                 logger.info_once("SFA NoPE preprocessing: PROLOG_V3 (Dr=0, W8A8, INT8 C8).")
+                if self.has_indexer and is_unquantized_query_projection(self.indexer.wq_b):
+                    logger.info_once("SFA NoPE indexer: dequantize Prolog INT8 q_c for floating-point wq_b.")
         else:
             self._process_weights_for_fused_mlapo(act_dtype)
         return True
@@ -1143,12 +1149,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
-            # Prolog's indexer query can carry quantization scales independently
-            # of the MLA weight type. Preserve the native query for an
-            # unquantized indexer, including layers that later toggle skip_topk.
+            # Check the consumer even when this layer currently skips top-k.
+            # Only the NoPE W8A8 adapter dequantizes q_c for a FLOAT indexer;
+            # other paths still require a matching quantized query linear.
             if self.has_indexer:
                 wq_b = getattr(self.indexer, "wq_b", None)
-                reasons.extend(prolog_query_unsupported_reasons(wq_b, self.q_lora_rank, qt))
+                reasons.extend(
+                    prolog_query_unsupported_reasons(
+                        wq_b,
+                        self.q_lora_rank,
+                        qt,
+                        allow_unquantized=self.qk_rope_head_dim == 0 and qt is AscendW8A8DynamicLinearMethod,
+                    )
+                )
             if self.enable_sparse_sfa_turboquant:
                 reasons.append("PROLOG_V3 does not support the TurboQuant 4-bit latent cache.")
             if qt is None and self.enable_sparse_sfa_c8:
@@ -1609,6 +1622,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self.q_lora_rank,
                 mxfp8=qt is AscendW8A8MXFP8DynamicLinearMethod,
             )
+            if is_nope and is_unquantized_query_projection(self.indexer.wq_b):
+                # query_quant_mode=0 controls ql_nope, not q_c. W8A8 Prolog
+                # returns INT8 q_c with FP32 per-token scales even for a FLOAT
+                # indexer. Restore its activation dtype after FP32 scaling;
+                # retain all bucket rows and leave the operator outputs intact.
+                if isinstance(q_c, tuple):
+                    quantized, scale = q_c
+                    q_c = quantized.float() * scale.view(num_tokens, 1)
+                q_c = q_c.to(hidden_states.dtype)
         elif self._quant_type is None:
             q_c = None
 

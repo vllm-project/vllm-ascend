@@ -7,9 +7,20 @@ does not establish Dr=0 support.
 
 The current contract requires A2/A3 (DAV_2201), W8A8 dynamic MLA projections,
 INT8 per-tile C8 KV storage, D=256, KV rank 512, Q rank 1536 or 2048, tile size
-128, and PCP/DCP sizes of one. An indexer's query projection must use the
-matching W8A8 dynamic scheme. The packed cache width is 528 bytes per slot.
+128, and PCP/DCP sizes of one. An indexer's query projection may use the
+matching W8A8 dynamic scheme or an unquantized FLOAT linear (normally BF16).
+The packed cache width is 528 bytes per slot.
 MXFP8 MLA weights and other hardware families remain outside this opt-in path.
+
+W8A8 checkpoints can keep `indexer.wq_b` in floating point. This does not
+require requantizing the checkpoint or a separate C8 checkpoint. For this
+consumer, the adapter multiplies Prolog's INT8 `q_c` by its FP32 per-token
+scale, then casts to the hidden-state dtype before the existing indexer linear.
+Quantized indexers keep the prepared-input path without this conversion.
+`query_quant_mode=0` controls the main attention query, not the low-rank `q_c`.
+Dequantization preserves the returned quantized values, not the original
+pre-quantization query; compare end-to-end accuracy and performance with native
+preprocessing on the target NPU, including graph replay and MTP.
 
 ## Validate and enable
 
@@ -40,6 +51,8 @@ Successful selection logs `SFA NoPE preprocessing: PROLOG_V3`. A static
 configuration mismatch logs `PROLOG_V3 rejected` and selects native before
 weight conversion. Selection alone does not prove that a request executed the
 operator; confirm actual calls with a real request and profiling.
+FLOAT indexers additionally log `SFA NoPE indexer: dequantize Prolog INT8 q_c
+for floating-point wq_b.` at initialization.
 
 ## CPU contract tests
 

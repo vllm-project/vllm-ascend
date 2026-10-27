@@ -112,6 +112,7 @@ def main():
     linear = make_module("vllm.model_executor.layers.linear")
     for name in ("ReplicatedLinear", "ColumnParallelLinear", "RowParallelLinear"):
         setattr(linear, name, type(name, (nn.Module,), {}))
+    linear.UnquantizedLinearMethod = type("UnquantizedLinearMethod", (), {})
     prepared = load_selected(
         repo,
         "vllm_ascend.quantization.prepared_linear_input",
@@ -146,6 +147,7 @@ def main():
         functions={
             "mxfp8_query_scale_width",
             "_mxfp8_query_padding",
+            "is_unquantized_query_projection",
             "prolog_query_unsupported_reasons",
             "normalize_prolog_query",
         },
@@ -189,6 +191,7 @@ def main():
             "AscendW8A8LinearMethod": type("UnsupportedStaticScheme", (), {}),
             "prolog_query_unsupported_reasons": query_contract.prolog_query_unsupported_reasons,
             "normalize_prolog_query": query_contract.normalize_prolog_query,
+            "is_unquantized_query_projection": query_contract.is_unquantized_query_projection,
             "HardwareCapability": hardware_profile.HardwareCapability,
             "get_current_hardware_profile": hardware_profile.get_current_hardware_profile,
             "SFA_QSFA_TILE_SIZE": 128,
