@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import vllm.envs as vllm_envs
 from vllm.logger import logger
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import uses_hybrid_kv_cache
 
@@ -70,7 +72,15 @@ def create_kv_pool_scheduler(
         scheduler_type = AsynchronousBulkScheduler
     else:
         scheduler_type = SynchronousBulkScheduler
-    return scheduler_type(scheduler_config, LookupClient(lookup_address, timeout_ms=config.lookup_rpc_timeout_ms))
+    block_hasher = None
+    if config.hash_block_size != config.engine_hash_block_size:
+        hash_function = get_hash_fn_by_name(vllm_config.cache_config.prefix_caching_hash_algo)
+        block_hasher = get_request_block_hasher(config.hash_block_size, hash_function)
+    return scheduler_type(
+        scheduler_config,
+        LookupClient(lookup_address, timeout_ms=config.lookup_rpc_timeout_ms),
+        block_hasher=block_hasher,
+    )
 
 
 def create_kv_pool_worker(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> KVPoolWorker:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from vllm.utils.math_utils import cdiv
@@ -18,6 +18,7 @@ from ..infrastructure.protocol.messages import (
     StoreSourceReleaseMetadata,
 )
 from ..infrastructure.protocol.rpc import LookupClient
+from .hashing import RequestHashes
 from .lookup import resolve_load_candidate
 from .source_leases import StoreSourceLeases
 from .state import LoadCandidate, RequestAllocation, RequestProgress, SchedulerConfig
@@ -25,6 +26,7 @@ from .state import LoadCandidate, RequestAllocation, RequestProgress, SchedulerC
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
 
@@ -35,8 +37,15 @@ class KVPoolScheduler:
     load_is_deferred = False
     store_with_scheduled_load = False
 
-    def __init__(self, config: SchedulerConfig, lookup_client: LookupClient) -> None:
+    def __init__(
+        self,
+        config: SchedulerConfig,
+        lookup_client: LookupClient,
+        *,
+        block_hasher: Callable[[Request], list[BlockHash]] | None = None,
+    ) -> None:
         self._config = config
+        self._request_hashes = RequestHashes(block_hasher)
         self._lookup_client = lookup_client
         self._pending_lookups: dict[str, LoadCandidate] = {}
         self._confirmed_loads: dict[str, LoadCandidate] = {}
@@ -64,7 +73,7 @@ class KVPoolScheduler:
             return 0, False
 
         result = self._lookup_client.lookup(
-            LookupRequest(query_start, query_end, self._config.transfer_group_ids, tuple(request.block_hashes))
+            LookupRequest(query_start, query_end, self._config.transfer_group_ids, self._request_hashes.get(request))
         )
         candidate = resolve_load_candidate(
             self._config,
@@ -84,7 +93,7 @@ class KVPoolScheduler:
     def confirm_allocation(self, request: Request, blocks: KVCacheBlocks, allocated_external_tokens: int) -> None:
         request_id = request.request_id
         block_ids_by_group = _freeze_block_ids(blocks.get_block_ids())
-        block_hashes = tuple(request.block_hashes)
+        block_hashes = self._request_hashes.get(request)
         candidate = self._pending_lookups.pop(request_id, None)
         previous = self._allocations.get(request_id)
         if candidate is None and previous is not None:
@@ -202,7 +211,7 @@ class KVPoolScheduler:
             request_id,
             scheduled_end,
             block_ids_by_group,
-            tuple(request.block_hashes),
+            self._request_hashes.get(request),
             request.num_prompt_tokens,
             allocation.store_skip_end_token,
             min(scheduled_end, request.num_tokens),
@@ -233,7 +242,7 @@ class KVPoolScheduler:
             request_id,
             scheduled_end,
             replacement_block_ids,
-            tuple(request.block_hashes),
+            self._request_hashes.get(request),
             request.num_tokens,
             allocation.store_skip_end_token,
             min(scheduled_end, request.num_tokens),
@@ -269,7 +278,7 @@ class KVPoolScheduler:
         progress = progress.advance(
             scheduled_end,
             new_block_ids,
-            request.block_hashes,
+            self._request_hashes.get(request),
             min(scheduled_end, request.num_tokens),
         )
         self._request_progress[request_id] = progress
@@ -376,10 +385,8 @@ class KVPoolScheduler:
         boundary = next(iter(boundaries))
         if boundary <= 0 or boundary > progress.prefill_end_token:
             return False
-        if (
-            boundary % self._config.hash_block_size
-            or boundary > len(request.block_hashes) * self._config.hash_block_size
-        ):
+        block_hashes = self._request_hashes.get(request)
+        if boundary % self._config.hash_block_size or boundary > len(block_hashes) * self._config.hash_block_size:
             return False
         sources = tuple(
             StateCheckpointSource(group_id, block_id, boundary)
@@ -393,7 +400,7 @@ class KVPoolScheduler:
         command = CheckpointStoreCommand(
             request.request_id,
             _freeze_block_ids(block_ids),
-            tuple(request.block_hashes),
+            block_hashes,
             progress.store_skip_end_token,
             sources,
         )
@@ -426,6 +433,7 @@ class KVPoolScheduler:
         return request, allocation
 
     def _discard_request(self, request_id: str) -> None:
+        self._request_hashes.discard(request_id)
         self._requests.pop(request_id, None)
         self._allocations.pop(request_id, None)
         self._request_progress.pop(request_id, None)
@@ -450,6 +458,7 @@ class KVPoolScheduler:
                 "Cannot close KV Pool Scheduler with pending Store ownership: "
                 f"source lease job ids={pending_job_ids}, queued finished checkpoints={queued_checkpoints}"
             )
+        self._request_hashes.clear()
 
 
 def _freeze_block_ids(block_ids_by_group: Iterable[Iterable[int]]) -> tuple[tuple[int, ...], ...]:

@@ -105,7 +105,7 @@ infrastructure 可以包含领域规则。Reachability 必须理解不同缓存�
 
 原始 `group_id` 用于缓存组、buffer 和 key 的身份；`transfer_group_ids` 给出参与传输的组，掩码等紧凑数组使用这些组的排列位置。比如原始组 2、5 参与传输，掩码的第 0、1 项分别对应组 2、5，远端命名仍保留 2、5。
 
-v1 使用引擎解析出的 scheduler block size 和 hash block size，不在 connector 内重新计算更细的 hash。每个参与传输的 group block 必须是 hash block 的整数倍，并整除 scheduler block。当前 Ascend 上游在多组 KV、DCP 大于 1 且关闭 prefix caching 时返回 scheduler 粒度的 hash；若该粒度无法表示 group block，v1 会在配置解析阶段拒绝该组合。
+v1 保留引擎的 scheduler block size，分别记录引擎与外部对象的 hash block size。多组 KV、DCP 大于 1 且关闭 prefix caching 时，Ascend 上游可能返回 scheduler 粒度的 hash；v1 在配置层为外部对象选择与开启 prefix caching 时兼容的细粒度。每个参与传输的 group block 必须是外部对象 hash block 的整数倍，并整除 scheduler block。两种 hash 粒度相同时直接复用请求 hash；不同时，Scheduler 复用 vLLM 哈希算法，从请求 token 和身份信息增量生成 v1 专用 hash，供 Lookup、Load 和 Store 共同使用。原始 Request 和全局解析函数保持不变，额外 hash 随请求完成或抢占释放。
 
 上下文并行还需要实际进程成员信息。初始化阶段收集 global rank、TP rank 和 DCP rank，形成 `ContextRank`；PCP 与 TP 的 CPU 通信组用于取得真实成员关系。DCP 为 1 时可直接使用已有 TP rank 列表。Worker 随后根据这些事实选 writer、建立发布协调组。配置层提供身份和关系，发布过程留在 Worker。
 
