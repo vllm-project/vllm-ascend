@@ -670,10 +670,11 @@ __aicore__ inline int32_t QLIV2Vector<QLIV2T>::BuildCandidateCompact(const QLIV2
         PipeBarrier<PIPE_V>();
         AscendC::Mins(m1, m1, 1, 64);            // (e >= vj)
         PipeBarrier<PIPE_V>();
-        // m2 = min(1, max(0, blockSize - e)) = (e < blockSize) — e = blockSize-1 时必须为 1
-        Duplicate(m2, blockSize, 64);            // blockSize (Sub 后 +1 语义: blockSize - e)
+        // m2 = min(1, max(0, blockSize - e)) = (e < blockSize) — e = blockSize-1 时必须为 1,
+        // e = blockSize (boundary 块外首个 entry) 必须为 0
+        Duplicate(m2, blockSize - 1, 64);        // blockSize-1
         PipeBarrier<PIPE_V>();
-        AscendC::Sub(m2, m2, eScr, 64);          // blockSize - e - ... 见下
+        AscendC::Sub(m2, m2, eScr, 64);          // (blockSize-1) - e
         PipeBarrier<PIPE_V>();
         AscendC::Adds(m2, m2, 1, 64);            // blockSize - e
         PipeBarrier<PIPE_V>();
