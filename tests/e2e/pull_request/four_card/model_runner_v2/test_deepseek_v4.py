@@ -169,3 +169,65 @@ def test_dspark_spec_decoding(
     golden = [0.73, 0.64, 0.55, 0.49, 0.42]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
+
+
+@pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
+@pytest.mark.parametrize("max_tokens", [1024])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dspark_spec_decoding_bf16_kv_padded_graph_replay(
+    model: str,
+    max_tokens: int,
+) -> None:
+    """Pin the draft SparseFlashMla activation and the draft graph mode.
+
+    The parametrized ``test_dspark_spec_decoding`` activates the BF16 draft
+    path only through ``auto`` KV dtype resolution: if that resolution ever
+    changes, the draft silently falls back to the FIA plan, the acceptance
+    assertions still pass, and the draft-sparse coverage disappears without a
+    failing test. This case pins ``kv_cache_dtype="bfloat16"`` (the gate's
+    activation condition on A3/A5) and the draft ``enforce_eager=False``, and
+    keeps the small FULL_DECODE_ONLY capture sizes so the first decode batch
+    is deterministically padded with dummy requests (the graph-padding
+    contract the draft kernels rely on) while the generation replays the
+    dspark graphs throughout.
+    """
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    num_speculative_tokens = 5
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=4096,
+        max_num_seqs=len(prompts),
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enforce_eager=False,
+        disable_log_stats=False,
+        async_scheduling=True,
+        attention_config={"indexer_kv_dtype": "int8"},
+        kv_cache_dtype="bfloat16",
+        speculative_config={
+            "method": "dspark",
+            "num_speculative_tokens": num_speculative_tokens,
+            "enforce_eager": False,
+        },
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.73, 0.64, 0.55, 0.49, 0.42]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
