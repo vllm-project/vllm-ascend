@@ -56,5 +56,5 @@ def test_dsv4_platform_preserves_supported_block_size(monkeypatch, device, reque
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4")),
     )
     utils.refresh_block_size(config)
-    supported = requested in (32, 64, 128) or (device == AscendDeviceType.A3 and requested == 16)
+    supported = requested in (16, 32, 64, 128)
     assert config.cache_config.block_size == (requested if supported else 32)

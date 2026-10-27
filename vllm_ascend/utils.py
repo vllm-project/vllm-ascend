@@ -1255,9 +1255,7 @@ def refresh_block_size(vllm_config):
         return
 
     if model_config.hf_config.model_type == "deepseek_v4":
-        supported_block_sizes = [32, 64, 128]
-        if get_ascend_device_type() == AscendDeviceType.A3:
-            supported_block_sizes.insert(0, 16)
+        supported_block_sizes = [16, 32, 64, 128]
         if cache_config.block_size is None:
             cache_config.block_size = 32
         elif cache_config.block_size not in supported_block_sizes:
