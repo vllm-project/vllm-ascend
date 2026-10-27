@@ -271,7 +271,7 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
-### 5.2 PD Disaggregation (1P2D) {: #52-pd-disaggregation }
+### 5.2 PD Disaggregation (1P2D)
 
 Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
@@ -398,6 +398,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     NIC_NAME="<CURRENT_NODE_NIC>"
     DECODE_HEAD_IP="<DECODE1_NODE_IP>"
     DP_RANK=${1:-0}
+    LOCAL_DP_RANK=$DP_RANK
     SERVICE_PORT=$((19200 + DP_RANK))
     DP_RPC_PORT=16920
     KV_PORT=$((25000 + DP_RANK*32))
@@ -413,7 +414,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export ASCEND_RT_VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
+    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_DP_RANK*4)),$((LOCAL_DP_RANK*4+1)),$((LOCAL_DP_RANK*4+2)),$((LOCAL_DP_RANK*4+3))"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -944,13 +945,22 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
     ```bash
     PREFILL_IP="<PREFILL_NODE_IP>"
-    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
+    DECODE1_IP="<DECODE1_NODE_IP>"
+    DECODE2_IP="<DECODE2_NODE_IP>"
 
     python3 /workspace/load_balance_proxy_server_example.py \
-        --host 0.0.0.0 --port 8009 \
-        --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
-        --decoder-hosts "$DECODE_HEAD_IP" --decoder-ports 31060 \
-        --max-retries 0 --workers 4
+        --host 0.0.0.0 \
+        --port 19080 \
+        --prefiller-hosts "$PREFILL_IP" \
+        --prefiller-ports 19100 \
+        --decoder-hosts \
+            "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" \
+            "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" \
+        --decoder-ports \
+            19200 19201 19202 19203 \
+            19204 19205 19206 19207 \
+        --max-retries 0 \
+        --workers 4
     ```
 
 ## 6 Functional Verification
