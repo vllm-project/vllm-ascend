@@ -13,6 +13,7 @@ import pytest
 def example(monkeypatch):
     path = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_http_hccl.py"
     spec = importlib.util.spec_from_file_location("rlhf_http_hccl_example", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
