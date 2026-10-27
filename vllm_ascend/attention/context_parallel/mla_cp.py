@@ -842,10 +842,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         # The ready event also protects the history FIA's shared workspace.
         main_stream = torch.npu.current_stream()
         current_output = current_lse = None
+        core_budget = flash.current.core_budget if flash is not None and flash.current is not None else None
         if has_current:
             if flash is not None:
                 self._prepare_dcp_flashmla_current(flash, current_q_nope, current_q_pe, current_k_nope, current_k_pe)
-            attn_stream = cp_decode_comm_stream()
+            attn_stream = core_budget.stream if core_budget is not None else cp_decode_comm_stream()
             current_inputs_ready = main_stream.record_event()
             current_tensors: tuple[torch.Tensor | None, ...] = (
                 current_q_nope,
@@ -909,6 +910,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             history_output,
             history_lse,
             defer_combine=True,
+            pack_vector_cores=core_budget.pack_vector_cores if core_budget is not None else None,
         )
         if has_current:
             main_stream.wait_event(current_attn_done)

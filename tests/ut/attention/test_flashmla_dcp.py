@@ -162,7 +162,12 @@ def runtime(monkeypatch):
         return values, -values
 
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
+    load("vllm_ascend.attention.flashmla_core_budget", "vllm_ascend/attention/flashmla_core_budget.py")
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
+    core_budget_factory = Mock(return_value=None)
+    monkeypatch.setitem(
+        api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", core_budget_factory
+    )
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
         return torch.cat((lengths, cu_seqlens_q, seqused_q))
@@ -244,6 +249,8 @@ def runtime(monkeypatch):
 
     return SimpleNamespace(
         builder=builder,
+        core_budget_factory=core_budget_factory,
+        attn_stream=attn_stream,
         api=api,
         metadata_op=metadata_op,
         attention_op=attention_op,
@@ -431,10 +438,18 @@ def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
         (False, True, 4, torch.float16, True),
     ],
 )
+@pytest.mark.parametrize("budgeted", [False, True])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, budgeted
 ):
     runtime.context.capturing = capturing
+    if budgeted:
+        budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+        monkeypatch.setitem(
+            runtime.api.FlashMLAMetadataBuilder.__init__.__globals__,
+            "create_flashmla_core_budget",
+            lambda *args: budget,
+        )
     torch.manual_seed(41)
     size, local_heads, tokens = 8, 8, 5
     split = causal and speculative
@@ -492,9 +507,20 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         owned = slice(rank * local_heads, (rank + 1) * local_heads)
 
         def exchange(
-            output, lse, world_size, scatter_dim, group, *, defer_combine, owned=owned, rank=rank, flash=flash
+            output,
+            lse,
+            world_size,
+            scatter_dim,
+            group,
+            *,
+            defer_combine,
+            pack_vector_cores=None,
+            owned=owned,
+            rank=rank,
+            flash=flash,
         ):
             assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
+            assert pack_vector_cores == (28 if budgeted and split else None)
             runtime.events.append(("exchange", runtime.active_stream[0]))
             assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
             expected_output, expected_lse = partials[rank]
@@ -645,3 +671,58 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
     assert target.current is not None and draft.current is None
     assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+
+
+def test_budgeted_metadata_refresh_orders_streams_and_preserves_graph_buffers(runtime, monkeypatch):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+    create = Mock(return_value=budget)
+    monkeypatch.setitem(runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", create)
+    state = runtime.builder()
+    inputs = common([20, 4], [4, 4], tokens=8)
+    flash = state.build(inputs, 2, 8, False, retain_for_graph=True)
+    pointers = (flash.schedule.data_ptr(), flash.current.schedule.data_ptr())
+    seen = []
+    schedule = runtime.metadata_op.side_effect
+
+    def observed(*args, **kwargs):
+        seen.append(runtime.active_stream[0])
+        return schedule(*args, **kwargs)
+
+    runtime.metadata_op.side_effect = observed
+    runtime.events.clear()
+    inputs = common([21, 5], [1, 1], tokens=8)
+    replay = state.build(inputs, 2, 2, False, retain_for_graph=True)
+    assert replay is flash
+    assert pointers == (replay.schedule.data_ptr(), replay.current.schedule.data_ptr())
+    assert seen == ["main", "attn"]
+    assert runtime.events == [
+        ("record", "main"),
+        ("wait", "attn", "main"),
+        ("record", "attn"),
+        ("wait", "main", "attn"),
+    ]
+    assert runtime.active_stream == ["main"]
+    create.assert_called_once()
+
+
+def test_large_pack_uses_original_stream_and_metadata(runtime, monkeypatch):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+    monkeypatch.setitem(
+        runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", lambda *args: budget
+    )
+    state = runtime.builder(heads=12)
+    large = state.build(common([32], [32], tokens=32), 1, 32, False, retain_for_graph=True)
+    assert large.current.core_budget is None
+    assert state._core_budget_for(8) is budget
+    assert state._core_budget_for(32) is None
+    # The selection uses graph capacity, not changing active lengths.
+    again = state.build(common([32], [1], tokens=32), 1, 1, False, retain_for_graph=True)
+    assert again is large and again.current.core_budget is None
+
+
+@pytest.mark.parametrize("size,speculative,expected_calls", [(8, True, 1), (1, True, 0), (8, False, 0)])
+def test_core_policy_is_automatic_for_dcp_speculation(runtime, size, speculative, expected_calls):
+    runtime.builder(size=size, speculative=speculative)
+    assert runtime.core_budget_factory.call_count == expected_calls
+    if expected_calls:
+        runtime.core_budget_factory.assert_called_once_with(torch.device("cpu"))

@@ -10,6 +10,7 @@ in preflight tests: the decode hot path must not copy lengths or tables to the C
 """
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ import numpy as np
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend.attention.flashmla_core_budget import FlashMLACoreBudget, create_flashmla_core_budget
 from vllm_ascend.attention.utils import MLA_FLASH_SUPPORTED_Q_HEADS, get_flashmla_ops
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
@@ -283,6 +285,7 @@ class FlashMLACurrent:
     block_table: torch.Tensor
     slots: torch.Tensor
     attn_mask: torch.Tensor
+    core_budget: FlashMLACoreBudget | None = None
 
 
 @dataclass
@@ -319,6 +322,9 @@ class FlashMLAMetadataBuilder:
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
         adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        self.core_budget = None
+        if self.dcp_size > 1 and self.use_spec_decode:
+            self.core_budget = create_flashmla_core_budget(device)
         self.current_adapter = adapter
         history_adapter = replace(
             adapter,
@@ -332,7 +338,14 @@ class FlashMLAMetadataBuilder:
         self.buffers: dict[tuple, FlashMLADecode] = {}
         self.attn_mask = attn_mask
 
+    def _core_budget_for(self, tokens: int) -> FlashMLACoreBudget | None:
+        rows = tokens * self.current_adapter.config.num_heads * self.dcp_size
+        if self.core_budget is not None and self.core_budget.allows_pack(rows):
+            return self.core_budget
+        return None
+
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
+        core_budget = self._core_budget_for(tokens)
         ints = {"dtype": torch.int32, "device": self.device}
         adapter = self.adapters[causal]
         cu = torch.zeros(rows + 1, **ints)
@@ -366,11 +379,13 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
-            current_schedule = self.current_adapter.build_metadata(
-                torch.empty_like(used, device="meta"),
-                torch.empty_like(cu, device="meta"),
-                torch.empty_like(used, device="meta"),
-            )
+            resource_context = torch.npu.stream(core_budget.stream) if core_budget is not None else nullcontext()
+            with resource_context:
+                current_schedule = self.current_adapter.build_metadata(
+                    torch.empty_like(used, device="meta"),
+                    torch.empty_like(cu, device="meta"),
+                    torch.empty_like(used, device="meta"),
+                )
             flash.current = FlashMLACurrent(
                 adapter=self.current_adapter,
                 query=torch.empty(
@@ -387,6 +402,7 @@ class FlashMLAMetadataBuilder:
                 block_table=torch.zeros((rows, block_columns), **ints),
                 slots=torch.full_like(flash.slots, -1),
                 attn_mask=self.attn_mask,
+                core_budget=core_budget,
             )
         return flash
 
@@ -400,7 +416,9 @@ class FlashMLAMetadataBuilder:
         tokens = num_decode_tokens if has_prefill else max(common.num_actual_tokens, common.num_input_tokens)
         rows = num_decodes + 1 if has_prefill else max(num_decodes, min(tokens, self.max_num_reqs)) + 1
         columns = common.block_table_tensor.shape[1]
-        key = tokens, rows, columns, common.causal
+        core_budget = self._core_budget_for(tokens)
+        budget_key = core_budget.cache_key if core_budget is not None else None
+        key = tokens, rows, columns, common.causal, budget_key
         if has_prefill:
             if retain_for_graph:
                 raise ValueError("FlashMLA graph buffers require a decode-only batch")
@@ -467,7 +485,20 @@ class FlashMLAMetadataBuilder:
                 requests = torch.searchsorted(flash.cu[1:], indices.to(torch.int32), right=True)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(~flash.token_live, -1)
-                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                if current.core_budget is None:
+                    current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                else:
+                    # Generate the plan under the same resources as its consumer.
+                    # Join before returning: every layer and graph sees ready data.
+                    main = torch.npu.current_stream()
+                    stream = current.core_budget.stream
+                    stream.wait_event(main.record_event())
+                    with torch.npu.stream(stream):
+                        for tensor in (flash.used_q, flash.cu, current.schedule):
+                            tensor.record_stream(stream)
+                        current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                        ready = stream.record_event()
+                    main.wait_event(ready)
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.

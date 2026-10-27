@@ -150,6 +150,42 @@ When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
 
+#### FlashMLA overlap resource budgets
+
+On Ascend 950, external FlashMLA automatically budgets resources for concurrent
+current-chunk attention and history output/LSE packing when using DCP with
+speculative decoding. This requires no additional configuration.
+
+The policy queries device properties, process limits and the caller stream's
+limits once before warmup and graph capture. It uses the smallest available
+ceiling and allocates half the complete MIX groups to current attention (one
+Cube and two Vector cores per group). Pack receives the remaining Vector budget.
+For example, a 28/56 device uses 14/28 for attention and at most 28 Vector blocks
+for pack; a 32/64 device uses 16/32 and 32. Existing application limits remain
+ceilings. These budgets limit concurrency; they do not reserve exclusive cores
+or measure currently idle cores.
+
+The budget applies when `captured_tokens * local_heads * dcp_size` is at most
+16 times the available Vector core count. Larger packs retain their full grid,
+since reducing their parallelism can outweigh the attention benefit. For 96
+history heads and 56 available Vector cores, an 8-token bucket qualifies and a
+32-token bucket uses the full grid. This workload gate scales with exposed
+resources and DCP head count, but does not guarantee a speedup for every workload.
+
+Current attention and its metadata refresh share a dedicated limited stream.
+Events preserve input readiness and completion dependencies. The allocation is
+fixed for the metadata builder and included in its graph-buffer cache key;
+changing active lengths does not change a captured graph's resource plan.
+Do not change external process or stream limits after capture. Validate eager
+and graph execution when updating the FlashMLA/CANN package, since FlashMLA's
+scheduling must honor runtime resource limits.
+
+Unsupported hardware, unavailable APIs, invalid resource counts or failed
+limit readback retain the original overlap path with a warning. Ordinary
+decode, noncausal draft attention and FIA retain their existing execution paths.
+Communication and other kernels can still contend for resources; validate
+service ITL and throughput on the target workload.
+
 #### KV-cache Transfer
 
 The following constraint applies to both standalone DCP and PCP+DCP:
