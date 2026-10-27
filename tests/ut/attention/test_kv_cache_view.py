@@ -106,6 +106,10 @@ def test_dense_paged_path_is_limited_to_supported_backend(monkeypatch):
     backend.enable_c8_quant = True
     assert not backend._supports_dense_paged_kv()
 
+    backend.enable_c8_quant = False
+    backend.__dict__.pop("vllm_config")
+    assert not backend._supports_dense_paged_kv()
+
 
 def test_graph_providers_resolve_dynamic_block_table_and_stable_output():
     source = torch.tensor([[1, 3]], dtype=torch.int32)

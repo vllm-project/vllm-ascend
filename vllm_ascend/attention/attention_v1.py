@@ -925,9 +925,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size
 
     def _supports_dense_paged_kv(self) -> bool:
+        vllm_config = getattr(self, "vllm_config", None)
         return (
             type(self) is AscendAttentionBackendImpl
-            and getattr(self.vllm_config, "speculative_config", None) is None
+            and vllm_config is not None
+            and getattr(vllm_config, "speculative_config", None) is None
             and not _EXTRA_CTX.is_draft_model
             and self.attn_type == AttentionType.DECODER
             and not self.use_bnsd_kv_cache
