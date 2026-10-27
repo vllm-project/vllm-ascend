@@ -51,6 +51,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -316,48 +317,6 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
-    def _restore_replicated_draft_target_states(self) -> None:
-        """Restore target states consumed by a replicated PCP draft."""
-        state = self.execute_model_state
-        pcp_manager = self.pcp_manager
-        if (
-            state is None
-            or pcp_manager is None
-            or not self.is_last_pp_rank
-            or not getattr(self.speculator, "replicated_pcp", False)
-        ):
-            return
-
-        get_hidden_states = getattr(
-            self.model,
-            "get_mtp_target_hidden_states",
-            None,
-        )
-        if get_hidden_states is not None:
-            mtp_target_hidden_states = get_hidden_states()
-            if mtp_target_hidden_states is not None:
-                pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
-
-        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
-        # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front.
-        if state.hidden_states is not None:
-            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
-            # vLLM #57980 folded the aux-hidden restore into
-            # restore_for_sampling. The replicated-PCP fast path below bypasses
-            # that call, so restore aux here too.
-            if state.aux_hidden_states is not None:
-                replacements["aux_hidden_states"] = [
-                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
-                ]
-            state = state._replace(**replacements)
-            # Tell restore_for_sampling to skip its second all-gather for this
-            # step. The layout is tracked explicitly because a length match is
-            # ambiguous under piecewise/FULL graphs: every rank pads its local
-            # batch to the same global padded length.
-            pcp_manager._sampling_hidden_restored = True
-        self.execute_model_state = state
-
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
         if (
@@ -376,22 +335,6 @@ class NPUModelRunner(GPUModelRunner):
                 "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
             )
 
-        pcp_manager = self.pcp_manager
-        if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
-            assert isinstance(pcp_manager, AscendPCPManager)
-            # The last PP stage restores PCP outputs to the global request
-            # layout before sampling. Non-last stages do not own final hidden
-            # states, but their PP receive/postprocess path must use that same
-            # global request layout rather than PCP-local segment rows.
-            self.execute_model_state = self.execute_model_state._replace(
-                input_batch=pcp_manager.global_batch,
-            )
-
-        # The pre-restore marker is scoped to this sampling step; stale state
-        # from a previous step must not suppress the upstream all-gather.
-        if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
-            pcp_manager._sampling_hidden_restored = False
-        self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -497,9 +440,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
-                self.pcp_manager.kv_cache_config = kv_cache_config
-                self.pcp_manager.global_input_buffers = self.input_buffers
+                self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,

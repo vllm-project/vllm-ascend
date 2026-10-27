@@ -337,12 +337,12 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
     assert len(seen) == 2
     for parallel_config, seq_lens_cpu, is_prefilling in seen:
         assert parallel_config is spec.draft_vllm_config.parallel_config
+        # Draft decode steps pass no prefilling request, like upstream.
+        assert is_prefilling.tolist() == [False, False]
         if use_dcp:
             assert seq_lens_cpu.tolist() == [32, 128]
-            assert is_prefilling.tolist() == [False, False]
         else:
             assert seq_lens_cpu is None
-            assert is_prefilling.tolist() == [True, False]
 
 
 @pytest.mark.parametrize("mode", ["NONE", "PIECEWISE", "FULL"])
