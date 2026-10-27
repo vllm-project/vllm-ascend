@@ -651,6 +651,7 @@ def _build_routing_replay_experts(router, log2phy):
 
 def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
     _disable_force_eplb(monkeypatch)
+    monkeypatch.setattr(routed_experts_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=None))
     router = AscendGroupedTopKRouter(
         top_k=2,
         global_num_experts=4,
@@ -687,6 +688,7 @@ def test_routing_replay_captures_logical_ids_before_ascend_mapping(monkeypatch):
 
 def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
     _disable_force_eplb(monkeypatch)
+    monkeypatch.setattr(routed_experts_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=None))
     router = AscendGroupedTopKRouter(
         top_k=2,
         global_num_experts=4,
