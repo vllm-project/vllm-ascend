@@ -3,6 +3,7 @@ from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import fields, replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
@@ -57,7 +58,11 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import (
+    NPUModelRunner,
+    _resolve_draft_kernel_block_sizes,
+    _uses_per_group_kernel_block_sizes,
+)
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -136,6 +141,77 @@ class SparseAttentionBackend(AscendAttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+
+class TestDraftKernelBlockSizeCapabilities(unittest.TestCase):
+    def test_capability_result_is_evaluated(self):
+        class PerGroupProposer:
+            def __init__(self, enabled: bool):
+                self.enabled = enabled
+
+            def uses_per_group_kernel_block_sizes(self) -> bool:
+                return self.enabled
+
+        self.assertTrue(_uses_per_group_kernel_block_sizes(PerGroupProposer(True)))
+        self.assertFalse(_uses_per_group_kernel_block_sizes(PerGroupProposer(False)))
+        self.assertFalse(_uses_per_group_kernel_block_sizes(object()))
+
+    def test_single_group_contract_preserves_supported_sizes(self):
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes([[128, 64], [32]], per_group=False),
+            [128, 64],
+        )
+
+    def test_per_group_contract_selects_one_size_per_group(self):
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes([[128, 64], [32]], per_group=True),
+            [128, 32],
+        )
+
+    def test_scalar_and_flat_inputs_remain_compatible(self):
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes(128, per_group=False),
+            [128],
+        )
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes([128, 32], per_group=False),
+            [128, 32],
+        )
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes([128, 32], per_group=True),
+            [128, 32],
+        )
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes((128, 32), per_group=False),
+            [128, 32],
+        )
+        self.assertEqual(
+            _resolve_draft_kernel_block_sizes(((128, 64), (32,)), per_group=True),
+            [128, 32],
+        )
+
+
+class TestQwen4ExpInputAdapterDispatch(unittest.TestCase):
+    def test_runner_delegates_auxiliary_inputs(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.qwen4_exp_input_adapter = MagicMock()
+        runner.query_start_loc = SimpleNamespace(gpu=torch.tensor([0, 1], dtype=torch.int32))
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([3], dtype=np.int32),
+            token_ids_cpu=np.array([[7, 8, 9]], dtype=np.int32),
+        )
+        model_kwargs: dict[str, Any] = {}
+
+        runner._maybe_add_qwen4_exp_inputs(
+            model_kwargs,
+            num_reqs=1,
+            num_reqs_padded=1,
+        )
+
+        call_args = runner.qwen4_exp_input_adapter.prepare.call_args.args
+        self.assertIs(call_args[0], model_kwargs)
+        self.assertEqual(call_args[1].num_reqs, 1)
+        self.assertEqual(call_args[1].num_reqs_padded, 1)
 
 
 class TestGlm5MtpGraphMetadata(unittest.TestCase):
@@ -2479,6 +2555,551 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_compressed_hybrid_page_strided_descriptors_allocate_once(self):
+        compressed_name = "model.layers.0.self_attn.attn"
+        mamba_name = "model.layers.1.linear_attn"
+        compressed_spec = MLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+            tokens_per_state=4,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((2, 4),),
+            dtypes=(torch.float32,),
+        )
+        num_blocks = 3
+        packed_page_size = compressed_spec.page_size_bytes + mamba_spec.page_size_bytes
+        backing_size = num_blocks * packed_page_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[compressed_name],
+                    layer_stride=0,
+                    block_stride=packed_page_size,
+                    offset=0,
+                ),
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[mamba_name],
+                    layer_stride=0,
+                    block_stride=packed_page_size,
+                    offset=compressed_spec.page_size_bytes,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[compressed_name],
+                    kv_cache_spec=compressed_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=[mamba_name],
+                    kv_cache_spec=mamba_spec,
+                ),
+            ],
+        )
+        runner = self._build_runner()
+        # Sparse QSA is a runtime backend selection.  It must not disable a
+        # page-strided shared backing whose geometry is fully described by the
+        # planner descriptors.
+        runner.use_sparse = True
+        runner.use_compress = True
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True,
+            is_layer_compact=False,
+            is_block_compact=False,
+        )
+
+        with patch.object(
+            runner,
+            "_allocate_int8_cache_tensor",
+            wraps=runner._allocate_int8_cache_tensor,
+        ) as allocate:
+            raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        allocate.assert_called_once_with(backing_size, 2 * 1024 * 1024)
+        self.assertIs(raw_caches[compressed_name], raw_caches[mamba_name])
+        self.assertEqual(raw_caches[compressed_name].numel(), backing_size)
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_standardized_overlay_descriptors_allocate_once(self):
+        """Equal page strides still describe one common main backing.
+
+        The real Qwen4Exp main planner emits one single-layer descriptor for
+        each cache region. Every descriptor has the same full allocation size,
+        starts at byte zero, and uses its logical page size as the block and
+        layer stride. This is an overlay layout, not a request for one full
+        allocation per descriptor.
+        """
+        attn_name = "model.layers.0.self_attn.attn"
+        compressed_name = "model.layers.0.self_attn.compressed_key"
+        mamba_name = "model.layers.1.linear_attn"
+        attn_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        compressed_spec = MLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=32,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((4, 8),),
+            dtypes=(torch.float32,),
+        )
+        specs = {
+            attn_name: attn_spec,
+            compressed_name: compressed_spec,
+            mamba_name: mamba_spec,
+        }
+        page_sizes = {spec.page_size_bytes for spec in specs.values()}
+        self.assertEqual(len(page_sizes), 1)
+        page_size = page_sizes.pop()
+        num_blocks = 3
+        backing_size = num_blocks * page_size
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                )
+                for name in specs
+            ],
+            kv_cache_groups=[KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        )
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.use_compress = False
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True,
+            is_layer_compact=False,
+            is_block_compact=False,
+        )
+
+        self.assertTrue(runner._uses_page_strided_shared_backing(config, specs))
+        with patch.object(
+            runner,
+            "_allocate_int8_cache_tensor",
+            wraps=runner._allocate_int8_cache_tensor,
+        ) as allocate:
+            raw_caches = runner._allocate_kv_cache_tensors(config)
+
+        allocate.assert_called_once_with(backing_size, 2 * 1024 * 1024)
+        self.assertEqual(set(raw_caches), set(specs))
+        self.assertEqual(
+            len({raw.untyped_storage().data_ptr() for raw in raw_caches.values()}),
+            1,
+        )
+        self.assertTrue(all(raw is raw_caches[attn_name] for raw in raw_caches.values()))
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_shared_backing_without_layout_resolver_falls_back(self):
+        spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=2 * spec.page_size_bytes,
+                    layers=["model.layers.0.self_attn.attn"],
+                    layer_stride=spec.page_size_bytes,
+                    block_stride=spec.page_size_bytes,
+                    offset=0,
+                )
+            ],
+            kv_cache_groups=[],
+        )
+        runner = self._build_runner()
+        runner.vllm_config.cache_config = SimpleNamespace()
+
+        self.assertFalse(
+            runner._uses_page_strided_shared_backing(
+                config,
+                {"model.layers.0.self_attn.attn": spec},
+            )
+        )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_main_native_backends_use_unified_cache_geometry(self):
+        class MainNativeBackend:
+            @staticmethod
+            def get_name():
+                return "QWEN4_EXP_QSA_ASCEND"
+
+        self.assertFalse(hasattr(MainNativeBackend, "get_kv_cache_shape"))
+        cases = [
+            (
+                "model.layers.0.self_attn.attn",
+                FullAttentionSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=4,
+                    head_size_v=4,
+                    dtype=torch.bfloat16,
+                ),
+                (3, 1, 8, 8),
+            ),
+            (
+                "model.layers.0.self_attn.compressed_key_cache",
+                MLAAttentionSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=3,
+                    dtype=torch.bfloat16,
+                    tokens_per_state=4,
+                ),
+                (3, 1, 2, 3),
+            ),
+        ]
+        for layer_name, spec, expected_shape in cases:
+            with self.subTest(layer_name=layer_name):
+                num_blocks = 3
+                backing_size = num_blocks * spec.page_size_bytes
+                config = KVCacheConfig(
+                    num_blocks=num_blocks,
+                    kv_cache_tensors=[
+                        KVCacheTensor(
+                            size=backing_size,
+                            layers=[layer_name],
+                            layer_stride=spec.page_size_bytes,
+                            block_stride=spec.page_size_bytes,
+                            offset=0,
+                        )
+                    ],
+                    kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
+                )
+                runner = self._build_runner()
+                runner._page_strided_shared_backing = True
+                runner._kv_cache_spec_attn_group_iterator = lambda spec=spec, layer_name=layer_name: [
+                    SimpleNamespace(
+                        kv_cache_spec=spec,
+                        backend=MainNativeBackend,
+                        layer_names=[layer_name],
+                    )
+                ]
+                raw = {layer_name: torch.empty(backing_size, dtype=torch.int8)}
+
+                cache = runner._reshape_kv_cache_tensors(config, raw)[layer_name]
+
+                self.assertIsInstance(cache, torch.Tensor)
+                self.assertEqual(cache.shape, expected_shape)
+                self.assertEqual(
+                    cache.stride(0) * cache.element_size(),
+                    spec.page_size_bytes,
+                )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_independent_descriptor_sizes_do_not_alias(self):
+        first_name = "model.layers.0.self_attn.attn"
+        second_name = "model.layers.1.self_attn.attn"
+        spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        num_blocks = 3
+        page_size = spec.page_size_bytes
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=num_blocks * page_size,
+                    layers=[first_name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                ),
+                KVCacheTensor(
+                    size=(num_blocks + 1) * page_size,
+                    layers=[second_name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec([first_name], spec),
+                KVCacheGroupSpec([second_name], spec),
+            ],
+        )
+        runner = self._build_runner()
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True
+        )
+
+        self.assertFalse(
+            runner._uses_page_strided_shared_backing(
+                config,
+                {first_name: spec, second_name: spec},
+            )
+        )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_page_strided_views_preserve_all_cache_region_geometry(self):
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+        from vllm.models.qwen4_exp.common.qsa_cache import (
+            QSACompressedKeyCache,
+            QSAStateBackend,
+        )
+
+        class QSAStateLayer(AttentionLayerBase):
+            def get_attn_backend(self):
+                return QSAStateBackend
+
+            def get_kv_cache_spec(self, vllm_config):
+                del vllm_config
+                return self.kv_cache_spec
+
+        attn_name = "model.layers.0.self_attn.attn"
+        qsa_name = "model.layers.1.self_attn.attn"
+        mamba_name = "model.layers.2.linear_attn"
+        attn_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=2,
+            dtype=torch.bfloat16,
+        )
+        qsa_spec = QSACompressedKeyCache.get_kv_cache_spec(
+            SimpleNamespace(
+                cache_config=SimpleNamespace(block_size=8),
+                head_size=3,
+                dtype=torch.bfloat16,
+                compress_ratio=4,
+            ),
+            None,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((2, 2), (1, 3)),
+            dtypes=(torch.bfloat16, torch.float32),
+        )
+        num_blocks = 3
+        offsets = {
+            attn_name: 0,
+            qsa_name: attn_spec.page_size_bytes,
+            mamba_name: (attn_spec.page_size_bytes + qsa_spec.page_size_bytes),
+        }
+        packed_page_size = sum(spec.page_size_bytes for spec in (attn_spec, qsa_spec, mamba_spec))
+        backing_size = num_blocks * packed_page_size
+        specs = {
+            attn_name: attn_spec,
+            qsa_name: qsa_spec,
+            mamba_name: mamba_spec,
+        }
+        descriptors = [
+            KVCacheTensor(
+                size=backing_size,
+                layers=[name],
+                layer_stride=0,
+                block_stride=packed_page_size,
+                offset=offsets[name],
+            )
+            for name in specs
+        ]
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=descriptors,
+            kv_cache_groups=[KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        )
+        runner = self._build_runner()
+        runner.use_compress = True
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True,
+            is_layer_compact=False,
+            is_block_compact=False,
+        )
+        qsa_layer = QSAStateLayer()
+        qsa_layer.kv_cache_spec = qsa_spec
+        runner.vllm_config.compilation_config.static_forward_context = {qsa_name: qsa_layer}
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=attn_spec,
+                backend=runner.attn_backend,
+                layer_names=[attn_name],
+            ),
+            SimpleNamespace(
+                kv_cache_spec=qsa_spec,
+                backend=QSAStateBackend,
+                layer_names=[qsa_name],
+            ),
+            SimpleNamespace(
+                kv_cache_spec=mamba_spec,
+                backend=None,
+                layer_names=[mamba_name],
+            ),
+        ]
+
+        raw = runner._allocate_kv_cache_tensors(config)
+        backing = raw[attn_name]
+        self.assertEqual(QSAStateBackend.get_name(), "QWEN4_EXP_EXP_QSA_STATE")
+        self.assertTrue(runner._uses_unified_attention_cache_view(QSAStateBackend))
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+
+        k_cache, v_cache = caches[attn_name]
+        qsa_cache = caches[qsa_name]
+        conv_state, temporal_state = caches[mamba_name]
+        views = {
+            "k": (k_cache, 0),
+            "v": (
+                v_cache,
+                attn_spec.block_size * attn_spec.num_kv_heads * attn_spec.head_size * 2,
+            ),
+            "qsa": (qsa_cache, offsets[qsa_name]),
+            "conv": (conv_state, offsets[mamba_name]),
+            "temporal": (
+                temporal_state,
+                offsets[mamba_name] + 2 * 2 * 2,
+            ),
+        }
+        self.assertEqual(qsa_cache.shape, (num_blocks, 1, 2, 3))
+        for name, (view, expected_offset) in views.items():
+            with self.subTest(name=name):
+                dtype_size = view.element_size()
+                self.assertEqual(
+                    view.data_ptr(),
+                    backing.data_ptr() + expected_offset,
+                )
+                self.assertEqual(
+                    view.stride(0),
+                    packed_page_size // dtype_size,
+                )
+                expected_inner = [1] * (view.ndim - 1)
+                for dim in range(len(expected_inner) - 2, -1, -1):
+                    expected_inner[dim] = expected_inner[dim + 1] * view.shape[dim + 2]
+                self.assertEqual(
+                    view.stride()[1:],
+                    tuple(expected_inner),
+                )
+
+        block_zero_regions = [
+            (0, attn_spec.page_size_bytes),
+            (
+                offsets[qsa_name],
+                offsets[qsa_name] + qsa_spec.page_size_bytes,
+            ),
+            (
+                offsets[mamba_name],
+                offsets[mamba_name] + mamba_spec.page_size_bytes,
+            ),
+        ]
+        for previous, current in zip(
+            block_zero_regions,
+            block_zero_regions[1:],
+        ):
+            self.assertLessEqual(previous[1], current[0])
+
+        before = backing.clone()
+        conv_state[0, 0, 0] = 1
+        changed = torch.nonzero(before != backing).flatten().tolist()
+        self.assertTrue(changed)
+        self.assertTrue(
+            all(
+                offsets[mamba_name]
+                <= byte_idx
+                < offsets[mamba_name] + torch.empty((), dtype=torch.bfloat16).element_size()
+                for byte_idx in changed
+            )
+        )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_page_strided_descriptor_rejects_backing_overflow(self):
+        name = "model.layers.0.self_attn.attn"
+        peer_name = "model.layers.1.self_attn.attn"
+        spec = MLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+            tokens_per_state=4,
+        )
+        descriptor = KVCacheTensor(
+            size=spec.page_size_bytes * 2,
+            layers=[name],
+            layer_stride=0,
+            block_stride=spec.page_size_bytes * 2,
+            offset=spec.page_size_bytes,
+        )
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                descriptor,
+                KVCacheTensor(
+                    size=descriptor.size,
+                    layers=[peer_name],
+                    layer_stride=0,
+                    block_stride=spec.page_size_bytes,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec([name], spec),
+                KVCacheGroupSpec([peer_name], spec),
+            ],
+        )
+        runner = self._build_runner()
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "descriptor exceeds its shared backing",
+        ):
+            runner._uses_page_strided_shared_backing(
+                config,
+                {name: spec, peer_name: spec},
+            )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
     @patch(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
