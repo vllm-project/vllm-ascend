@@ -39,7 +39,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_dflash.py: 295
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_draft_model.py: 200
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8b_dspark.py: 420
-  tests/e2e/pull_request/one_card/model_runner_v2/test_llama3_1_8b_eagle.py: 230
+  tests/e2e/pull_request/one_card/model_runner_v2/test_llama3_1_8b_eagle.py: 700
   tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_mtp.py: 295
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py: 370
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 80
