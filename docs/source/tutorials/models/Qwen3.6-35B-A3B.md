@@ -402,10 +402,13 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
 
-| dataset | metric | mode | vllm-api-general-chat |
-| ------- | ------ | ---- | --------------------- |
-| mmmu | accuracy | gen | 83.3 |
-| gpqa | accuracy | gen | 83.3 |
+For MMMU, follow the [AISBench MMMU dataset guide](https://github.com/AISBench/benchmark/blob/master/ais_bench/benchmark/configs/datasets/mmmu/README_en.md)
+to download [AI-ModelScope/MMMU](https://modelscope.cn/datasets/AI-ModelScope/MMMU/summary) into `ais_bench/datasets/mmmu`.
+
+| dataset | metric | mode | hardware | vllm-api-general-chat |
+| ------- | ------ | ---- | -------- | --------------------- |
+| mmmu | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
+| gpqa | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
 
 ### 7.2 Using lm_eval
 
