@@ -403,6 +403,26 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_rejects_unsupported_tp_at_config_time(self, mock_fix_incompatible_config):
+        # The TP degree is validated here, not when a parallel group is built:
+        # an EP/MC2 group of DP x PCP x TP ranks must never gate the feature.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True}}
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_unsupported_tp_ok_when_disabled(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": False}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
