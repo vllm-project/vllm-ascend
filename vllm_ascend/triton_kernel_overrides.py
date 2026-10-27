@@ -33,6 +33,9 @@ Three rules when editing the table:
   grid and invokes the value as a plain function, so a raw ``@triton.jit``
   kernel cannot be a value; kernel entries point at launch adapters that
   derive the grid and launch it (see ``ops/triton/v2/``).
+  TODO: the dropped grid is an upstream dispatcher bug that will be
+  fixed; once the caller's grid reaches the impl, remove the launch
+  adapters and register the raw kernels directly.
 """
 
 from __future__ import annotations
@@ -139,6 +142,9 @@ TRITON_KERNEL_OVERRIDES: dict[str, Callable[..., Any]] = {
 # would fail with "not a Triton function". These swaps keep the retired
 # patch file's plain-attribute semantics; only the defining module is
 # patched, which is exactly where the inliner looks.
+# TODO: this is an upstream dispatcher bug that will be fixed -- device
+# functions will become registerable; once they are, move these entries
+# into the override table and delete the manual swap.
 _DEVICE_FUNCTION_SWAPS: dict[str, Callable[..., Any]] = {
     # TODO: Remove after the new Q4 Triton-Ascend release is available.
     "vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token": (_load_effective_token_ascend),
