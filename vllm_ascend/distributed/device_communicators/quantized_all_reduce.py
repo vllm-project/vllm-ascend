@@ -20,9 +20,7 @@ only pays off for large messages, so it is gated by a payload threshold.
 
 Configuration
 -------------
-Applies to tensor-parallel (``tp``) collectives only; other parallel groups
-(ep/mc2/dp/dcp/pcp/pp/p_tp_*/eplb/kvpp) keep their existing path. Enable it
-through ``--additional-config`` (see vllm_ascend.ascend_config):
+Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
     --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 33554432}}'
 
@@ -63,11 +61,9 @@ _MAX_VALID_WORLD_SIZE = 8
 class QuantizedAllReduce:
     """Wrapper adding int8 quantized all-reduce around a base all_reduce."""
 
-    def __init__(self, group: "dist.ProcessGroup", min_numel: int, world_size: int | None = None) -> None:
+    def __init__(self, group: "dist.ProcessGroup", min_numel: int) -> None:
         self.group = group
-        # world_size is the size of the group this collective runs on (the TP
-        # degree for the supported path); the caller may pass it explicitly.
-        self.world_size = world_size if world_size is not None else dist.get_world_size(group)
+        self.world_size = dist.get_world_size(group)
         device_type = get_ascend_device_type()
         # Fail fast on unvalidated families: a silent bf16 fallback would hide
         # a misconfiguration, and 310P lacks bf16 npu_quantize support anyway.
