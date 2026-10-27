@@ -54,6 +54,7 @@ class AisbenchRunner:
     }
     DATASET_RENAME = {
         "aime2024": "aime",
+        "aime26": "aime2026",
         "gsm8k-lite": "gsm8k",
         "textvqa-lite": "textvqa",
         "longbenchv2": "longbenchv2",

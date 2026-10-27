@@ -58,7 +58,7 @@ test_cases:
     benchmarks:
       acc_aime2026:
         case_type: accuracy
-        dataset_path_local: tests/e2e/cases/models/datasets/aime2026
+        dataset_path: evalscope/aime26
         request_conf: vllm_api_stream_chat
         dataset_conf: aime2026/aime2026_gen_0_shot_chat_prompt
         max_out_len: 65536
