@@ -24,14 +24,12 @@ mean blocks were moved.
 
 from __future__ import annotations
 
-from vllm.logger import init_logger
-from vllm.v1.agent_hint import AgentHint, AgentManagementResult
+from vllm.logger import logger
+from vllm.v1.agent_hint import AgentHint, AgentManagementResult  # type: ignore[import-not-found]
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.tier_policy import (
     TierPolicy,
 )
-
-logger = init_logger(__name__)
 
 
 class NPUContextEditBackend:
@@ -50,14 +48,11 @@ class NPUContextEditBackend:
         job_id: str,
         request_id: str,
     ) -> AgentManagementResult:
-        expected_resume_s = (
-            hint.prediction.expected_resume_s if hint.prediction is not None else None
-        )
+        expected_resume_s = hint.prediction.expected_resume_s if hint.prediction is not None else None
         decision = self._policy.decide(expected_resume_s)
         block_count = len(hint.block_hashes or [])
         logger.info(
-            "kv_context_edit action=%s session_id=%s expected_resume_s=%s tier=%s "
-            "fallback=%s blocks=%s job=%s",
+            "kv_context_edit action=%s session_id=%s expected_resume_s=%s tier=%s fallback=%s blocks=%s job=%s",
             action,
             hint.session_id,
             expected_resume_s,
