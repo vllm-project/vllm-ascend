@@ -800,9 +800,9 @@ class NPUWorker(WorkerBase):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
+        # allocation. For block-compact layouts, Ascend can
         # preserve that contract for attention/Mamba and eligible full/sliding
-        # attention models while exposing contiguous per-layer views. Do not
+        # attention models through supported cache views. Do not
         # shrink the planner budget when the runner can consume that layout.
         per_layer_specs = []
         for group in kv_cache_groups:
@@ -828,26 +828,7 @@ class NPUWorker(WorkerBase):
         is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
         if (
             has_attention
-            and has_mamba
-            and getattr(layout, "is_block_outermost", False)
-            and self.vllm_config.kv_transfer_config is None
-            and getattr(
-                model_runner,
-                "supports_page_strided_shared_kv_backing",
-                False,
-            )
-        ):
-            # Main's block-outermost descriptors all address one physical
-            # page-strided backing. In particular, Qwen4Exp's compressed QSA
-            # descriptors describe logical views into that allocation; they
-            # are not independent per-layer buffers. Preserve the profiler's
-            # full budget so the planner derives num_blocks from the packed
-            # physical page size rather than scaling it once per group.
-            return available_memory
-        if (
-            has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
-            and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)

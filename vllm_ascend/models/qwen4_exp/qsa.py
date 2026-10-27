@@ -14,7 +14,6 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
-from copy import copy
 from dataclasses import replace
 from typing import Protocol, TypeAlias, cast
 
@@ -51,7 +50,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 
-QSAKVCache: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
 
 def _store_qsa_cache_rows(
@@ -98,18 +97,8 @@ class QSAForwardMetadataProtocol(Protocol):
     block_table: torch.Tensor
 
 
-def _split_qsa_kv_cache(kv_cache: QSAKVCache, head_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    if isinstance(kv_cache, tuple):
-        if len(kv_cache) != 2:
-            raise ValueError("QSA packed cache must contain K and V views")
-        return kv_cache
-    return kv_cache.transpose(1, 2).split(head_size, dim=-1)
-
-
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
-    if isinstance(kv_cache, tuple):
-        return len(kv_cache) == 2 and all(cache.numel() for cache in kv_cache)
-    return bool(kv_cache.numel())
+    return isinstance(kv_cache, tuple) and all(cache.numel() for cache in kv_cache)
 
 
 def apply_qsa_rope(
@@ -404,7 +393,7 @@ class AscendQSAImpl:
         slot_mapping: torch.Tensor,
     ) -> None:
         del layer
-        key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+        key_cache, value_cache = kv_cache
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
@@ -431,7 +420,7 @@ class AscendQSAImpl:
         if num_tokens == 0:
             return output
         selected_indices = layer.topk_indices_buffer[:num_tokens]
-        key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+        key_cache, value_cache = kv_cache
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
@@ -459,40 +448,6 @@ class AscendQSAImpl:
         draft_attn_metadatas=None,
     ):
         """QSA replay parameters live in persistent buffers; nothing to rebind."""
-
-
-class AscendQSAStateMetadataBuilder(qsa_cache.QSAMetadataBuilder):
-    """Keep compressed indexer state addressed by its physical manager pages.
-
-    Main QSA and compressed keys share a scheduler group. The group uses
-    128-token kernel blocks for GBSA, but compressed storage still contains
-    block_size / compress_ratio states per manager page.
-    """
-
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self._manager_table = None
-        self._manager_table_rows = vllm_config.scheduler_config.max_num_seqs
-
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-        if self.vllm_config.use_v2_model_runner:
-            # MRV2 exposes compressed storage as kernel pages, like GQA.
-            # Its block table and builder spec already address those views.
-            return super().build(common_prefix_len, common_attn_metadata, fast_build)
-        factor = self.kv_cache_spec.block_size // GBSA_PAGE_SIZE
-        if not self.is_circular_buffer and factor > 1:
-            pages = common_attn_metadata.block_table_tensor[:, ::factor]
-            if self._manager_table is None:
-                self._manager_table = torch.empty(
-                    (self._manager_table_rows, pages.shape[1]), dtype=pages.dtype, device=pages.device
-                )
-            manager_table = self._manager_table[: pages.shape[0], : pages.shape[1]]
-            # Floor division preserves the -1 padding sentinel. Keep the output
-            # address stable for ACL graph replay, including later MTP steps.
-            torch.div(pages, factor, rounding_mode="floor", out=manager_table)
-            common_attn_metadata = copy(common_attn_metadata)
-            common_attn_metadata.block_table_tensor = manager_table
-        return super().build(common_prefix_len, common_attn_metadata, fast_build)
 
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
@@ -542,19 +497,10 @@ upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl
 upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
 
 
-def _ascend_qsa_state_cache_layouts(
-    cls,
-) -> tuple[KVCacheLayout, ...]:
-    del cls
-    return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
-
-
 # Side-cache descriptors use the same block-outermost layout as main QSA KV.
 # Their physical block stride is honored by the runner, so no compact copy is
 # required before LightningIndexer or the Triton QSA selector consumes them.
-qsa_cache.QSAStateBackend.supported_kv_cache_layouts = classmethod(_ascend_qsa_state_cache_layouts)
 qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
-qsa_cache.QSAStateBackend.get_builder_cls = staticmethod(lambda: AscendQSAStateMetadataBuilder)
 
 
 # qsa_cache selects its Triton metadata builder at import time. The upstream

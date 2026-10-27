@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -37,13 +38,14 @@ from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
 def _groups() -> list[KVCacheGroupSpec]:
+    # Match vLLM alignment: 256 tokens cover the full 33KiB GDN page.
     sources = [
         "model.layers.11.self_attn",
         "model.layers.47.self_attn",
         "model.mtp.layers.48.self_attn",
     ]
     main = FullAttentionSpec(
-        block_size=128,
+        block_size=256,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
@@ -57,7 +59,7 @@ def _groups() -> list[KVCacheGroupSpec]:
         dtype=torch.bfloat16,
     )
     compressed = MLAAttentionSpec(
-        block_size=128,
+        block_size=256,
         num_kv_heads=1,
         head_size=32,
         dtype=torch.bfloat16,
@@ -109,7 +111,7 @@ def _groups() -> list[KVCacheGroupSpec]:
 
 def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     main = FullAttentionSpec(
-        block_size=128,
+        block_size=256,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
@@ -123,7 +125,7 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         dtype=torch.bfloat16,
     )
     compressed = MLAAttentionSpec(
-        block_size=128,
+        block_size=256,
         num_kv_heads=1,
         head_size=32,
         dtype=torch.bfloat16,
@@ -164,7 +166,7 @@ def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> 
     assert layout is not None
     assert layout.slot_count == 3
     conv, ssm = layout.region("r1"), layout.region("r2")
-    assert conv.block_stride == ssm.block_stride == 49152
+    assert conv.block_stride == ssm.block_stride == 65536
     assert ssm.offset == conv.page_size_bytes
     occupied = []
     for block in range(3):
@@ -213,7 +215,7 @@ def test_qwen4_cache_views_are_contiguous_and_advanced_index_is_bounded() -> Non
 
     views = {
         "raw": view("r4", (8, 1, 32)),
-        "compressed": view("r5", (32, 1, 32)),
+        "compressed": view("r5", (64, 1, 32)),
         "gdn_conv": view("r1", (64, 4)),
         "gdn_ssm": view("r2", (128, 128)),
     }
@@ -318,11 +320,12 @@ def _allocate_mrv2_kv_cache(
     *,
     use_main: bool = False,
     kernel_block_sizes: list[int] | None = None,
+    kv_transfer_config=None,
 ):
     """Allocate and materialize Qwen4Exp cache views through MRV2 only."""
     vllm_config = SimpleNamespace(
         additional_config={},
-        kv_transfer_config=None,
+        kv_transfer_config=kv_transfer_config,
         cache_config=SimpleNamespace(cache_dtype="auto"),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(),
@@ -378,7 +381,8 @@ def _allocate_mrv2_kv_cache(
 
 
 @pytest.mark.parametrize("runner_kind", ["v2", "v2_main"])
-def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind) -> None:
+@pytest.mark.parametrize("with_kv_transfer", [False, True])
+def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, runner_kind, with_kv_transfer) -> None:
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(
             cache_config=SimpleNamespace(
@@ -394,6 +398,9 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
         config,
         monkeypatch,
         use_main=runner_kind == "v2_main",
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
+        ),
     )
     # Every physical byte is represented once by the planner, including the
     # single PLE and hidden banks outside the shared slot backing.
@@ -405,6 +412,8 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     backing = raw[shared_names[0]]
     assert isinstance(backing, torch.Tensor)
     assert all(raw[name] is backing for name in shared_names)
+    if with_kv_transfer:
+        assert all(t.data_ptr() % (2 * 1024 * 1024) == 0 for t in raw.values())
     assert raw["model.cache_only_layers.0"] is not backing
 
     expected_regions = {
@@ -424,7 +433,7 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
             region = layout.region(region_name)
             assert state[0].is_contiguous()
             assert not state.is_contiguous()
-            assert state.storage_offset() * state.element_size() == (
+            assert state.storage_offset() * state.element_size() - backing.storage_offset() == (
                 owner.slot * layout.slot_backing_size + region.offset
             )
             assert state.stride(0) * state.element_size() == region.block_stride
@@ -448,13 +457,13 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
 
     k, v = caches["model.layers.11.self_attn.attn"]
     ssm = caches["model.layers.0.linear_attn"][1]
-    assert k.shape == v.shape == (3, 128, 1, 64)
-    assert k.stride() == v.stride() == (24576, 64, 64, 1)
+    assert k.shape == v.shape == (6, 128, 1, 64)
+    assert k.stride() == v.stride() == (16384, 64, 64, 1)
     assert v.data_ptr() - k.data_ptr() == 16384
     assert k.data_ptr() == caches["model.layers.0.linear_attn"][0].data_ptr()
     assert ssm.data_ptr() - k.data_ptr() == 512
-    k[2].fill_(5)
-    v[2].fill_(9)
+    k[4].fill_(5)
+    v[4].fill_(9)
     torch.testing.assert_close(ssm[2].flatten()[:7936], torch.full((7936,), 5, dtype=ssm.dtype))
     torch.testing.assert_close(ssm[2].flatten()[7936:16128], torch.full((8192,), 9, dtype=ssm.dtype))
     assert torch.count_nonzero(ssm[:2]) == 0
@@ -464,7 +473,7 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert raw_qsa.is_contiguous()
 
     compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
-    assert compressed.shape == (3, 32, 1, 32)
+    assert compressed.shape == (6, 32, 1, 32)
     assert compressed.is_contiguous()
 
 
@@ -793,7 +802,7 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     )
 
 
-@pytest.mark.parametrize("manager_block_size", [128, 384, 768])
+@pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup

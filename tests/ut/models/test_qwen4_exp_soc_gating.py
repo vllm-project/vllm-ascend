@@ -72,7 +72,7 @@ def test_forward_qsa_always_uses_cann_gbsa(monkeypatch) -> None:
     logical_positions = torch.zeros(1, dtype=torch.int64)
     seq_lens = torch.ones(1, dtype=torch.int32)
 
-    def gbsa(*args):
+    def gbsa(*args, **kwargs):
         calls.append(args)
         return sentinel
 

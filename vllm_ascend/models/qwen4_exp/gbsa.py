@@ -13,95 +13,6 @@ GBSA_RESIDUAL_TOKENS = GBSA_COMPRESS_RATIO - 1
 GBSA_PAGE_SIZE = 128
 
 
-def is_qsa_gbsa_cache_compatible(cache: torch.Tensor) -> bool:
-    """Return whether a cache can be exposed as zero-copy GBSA pages.
-
-    GBSA requires every physical page to occupy a non-overlapping, uniformly
-    strided region. A storage-block stride that is not an integer multiple of
-    one 128-token page cannot be represented by a single PA_BBND tensor plus a
-    remapped block table without copying.
-    """
-    if cache.ndim != 4 or min(cache.shape) == 0:
-        return False
-    if cache.shape[1] != GBSA_PAGE_SIZE and cache.shape[2] == GBSA_PAGE_SIZE:
-        cache = cache.transpose(1, 2)
-    _, storage_page_size, num_heads, head_dim = cache.shape
-    if storage_page_size % GBSA_PAGE_SIZE:
-        return False
-    row_elements = num_heads * head_dim
-    storage_block_elements = storage_page_size * row_elements
-    subpage_elements = GBSA_PAGE_SIZE * row_elements
-    return bool(
-        cache.stride(3) == 1
-        and (num_heads == 1 or cache.stride(2) == head_dim)
-        and cache.stride(1) == row_elements
-        and cache.stride(0) >= storage_block_elements
-        and cache.stride(0) % subpage_elements == 0
-    )
-
-
-def _as_gbsa_page_pool(
-    cache: torch.Tensor,
-) -> tuple[torch.Tensor, int, int, int]:
-    """Expose a large-page cache as a zero-copy, 128-token physical pool.
-
-    The cache may have padding between storage blocks (a non-dense dim-0
-    stride), but every storage block must be dense internally.  Padding is
-    represented by unreferenced 128-token virtual page ids.  The caller remaps
-    the block table with separate block and subpage strides, so no data is
-    copied; the cache planner guarantees that padding is a whole-page multiple.
-    """
-    if cache.ndim != 4:
-        raise ValueError(f"QSA GBSA requires a 4-D KV cache, got {cache.ndim}-D")
-
-    num_blocks, storage_page_size, num_heads, head_dim = cache.shape
-    if min(cache.shape) == 0:
-        raise ValueError("QSA GBSA requires a nonempty KV cache")
-    if storage_page_size % GBSA_PAGE_SIZE:
-        raise ValueError(
-            f"QSA GBSA requires storage pages divisible into 128-token pages, got shape={tuple(cache.shape)}"
-        )
-
-    row_elements = num_heads * head_dim
-    storage_block_elements = storage_page_size * row_elements
-    subpage_elements = GBSA_PAGE_SIZE * row_elements
-    subpages = storage_page_size // GBSA_PAGE_SIZE
-
-    if cache.stride(3) != 1:
-        raise ValueError("QSA GBSA requires a contiguous KV head dimension")
-    if num_heads > 1 and cache.stride(2) != head_dim:
-        raise ValueError("QSA GBSA requires dense KV heads inside each token")
-    if cache.stride(1) != row_elements:
-        raise ValueError(
-            "QSA GBSA requires dense tokens inside each storage page, "
-            f"got shape={tuple(cache.shape)} stride={cache.stride()} "
-            f"storage_offset={cache.storage_offset()}"
-        )
-    if cache.stride(0) < storage_block_elements:
-        raise ValueError("QSA GBSA does not support overlapping KV storage pages")
-    if cache.stride(0) % subpage_elements:
-        raise ValueError(
-            "QSA GBSA cannot represent this non-contiguous cache as "
-            "non-overlapping 128-token pages without copying, "
-            f"got shape={tuple(cache.shape)} stride={cache.stride()} "
-            f"storage_offset={cache.storage_offset()}"
-        )
-    virtual_page_elements = subpage_elements
-    physical_block_stride = cache.stride(0) // subpage_elements
-    physical_subpage_stride = 1
-    physical_page_count = (num_blocks - 1) * physical_block_stride + (subpages - 1) * physical_subpage_stride + 1
-    page_pool = cache.as_strided(
-        size=(physical_page_count, GBSA_PAGE_SIZE, num_heads, head_dim),
-        stride=(virtual_page_elements, row_elements, head_dim, 1),
-    )
-    return (
-        page_pool,
-        physical_block_stride,
-        physical_subpage_stride,
-        subpages,
-    )
-
-
 def qsa_gbsa_attention(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -117,31 +28,9 @@ def qsa_gbsa_attention(
         raise ValueError("QSA GBSA requires 4-D K/V caches")
     if key_cache.shape != value_cache.shape:
         raise ValueError("QSA GBSA requires matching K/V cache shapes")
-    if key_cache.shape[1] != GBSA_PAGE_SIZE and key_cache.shape[2] == GBSA_PAGE_SIZE:
-        key_cache = key_cache.transpose(1, 2)
-        value_cache = value_cache.transpose(1, 2)
-
-    num_blocks, storage_page_size, _, _ = key_cache.shape
-    logical_max_seqlen_kv = num_blocks * storage_page_size
-    storage_page_size = key_cache.shape[1]
-    if storage_page_size % GBSA_PAGE_SIZE:
-        raise ValueError(
-            f"QSA GBSA requires storage pages divisible into 128-token pages, got shape={tuple(key_cache.shape)}"
-        )
-    if storage_page_size != GBSA_PAGE_SIZE:
-        key_cache, block_stride, subpage_stride, subpages = _as_gbsa_page_pool(key_cache)
-        value_cache, value_block_stride, value_subpage_stride, value_subpages = _as_gbsa_page_pool(value_cache)
-        if (block_stride, subpage_stride, subpages) != (
-            value_block_stride,
-            value_subpage_stride,
-            value_subpages,
-        ):
-            raise ValueError("QSA GBSA requires matching K/V cache strides")
-        # vLLM's block table already addresses virtual 128-token pages.
-        # Packed K/V leaves a V-sized gap between consecutive K storage blocks.
-        physical_pages = torch.div(block_table, subpages, rounding_mode="floor") * block_stride
-        physical_pages = physical_pages + block_table.remainder(subpages) * subpage_stride
-        block_table = torch.where(block_table >= 0, physical_pages, torch.full_like(block_table, -1))
+    # The table width counts logical kernel pages; pool rows also include
+    # packed gaps and therefore do not describe the sequence-length bound.
+    logical_max_seqlen_kv = block_table.shape[1] * GBSA_PAGE_SIZE
     num_kv_heads = key_cache.shape[2]
     if query.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("QSA GBSA requires FP16/BF16 query")
@@ -225,4 +114,4 @@ def qsa_gbsa_attention(
     return output
 
 
-__all__ = ["is_qsa_gbsa_cache_compatible", "qsa_gbsa_attention"]
+__all__ = ["qsa_gbsa_attention"]

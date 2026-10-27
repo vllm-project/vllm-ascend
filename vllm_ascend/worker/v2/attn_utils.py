@@ -106,6 +106,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     QSA_MAIN,
     QSA_RAW,
     build_qwen4_kv_cache_layout,
+    make_qsa_kernel_page_cache,
     make_slab_view,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
@@ -1168,32 +1169,31 @@ def _allocate_kv_cache(
     # build the layout from the cache groups themselves. Allocate
     # slot_count shared slabs plus one dense bank per PLE/hidden owner.
     # Reshape must preserve the physical byte strides used by this planner.
-    if vllm_config.kv_transfer_config is None and not is_dsv4_model:
-        qwen4_cache_layout = build_qwen4_kv_cache_layout(
-            kv_cache_config.kv_cache_groups,
-            kv_cache_config.num_blocks,
+    qwen4_cache_layout = build_qwen4_kv_cache_layout(
+        kv_cache_config.kv_cache_groups,
+        kv_cache_config.num_blocks,
+    )
+    if qwen4_cache_layout is not None:
+        backing = _allocate_int8_cache_tensor(
+            qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
+            alignment,
+            device,
         )
-        if qwen4_cache_layout is not None:
-            backing = _allocate_int8_cache_tensor(
-                qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
-                alignment,
-                device,
-            )
-            for cache_owner in qwen4_cache_layout.owners:
-                if cache_owner.role in (PLE, HIDDEN):
-                    # PLE indexed updates require dense blocks; r2's larger
-                    # stride would materialize the entire state pool.
-                    size = (
-                        cache_owner.spec.state_content_size_bytes
-                        if isinstance(cache_owner.spec, MambaSpec)
-                        else cache_owner.spec.page_size_bytes
-                    )
-                    kv_cache_raw_tensors[cache_owner.layer_name] = _allocate_int8_cache_tensor(
-                        kv_cache_config.num_blocks * size, alignment, device
-                    )
-                else:
-                    kv_cache_raw_tensors[cache_owner.layer_name] = backing
-            return kv_cache_raw_tensors
+        for cache_owner in qwen4_cache_layout.owners:
+            if cache_owner.role in (PLE, HIDDEN):
+                # PLE indexed updates require dense blocks; r2's larger
+                # stride would materialize the entire state pool.
+                size = (
+                    cache_owner.spec.state_content_size_bytes
+                    if isinstance(cache_owner.spec, MambaSpec)
+                    else cache_owner.spec.page_size_bytes
+                )
+                kv_cache_raw_tensors[cache_owner.layer_name] = _allocate_int8_cache_tensor(
+                    kv_cache_config.num_blocks * size, alignment, device
+                )
+            else:
+                kv_cache_raw_tensors[cache_owner.layer_name] = backing
+        return kv_cache_raw_tensors
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
@@ -1650,12 +1650,10 @@ def _reshape_kv_cache_v2(
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
     # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
-    qwen4_cache_layout = None
-    if vllm_config.kv_transfer_config is None and not is_dsv4_model:
-        qwen4_cache_layout = build_qwen4_kv_cache_layout(
-            kv_cache_config.kv_cache_groups,
-            kv_cache_config.num_blocks,
-        )
+    qwen4_cache_layout = build_qwen4_kv_cache_layout(
+        kv_cache_config.kv_cache_groups,
+        kv_cache_config.num_blocks,
+    )
     layer_tuple_strides: dict[str, int] = {}
     if is_deepseek_v41_cache(layer_kv_cache_spec):
         layer_tuple_strides = {
@@ -1716,22 +1714,17 @@ def _reshape_kv_cache_v2(
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
                     region = qwen4_cache_layout.region("r0")
-                    k_bytes = (
-                        kv_cache_spec.block_size
-                        * kv_cache_spec.num_kv_heads
-                        * kv_cache_spec.head_size
-                        * get_dtype_size(kv_cache_spec.dtype)
-                    )
-                    kv_caches[layer_name] = tuple(
-                        make_slab_view(
-                            raw_slab,
-                            dtype=kv_cache_spec.dtype,
-                            num_blocks=kv_cache_config.num_blocks,
-                            item_shape=(kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, head_size),
-                            storage_offset=slot_offset + region.offset + offset,
-                            block_stride=region.block_stride,
-                        )
-                        for head_size, offset in ((kv_cache_spec.head_size, 0), (kv_cache_spec.head_size_v, k_bytes))
+                    kv_caches[layer_name] = make_qsa_kernel_page_cache(
+                        raw_slab,
+                        dtype=kv_cache_spec.dtype,
+                        num_blocks=kv_cache_config.num_blocks,
+                        manager_block_size=kv_cache_spec.block_size,
+                        kernel_block_size=kernel_block_size,
+                        num_kv_heads=kv_cache_spec.num_kv_heads,
+                        head_size=kv_cache_spec.head_size,
+                        head_size_v=kv_cache_spec.head_size_v,
+                        storage_offset=slot_offset + region.offset,
+                        block_stride=region.block_stride,
                     )
                     continue
                 if owner.role in (QSA_RAW, QSA_COMPRESSED):

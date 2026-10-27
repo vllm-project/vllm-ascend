@@ -275,7 +275,7 @@ def build_qwen4_kv_cache_layout(
     # whole page; GDN interprets the same bytes as adjacent conv and SSM.
     subpage_alignment = math.lcm(
         *(
-            128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
+            2 * 128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
             for _, spec in role_members[QSA_MAIN]
             for size in (spec.head_size, spec.head_size_v)
         )
@@ -369,6 +369,45 @@ def make_slab_view(
         .as_strided((num_blocks, *item_shape), (block_stride // dtype_size, *inner_strides))
     )
     return result
+
+
+def make_qsa_kernel_page_cache(
+    backing: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    num_blocks: int,
+    manager_block_size: int,
+    kernel_block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    head_size_v: int,
+    storage_offset: int,
+    block_stride: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Interleave K/V per kernel page and expose two strided tensor views."""
+    dtype_size = get_dtype_size(dtype)
+    page_bytes = kernel_block_size * num_kv_heads * head_size * dtype_size
+    pair_bytes = 2 * page_bytes
+    if manager_block_size % kernel_block_size or block_stride % pair_bytes or head_size != head_size_v:
+        raise ValueError("QSA kernel-page pools require equal K/V widths and whole-page strides")
+    kernel_pages = manager_block_size // kernel_block_size
+    # vLLM grows manager blocks to fit the full Mamba page. The resulting
+    # K/V pairs must be contiguous so its block IDs and slots need no remap.
+    if block_stride != kernel_pages * pair_bytes:
+        raise ValueError("QSA manager page must match its aligned kernel K/V pairs")
+    physical_page_count = num_blocks * kernel_pages
+    key, value = (
+        make_slab_view(
+            backing,
+            dtype=dtype,
+            num_blocks=physical_page_count,
+            item_shape=(kernel_block_size, num_kv_heads, width),
+            storage_offset=storage_offset + offset,
+            block_stride=pair_bytes,
+        )
+        for width, offset in ((head_size, 0), (head_size_v, page_bytes))
+    )
+    return key, value
 
 
 def _prepare_qsa_composite_groups(
