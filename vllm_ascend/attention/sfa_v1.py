@@ -2067,9 +2067,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         if gate_hidden_states is not None:
             gate_hidden_states = gate_hidden_states[:num_input_tokens]
 
-        if fused_type == PreprocessType.NATIVE and gate_hidden_states is not None:
-            gate_hidden_states = hidden_states
-
         if fused_type != PreprocessType.NATIVE:
             self._start_o_proj_weight_gather()
             # Keep the raw hidden states for the indexer's k path: the fused
