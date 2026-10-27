@@ -142,6 +142,9 @@ def test_upstream_verify_uses_processed_logits_without_class_patch(monkeypatch, 
     verifier.synthetic_conditional_rates = None
     verifier.use_block_verification = False
     verifier.watermark_key = None
+    verifier.fly_window_size = 0
+    verifier.fly_entropy_threshold = 0.3
+    verifier.fly_entropy_top_k = 3
     # Upstream main adds this argument; the supported release omits it.
     verify_kwargs = {}
     if "verify_draft_sampled" in inspect.signature(verifier._verify).parameters:
