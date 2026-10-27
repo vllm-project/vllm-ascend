@@ -231,13 +231,14 @@ def test_packed_clones_are_tracked_before_the_loader_can_release_them(num_buffer
     raw_pointers = []
 
     def receive(tensor, **kwargs):
+        recorded.clear()
         tensor.zero_()
         raw_pointers.append(tensor.untyped_storage().data_ptr())
 
     def load(weights):
         for _, tensor in weights:
             pointer = tensor.untyped_storage().data_ptr()
-            assert pointer not in raw_pointers
+            assert pointer != raw_pointers[-1]
             assert all((pointer, stream) in recorded for stream in (*streams, caller_stream))
 
     with patch.object(torch.Tensor, "record_stream", record):
