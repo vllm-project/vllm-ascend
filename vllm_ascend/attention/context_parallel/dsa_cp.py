@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSA prefill context parallelism using the PCP group and MRV2 batches."""
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.logger import logger
@@ -34,12 +31,10 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
-from vllm_ascend.quantization.methods import AscendLinearScheme
 from vllm_ascend.utils import enable_pcp_o_proj_weight_sharding
 from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
+    ParallelOProjection,
     WeightSwitchConfig,
-    WeightSwitchMixin,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -448,7 +443,9 @@ class AscendDSAPCPImpl(AscendDSAImpl):
     """Use ordinary decode updates or global PCP prefill cache updates."""
 
     supports_pcp: ClassVar[bool] = True
+
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
+    o_proj_weight_switch_pool_key = "dsa_pcp_o_proj"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -457,108 +454,29 @@ class AscendDSAPCPImpl(AscendDSAImpl):
         # cache-update work for the auxiliary stream to overlap.
         self.multistream_dsv4_dsa_overlap = False
 
-        # V4 and V4.1 share this projector; the batch context selects its O path.
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
-        if not self.enable_pcp_o_proj_weight_sharding:
-            return
-
-        self._pcp_o_proj_weight_switches = None
-        self._pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
-        # Fall back to ordinary O weights if groups or quantization cannot be sharded.
-        pcp_size = get_pcp_group().world_size
-        try:
-            if self.n_local_groups % pcp_size != 0:
-                raise ValueError(f"n_local_groups={self.n_local_groups} is not divisible by pcp_size={pcp_size}")
-            self._get_pcp_weight_switch_method(self.wo_a)
-            self._get_pcp_weight_switch_method(self.wo_b)
-        except (RuntimeError, ValueError) as exc:
-            logger.warning_once(
-                "DSA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
-                exc,
-            )
-            self.enable_pcp_o_proj_weight_sharding = False
-            return
-
-        # Configure PCP weight loading before the model weights are loaded.
-        self._prepare_pcp_o_proj_weight_shards()
-        # Sharded decode needs exchange buffers allocated before graph capture.
-        if self._pcp_decode_sharded:
-            self._initialize_pcp_o_proj_exchange_buffers()
-
-    @staticmethod
-    def _get_pcp_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
-        quant_method = layer.quant_method
-        linear_method = getattr(quant_method, "quant_method", quant_method)
-        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
-            raise RuntimeError(
-                "DSA-PCP O-proj weight sharding requires a weight-switch capable method, "
-                f"got {type(linear_method).__name__}."
-            )
-        return linear_method
-
-    def _prepare_pcp_o_proj_weight_shards(self) -> None:
-        pcp_group = get_pcp_group()
-        if self.n_local_groups % pcp_group.world_size != 0:
-            raise ValueError(
-                "DSA-PCP O-proj weight sharding requires n_local_groups to be "
-                "divisible by the PCP size, got "
-                f"n_local_groups={self.n_local_groups}, pcp_size={pcp_group.world_size}."
-            )
-
-        self.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group)
-        load_partition = WeightLoadPartition.from_nested_groups(get_tp_group(), pcp_group)
-        self.wo_a_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_a)
-        self.wo_b_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_b)
-        self.wo_a_pcp_weight_method.prepare_layer_for_parallel_output_weight_load(
-            self.wo_a,
-            self.pcp_o_proj_weight_switch_config,
-            load_partition,
-        )
-        self.wo_b_pcp_weight_method.prepare_layer_for_parallel_weight_load(
+        self._parallel_o_proj = ParallelOProjection(
+            self.n_local_heads * self.head_dim,
             self.wo_b,
-            self.pcp_o_proj_weight_switch_config,
-            load_partition,
+            config=WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"),
+            tp_group=get_tp_group(),
+            pool=self.o_proj_full_pools,
+            pool_key=self.o_proj_weight_switch_pool_key,
+            project_full=super()._forward_o_proj,
+            decode_sharded=is_pcp_decode_sharding_enabled(self.vllm_config),
+            input_layer=self.wo_a,
+            input_projection=self._wo_a_bmm,
+            num_input_groups=self.n_local_groups,
         )
-
-        # wo_a post-processing reshapes the raw output shard into a batched
-        # group layout. Keep its layer/method metadata aligned with the
-        # PCP-local resident shard; the attention implementation itself keeps
-        # the TP-local group count because runtime all-gather restores it.
-        local_groups = self.n_local_groups // pcp_group.world_size
-        self.wo_a.n_local_groups = local_groups
-        if hasattr(self.wo_a_pcp_weight_method, "n_local_groups"):
-            self.wo_a_pcp_weight_method.n_local_groups = local_groups
-
-    def _initialize_pcp_o_proj_exchange_buffers(self) -> None:
-        """Allocate activation-typed collective storage before graph capture."""
-        pcp_size = get_pcp_group().world_size
-        compilation_config = self.vllm_config.compilation_config
-        decode_query_len = 1 + self.vllm_config.num_speculative_tokens
-        capacity = max(
-            self.vllm_config.scheduler_config.max_num_seqs * decode_query_len,
-            compilation_config.max_cudagraph_capture_size or 0,
-            max(compilation_config.cudagraph_capture_sizes or [0]),
-        )
-        input_size = self.n_local_heads * self.head_dim
-        output_size = self.wo_b.output_size_per_partition
-        dtype = self.vllm_config.model_config.dtype
-        device = self.wo_b.weight.device
-        # Compatible layers share storage because O projections execute in
-        # sequence. Forward slices the active bucket without reallocating or
-        # sending the unused capacity; all HCCL addresses stay graph-stable.
-        shapes = {
-            "_pcp_o_proj_ag_in_buf": (capacity, input_size),
-            "_pcp_o_proj_ag_out_buf": (pcp_size * capacity, input_size),
-            "_pcp_o_proj_rs_in_buf": (pcp_size * capacity, output_size),
-            "_pcp_o_proj_rs_out_buf": (capacity, output_size),
-        }
-        for name, shape in shapes.items():
-            key = ("dsa_pcp_o_proj_decode", name, device, dtype, shape)
-            buffer = self.o_proj_full_pools.get(key)
-            if buffer is None:
-                buffer = torch.empty(shape, dtype=dtype, device=device)
-                self.o_proj_full_pools[key] = buffer
-            setattr(self, name, buffer)
+        if self.enable_pcp_o_proj_weight_sharding:
+            try:
+                self._parallel_o_proj.prepare_weight_load(self.vllm_config)
+            except (RuntimeError, ValueError) as exc:
+                logger.warning_once(
+                    "DSA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
+                    exc,
+                )
+                self.enable_pcp_o_proj_weight_sharding = False
 
     def forward(
         self,
@@ -574,13 +492,13 @@ class AscendDSAPCPImpl(AscendDSAImpl):
         # Global prefill must select the same collectives on every rank;
         # a one-token prefill shard can look like DecodeOnly locally.
         has_prefill = pcp_metadata is not None and pcp_metadata.pcp_has_global_prefill
-        with self._o_proj_batch(needs_global_metadata=pcp_metadata is not None, has_prefill=has_prefill):
+        with self._parallel_o_proj.batch(needs_global_metadata=pcp_metadata is not None, has_prefill=has_prefill):
             result = super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
             # V4 returns after cache preparation on empty query ranks. They
             # still project other owners' requests with their resident O groups.
             # Keep this on the successful path, outside exception cleanup.
             if (
-                self._pcp_o_proj_use_activation_exchange
+                self._parallel_o_proj.exchanges_tokens
                 and pcp_metadata is not None
                 and pcp_metadata.num_actual_tokens == 0
             ):
@@ -589,139 +507,8 @@ class AscendDSAPCPImpl(AscendDSAImpl):
                 output.zero_()
             return result
 
-    @contextmanager
-    def _o_proj_batch(
-        self,
-        needs_global_metadata: bool,
-        has_prefill: bool,
-    ) -> Generator[None, None, None]:
-        """Own the O-projection mode and weight lifetime for V4 and V4.1.
-
-        Callers translate their metadata into global batch facts before cache
-        preparation. Prefill gathers weights, sharded decode exchanges
-        activations, and replicated decode/profile uses resident local weights.
-        """
-        try:
-            self._pcp_o_proj_use_activation_exchange = (
-                self.enable_pcp_o_proj_weight_sharding
-                and needs_global_metadata
-                and self._pcp_decode_sharded
-                and not has_prefill
-            )
-            self._pcp_o_proj_use_full_weight = (
-                self.enable_pcp_o_proj_weight_sharding
-                and needs_global_metadata
-                and not self._pcp_o_proj_use_activation_exchange
-            )
-            # V4.1 calls O projection directly rather than DSA forward. Prepare
-            # persistent aliases during warmup, before either caller captures.
-            if self.enable_pcp_o_proj_weight_sharding:
-                self._get_pcp_o_proj_weight_switches()
-            yield
-        finally:
-            # An empty query rank or an early return may skip O projection.
-            # Drain launched weight gathers and restore resident shards.
-            if self.enable_pcp_o_proj_weight_sharding:
-                for layer, method, state in self._pcp_o_proj_weight_switches or ():
-                    if state.handles:
-                        method.wait_weight_all_gather(state)
-                    if self._pcp_o_proj_use_full_weight:
-                        method.switch_weight(layer, state, use_full_weight=False)
-
-    def _maybe_all_gather_pcp_o_proj_weights(self) -> None:
-        if not self._pcp_o_proj_use_full_weight:
-            return
-
-        for _, method, state in self._get_pcp_o_proj_weight_switches():
-            method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
-
-    def _get_pcp_o_proj_weight_switches(self):
-        if self._pcp_o_proj_weight_switches is None:
-            weight_switches = []
-            for name, layer, method in (
-                ("wo_a", self.wo_a, self.wo_a_pcp_weight_method),
-                ("wo_b", self.wo_b, self.wo_b_pcp_weight_method),
-            ):
-                state = method.enable_weight_switch(
-                    layer,
-                    self.pcp_o_proj_weight_switch_config,
-                    pool=AscendDSAPCPImpl.o_proj_full_pools,
-                    pool_key_prefix=(type(method).__qualname__, name, "dsa_pcp_o_proj"),
-                )
-                weight_switches.append((layer, method, state))
-            self._pcp_o_proj_weight_switches = tuple(weight_switches)
-        return self._pcp_o_proj_weight_switches
-
-    def _project_o_proj_with_local_weights(self, group_input: torch.Tensor) -> torch.Tensor:
-        """Project only the O groups owned by this PCP rank, then reduce TP."""
-        pcp_group = get_pcp_group()
-        projected = self._wo_a_bmm(group_input).reshape(group_input.shape[0], -1)
-        linear_method = self._get_pcp_weight_switch_method(self.wo_b)
-        if isinstance(linear_method, AscendLinearScheme):
-            tp_group = get_tp_group()
-            # The complete O-projection bias belongs to only one TP/PCP shard.
-            bias_rank = 0 if tp_group.rank_in_group == 0 and pcp_group.rank_in_group == 0 else 1
-            bias = self.wo_b.bias if bias_rank == 0 and not self.wo_b.skip_bias_add else None
-            partial_output = linear_method.apply(self.wo_b, projected, bias=bias, tp_rank=bias_rank)
-            if self.wo_b.reduce_results and tp_group.world_size > 1:
-                partial_output = tp_group.all_reduce(partial_output)
-        else:
-            partial_output = self.wo_b(projected)
-        return partial_output
-
-    def _forward_o_proj_with_local_weights(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        # Decode tokens and their KV cache updates are replicated across PCP
-        # ranks, so each rank projects the same attention output locally.
-        pcp_group = get_pcp_group()
-        num_tokens = o_proj_input.shape[0]
-        groups_per_rank = self.n_local_groups // pcp_group.world_size
-        group_input = o_proj_input.reshape(num_tokens, self.n_local_groups, -1)
-        group_input = group_input.narrow(1, pcp_group.rank_in_group * groups_per_rank, groups_per_rank).contiguous()
-
-        output[...] = pcp_group.all_reduce(self._project_o_proj_with_local_weights(group_input))
-        return output
-
-    def _forward_o_proj_with_sharded_tokens(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        """Gather decode tokens, project local O groups, and scatter sums."""
-        pcp_group = get_pcp_group()
-        num_tokens = o_proj_input.shape[0]
-        groups_per_rank = self.n_local_groups // pcp_group.world_size
-        group_hidden_dim = self.n_local_heads * self.head_dim // self.n_local_groups
-        local_rows = self._pcp_o_proj_ag_in_buf[:num_tokens]
-        local_rows.copy_(o_proj_input.reshape(num_tokens, -1))
-        global_rows = self._pcp_o_proj_ag_out_buf[: pcp_group.world_size * num_tokens]
-        # AllToAll reduces payload but adds a channel-packing transpose; measured
-        # small-batch decode showed no clear benefit, so use token AllGather.
-        dist.all_gather_into_tensor(global_rows, local_rows, group=pcp_group.device_group)
-        # Rank-major padded rows match ReduceScatter's token ownership. Select
-        # resident O groups after gathering to avoid packing channels to send.
-        group_input = global_rows.view(pcp_group.world_size * num_tokens, self.n_local_groups, group_hidden_dim)
-        group_input = group_input.narrow(1, pcp_group.rank_in_group * groups_per_rank, groups_per_rank).contiguous()
-        partial_output = self._project_o_proj_with_local_weights(group_input)
-        scatter_input = self._pcp_o_proj_rs_in_buf[: pcp_group.world_size * num_tokens]
-        scatter_input.copy_(partial_output)
-        reduced = self._pcp_o_proj_rs_out_buf[:num_tokens]
-        dist.reduce_scatter_tensor(reduced, scatter_input, group=pcp_group.device_group)
-        output.copy_(reduced)
-        return output
-
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        if not self.enable_pcp_o_proj_weight_sharding:
-            return super()._forward_o_proj(o_proj_input, output)
-        if self._pcp_o_proj_use_activation_exchange:
-            return self._forward_o_proj_with_sharded_tokens(o_proj_input, output)
-        if not self._pcp_o_proj_use_full_weight:
-            return self._forward_o_proj_with_local_weights(o_proj_input, output)
-
-        weight_switches = self._get_pcp_o_proj_weight_switches()
-        for layer, method, state in weight_switches:
-            method.wait_weight_all_gather(state)
-            method.switch_weight(layer, state, use_full_weight=True)
-        try:
-            return super()._forward_o_proj(o_proj_input, output)
-        finally:
-            for layer, method, state in weight_switches:
-                method.switch_weight(layer, state, use_full_weight=False)
+        return self._parallel_o_proj.forward(o_proj_input, output)
 
     def _gather_and_restore_hidden_states(
         self,
@@ -872,7 +659,8 @@ class AscendDSAPCPImpl(AscendDSAImpl):
         # Every rank must join the weight gathers, including ranks that return
         # before local attention. Launch after the cache collectives to overlap
         # local attention on nonempty ranks.
-        self._maybe_all_gather_pcp_o_proj_weights()
+        self._parallel_o_proj.all_gather_weights()
+
         return True
 
     def _get_o_proj_input_shape(

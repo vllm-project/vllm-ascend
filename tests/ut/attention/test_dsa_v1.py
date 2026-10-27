@@ -49,9 +49,10 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
-from vllm_ascend.ops.linear import AscendRowParallelLinear
+from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_static import AscendW8A8LinearMethod
+from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -1027,6 +1028,14 @@ def _make_impl(
             "vllm_ascend.attention.context_parallel.dsa_cp.enable_pcp_o_proj_weight_sharding",
             return_value=False,
         ),
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.get_pcp_group",
+            return_value=SimpleNamespace(world_size=2, rank_in_group=0),
+        ),
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
+            return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+        ),
     ):
         return impl_cls(
             n_heads=1,
@@ -1041,7 +1050,10 @@ def _make_impl(
             n_local_groups=1,
             window_size=16,
             compress_ratio=1,
-            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto")),
+            vllm_config=SimpleNamespace(
+                cache_config=SimpleNamespace(cache_dtype="auto"),
+                parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+            ),
             wq_a=linear,
             wq_b=linear,
             wkv=linear,
@@ -2054,6 +2066,22 @@ def test_pcp_graph_metadata_restores_mtp_query_offsets():
     assert torch.equal(replace_kwargs["query_start_loc_cpu"], expected_query_start_loc)
 
 
+def _attach_parallel_o_proj(impl, pcp_group, *, tp_group=None, decode_sharded=False):
+    impl._parallel_o_proj = ParallelOProjection(
+        impl.n_local_heads * impl.head_dim,
+        impl.wo_b,
+        config=WeightSwitchConfig.from_group(pcp_group, shard_axis="input"),
+        tp_group=tp_group or SimpleNamespace(world_size=1, rank_in_group=0),
+        pool=impl.o_proj_full_pools,
+        pool_key="dsa_pcp_o_proj",
+        project_full=AscendDSAImpl._forward_o_proj.__get__(impl),
+        decode_sharded=decode_sharded,
+        input_layer=impl.wo_a,
+        input_projection=impl._wo_a_bmm,
+        num_input_groups=impl.n_local_groups,
+    )
+
+
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 @pytest.mark.parametrize("shard_o_proj", [False, True])
 @pytest.mark.parametrize("global_prefill,decode_sharded", [(True, False), (True, True), (False, True)])
@@ -2066,8 +2094,10 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
     """Exercise batched cache preparation, local attention, and empty ranks."""
     impl = _make_impl(AscendDSAPCPImpl)
     impl.enable_pcp_o_proj_weight_sharding = shard_o_proj
-    impl._pcp_decode_sharded = decode_sharded
-    impl.pcp_o_proj_weight_switch_config = MagicMock()
+    impl._parallel_o_proj.enabled = shard_o_proj
+    impl._parallel_o_proj._weight_switch_enabled = shard_o_proj
+    impl._parallel_o_proj.decode_sharded = decode_sharded
+    impl._parallel_o_proj.config = MagicMock()
     events = []
     weight_switches = []
     for _ in range(2):
@@ -2087,7 +2117,7 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         method.all_gather_weight.side_effect = gather
         method.wait_weight_all_gather.side_effect = wait
         weight_switches.append((MagicMock(), method, state))
-    impl._pcp_o_proj_weight_switches = tuple(weight_switches)
+    impl._parallel_o_proj._weight_switch_states = tuple(weight_switches)
     impl.compress_ratio = 4
     impl.compressor = SimpleNamespace(
         state_cache=SimpleNamespace(prefix="compressor.state_cache"),
@@ -2269,10 +2299,11 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
     )
     attn_metadata = {"swa_cache": metadata}
     impl.enable_pcp_o_proj_weight_sharding = True
-    impl._pcp_o_proj_use_full_weight = True
-    impl._pcp_decode_sharded = False
-    impl._pcp_o_proj_weight_switches = None
-    impl._get_pcp_o_proj_weight_switches = MagicMock(return_value=())
+    impl._parallel_o_proj.enabled = True
+    impl._parallel_o_proj.set_mode(use_full_weight=True, exchange_tokens=False)
+    impl._parallel_o_proj.decode_sharded = False
+    impl._parallel_o_proj._weight_switch_states = None
+    impl._parallel_o_proj.enable = MagicMock()
 
     with (
         patch.object(
@@ -2281,9 +2312,9 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
             autospec=True,
             return_value=False,
         ) as prepare_standard_caches,
-        impl._o_proj_batch(needs_global_metadata=False, has_prefill=False),
+        impl._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False),
     ):
-        assert not impl._pcp_o_proj_use_full_weight
+        assert not impl._parallel_o_proj.uses_full_weight
         assert not impl._prepare_caches_before_attention(
             "layer",
             torch.empty((4, 4)),
@@ -2292,21 +2323,59 @@ def test_pcp_decode_delegates_to_standard_cache_preparation():
         )
 
     prepare_standard_caches.assert_called_once()
-    impl._get_pcp_o_proj_weight_switches.assert_called_once()
+    impl._parallel_o_proj.enable.assert_called_once()
 
 
 @pytest.mark.parametrize("global_prefill", [False, True])
 def test_disabled_pcp_o_projection_context_needs_no_shard_state(global_prefill):
     impl = _make_impl(AscendDSAPCPImpl)
-    assert not hasattr(impl, "_pcp_o_proj_weight_switches")
+    assert impl._parallel_o_proj._weight_switch_states is None
     assert not hasattr(impl, "_pcp_decode_sharded")
     with (
         pytest.raises(RuntimeError, match="injected failure"),
-        impl._o_proj_batch(needs_global_metadata=True, has_prefill=global_prefill),
+        impl._parallel_o_proj.batch(needs_global_metadata=True, has_prefill=global_prefill),
     ):
-        assert not impl._pcp_o_proj_use_full_weight
-        assert not impl._pcp_o_proj_use_activation_exchange
+        assert not impl._parallel_o_proj.uses_full_weight
+        assert not impl._parallel_o_proj.exchanges_tokens
         raise RuntimeError("injected failure")
+
+
+def test_dsa_pcp_exchange_buffer_uses_attention_output_width():
+    impl = AscendDSAPCPImpl.__new__(AscendDSAPCPImpl)
+    impl.n_local_heads = 32
+    impl.n_local_groups = 2
+    impl.head_dim = 512
+    impl.o_proj_full_pools = {}
+    impl.wo_a = SimpleNamespace(
+        input_size=32 * 512,
+        input_size_per_partition=32 * 512,
+        output_size_per_partition=1234,
+        weight=torch.empty(1),
+    )
+    impl.wo_b = SimpleNamespace(
+        input_size=4096,
+        input_size_per_partition=4096,
+        output_size_per_partition=4096,
+        weight=torch.empty(1),
+    )
+    group = SimpleNamespace(world_size=2, rank_in_group=0, device_group=object())
+    impl.vllm_config = SimpleNamespace(
+        num_speculative_tokens=0,
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        compilation_config=SimpleNamespace(max_cudagraph_capture_size=16, cudagraph_capture_sizes=None),
+        model_config=SimpleNamespace(dtype=torch.float32),
+    )
+    _attach_parallel_o_proj(impl, group)
+
+    impl._parallel_o_proj._prepare_exchange_buffers(impl.vllm_config)
+
+    assert impl._parallel_o_proj.input_layer is impl.wo_a
+    assert impl._parallel_o_proj.o_proj is impl.wo_b
+    assert impl._parallel_o_proj.input_size == 32 * 512
+    assert impl._parallel_o_proj.output_size == 4096
+    assert impl._parallel_o_proj.all_gather_input.shape == (16, 32 * 512)
+    assert impl._parallel_o_proj.all_gather_output.shape == (32, 32 * 512)
+    assert impl._parallel_o_proj.reduce_scatter_input.shape == (32, 4096)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
@@ -2360,6 +2429,9 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
                 num_speculative_tokens=0,
                 model_config=SimpleNamespace(dtype=torch.bfloat16),
             )
+            layer.input_size_per_partition = 2
+            _attach_parallel_o_proj(impl, pcp_group, tp_group=tp_group, decode_sharded=decode_sharded)
+            impl._parallel_o_proj._weight_switch_enabled = True
 
             def exchange(destination, source, *, group):
                 destination.copy_(source.repeat(2, 1))
@@ -2382,25 +2454,163 @@ def test_pcp_local_o_projection_adds_static_quant_bias_once(tp_size, reduce_resu
                 patch.object(torch.ops.vllm, "quantize", create=True, side_effect=lambda x, *args: x.to(torch.int8)),
                 patch("torch_npu.npu_transpose_batchmatmul", create=True, side_effect=lambda x, *args, **kwargs: x),
                 patch("torch_npu.npu_quant_matmul", create=True, side_effect=quant_matmul),
-                patch(
-                    "vllm_ascend.attention.context_parallel.dsa_cp.dist.all_gather_into_tensor", side_effect=exchange
-                ) as ag,
-                patch(
-                    "vllm_ascend.attention.context_parallel.dsa_cp.dist.reduce_scatter_tensor", side_effect=scatter
-                ) as rs,
+                patch.object(torch.distributed, "all_gather_into_tensor", side_effect=exchange) as ag,
+                patch.object(torch.distributed, "reduce_scatter_tensor", side_effect=scatter) as rs,
             ):
                 result = torch.empty((1, 2), dtype=torch.bfloat16)
                 inputs = torch.zeros((1, 2, 2), dtype=torch.bfloat16)
                 if decode_sharded:
-                    impl._initialize_pcp_o_proj_exchange_buffers()
-                    impl._forward_o_proj_with_sharded_tokens(inputs, result)
+                    impl._parallel_o_proj._prepare_exchange_buffers(impl.vllm_config)
+                    impl._parallel_o_proj.set_mode(use_full_weight=False, exchange_tokens=True)
+                    impl._forward_o_proj(inputs, result)
                 else:
-                    impl._forward_o_proj_with_local_weights(inputs, result)
+                    impl._parallel_o_proj.set_mode(use_full_weight=False, exchange_tokens=False)
+                    impl._forward_o_proj(inputs, result)
                 partial_outputs.append(result)
             assert tp_group.all_reduce.call_count == int(reduce_results and tp_size > 1)
             assert pcp_group.all_reduce.call_count == int(not decode_sharded)
             assert ag.call_count == rs.call_count == int(decode_sharded)
     assert torch.equal(torch.stack(partial_outputs).sum(0), torch.full((1, 2), quant_bias_value, dtype=torch.bfloat16))
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("reduce_results", [False, True])
+@pytest.mark.parametrize("skip_bias_add", [False, True])
+@pytest.mark.parametrize("decode_sharded", [False, True])
+def test_pcp_o_projection_preserves_ordinary_bias_and_collective_order(
+    quantized, reduce_results, skip_bias_add, decode_sharded
+):
+    """Apply ordinary bias once with PCP before TP and deferred TP summation."""
+    peers = torch.arange(1, 17, dtype=torch.float32).reshape(2, 2, 2, 2)
+    all_rows = torch.cat(tuple(peers)) if decode_sharded else peers[0]
+    bias = torch.tensor([13.0, 17.0])
+    by_owner: dict[int, list[torch.Tensor]] = {0: [], 1: []}
+
+    def contribution(tp_rank, pcp_rank):
+        return all_rows[:, pcp_rank] * (1 + 2 * tp_rank + pcp_rank)
+
+    full_sum = sum(contribution(tp_rank, pcp_rank) for tp_rank in range(2) for pcp_rank in range(2))
+    for pcp_rank in range(2):
+        for tp_rank in range(2):
+            events: list[str] = []
+            partial = contribution(tp_rank, pcp_rank)
+            after_pcp = sum(contribution(tp_rank, rank) for rank in range(2))
+            tp_input = after_pcp.chunk(2)[pcp_rank] if decode_sharded else after_pcp
+            after_tp = (full_sum.chunk(2)[pcp_rank] if decode_sharded else full_sum) if reduce_results else tp_input
+
+            def reduce_tp(value, *, events=events, tp_input=tp_input, after_tp=after_tp):
+                events.append("tp")
+                torch.testing.assert_close(value, tp_input)
+                return after_tp
+
+            def reduce_pcp(value, *, events=events, partial=partial, after_pcp=after_pcp):
+                events.append("pcp")
+                torch.testing.assert_close(value, partial)
+                return after_pcp
+
+            def gather(destination, source, *, group, events=events, pcp_rank=pcp_rank):
+                events.append("gather")
+                torch.testing.assert_close(source, peers[pcp_rank].flatten(1))
+                destination.copy_(all_rows.flatten(1))
+
+            def scatter(
+                destination, source, *, group, events=events, partial=partial, after_pcp=after_pcp, pcp_rank=pcp_rank
+            ):
+                events.append("scatter")
+                torch.testing.assert_close(source, partial)
+                destination.copy_(after_pcp.chunk(2)[pcp_rank])
+
+            def grouped_matmul(value, weight, *, events=events, **kwargs):
+                events.append("wo_a")
+                return torch.bmm(value.transpose(0, 1), weight).transpose(0, 1)
+
+            def unquantized_gemm(value, weight, ordinary_bias, *, events=events):
+                events.append("wo_b")
+                assert ordinary_bias is None
+                return torch.nn.functional.linear(value, weight)
+
+            def quantized_gemm(value, weight, scale, *, bias, output_dtype, events=events):
+                events.append("wo_b")
+                # ModelSlim's quantization correction is independent of the
+                # ordinary output bias tested here.
+                assert bias is None or not torch.count_nonzero(bias)
+                return torch.nn.functional.linear(value.to(output_dtype), weight.to(output_dtype))
+
+            tp_group = SimpleNamespace(world_size=2, rank_in_group=tp_rank, all_reduce=reduce_tp)
+            pcp_group = SimpleNamespace(
+                world_size=2, rank_in_group=pcp_rank, device_group=object(), all_reduce=reduce_pcp
+            )
+            vllm_config = SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=2),
+                compilation_config=SimpleNamespace(max_cudagraph_capture_size=2, cudagraph_capture_sizes=None),
+                num_speculative_tokens=0,
+                model_config=SimpleNamespace(dtype=torch.float32),
+            )
+            if quantized:
+                method = object.__new__(AscendW8A8LinearMethod)
+                method.quant_method = "modelslim"
+                method = AscendLinearMethod(method)
+            else:
+                method = AscendUnquantizedLinearMethod()
+            output_layer = SimpleNamespace(
+                quant_method=method,
+                weight=torch.eye(2, dtype=torch.int8 if quantized else torch.float32) * (1 + 2 * tp_rank + pcp_rank),
+                bias=bias,
+                reduce_results=reduce_results,
+                skip_bias_add=skip_bias_add,
+                input_size_per_partition=2,
+                output_size_per_partition=2,
+                params_dtype=torch.float32,
+                quant_bias=torch.zeros(2, dtype=torch.int32),
+                deq_scale=torch.ones(2),
+                aclnn_input_scale=torch.ones(2),
+                aclnn_input_scale_reciprocal=torch.ones(2),
+                aclnn_input_offset=torch.zeros(2),
+            )
+            projection = ParallelOProjection(
+                4,
+                output_layer,
+                config=WeightSwitchConfig.from_group(pcp_group, shard_axis="input"),
+                tp_group=tp_group,
+                pool={},
+                pool_key="dsa_bias_regression",
+                project_full=MagicMock(side_effect=AssertionError("local projection must use resident weights")),
+                decode_sharded=decode_sharded,
+                input_layer=SimpleNamespace(weight=torch.eye(2).unsqueeze(0)),
+                input_projection=lambda value, kernel=grouped_matmul: kernel(value, torch.eye(2).unsqueeze(0)),
+                num_input_groups=2,
+            )
+            projection._weight_switch_enabled = True
+            projection.set_mode(use_full_weight=False, exchange_tokens=decode_sharded)
+            if decode_sharded:
+                projection._prepare_exchange_buffers(vllm_config)
+            with (
+                patch("torch_npu.npu_transpose_batchmatmul", create=True, side_effect=grouped_matmul),
+                patch.object(torch.ops.vllm, "unquantized_gemm", create=True, side_effect=unquantized_gemm),
+                patch.object(
+                    torch.ops.vllm, "quantize", create=True, side_effect=lambda value, *args: value.to(torch.int8)
+                ),
+                patch("torch_npu.npu_quant_matmul", create=True, side_effect=quantized_gemm),
+                patch("torch.distributed.all_gather_into_tensor", side_effect=gather),
+                patch("torch.distributed.reduce_scatter_tensor", side_effect=scatter),
+            ):
+                inputs = peers[pcp_rank] if decode_sharded else peers[0]
+                output = torch.empty(2, 2)
+                assert projection.forward(inputs, output) is output
+            expected = after_tp
+            if not skip_bias_add and (reduce_results or tp_rank == 0):
+                expected = expected + bias
+            torch.testing.assert_close(output, expected)
+            expected_events = (["gather"] if decode_sharded else []) + ["wo_a", "wo_b"]
+            expected_events.append("scatter" if decode_sharded else "pcp")
+            if reduce_results:
+                expected_events.append("tp")
+            assert events == expected_events
+            by_owner[pcp_rank].append(output)
+    for pcp_rank, outputs in by_owner.items():
+        combined = outputs[0] if reduce_results else sum(outputs)
+        expected = full_sum.chunk(2)[pcp_rank] if decode_sharded else full_sum
+        torch.testing.assert_close(combined, expected if skip_bias_add else expected + bias)
 
 
 @pytest.mark.parametrize("tp_size", [2, 8])
