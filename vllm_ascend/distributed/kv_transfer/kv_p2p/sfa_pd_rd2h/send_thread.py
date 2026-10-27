@@ -26,9 +26,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    SFAPD_DCP_PROTOCOL_VERSION,
     SFAPD_PROTOCOL_VERSION,
     DSparkDraftKVStatus,
     LayerMetadata,
+    ReadRequest,
     SendTask,
     get_external_request_id,
 )
@@ -47,6 +49,8 @@ class ProducerSendState:
     layer_storage_slots: dict[int, tuple[int, ...]]
     producer_pp_rank: int = 0
     producer_pp_size: int = 1
+    producer_dcp_size: int = 1
+    producer_dcp_rank: int = 0
 
 
 @dataclass
@@ -351,10 +355,11 @@ class MembPullSendingThread(threading.Thread):
         # the same ``(remote_host, remote_port)`` share one READ_READY_BATCH.
         # Each value is ``(read_reqs, done_ext_ids)``; a read request contains
         # ``(external_req_id, main_block_ids, indexer_block_ids,
-        # main_start_block, indexer_start_block)``.
+        # main_start_block, indexer_start_block)``. DCP appends token_start
+        # and token_end to delimit the valid bytes in partial stripes.
         endpoint_payloads: dict[
             tuple[str, int],
-            tuple[list[tuple[str, list[int], list[int], int, int]], list[str]],
+            tuple[list[ReadRequest], list[str]],
         ] = {}
         endpoint_engine_ids: dict[tuple[str, int], str | None] = {}
         layer_meta = self._state.layer_metadata[layer_name]
@@ -362,7 +367,7 @@ class MembPullSendingThread(threading.Thread):
 
         def _blocks_for_chunk(rm, group_idx: int) -> tuple[list[int], int]:
             all_block_ids = rm.local_block_ids[group_idx] if len(rm.local_block_ids) > group_idx else []
-            block_size = self._state.block_sizes[group_idx]
+            block_size = self._state.block_sizes[group_idx] * self._state.producer_dcp_size
             transferred_tokens = max(
                 int(getattr(rm, "remote_cache_tokens", 0) or 0),
                 int(rm.local_transed_tokens or 0),
@@ -370,7 +375,7 @@ class MembPullSendingThread(threading.Thread):
             )
             start_block = transferred_tokens // block_size
             computed_tokens = max(int(rm.local_computed_tokens or 0), 0)
-            if rm.chunk_finish:
+            if rm.chunk_finish or self._state.producer_dcp_size > 1:
                 end_block = (computed_tokens + block_size - 1) // block_size
             else:
                 end_block = computed_tokens // block_size
@@ -400,15 +405,24 @@ class MembPullSendingThread(threading.Thread):
                 endpoint_engine_ids[endpoint] = rm.remote_engine_id
                 read_reqs, done_ext_ids = endpoint_payloads.setdefault(endpoint, ([], []))
                 if p_main_block_ids or p_indexer_block_ids:
-                    read_reqs.append(
-                        (
+                    entry: ReadRequest = (
+                        ext_id,
+                        p_main_block_ids,
+                        p_indexer_block_ids,
+                        main_start_block,
+                        indexer_start_block,
+                    )
+                    if self._state.producer_dcp_size > 1:
+                        entry = (
                             ext_id,
                             p_main_block_ids,
                             p_indexer_block_ids,
                             main_start_block,
                             indexer_start_block,
+                            max(int(getattr(rm, "remote_cache_tokens", 0) or 0), int(rm.local_transed_tokens or 0), 0),
+                            max(int(rm.local_computed_tokens or 0), 0),
                         )
-                    )
+                    read_reqs.append(entry)
                 if chunk_done:
                     done_ext_ids.append(ext_id)
             logger.debug(
@@ -472,13 +486,22 @@ class MembPullSendingThread(threading.Thread):
                 "main_tensor_count": meta.main_tensor_count,
                 "has_indexer": meta.has_indexer,
             }
+        version = SFAPD_DCP_PROTOCOL_VERSION if self._state.producer_dcp_size > 1 else SFAPD_PROTOCOL_VERSION
+        if version == SFAPD_DCP_PROTOCOL_VERSION:
+            for wire_meta in p_meta_dict.values():
+                wire_meta["dcp"] = {
+                    "size": self._state.producer_dcp_size,
+                    "rank": self._state.producer_dcp_rank,
+                    "block_size": self._state.block_sizes[self._state.main_group_idx],
+                    "indexer_block_size": self._state.block_sizes[self._state.indexer_group_idx],
+                }
         dealer.send(
             encoder.encode(
                 (
                     MF_META,
                     self._state.p_session,
                     encoder.encode(p_meta_dict),
-                    SFAPD_PROTOCOL_VERSION,
+                    version,
                     self._state.producer_pp_rank,
                     self._state.producer_pp_size,
                 )
@@ -490,9 +513,11 @@ class MembPullSendingThread(threading.Thread):
             if payload == [b"ACK"]:
                 if self._state.producer_pp_size > 1:
                     raise RuntimeError("SFAPD producer PP>1 requires a PP-aware D; received a legacy MF_META ACK")
+                if self._state.producer_dcp_size > 1:
+                    raise RuntimeError("SFAPD producer DCP>1 requires a DCP-aware D; received a legacy MF_META ACK")
             elif len(payload) == 1:
                 reply = msgspec.msgpack.Decoder(type=tuple).decode(payload[0])
-                if reply != (MF_META_ACK, SFAPD_PROTOCOL_VERSION):
+                if reply != (MF_META_ACK, version):
                     raise RuntimeError(f"MembPull P MF_META got unexpected reply: {reply!r}")
             else:
                 raise RuntimeError(f"MembPull P MF_META got unexpected reply: {payload!r}")

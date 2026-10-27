@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank, get_tp_group
+from vllm.distributed import get_dcp_group, get_pp_group, get_tensor_model_parallel_rank, get_tp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
@@ -431,7 +431,10 @@ class SFAPDRD2HConsumerWorker:
 
     def _build_consumer_read_state(self) -> ConsumerReadState:
         assert self.offload_manager is not None
+        main_group, indexer_group = infer_sfa_component_group_ids(self.kv_cache_config)
         return ConsumerReadState(
+            main_block_size=self.kv_cache_config.kv_cache_groups[main_group].kv_cache_spec.block_size,
+            indexer_block_size=self.kv_cache_config.kv_cache_groups[indexer_group].kv_cache_spec.block_size,
             num_blocks=self.kv_cache_config.num_blocks,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             layer_metadata=self.layer_metadata,
@@ -625,6 +628,18 @@ class SFAPDRD2HProducerWorker:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        if self.dcp_size > 1:
+            if (
+                self.dcp_size != self.tp_size
+                or vllm_config.parallel_config.prefill_context_parallel_size != 1
+                or self.pp_size != 1
+            ):
+                raise ValueError("SFAPD DCP requires DCP=TP and PCP=PP=1")
+            speculative = vllm_config.speculative_config
+            if speculative is not None and speculative.method == "dspark":
+                raise ValueError("SFAPD DCP does not support DSpark draft-KV transfer")
         self.side_channel_host = get_ip()
         self.side_channel_port = vllm_config.kv_transfer_config.kv_port + self.dp_rank * self.tp_size
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
@@ -634,6 +649,10 @@ class SFAPDRD2HProducerWorker:
         self.kv_cache_specs = [group_spec.kv_cache_spec for group_spec in self.kv_cache_config.kv_cache_groups]
         self.block_size = [spec.block_size for spec in self.kv_cache_specs]
         self.num_kv_cache_groups = len(self.kv_cache_specs)
+        if self.dcp_size > 1:
+            interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+            if any(size != interleave for size in self.block_size):
+                raise ValueError("SFAPD DCP requires physical KV block sizes equal to CP interleave size")
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(self.kv_cache_config)
         self.use_mla = self.vllm_config.model_config.use_mla
         self.layer_metadata: dict[str, LayerMetadata] = {}
@@ -695,6 +714,10 @@ class SFAPDRD2HProducerWorker:
                     self._active_dspark_requests[req_id] = req_meta
                 if req_meta.remote_port is None:
                     continue
+                if getattr(self, "dcp_size", 1) > 1 and (
+                    (req_meta.remote_dcp_size or 1) != 1 or (req_meta.remote_pcp_size or 1) != 1
+                ):
+                    raise ValueError("SFAPD DCP producer requires a non-CP offload consumer")
                 remote_tp_size = req_meta.remote_tp_size
                 if remote_tp_size is None:
                     remote_tp_size = self.tp_size
@@ -766,6 +789,8 @@ class SFAPDRD2HProducerWorker:
             layer_storage_slots=self.layer_storage_slots,
             producer_pp_rank=self.pp_rank,
             producer_pp_size=self.pp_size,
+            producer_dcp_size=getattr(self, "dcp_size", 1),
+            producer_dcp_rank=getattr(self, "dcp_rank", 0),
         )
 
     @staticmethod

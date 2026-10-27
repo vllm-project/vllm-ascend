@@ -17,6 +17,10 @@ import zmq
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dcp_layout import (
+    dcp_block_segments,
+    validate_dcp_layout_metadata,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     DSparkContextReceiver,
@@ -34,9 +38,12 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    SFAPD_DCP_PROTOCOL_VERSION,
     SFAPD_PROTOCOL_VERSION,
     CopySfaTailDest,
     DSparkDraftKVStatus,
+    ReadRequest,
+    parse_read_request,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -64,6 +71,8 @@ class ConsumerReadState:
     topk_row_tokens: int = 0
     topk_hot_tokens: int = 0
     block_size: int = 128
+    main_block_size: int = 128
+    indexer_block_size: int = 128
     dspark_context_receiver: DSparkContextReceiver | None = None
     dspark_draft_kv_metadata: dict[str, DraftKVCacheMetadata] = field(default_factory=dict)
     dspark_draft_blocks_by_req: dict[str, dict[int, tuple[int, ...]]] = field(default_factory=dict)
@@ -225,15 +234,23 @@ class MembPullReadThread(threading.Thread):
                         if unknown_layers:
                             raise ValueError(f"MF_META contains layers unknown to D: {sorted(unknown_layers)}")
                         if len(msg) == 3:
-                            pp_rank, pp_size = 0, 1
+                            version, pp_rank, pp_size = SFAPD_PROTOCOL_VERSION, 0, 1
                         else:
                             version, pp_rank, pp_size = map(int, msg[3:6])
-                            if version != SFAPD_PROTOCOL_VERSION:
+                            if version not in (SFAPD_PROTOCOL_VERSION, SFAPD_DCP_PROTOCOL_VERSION):
                                 raise ValueError(
                                     f"SFAPD protocol version mismatch: P={version}, D={SFAPD_PROTOCOL_VERSION}"
                                 )
                             if pp_size < 1 or not 0 <= pp_rank < pp_size:
                                 raise ValueError(f"invalid producer PP topology: rank={pp_rank}, size={pp_size}")
+                        has_dcp = any("dcp" in m for m in p_layer_meta.values())
+                        if has_dcp and (len(msg) != 6 or version != SFAPD_DCP_PROTOCOL_VERSION):
+                            raise ValueError("DCP metadata requires the DCP protocol version")
+                        if len(msg) == 6 and version == SFAPD_DCP_PROTOCOL_VERSION:
+                            if pp_size != 1 or not p_layer_meta or not all("dcp" in m for m in p_layer_meta.values()):
+                                raise ValueError("DCP requires PP=1 and layout metadata for every layer")
+                            if self._state.topk_k_bases or self._state.dspark_context_receiver is not None:
+                                raise ValueError("DCP receive requires fused-overlap offload without DSpark")
                         self._p_session = p_session
                         self._p_layer_meta = p_layer_meta
                         self._p_sessions[identity] = p_session
@@ -255,7 +272,7 @@ class MembPullReadThread(threading.Thread):
                         if len(msg) == 3:
                             sock.send_multipart((identity, b"", b"ACK"))
                         else:
-                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))))
+                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, version))))
 
                     elif msg_type == DSPARK_DRAFT_KV:
                         self._handle_dspark_draft_kv(identity, msg, sock, encoder)
@@ -272,16 +289,7 @@ class MembPullReadThread(threading.Thread):
                         # Legacy two-field entries contain one shared block-id
                         # list, so use it for both components and default both
                         # destination offsets to zero.
-                        read_reqs = [
-                            (
-                                entry[0],
-                                list(entry[1]),
-                                list(entry[2] if len(entry) > 2 else entry[1]),
-                                int(entry[3]) if len(entry) > 3 else 0,
-                                int(entry[4]) if len(entry) > 4 else 0,
-                            )
-                            for entry in msg[3]
-                        ]
+                        read_reqs = [parse_read_request(entry) for entry in msg[3]]
                         done_ext_ids = list(msg[4]) if len(msg) > 4 else []
                         # Contributor identity (unequal P/D TP). Absent = legacy single
                         # contributor: member 0 of a 1-member group pulls everything.
@@ -764,8 +772,10 @@ class MembPullReadThread(threading.Thread):
             p_main_block_ids[start - main_start_block : end - main_start_block],
             dtype=np.int64,
         )
-        dst_blocks = np.arange(start, end, dtype=np.int64)
-        dst_tokens = dest.pool_slot * state.topk_row_tokens + dst_blocks * state.block_size
+        dst_blocks: np.ndarray[Any, np.dtype[np.int64]] = np.arange(start, end, dtype=np.int64)
+        dst_tokens: np.ndarray[Any, np.dtype[np.int64]] = (
+            dest.pool_slot * state.topk_row_tokens + dst_blocks * state.block_size
+        )
         partial = np.minimum(dest.kv_tokens - dst_blocks * state.block_size, state.block_size)
         for p_base, p_block_len, token_bytes, topk_base in (
             (int(layer["p_k_base"]), p_k_len, token_bytes_k, state.topk_k_bases[offload_id]),
@@ -1029,10 +1039,100 @@ class MembPullReadThread(threading.Thread):
             read_info["num_transfers"],
         )
 
+    def _do_read_dcp_batch(
+        self,
+        layer_name: str,
+        read_reqs: list[ReadRequest],
+        p_session: str,
+        meta: dict[str, Any],
+        member: int,
+        ratio: int,
+    ) -> None:
+        state = self._state
+        if getattr(state, "topk_k_bases", ()) or getattr(state, "dspark_context_receiver", None) is not None:
+            raise ValueError("DCP receive requires fused-overlap offload without DSpark")
+        cp = meta["dcp"]
+        size, rank, block = validate_dcp_layout_metadata(
+            cp,
+            tp_size=state.tp_size,
+            tp_rank=self.tp_rank,
+            member=member,
+            ratio=ratio,
+            main_block_size=state.main_block_size,
+            indexer_block_size=state.indexer_block_size,
+        )
+        pool_idx = state.main_name_to_idx[layer_name]
+        offload_id = state.get_offload_layer_id(layer_name)
+        main_bases = state.main_gva_bases[offload_id]
+        main_lengths = state.main_block_lens[offload_id]
+        bases = meta["base_addrs"]
+        lengths = [a * b for a, b in zip(meta["block_len"], meta["block_size_scale"])]
+        if int(meta.get("main_tensor_count", 2)) != 2 or tuple(lengths[:2]) != tuple(main_lengths):
+            raise ValueError("DCP main KV physical layout mismatch")
+        indexer = state.indexer_tensors[pool_idx]
+        scale = state.indexer_scale_tensors[pool_idx]
+        has_indexer = bool(meta.get("has_indexer", False))
+        expected = 2 + int(indexer is not None) + int(scale is not None)
+        if has_indexer != (indexer is not None) or len(bases) != expected or len(lengths) != expected:
+            raise ValueError("DCP indexer/scale presence mismatch")
+        components = [(bases[i], main_bases[i], lengths[i], False) for i in range(2)]
+        for i, tensor in enumerate((indexer, scale), start=2):
+            if tensor is None:
+                continue
+            dbytes = tensor.element_size() * math.prod(tensor.shape[1:]) * (tensor.shape[0] // state.num_blocks)
+            if lengths[i] != dbytes * size:
+                raise ValueError("DCP replicated indexer/scale physical layout mismatch")
+            components.append((bases[i], tensor.data_ptr(), dbytes, True))
+        if any(length % block for _, _, length, _ in components):
+            raise ValueError("DCP component bytes must be divisible by physical token block size")
+        local, peer, sizes = [], [], []
+        for entry in read_reqs:
+            if len(entry) != 7:
+                raise ValueError("DCP read requires exact token interval")
+            (
+                req,
+                main_ids,
+                index_ids,
+                main_start,
+                index_start,
+                token_start,
+                token_end,
+            ) = entry
+            d_main, d_index = self._wait_for_dest_blocks(req, layer_name)
+            for src, dst, block_bytes, replicated in components:
+                row_bytes = block_bytes // block
+                segments = dcp_block_segments(
+                    index_ids if replicated else main_ids,
+                    d_index if replicated else d_main,
+                    start_block=index_start if replicated else main_start,
+                    token_start=token_start,
+                    token_end=token_end,
+                    block_size=block,
+                    dcp_size=size,
+                    owner_rank=None if replicated else rank,
+                    contributor=member,
+                    contributors=ratio,
+                )
+                for sb, so, db, do, count in segments:
+                    peer.append(src + sb * block_bytes + so * row_bytes)
+                    local.append(dst + db * block_bytes + do * row_bytes)
+                    sizes.append(count * row_bytes)
+        if sizes:
+            peers, locals_, lengths_ = _coalesce_desc(
+                np.array(peer, dtype=np.int64),
+                np.array(local, dtype=np.int64),
+                np.array(sizes, dtype=np.int64),
+            )
+            # Main KV goes directly to shared host GVAs; indexer/scale stay on NPU.
+            # READ_DONE may only be emitted after this synchronous read succeeds.
+            ret = self.engine.batch_transfer_sync_read(p_session, locals_.tolist(), peers.tolist(), lengths_.tolist())
+            if ret != 0:
+                raise RuntimeError(f"DCP remote D2H batch read failed for layer {layer_name}, ret={ret}")
+
     def _do_read_batch(
         self,
         layer_name: str,
-        read_reqs: list[tuple[str, list[int], list[int], int, int]],
+        read_reqs: list[ReadRequest],
         p_session: str | None = None,
         p_layer_meta: dict[str, Any] | None = None,
         group_member_idx: int = 0,
@@ -1043,6 +1143,13 @@ class MembPullReadThread(threading.Thread):
         if p_session is None:
             raise RuntimeError("MF_META not received before READ_READY_BATCH")
 
+        effective_meta = p_layer_meta if p_layer_meta is not None else self._p_layer_meta
+        if "dcp" in effective_meta.get(layer_name, {}):
+            return self._do_read_dcp_batch(
+                layer_name, read_reqs, p_session, effective_meta[layer_name], group_member_idx, ratio
+            )
+        if any(len(entry) != 5 for entry in read_reqs):
+            raise ValueError("Non-DCP reads require five-field block descriptors")
         layer = self._resolve_read_layer(layer_name, p_layer_meta)
         if layer is None:
             raise RuntimeError(f"MembPull cannot resolve P/D layout for {layer_name}")
@@ -1052,13 +1159,10 @@ class MembPullReadThread(threading.Thread):
         all_peer_ptrs: list[int] = []
         all_lengths: list[int] = []
         read_infos: list[dict[str, Any]] = []
-        for (
-            ext_req_id,
-            p_main_block_ids,
-            p_indexer_block_ids,
-            main_start_block,
-            indexer_start_block,
-        ) in read_reqs:
+        for entry in read_reqs:
+            if len(entry) != 5:
+                raise ValueError("Non-DCP reads require five-field block descriptors")
+            ext_req_id, p_main_block_ids, p_indexer_block_ids, main_start_block, indexer_start_block = entry
             local_ptrs, peer_ptrs, lengths, read_info = self._build_req_descriptors(
                 layer,
                 ext_req_id,
