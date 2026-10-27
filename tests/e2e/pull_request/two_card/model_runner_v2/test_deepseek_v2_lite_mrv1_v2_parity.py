@@ -41,6 +41,8 @@ MODEL = os.environ.get("DEEPSEEK_V2_MODEL", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
 RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity.json"))
 TP2_RESULT_PATH = Path(os.environ.get("DEEPSEEK_V2_MRV_TP2_RESULT", "/tmp/deepseek_v2_mrv1_v2_parity_tp2.json"))
 
+WARMUP_PROMPT = "Warm up the model runner without reusing a parity prompt."
+
 PROMPTS = [
     "The capital of France is",
     "用三句话解释什么是张量并行。",
@@ -99,11 +101,16 @@ def _greedy_logprob_deltas(mrv1, mrv2):
         mrv2["greedy_logprobs"],
         strict=True,
     ):
-        for token1, token2, position1, position2 in zip(tokens1, tokens2, logprobs1, logprobs2, strict=True):
+        for token1, token2, position1, position2 in zip(tokens1, tokens2, logprobs1, logprobs2):
             if token1 != token2:
                 continue
             entry1 = position1.get(token1, position1.get(str(token1)))
             entry2 = position2.get(token2, position2.get(str(token2)))
+            if entry1 is None or entry2 is None:
+                raise AssertionError(
+                    f"Missing greedy logprob for matching token {token1}: "
+                    f"MRV1={entry1!r}, MRV2={entry2!r}"
+                )
             value1 = entry1.logprob if hasattr(entry1, "logprob") else entry1["logprob"]
             value2 = entry2.logprob if hasattr(entry2, "logprob") else entry2["logprob"]
             deltas.append(abs(value1 - value2))
@@ -150,6 +157,7 @@ def _measure(
                 gpu_memory_utilization=gpu_memory_utilization,
             ) as runner,
         ):
+            runner.generate([WARMUP_PROMPT], SamplingParams(max_tokens=1, temperature=0.0))
             started = time.perf_counter()
             greedy_outputs = runner.generate_w_logprobs(prompts, greedy)
             sampled_outputs = runner.generate(prompts, sampled)
@@ -172,7 +180,7 @@ def _measure(
         "tensor_parallel_size": tensor_parallel_size,
         "expert_parallel": enable_expert_parallel,
         "gpu_memory_utilization": gpu_memory_utilization,
-        "timing_scope": "generation_after_engine_init",
+        "timing_scope": "generation_after_warmup",
     }
 
 
@@ -181,13 +189,16 @@ def test_deepseek_v2_lite_mrv1_mrv2_parity_and_performance():
     mrv1 = _measure("0")
     mrv2 = _measure("1")
 
-    sampled_total = sum(len(tokens) for tokens in mrv1["sampled_tokens"])
+    sampled_total = max(
+        sum(len(tokens) for tokens in mrv1["sampled_tokens"]),
+        sum(len(tokens) for tokens in mrv2["sampled_tokens"]),
+    )
     sampled_matches = sum(
         left == right
         for left_tokens, right_tokens in zip(mrv1["sampled_tokens"], mrv2["sampled_tokens"], strict=True)
-        for left, right in zip(left_tokens, right_tokens, strict=True)
+        for left, right in zip(left_tokens, right_tokens)
     )
-    sampled_match_ratio = sampled_matches / sampled_total
+    sampled_match_ratio = sampled_matches / sampled_total if sampled_total else 0.0
     greedy_logprob_max_delta, greedy_logprob_mean_delta = _greedy_logprob_deltas(mrv1, mrv2)
 
     mrv1_rates = mrv1["output_tokens"] / mrv1["elapsed_s"]
@@ -257,13 +268,16 @@ def test_deepseek_v2_lite_mrv1_mrv2_tp2_ep_parity_and_performance():
         gpu_memory_utilization=0.45,
     )
 
-    sampled_total = sum(len(tokens) for tokens in mrv1["sampled_tokens"])
+    sampled_total = max(
+        sum(len(tokens) for tokens in mrv1["sampled_tokens"]),
+        sum(len(tokens) for tokens in mrv2["sampled_tokens"]),
+    )
     sampled_matches = sum(
         left == right
         for left_tokens, right_tokens in zip(mrv1["sampled_tokens"], mrv2["sampled_tokens"], strict=True)
-        for left, right in zip(left_tokens, right_tokens, strict=True)
+        for left, right in zip(left_tokens, right_tokens)
     )
-    sampled_match_ratio = sampled_matches / sampled_total
+    sampled_match_ratio = sampled_matches / sampled_total if sampled_total else 0.0
     greedy_logprob_max_delta, greedy_logprob_mean_delta = _greedy_logprob_deltas(mrv1, mrv2)
     mrv1_rates = mrv1["output_tokens"] / mrv1["elapsed_s"]
     mrv2_rates = mrv2["output_tokens"] / mrv2["elapsed_s"]
