@@ -139,6 +139,7 @@ def test_local_wire_header_and_send_lifetime(transport, first, last):
     if last:
         group.isend_tensor_dict.assert_not_called()
     else:
+        assert output is not None
         wire = group.isend_tensor_dict.call_args.args[0]
         assert wire is not output.tensors
         assert wire[SP_PP_HEADER_KEY] == (1, 5, 4, 2)
@@ -329,7 +330,7 @@ def test_partial_posting_failure_exits_with_frame_owned_buffers_alive(
     worker, group, _ = transport
     runtime = worker._glm5next_sp_pp_runtime = _runtime()
     group.is_first_rank = direction == "send"
-    references = []
+    references: list[weakref.ReferenceType[object]] = []
     waits = []
 
     class PostedHandle:
@@ -359,7 +360,7 @@ def test_partial_posting_failure_exits_with_frame_owned_buffers_alive(
 
     def exit_worker(code):
         assert code != 0
-        error = sys.exception()
+        error = sys.exc_info()[1]
         assert isinstance(error, Glm5NextSPPPError)
         assert f"{direction} posting failed" in str(error)
         cause = error.__cause__

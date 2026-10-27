@@ -170,5 +170,6 @@ def test_release_and_recapture_drop_only_manager_owned_output(monkeypatch):
     state = _state(runtime)
     monkeypatch.setattr(ModelAclGraphManager, "capture", lambda *args, **kwargs: None)
     manager.capture(None, state, None, runtime.input_buffer.active, None, [], None)
+    assert manager._sp_pp_output_buffer is not None
     assert manager._sp_pp_output_buffer.capacity == 4
     assert state._sp_pp_capture_layout is None
