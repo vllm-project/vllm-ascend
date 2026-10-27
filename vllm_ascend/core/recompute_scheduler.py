@@ -46,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config
+from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
 
 def _normalize_encoder_schedule_result(
@@ -101,6 +101,10 @@ class RecomputeScheduler(Scheduler):
     """
 
     prefill_capacity_bound: bool
+
+    def _can_admit_local_prefix(self, request: Request, local_hits: int) -> bool:
+        """Hook for decoder-local admission before connector lookup/allocation."""
+        return True
 
     def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
         allocate = getattr(super(), "_allocate_encoder_inputs", None)
@@ -432,6 +436,14 @@ class RecomputeScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if not vllm_version_is("0.32.0") and (
+                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
+                ):
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -553,6 +565,11 @@ class RecomputeScheduler(Scheduler):
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+
+                    # delta for decoder_append_prefill: check local admission before connector lookup/allocation.
+                    if not self._can_admit_local_prefix(request, num_new_local_computed_tokens):
+                        skip_request(request_queue)
+                        continue
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
