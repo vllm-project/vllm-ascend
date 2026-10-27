@@ -345,14 +345,15 @@ class Glm5NextSPPPGraphManager(ModelAclGraphManager):
     ) -> None:
         from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer
 
-        runtime = self.model_runner._glm5next_sp_pp_runtime
+        spec = self.model_runner._glm5next_sp_pp_spec
         # Host containers are independent; only stable canonical input storage
         # is shared with the runner. Output storage belongs to this manager.
-        input_buffer = None if runtime.input_buffer is None else runtime.input_buffer.fork()
+        buffer = model_state.sp_pp_input_buffer
+        input_buffer = None if buffer is None else buffer.fork()
         if not self.is_last_pp_rank:
             max_tokens = max(self.capture_sizes, default=0)
             if max_tokens:
-                self._sp_pp_output_buffer = Glm5NextSPPPBuffer.allocate(runtime.spec, max_tokens, self.device)
+                self._sp_pp_output_buffer = Glm5NextSPPPBuffer.allocate(spec, max_tokens, self.device)
                 self.intermediate_tensors = self._sp_pp_output_buffer.active
 
         def activate_layout(num_tokens: int) -> None:

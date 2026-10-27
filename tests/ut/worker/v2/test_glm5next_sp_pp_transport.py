@@ -11,13 +11,11 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import vllm.distributed.parallel_state as parallel_state
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.glm5next.model import (
-    SP_PP_HEADER_KEY,
     Glm5NextSPPPBuffer,
-    Glm5NextSPPPError,
-    Glm5NextSPPPRuntime,
     Glm5NextSPPPSpec,
 )
 from vllm_ascend.worker.v2 import model_runner as runner_module
@@ -58,14 +56,70 @@ def transport(monkeypatch, worker_module):
     return worker, group, tp_group
 
 
-def _runtime():
-    runtime = Glm5NextSPPPRuntime(Glm5NextSPPPSpec(4, 2, 8, 3), torch.device("cpu"))
-    runtime.bind_input(Glm5NextSPPPBuffer.allocate(runtime.spec, 16, torch.device("cpu")).active)
-    return runtime
+def _spec():
+    return Glm5NextSPPPSpec(4, 2, 8, 3)
 
 
-def _states(runtime, total=5):
-    return Glm5NextSPPPBuffer.allocate(runtime.spec, total, torch.device("cpu")).active
+def _states(spec, total=5):
+    return Glm5NextSPPPBuffer.allocate(spec, total, torch.device("cpu")).active
+
+
+def _core_group(monkeypatch, direction="send", fail_after=None):
+    """Run real Core posting/retention; replace only distributed device I/O."""
+    group = SimpleNamespace(
+        world_size=2,
+        rank_in_group=0 if direction == "send" else 1,
+        ranks=[0, 1],
+        device_group=object(),
+        cpu_group=object(),
+        use_cpu_custom_send_recv=False,
+        is_first_rank=direction == "send",
+        is_last_rank=False,
+        references=[],
+        waits=[],
+        posts=0,
+        complete=False,
+    )
+
+    class Handle:
+        def __init__(self, backing=None):
+            self.backing = backing
+
+        def wait(self):
+            group.waits.append(id(self))
+
+        def is_completed(self):
+            return group.complete
+
+    def send_metadata(metadata, dst):
+        backing = torch.empty(8, dtype=torch.uint8)
+        handle = Handle(backing)
+        group.references.extend((weakref.ref(backing), weakref.ref(handle)))
+        return handle
+
+    def post(tensor, **kwargs):
+        group.posts += 1
+        if fail_after is not None and group.posts > fail_after:
+            raise RuntimeError(f"{direction} failed after {fail_after} posts")
+        handle = Handle()
+        group.references.extend((weakref.ref(tensor), weakref.ref(handle)))
+        return handle
+
+    group.isend_object = send_metadata
+    metadata, _ = parallel_state._split_tensor_dict(_states(_spec()).tensors)
+    group.recv_object = lambda src: metadata
+    group._should_use_all_gather = lambda *args: False
+    group._reap_completed_isends = lambda: parallel_state.GroupCoordinator._reap_completed_isends(group)
+    group.isend_tensor_dict = lambda *args, **kwargs: parallel_state.GroupCoordinator.isend_tensor_dict(
+        group, *args, **kwargs
+    )
+    group.irecv_tensor_dict = lambda *args, **kwargs: parallel_state.GroupCoordinator.irecv_tensor_dict(
+        group, *args, **kwargs
+    )
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "isend", post)
+    monkeypatch.setattr(torch.distributed, "irecv", post)
+    return group
 
 
 @pytest.mark.parametrize("use_v2,sp", [(False, False), (False, True), (True, False), (True, True)])
@@ -75,17 +129,13 @@ def test_other_models_preserve_transport_objects_and_groups(transport, use_v2, s
     worker.use_v2_model_runner = use_v2
     worker.vllm_config.sp = sp
     received = {"hidden_states": torch.ones(2, 4)}
-    callbacks = [Mock()]
-    handles = [Mock()]
+    callbacks, handles = [Mock()], [Mock()]
     group.irecv_tensor_dict.return_value = received, handles, callbacks
     output = IntermediateTensors({"hidden_states": torch.zeros(2, 4)})
     output.kv_connector_output = None
 
     def execute(scheduled, intermediate):
-        if forward:
-            assert intermediate.tensors is received
-        else:
-            assert intermediate is None
+        assert intermediate.tensors is received if forward else intermediate is None
         return output
 
     worker.model_runner.execute_model.side_effect = execute
@@ -97,125 +147,91 @@ def test_other_models_preserve_transport_objects_and_groups(transport, use_v2, s
         callbacks[0].assert_called_once()
     else:
         group.irecv_tensor_dict.assert_not_called()
-    sent = group.isend_tensor_dict.call_args
-    assert sent.args[0] is output.tensors
-    assert sent.kwargs == {"all_gather_group": expected_group}
-    assert SP_PP_HEADER_KEY not in sent.args[0]
+    assert group.isend_tensor_dict.call_args.args[0] is output.tensors
+    assert group.isend_tensor_dict.call_args.kwargs == {"all_gather_group": expected_group}
+    assert "_glm5next_sp_pp_inflight" not in vars(worker)
     assert "_glm5next_sp_pp_send_refs" not in vars(worker)
 
 
 @pytest.mark.parametrize("first,last", [(True, False), (False, False), (False, True)])
-def test_local_wire_header_and_send_lifetime(transport, first, last):
+def test_local_shards_use_native_lazy_receive_and_wait_before_next_forward(transport, first, last):
     worker, group, _ = transport
     group.is_first_rank, group.is_last_rank = first, last
-    runtime = worker._glm5next_sp_pp_runtime = _runtime()
-    received = dict(_states(runtime).tensors)
-    received[SP_PP_HEADER_KEY] = (1, 5, 4, 2)
-    handle, callback = Mock(), Mock()
+    spec = worker.model_runner._glm5next_sp_pp_spec = _spec()
+    received = _states(spec).tensors
+    handle, callback, old_send = Mock(), Mock(), Mock()
     group.irecv_tensor_dict.return_value = received, [handle], [callback]
-    output = None if last else _states(runtime)
-    old_send = Mock()
     worker._pp_send_work = [old_send]
-    worker._glm5next_sp_pp_send_refs = ("old",)
+    output = None if last else _states(spec)
 
     def execute(scheduled, intermediate):
         old_send.wait.assert_called_once()
-        assert worker._glm5next_sp_pp_send_refs is None
-        runtime.prepare_inputs(5)
         if first:
             assert intermediate is None
         else:
-            # Header validation must not eagerly wait for device receives.
             handle.wait.assert_not_called()
-            assert set(intermediate.tensors) == set(runtime.spec.states)
+            assert intermediate.tensors is received
             handle.wait.assert_called_once()
             callback.assert_called_once()
-            assert all(value.shape[0] == 2 for value in intermediate.tensors.values())
+            assert all(value.shape[0] == 2 for value in received.values())
         return output
 
     worker.model_runner.execute_model.side_effect = execute
-    assert worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=3)) is None
-    assert SP_PP_HEADER_KEY in received  # Receive metadata was removed from a separate dictionary.
+    assert worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=5)) is None
     if last:
         group.isend_tensor_dict.assert_not_called()
     else:
         assert output is not None
-        wire = group.isend_tensor_dict.call_args.args[0]
-        assert wire is not output.tensors
-        assert wire[SP_PP_HEADER_KEY] == (1, 5, 4, 2)
-        assert SP_PP_HEADER_KEY not in output.tensors
-        assert worker._glm5next_sp_pp_send_refs == (output, wire)
-        assert group.isend_tensor_dict.call_args.kwargs == {"all_gather_group": None}
-        assert all(wire[key] is output[key] for key in runtime.spec.states)
-    assert worker._glm5next_sp_pp_inflight == []
-    with pytest.raises(Glm5NextSPPPError, match="no prepared real execution"):
-        runtime.make_header()
+        group.isend_tensor_dict.assert_called_once_with(output.tensors, all_gather_group=None)
+        assert set(output.tensors) == set(spec.states)
+    assert "_glm5next_sp_pp_inflight" not in vars(worker)
+    assert "_glm5next_sp_pp_send_refs" not in vars(worker)
 
 
-@pytest.mark.parametrize("fault", ["missing", "lane", "shape", "dtype", "keys", "tokens"])
-def test_protocol_failures_exit_before_copy_with_live_receive_refs(transport, worker_module, monkeypatch, fault):
+def test_core_owns_successful_send_buffers_until_completion_without_worker_refs(monkeypatch):
+    group = _core_group(monkeypatch)
+    handles = group.isend_tensor_dict(_states(_spec()).tensors, all_gather_group=None)
+    assert group._pending_isends[0][0] is handles
+    gc.collect()
+    assert all(reference() is not None for reference in group.references)
+    group._reap_completed_isends()
+    assert len(group._pending_isends) == 1
+    group.complete = True
+    group._reap_completed_isends()
+    assert not group._pending_isends
+    # Drop the caller's handles too; Core already finished all work.
+    del handles
+    gc.collect()
+    assert all(reference() is None for reference in group.references)
+
+
+@pytest.mark.parametrize("failure", ["model", "lazy_receive"])
+def test_target_idle_and_nonposting_errors_preserve_native_behavior(transport, worker_module, monkeypatch, failure):
     worker, group, _ = transport
-    runtime = worker._glm5next_sp_pp_runtime = _runtime()
-    received = dict(_states(runtime).tensors)
-    received[SP_PP_HEADER_KEY] = (1, 5, 4, 2)
-    if fault == "missing":
-        del received[SP_PP_HEADER_KEY]
-    elif fault == "lane":
-        received[SP_PP_HEADER_KEY] = (1, 5, 4, 1)
-    elif fault == "shape":
-        received["hidden_states"] = torch.empty(5, 8, dtype=torch.bfloat16)
-    elif fault == "dtype":
-        received["post"] = received["post"].bfloat16()
-    elif fault == "keys":
-        received["unsupported_aux"] = torch.empty(2, 8)
-    handle = Mock()
-    group.irecv_tensor_dict.return_value = received, [handle], []
-
-    def execute(scheduled, intermediate):
-        runtime.prepare_inputs(6)  # Same local t as T=5; header T must still reject it.
-        pytest.fail("A mismatched physical T reached the receive copy.")
-
-    worker.model_runner.execute_model.side_effect = execute
-
-    class FatalExit(BaseException):
-        pass
-
-    def exit_worker(code):
-        assert code != 0
-        assert worker._glm5next_sp_pp_inflight[0] is received
-        handle.wait.assert_not_called()
-        raise FatalExit
-
-    monkeypatch.setattr(worker_module.os, "_exit", exit_worker)
-    monkeypatch.setattr(worker_module.logger, "exception", Mock())
-    with pytest.raises(FatalExit):
-        worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=3))
-    group.isend_tensor_dict.assert_not_called()
-    if fault != "tokens":
-        worker.model_runner.execute_model.assert_not_called()
-
-
-def test_idle_and_ordinary_errors_do_not_enter_fatal_protocol(transport, worker_module, monkeypatch):
-    worker, group, _ = transport
-    runtime = worker._glm5next_sp_pp_runtime = _runtime()
+    worker.model_runner._glm5next_sp_pp_spec = _spec()
     exit_worker = Mock()
     monkeypatch.setattr(worker_module.os, "_exit", exit_worker)
     worker.model_runner.execute_model.return_value = None
     assert worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=0)) is None
     group.irecv_tensor_dict.assert_not_called()
-    group.isend_tensor_dict.assert_not_called()
-    group.is_first_rank = True
-    worker.model_runner.execute_model.side_effect = RuntimeError("unrelated failure")
-    with pytest.raises(RuntimeError, match="unrelated failure"):
+    error = RuntimeError("ordinary execution failure")
+    handle = Mock()
+    group.irecv_tensor_dict.return_value = _states(_spec()).tensors, [handle], []
+    if failure == "lazy_receive":
+        handle.wait.side_effect = error
+        worker.model_runner.execute_model.side_effect = lambda scheduled, intermediate: intermediate.tensors
+    else:
+        group.is_first_rank = True
+        worker.model_runner.execute_model.side_effect = error
+    with pytest.raises(RuntimeError) as caught:
         worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=1))
+    assert caught.value is error
     exit_worker.assert_not_called()
-    with pytest.raises(Glm5NextSPPPError, match="no prepared real execution"):
-        runtime.make_header()
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_graph_factory_selects_private_class_only_for_capability(monkeypatch, enabled):
-    runner = SimpleNamespace(_glm5next_sp_pp_runtime=_runtime() if enabled else None)
+    runner = SimpleNamespace(_glm5next_sp_pp_spec=_spec() if enabled else None)
     original = runner_module.vllm_model_runner.ModelCudaGraphManager
     generic = Mock(return_value="generic")
     private = Mock(return_value="private")
@@ -237,7 +253,7 @@ def test_graph_factory_selects_private_class_only_for_capability(monkeypatch, en
 
 
 @pytest.mark.parametrize("enabled,first", [(False, True), (False, False), (True, True), (True, False)])
-def test_load_model_binds_only_declared_target_runtime(monkeypatch, enabled, first):
+def test_load_model_binds_only_declared_target_layout(monkeypatch, enabled, first):
     from vllm.config.compilation import CUDAGraphMode
 
     warmup_calls = {}
@@ -260,7 +276,9 @@ def test_load_model_binds_only_declared_target_runtime(monkeypatch, enabled, fir
     runner.device = torch.device("cpu")
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.prompt_logprobs_worker = object()
-    runner.model_state = SimpleNamespace()
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import Glm5NextSPPPModelState
+
+    runner.model_state = Glm5NextSPPPModelState.__new__(Glm5NextSPPPModelState) if enabled else SimpleNamespace()
     runner.model = SimpleNamespace()
     spec = Glm5NextSPPPSpec(4, 2, 8, 3)
     runner.intermediate_tensors = None if first else Glm5NextSPPPBuffer.allocate(spec, 16, torch.device("cpu")).active
@@ -270,90 +288,38 @@ def test_load_model_binds_only_declared_target_runtime(monkeypatch, enabled, fir
     runner.load_model()
     for call in warmup_calls.values():
         call.assert_called_once()
+    assert isinstance(runner.model_state, (Glm5NextSPPPModelState, SimpleNamespace))
     assert runner.model_state.prompt_logprobs_worker is runner.prompt_logprobs_worker
     assert runner.intermediate_tensors is original_inputs
     if enabled:
-        runtime = runner._glm5next_sp_pp_runtime
-        assert runtime.spec is spec
-        assert runner.model_state.sp_pp_runtime is runtime
+        assert isinstance(runner.model_state, Glm5NextSPPPModelState)
+        assert runner._glm5next_sp_pp_spec is spec
+        buffer = runner.model_state.sp_pp_input_buffer
         if first:
-            assert runtime.input_buffer is None
+            assert buffer is None
         else:
-            assert runtime.input_buffer.active is original_inputs
-            runtime.prepare_inputs(1)
+            assert buffer is not None
+            assert buffer.active is original_inputs
+            buffer.activate(1)
             assert original_inputs["hidden_states"].shape[0] == 1
-            runtime.prepare_inputs(13)
+            buffer.activate(13)
             assert original_inputs["hidden_states"].shape[0] == 4
     else:
-        assert runner._glm5next_sp_pp_runtime is None
-        assert not hasattr(runner.model_state, "sp_pp_runtime")
-
-
-def test_model_normalization_error_exits_with_receive_refs_retained(transport, worker_module, monkeypatch):
-    worker, group, _ = transport
-    runtime = worker._glm5next_sp_pp_runtime = _runtime()
-    received = dict(_states(runtime).tensors)
-    received[SP_PP_HEADER_KEY] = (1, 5, 4, 2)
-    handle, callback = Mock(), Mock()
-    group.irecv_tensor_dict.return_value = received, [handle], [callback]
-
-    def execute(scheduled, intermediate):
-        runtime.prepare_inputs(5)
-        # A model-boundary error occurs after the ordinary lazy receive wait.
-        assert set(intermediate.tensors) == set(runtime.spec.states)
-        raise Glm5NextSPPPError("GLM SP+PP state does not match the local physical token count.")
-
-    worker.model_runner.execute_model.side_effect = execute
-
-    class FatalExit(BaseException):
-        pass
-
-    def exit_worker(code):
-        assert code != 0
-        assert worker._glm5next_sp_pp_inflight[0] is received
-        handle.wait.assert_called_once()
-        callback.assert_called_once()
-        raise FatalExit
-
-    monkeypatch.setattr(worker_module.os, "_exit", exit_worker)
-    monkeypatch.setattr(worker_module.logger, "exception", Mock())
-    with pytest.raises(FatalExit):
-        worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=3))
-    group.isend_tensor_dict.assert_not_called()
+        assert runner._glm5next_sp_pp_spec is None
+        assert not hasattr(runner.model_state, "sp_pp_input_buffer")
 
 
 @pytest.mark.parametrize("direction", ["receive", "send"])
 @pytest.mark.parametrize("posted_count", [1, 2])
-def test_partial_posting_failure_exits_with_frame_owned_buffers_alive(
-    transport, worker_module, monkeypatch, direction, posted_count
+@pytest.mark.parametrize("logging_fails", [False, True])
+def test_partial_core_posting_exits_with_original_frame_buffers_alive(
+    transport, worker_module, monkeypatch, direction, posted_count, logging_fails
 ):
-    worker, group, _ = transport
-    runtime = worker._glm5next_sp_pp_runtime = _runtime()
-    group.is_first_rank = direction == "send"
-    references: list[weakref.ReferenceType[object]] = []
-    waits = []
-
-    class PostedHandle:
-        def wait(self):
-            waits.append(self)
-
-    def partial_post(*args, **kwargs):
-        # These objects have no owner outside this failing PP API frame. Like
-        # Core, it has not yet returned its handles or registered pending sends.
-        metadata_buffer = torch.empty(8, dtype=torch.uint8)
-        partial_buffers = [torch.empty(2, 8) for _ in range(posted_count)]
-        posted_handles = [PostedHandle() for _ in range(posted_count)]
-        references.extend(weakref.ref(value) for value in [metadata_buffer, *partial_buffers, *posted_handles])
-        raise RuntimeError(f"{direction} failed after {posted_count} posts")
-
-    post = group.irecv_tensor_dict if direction == "receive" else group.isend_tensor_dict
-    post.side_effect = partial_post
-
-    def execute(scheduled, intermediate):
-        runtime.prepare_inputs(5)
-        return _states(runtime)
-
-    worker.model_runner.execute_model.side_effect = execute
+    worker, _, _ = transport
+    worker.model_runner._glm5next_sp_pp_spec = _spec()
+    group = _core_group(monkeypatch, direction, posted_count)
+    monkeypatch.setattr(worker_module, "get_pp_group", lambda: group)
+    worker.model_runner.execute_model.return_value = _states(_spec())
 
     class FatalExit(BaseException):
         pass
@@ -361,33 +327,33 @@ def test_partial_posting_failure_exits_with_frame_owned_buffers_alive(
     def exit_worker(code):
         assert code != 0
         error = sys.exc_info()[1]
-        assert isinstance(error, Glm5NextSPPPError)
-        assert f"{direction} posting failed" in str(error)
-        cause = error.__cause__
-        assert type(cause) is RuntimeError
-        assert str(cause) == f"{direction} failed after {posted_count} posts"
+        if logging_fails:
+            assert isinstance(error, RuntimeError) and str(error) == "logging failed"
+            error = error.__context__
+        assert type(error) is RuntimeError
+        assert str(error) == f"{direction} failed after {posted_count} posts"
         gc.collect()
-        assert len(references) == 1 + 2 * posted_count
-        assert all(reference() is not None for reference in references)
-        traceback = cause.__traceback__
-        while traceback is not None and traceback.tb_frame.f_code.co_name != "partial_post":
-            traceback = traceback.tb_next
-        assert traceback is not None
-        assert len(traceback.tb_frame.f_locals["posted_handles"]) == posted_count
-        assert len(traceback.tb_frame.f_locals["partial_buffers"]) == posted_count
-        assert waits == []
+        assert len(group.references) == 2 * posted_count + (2 if direction == "send" else 0)
+        assert all(reference() is not None for reference in group.references)
+        trace = error.__traceback__
+        method = "isend_tensor_dict" if direction == "send" else "irecv_tensor_dict"
+        while trace is not None and trace.tb_frame.f_code.co_name != method:
+            trace = trace.tb_next
+        assert trace is not None
+        assert len(trace.tb_frame.f_locals["handles"]) == posted_count + (direction == "send")
+        assert not getattr(group, "_pending_isends", None)
+        assert group.waits == []
         raise FatalExit
 
     monkeypatch.setattr(worker_module.os, "_exit", exit_worker)
-    monkeypatch.setattr(worker_module.logger, "exception", Mock())
+    monkeypatch.setattr(
+        worker_module.logger, "exception", Mock(side_effect=RuntimeError("logging failed") if logging_fails else None)
+    )
     with pytest.raises(FatalExit):
-        worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=3))
-    post.assert_called_once()
-    if direction == "receive":
-        worker.model_runner.execute_model.assert_not_called()
-        group.isend_tensor_dict.assert_not_called()
-    else:
-        group.irecv_tensor_dict.assert_not_called()
+        worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=5))
+    assert group.posts == posted_count + 1
+    assert "_glm5next_sp_pp_inflight" not in vars(worker)
+    assert "_glm5next_sp_pp_send_refs" not in vars(worker)
 
 
 @pytest.mark.parametrize("direction", ["receive", "send"])
@@ -407,3 +373,55 @@ def test_other_models_preserve_original_posting_exception(transport, worker_modu
     post.assert_called_once()
     assert "_glm5next_sp_pp_inflight" not in vars(worker)
     assert "_glm5next_sp_pp_send_refs" not in vars(worker)
+
+
+@pytest.mark.parametrize("logging_fails", [False, True])
+def test_partial_metadata_send_retains_both_serialized_buffers_until_exit(
+    transport, worker_module, monkeypatch, logging_fails
+):
+    worker, _, _ = transport
+    worker.model_runner._glm5next_sp_pp_spec = _spec()
+    worker.model_runner.execute_model.return_value = _states(_spec())
+    group = _core_group(monkeypatch, "send", fail_after=1)
+    group.isend_object = lambda obj, dst: parallel_state.GroupCoordinator.isend_object(group, obj, dst)
+    monkeypatch.setattr(worker_module, "get_pp_group", lambda: group)
+    original_post = torch.distributed.isend
+    metadata_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+
+    def post(tensor, **kwargs):
+        metadata_refs.append(weakref.ref(tensor))
+        return original_post(tensor, **kwargs)
+
+    monkeypatch.setattr(torch.distributed, "isend", post)
+
+    class FatalExit(BaseException):
+        pass
+
+    def exit_worker(code):
+        assert code != 0
+        error = sys.exc_info()[1]
+        if logging_fails:
+            assert isinstance(error, RuntimeError) and str(error) == "logging failed"
+            error = error.__context__
+        assert type(error) is RuntimeError
+        assert str(error) == "send failed after 1 posts"
+        gc.collect()
+        assert len(metadata_refs) == 2
+        assert all(reference() is not None for reference in [*metadata_refs, *group.references])
+        trace = error.__traceback__
+        while trace is not None and trace.tb_frame.f_code.co_name != "isend_object":
+            trace = trace.tb_next
+        assert trace is not None
+        assert len(trace.tb_frame.f_locals["works"]) == 1
+        assert len(trace.tb_frame.f_locals["retained"]) == 2
+        assert not getattr(group, "_pending_isends", None)
+        assert group.waits == []
+        raise FatalExit
+
+    monkeypatch.setattr(worker_module.os, "_exit", exit_worker)
+    monkeypatch.setattr(
+        worker_module.logger, "exception", Mock(side_effect=RuntimeError("logging failed") if logging_fails else None)
+    )
+    with pytest.raises(FatalExit):
+        worker.execute_model(SimpleNamespace(total_num_scheduled_tokens=5))
+    assert group.posts == 2

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from vllm.config.compilation import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.glm5next import model as glm5next_model
@@ -287,6 +288,7 @@ def _sp_pp_config():
             use_sequence_parallel_moe=True,
             tensor_parallel_size=4,
             pipeline_parallel_size=2,
+            data_parallel_size=1,
             use_ubatching=False,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=1,
@@ -294,11 +296,12 @@ def _sp_pp_config():
             nnodes=1,
         ),
         model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(mhc=True), dtype=torch.bfloat16, runner_type="generate"
+            hf_text_config=SimpleNamespace(mhc=True), dtype=torch.bfloat16, runner_type="generate", enforce_eager=False
         ),
         use_v2_model_runner=True,
         speculative_config=None,
         lora_config=None,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
     )
 
 
@@ -337,6 +340,7 @@ def test_sp_pp_gate_leaves_existing_modes_unchanged(monkeypatch, field, value):
         ("hf", "mhc", False, "mHC"),
         ("model_config", "runner_type", "pooling", "generation runner"),
         ("model_config", "dtype", torch.float16, "BF16"),
+        ("parallel_config", "data_parallel_size", 2, "data-parallel replica"),
         ("parallel_config", "use_ubatching", True, "DBO"),
         ("parallel_config", "prefill_context_parallel_size", 2, "context parallelism"),
         ("parallel_config", "decode_context_parallel_size", 2, "context parallelism"),
@@ -448,3 +452,17 @@ def test_sp_pp_partition_validation_rejects_empty_default_partition(monkeypatch)
     monkeypatch.setattr(glm5next_model.envs, "VLLM_PP_LAYER_PARTITION", None)
     with pytest.raises(NotImplementedError, match="strictly positive layer counts on every stage"):
         glm5next_model._validate_glm_sp_pp_partitions(2, 4)
+
+
+@pytest.mark.parametrize("mode", list(CUDAGraphMode))
+@pytest.mark.parametrize("eager", [False, True])
+def test_sp_pp_gate_limits_graph_modes_for_equal_stage_dispatch(monkeypatch, mode, eager):
+    config = _sp_pp_config()
+    config.compilation_config.cudagraph_mode = mode
+    config.model_config.enforce_eager = eager
+    monkeypatch.setattr(glm5next_model, "get_ascend_config", _ascend_sp_pp_config)
+    if eager or mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
+        assert glm5next_model._is_glm_sp_pp_enabled(config)
+    else:
+        with pytest.raises(NotImplementedError, match="FULL_DECODE_ONLY"):
+            glm5next_model._is_glm_sp_pp_enabled(config)

@@ -10,7 +10,7 @@ import torch_npu
 from torch import nn
 from transformers import Glm5NextTextConfig
 from vllm import envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -118,12 +118,8 @@ def _validate_supported_config(config: Glm5NextTextConfig) -> None:
         raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
 
 
-SP_PP_HEADER_KEY = "__glm5next_sp_pp__"
-_SP_PP_PROTOCOL_VERSION = 1
-
-
 class Glm5NextSPPPError(RuntimeError):
-    """A layout mismatch that must terminate the new PP execution path."""
+    """An invalid local mHC sequence-parallel buffer layout."""
 
 
 @dataclass(frozen=True)
@@ -195,91 +191,6 @@ class Glm5NextSPPPBuffer:
         self.active.tensors = {key: tensor[:rows] for key, tensor in self.backing.items()}
 
 
-class Glm5NextSPPPRuntime:
-    """Runner-owned host state; never attached to the compiled model."""
-
-    def __init__(self, spec: Glm5NextSPPPSpec, device: torch.device) -> None:
-        self.spec = spec
-        self.device = torch.device(device)
-        if self.device.type in ("cpu", "meta"):
-            self.device = torch.device(self.device.type)
-        elif self.device.index is None:
-            raise ValueError("GLM SP+PP requires an explicitly indexed accelerator device.")
-        self.input_buffer: Glm5NextSPPPBuffer | None = None
-        self._step_active = False
-        self._incoming_tokens: int | None = None
-        self._step_tokens: int | None = None
-
-    def bind_input(self, intermediate_tensors: IntermediateTensors | None) -> None:
-        if intermediate_tensors is None:
-            self.input_buffer = None
-            return
-        buffer = Glm5NextSPPPBuffer(self.spec, intermediate_tensors)
-        for key, tensor in buffer.backing.items():
-            self._validate_device(key, tensor)
-        self.input_buffer = buffer
-
-    def _validate_device(self, key: str, tensor: torch.Tensor) -> None:
-        if tensor.device != self.device:
-            raise Glm5NextSPPPError(
-                f"GLM SP+PP device mismatch for {key}: received {tensor.device}, expected {self.device}."
-            )
-
-    def validate_header(self, header: object) -> int:
-        if not isinstance(header, (tuple, list)) or len(header) != 4 or any(type(value) is not int for value in header):
-            raise Glm5NextSPPPError("Invalid GLM SP+PP header; expected (version, T, TP, lane).")
-        version, num_tokens, tp_size, tp_rank = header
-        if version != _SP_PP_PROTOCOL_VERSION or tp_size != self.spec.tp_size or tp_rank != self.spec.tp_rank:
-            raise Glm5NextSPPPError(f"GLM SP+PP protocol or TP lane mismatch: {header}.")
-        self.spec.local_rows(num_tokens)
-        return num_tokens
-
-    def validate_wire(self, tensors: dict[str, torch.Tensor], header: object) -> None:
-        num_tokens = self.validate_header(header)
-        rows = self.spec.local_rows(num_tokens)
-        if set(tensors) != set(self.spec.states):
-            raise Glm5NextSPPPError(f"GLM SP+PP wire keys do not match the mHC state: {tuple(tensors)}.")
-        for key, (tail, dtype) in self.spec.states.items():
-            tensor = tensors[key]
-            if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != (rows, *tail) or tensor.dtype != dtype:
-                raise Glm5NextSPPPError(
-                    f"Invalid GLM SP+PP wire shape or dtype for {key}; expected {(rows, *tail)}, {dtype}."
-                )
-            self._validate_device(key, tensor)
-
-    def begin_step(self, header: object = None) -> None:
-        if self._step_active:
-            raise Glm5NextSPPPError("GLM SP+PP transport step is already active.")
-        self._incoming_tokens = None if header is None else self.validate_header(header)
-        self._step_tokens = None
-        self._step_active = True
-
-    def prepare_inputs(self, num_tokens: int) -> None:
-        # This hook runs for real execution, dummy and skip-attention profiling.
-        # Only worker-delimited real steps may publish outgoing transport T.
-        if self._step_active:
-            if self._incoming_tokens is not None and num_tokens != self._incoming_tokens:
-                raise Glm5NextSPPPError(
-                    f"GLM SP+PP physical token mismatch: received T={self._incoming_tokens}, local T={num_tokens}."
-                )
-            if self._step_tokens is not None and num_tokens != self._step_tokens:
-                raise Glm5NextSPPPError("GLM SP+PP physical token count changed within a transport step.")
-        if self.input_buffer is not None:
-            self.input_buffer.activate(num_tokens)
-        if self._step_active:
-            self._step_tokens = num_tokens
-
-    def make_header(self) -> tuple[int, int, int, int]:
-        if not self._step_active or self._step_tokens is None:
-            raise Glm5NextSPPPError("GLM SP+PP has no prepared real execution to send.")
-        return (_SP_PP_PROTOCOL_VERSION, self._step_tokens, self.spec.tp_size, self.spec.tp_rank)
-
-    def end_step(self) -> None:
-        self._step_active = False
-        self._incoming_tokens = None
-        self._step_tokens = None
-
-
 def _normalize_sp_pp_state_impl(tensor: torch.Tensor, num_tokens: int, tp_rank: int, tp_size: int) -> torch.Tensor:
     local_tokens = (num_tokens + tp_size - 1) // tp_size
     if tensor.shape[0] != local_tokens:
@@ -322,8 +233,15 @@ def _is_glm_sp_pp_enabled(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_text_config
     if not vllm_config.use_v2_model_runner or not config.mhc:
         raise NotImplementedError("GLM-5.3-Flash SP+PP requires Model Runner V2 and mHC.")
+    if not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.cudagraph_mode not in (
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+    ):
+        raise NotImplementedError("GLM-5.3-Flash SP+PP supports eager execution or FULL_DECODE_ONLY graphs.")
     if vllm_config.model_config.dtype != torch.bfloat16:
         raise NotImplementedError("GLM-5.3-Flash SP+PP currently requires BF16 model activations.")
+    if parallel.data_parallel_size != 1:
+        raise NotImplementedError("GLM-5.3-Flash SP+PP currently requires a single data-parallel replica.")
     if parallel.use_ubatching:
         raise NotImplementedError("GLM-5.3-Flash SP+PP does not support DBO or microbatch slicing.")
     if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:

@@ -48,7 +48,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 if TYPE_CHECKING:
-    from vllm_ascend.models.glm5next.model import Glm5NextSPPPRuntime
+    from vllm.sequence import IntermediateTensors
+
+    from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer, Glm5NextSPPPSpec
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
@@ -498,14 +500,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
 
 class Glm5NextSPPPModelState(AscendMambaHybridModelState):
-    sp_pp_runtime: "Glm5NextSPPPRuntime"
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.sp_pp_input_buffer: Glm5NextSPPPBuffer | None = None
         self._sp_pp_capture_layout: Callable[[int], None] | None = None
 
+    def bind_sp_pp_inputs(self, spec: "Glm5NextSPPPSpec", tensors: "IntermediateTensors | None") -> None:
+        from vllm_ascend.models.glm5next.model import Glm5NextSPPPBuffer
+
+        self.sp_pp_input_buffer = None if tensors is None else Glm5NextSPPPBuffer(spec, tensors)
+
     def prepare_inputs(self, input_batch, req_states):
-        self.sp_pp_runtime.prepare_inputs(input_batch.num_tokens_after_padding)
+        if self.sp_pp_input_buffer is not None:
+            self.sp_pp_input_buffer.activate(input_batch.num_tokens_after_padding)
         return super().prepare_inputs(input_batch, req_states)
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int):
