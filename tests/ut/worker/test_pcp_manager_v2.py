@@ -816,6 +816,7 @@ def test_request_state_cpu_and_numpy_tokens_share_storage() -> None:
         num_speculative_steps,
         vocab_size,
         device,
+        use_dense_all_token_ids=False,
     ) -> None:
         state.max_num_reqs = max_num_reqs
         state.num_computed_tokens_np = np.zeros(max_num_reqs, dtype=np.int32)
