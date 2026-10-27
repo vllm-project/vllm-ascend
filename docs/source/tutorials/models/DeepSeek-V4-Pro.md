@@ -4,7 +4,7 @@
 
 !!! note
 
-    The "PD disaggregation" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
@@ -185,15 +185,13 @@ If you want to deploy a multi-node environment, you need to set up the environme
 
     It is recommended that the following service code be encapsulated in a .sh script file and executed in Bash mode.
 
-Configure the network variables in all startup scripts according to [Key Parameter Descriptions](#key-parameter-descriptions).
-
-### 5.1 Multi-Node PD-Colocated Deployment
+### 5.1 Multi-Node Online Deployment
 
 The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3 (128GB × 8) nodes or 4 Atlas 800I A2 (64GB × 8) nodes. The Ascend 950DT mixed-deployment example uses 2 nodes (96GB × 8) with the original Hugging Face weights. Run the following scripts on each node respectively.
 
 === "950DT products with DSpark"
 
-    Use the original `DeepSeek-V4-Pro-0813` checkpoint on both nodes. Each node hosts one DP rank whose 8 NPUs run prefill context parallel (PCP8), so the engine uses `DP2/TP1` with `--prefill-context-parallel-size 8`.
+    Use the original `DeepSeek-V4-Pro-0813` checkpoint on both nodes. Set `node0_ip` to the service IP of Node0 on both nodes. Each node hosts one DP rank whose 8 NPUs run prefill context parallel (PCP8), so the engine uses `DP2/TP1` with `--prefill-context-parallel-size 8`.
 
     **Node0**
 
@@ -346,9 +344,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     **Node0**
 
     ```bash
+    # nic_name is the network interface that owns local_ip on the current node.
     nic_name="xxx"
     local_ip="xxx"
 
+    # node0_ip must be the local_ip of Node0 on every node.
     node0_ip="xxxx"
 
     export HCCL_IF_IP=$local_ip
@@ -359,6 +359,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -420,6 +421,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -496,11 +498,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 
     export TASK_QUEUE_ENABLE=1
 
-    export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=7200
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
       --port 8000 \
@@ -572,11 +574,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 
     export TASK_QUEUE_ENABLE=1
 
-    export HCCL_CONNECT_TIMEOUT=1200
-    export HCCL_EXEC_TIMEOUT=2040
+    export HCCL_CONNECT_TIMEOUT=7200
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
       --port 8000 \
@@ -624,11 +626,10 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
       }'
     ```
 
-#### Key Parameter Descriptions
+Key Parameter Descriptions:
 
-- `local_ip` and `nic_name` specify the current node's communication IP and its network interface. `node0_ip` is Node0's communication IP in PD-colocated deployment or the current Prefill instance's master IP in the 950DT PD-disaggregated and pooling examples. `MASTER_ADDR` is Prefill node 0's communication IP in the A3 PD-disaggregated and pooling examples. Keep the master address consistent across all nodes in the same DP group or PP instance.
 - `--data-parallel-size` sets the global number of data parallel ranks, and `--data-parallel-size-local` sets the number of DP ranks on the current node.
-- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Set a unique value on each headless node: in the A2 example, use `1`, `2`, and `3` on Node1, Node2, and Node3, respectively. On Node0, omit `--data-parallel-start-rank` even when the start rank is 0, to avoid enabling hybrid load balancing with headless remote engines.
+- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Set a unique value on each headless node (e.g., Node1 = 1). On Node0, omit `--data-parallel-start-rank` even when the start rank is 0, to avoid enabling hybrid load balancing with headless remote engines.
 - `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.
 - `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.
 - `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.
@@ -648,7 +649,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800I A3
 - `--kv-cache-dtype` and `--attention_config.indexer_kv_dtype` set the KV cache data type. The 950DT example uses FP8 KV cache with both options set to `fp8`.
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 deployments require this flag; otherwise, the service may OOM during startup.
 - `--async-scheduling` enables asynchronous scheduling to overlap scheduler overhead with model execution.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput. `enable_fused_mc2: 0` disables the Fused MC2 dispatch/combine path.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`.
 
@@ -676,7 +677,7 @@ Expected Result:
 
 The service returns HTTP 200 OK with a JSON response containing the `choices` field.
 
-### 5.2 Multi-Node PD-Disaggregated Deployment
+### 5.2 Multi-Node PD Separation Deployment
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
@@ -772,9 +773,9 @@ Select the tab that matches the deployment hardware.
                 }'
             ```
 
-        2. `run_p_node1.sh` on the worker node of Prefill instance 1: use the same content as Prefill node 0 with these changes: change `--node-rank` to `1`, and append `--headless` to `vllm serve` so that this node runs only its PP stage without starting an API server.
+        2. `run_p_node1.sh` on the worker node of Prefill instance 1: use the same content as Prefill node 0 with these changes: set `local_ip` to the IP of this node, keep `node0_ip` as the master node's service IP, change `--node-rank` to `1`, and append `--headless` to `vllm serve` so that this node runs only its PP stage without starting an API server.
 
-        3. Prefill instance 2: prepare `run_p_node2.sh` (master node) and `run_p_node3.sh` (worker node) the same way, with these changes: assign a unique `kv_port`, for example `"kv_port":"30200"`. Keep all other settings identical so that both Prefill instances present the same `prefill` topology to the Decode pool.
+        3. Prefill instance 2: prepare `run_p_node2.sh` (master node) and `run_p_node3.sh` (worker node) the same way, with these changes: set `local_ip` to the IP of each node, set `node0_ip` to this instance's own master node IP, and assign a unique `kv_port`, for example `"kv_port":"30200"`. Keep all other settings identical so that both Prefill instances present the same `prefill` topology to the Decode pool.
 
     3. Prepare `run_dp_template.sh` on each Decode node. `launch_online_dp.py` passes the visible devices, port, DP size, DP rank, DP address, DP RPC port, TP size, and PCP size as `$1` through `$8`; this template ignores `$8` because Decode engines do not use PCP.
 
@@ -852,7 +853,7 @@ Select the tab that matches the deployment hardware.
             }'
         ```
 
-    4. Start the service. For each Prefill instance, start the master node (`--node-rank 0`) before its worker node. The first argument is the engine port passed to `--port $1`.
+    4. Start the service. Set `local_ip` in every script to the IP of the current node before starting. For each Prefill instance, start the master node (`--node-rank 0`) before its worker node. The first argument is the engine port passed to `--port $1`.
 
         1. Prefill instance 1, master node:
 
@@ -881,24 +882,28 @@ Select the tab that matches the deployment hardware.
         5. Decode node 0
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         6. Decode node 1
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         7. Decode node 2
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         8. Decode node 3
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
@@ -921,7 +926,7 @@ Select the tab that matches the deployment hardware.
 
     This section shows a deployment with one Prefill pool and one Decode pool on Atlas 800I A3 (128GB × 8). The example uses two physical nodes for each pool.
 
-    Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on all nodes. It includes the DSpark draft weights, so no separate draft-model path is required. Replace the model path below with your checkpoint directory.
+    Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on all nodes. It includes the DSpark draft weights, so no separate draft-model path is required. Replace the model path, IP addresses, and network interface names below with your environment's values.
 
     Before you start, please:
 
@@ -929,10 +934,12 @@ Select the tab that matches the deployment hardware.
 
     2. Prepare `run_prefill.sh` on both Prefill nodes.
 
+        Set `local_ip` to the current node's communication IP and `MASTER_ADDR` to Prefill node 0's communication IP on both nodes.
+
         ```shell
         local_ip="xx.xx.xx.x"
-        nic_name="xxxx"
-        MASTER_ADDR="xx.xx.xx.1"
+        nic_name="xxxx" # NIC that owns local_ip
+        MASTER_ADDR="xx.xx.xx.1" # Prefill node 0 on both nodes
 
         NODE_RANK="${1:?Usage: bash run_prefill.sh <0|1>}"
         HEADLESS_ARGS=()
@@ -950,6 +957,7 @@ Select the tab that matches the deployment hardware.
         export HCCL_BUFFSIZE=1024
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_EXEC_TIMEOUT=2040
+        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export VLLM_PP_LAYER_PARTITION="32,29"
@@ -1003,11 +1011,11 @@ Select the tab that matches the deployment hardware.
 
     3. Prepare `run_dp_template.sh` on both Decode nodes, in the same directory as `launch_online_dp.py`.
 
-        The launcher supplies the visible devices, service port, and parallel parameters.
+        Set `local_ip` and `nic_name` separately on each node. The launcher supplies the visible devices, service port, and parallel parameters.
 
         ```shell
         local_ip="xx.xx.xx.x"
-        nic_name="xxxx"
+        nic_name="xxxx" # NIC that owns local_ip
 
         export HCCL_IF_IP="$local_ip"
         export GLOO_SOCKET_IFNAME="$nic_name"
@@ -1026,6 +1034,7 @@ Select the tab that matches the deployment hardware.
         export HCCL_BUFFSIZE=1800
         export HCCL_CONNECT_TIMEOUT=1200
         export HCCL_EXEC_TIMEOUT=2040
+        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -1076,19 +1085,13 @@ Select the tab that matches the deployment hardware.
 
     4. Start the two Prefill nodes and two Decode nodes in separate terminals on the corresponding machines.
 
-        **Prefill node 0**
-
         ```shell
+        # Prefill node 0
         bash run_prefill.sh 0
-        ```
 
-        **Prefill node 1: headless**
-
-        ```shell
+        # Prefill node 1: headless
         bash run_prefill.sh 1
-        ```
 
-        ```shell
         # Decode node 0
         python launch_online_dp.py --dp-size 16 --tp-size 2 --pcp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 8000
 
@@ -1123,15 +1126,16 @@ Select the tab that matches the deployment hardware.
         1. Prefill node (4 P nodes share the same script)
 
             ```shell
-            nic_name="xxxx"
-            local_ip=xx.xx.xx.1/2/3/4
+            nic_name="xxxx" # change to your own nic name
+            local_ip=xx.xx.xx.1/2/3/4 # change to your own ip
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=2040
-            export HCCL_CONNECT_TIMEOUT=1200
+            export VLLM_RPC_TIMEOUT=3600000
+            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+            export HCCL_EXEC_TIMEOUT=204
+            export HCCL_CONNECT_TIMEOUT=6000
 
             export HCCL_IF_IP=$local_ip
             export GLOO_SOCKET_IFNAME=$nic_name
@@ -1147,6 +1151,7 @@ Select the tab that matches the deployment hardware.
 
             export ASCEND_RT_VISIBLE_DEVICES=$1
 
+            # Ensure the model path matches the directory recorded during download
             vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-0813-w4a8 \
                 --host 0.0.0.0 \
                 --port $2 \
@@ -1196,14 +1201,15 @@ Select the tab that matches the deployment hardware.
         2. Decode node (4 D nodes share the same script)
 
             ```shell
-            nic_name="xxxx"
-            local_ip=xx.xx.xx.5/6/7/8
+            nic_name="xxxx" # change to your own nic name
+            local_ip=xx.xx.xx.5/6/7/8 # change to your own ip
 
             export HCCL_OP_EXPANSION_MODE="AIV"
             export TASK_QUEUE_ENABLE=1
 
-            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-            export HCCL_EXEC_TIMEOUT=2040
+            export VLLM_RPC_TIMEOUT=3600000
+            export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+            export HCCL_EXEC_TIMEOUT=204
             export HCCL_CONNECT_TIMEOUT=1200
 
             export HCCL_IF_IP=$local_ip
@@ -1219,6 +1225,7 @@ Select the tab that matches the deployment hardware.
 
             export ASCEND_RT_VISIBLE_DEVICES=$1
 
+            # Ensure the model path matches the directory recorded during download
             vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-0813-w4a8 \
                 --host 0.0.0.0 \
                 --port $2 \
@@ -1580,6 +1587,8 @@ Select the tab that matches the deployment hardware.
         export VLLM_USE_FASTOKENS=1
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
+        # Parameters required by the Memcache KV Cache Pool. Change the config
+        # path to the actual path of mmc-local.conf in your environment.
         export PYTHONHASHSEED=0
         export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
 
@@ -1644,9 +1653,9 @@ Select the tab that matches the deployment hardware.
             }'
         ```
 
-    2. `run_p_node1.sh` on the worker node of Prefill instance 1: use the same content as `run_p_node0.sh` with these changes: change `--node-rank` to `1`, and append `--headless` to `vllm serve` so that this node runs only its PP stage without starting an API server.
+    2. `run_p_node1.sh` on the worker node of Prefill instance 1: use the same content as `run_p_node0.sh` with these changes: set `local_ip` to the IP of this node, keep `node0_ip` as the master node's service IP, change `--node-rank` to `1`, and append `--headless` to `vllm serve` so that this node runs only its PP stage without starting an API server.
 
-    3. Prefill instance 2: prepare `run_p_node2.sh` (master node) and `run_p_node3.sh` (worker node) the same way, with these changes: assign a unique `kv_port` to the outer `MultiConnector` and its `MooncakeConnectorV2` child, for example `"kv_port":"30200"`. Keep all other settings identical so that both Prefill instances present the same `prefill` topology to the Decode pool.
+    3. Prefill instance 2: prepare `run_p_node2.sh` (master node) and `run_p_node3.sh` (worker node) the same way, with these changes: set `local_ip` to the IP of each node, set `node0_ip` to this instance's own master node IP, and assign a unique `kv_port` to the outer `MultiConnector` and its `MooncakeConnectorV2` child, for example `"kv_port":"30200"`. Keep all other settings identical so that both Prefill instances present the same `prefill` topology to the Decode pool.
 
     ##### Prepare the Decode Startup Script
 
@@ -1678,6 +1687,8 @@ Select the tab that matches the deployment hardware.
     export VLLM_USE_FASTOKENS=1
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
+    # Parameters required by the Memcache KV Cache Pool. Change the config
+    # path to the actual path of mmc-local.conf in your environment.
     export PYTHONHASHSEED=0
     export MMC_LOCAL_CONFIG_PATH=/usr/local/python3.12.13/lib/python3.12/site-packages/memcache_hybrid/config/mmc-local.conf
 
@@ -1783,24 +1794,28 @@ Select the tab that matches the deployment hardware.
         1. Decode node 0
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         2. Decode node 1
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 8 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         3. Decode node 2
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 16 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         4. Decode node 3
 
             ```shell
+            # change ip to your own
             python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
@@ -1949,15 +1964,16 @@ Select the tab that matches the deployment hardware.
     ##### Start the Prefill Nodes with Pooling
 
     Save the following script as `run_prefill.sh` on both Prefill nodes. Set
-    `MEMCACHE_INSTALL_PATH` to the `Location` reported by `pip show memcache_hybrid`, and set `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration files above on both nodes.
+    `local_ip` and `nic_name` for the current node, and set `MASTER_ADDR` to Prefill
+    node 0's communication IP on both nodes. Set `MEMCACHE_INSTALL_PATH` to the `Location` reported by `pip show memcache_hybrid`, and set `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration files above on both nodes.
 
     ```shell
     MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     local_ip="xx.xx.xx.x"
-    nic_name="xxxx"
-    MASTER_ADDR="xx.xx.xx.1"
+    nic_name="xxxx" # NIC that owns local_ip
+    MASTER_ADDR="xx.xx.xx.1" # Prefill node 0 on both nodes
 
     NODE_RANK="${1:?Usage: bash run_prefill.sh <0|1>}"
     HEADLESS_ARGS=()
@@ -1969,6 +1985,7 @@ Select the tab that matches the deployment hardware.
     export GLOO_SOCKET_IFNAME="$nic_name"
     export TP_SOCKET_IFNAME="$nic_name"
     export HCCL_SOCKET_IFNAME="$nic_name"
+    # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
     export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
@@ -1980,6 +1997,7 @@ Select the tab that matches the deployment hardware.
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_PP_LAYER_PARTITION="32,29"
@@ -2064,30 +2082,26 @@ Select the tab that matches the deployment hardware.
     After the Decode engines are ready, start both Prefill nodes in separate
     terminals on the corresponding machines:
 
-    **Prefill node 0**
-
     ```shell
+    # Prefill node 0
     bash run_prefill.sh 0
-    ```
 
-    **Prefill node 1: headless**
-
-    ```shell
+    # Prefill node 1: headless
     bash run_prefill.sh 1
     ```
 
     ##### Start the Decode Nodes with Pooling
 
     On both Decode nodes, save the following script as `run_dp_template.sh` in the
-    same directory as `launch_online_dp.py`. Set `MEMCACHE_INSTALL_PATH` and
-    `MEMCACHE_CONFIG_DIR` for the local environment.
+    same directory as `launch_online_dp.py`. Set `local_ip`, `nic_name`,
+    `MEMCACHE_INSTALL_PATH`, and `MEMCACHE_CONFIG_DIR` for the local environment.
 
     ```shell
     MEMCACHE_INSTALL_PATH="<MEMCACHE_INSTALL_PATH>"
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     local_ip="xx.xx.xx.x"
-    nic_name="xxxx"
+    nic_name="xxxx" # NIC that owns local_ip
 
     export HCCL_IF_IP="$local_ip"
     export GLOO_SOCKET_IFNAME="$nic_name"
@@ -2101,6 +2115,7 @@ Select the tab that matches the deployment hardware.
     export DP_RPC_PORT="$6"
     export TP_SIZE="$7"
     export PCP_SIZE="$8"
+    # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
     export ACL_OP_INIT_MODE=1
     export LD_LIBRARY_PATH="$MEMCACHE_INSTALL_PATH/memcache_hybrid/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/local/lib/"
@@ -2111,6 +2126,7 @@ Select the tab that matches the deployment hardware.
     export HCCL_BUFFSIZE=2200
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_EXEC_TIMEOUT=2040
+    export VLLM_RPC_TIMEOUT=3600000
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -2275,21 +2291,22 @@ Select the tab that matches the deployment hardware.
     ##### Start the Prefill Nodes with Pooling
 
     Save the following script as `run_dp_template.sh` on the four Prefill nodes (they
-    share the same script). Set `MOONCAKE_CONFIG_DIR` to the absolute directory containing `mooncake.json`:
+    share the same script). Set `local_ip` and `nic_name` for the current node, and set
+    `MOONCAKE_CONFIG_DIR` to the absolute directory containing `mooncake.json`:
 
     ```shell
     MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
 
-    local_ip=xx.xx.xx.1/2/3/4
-    nic_name="xxxx"
+    local_ip=xx.xx.xx.1/2/3/4 # change to your own ip
+    nic_name="xxxx" # change to your own nic name
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=2040
-    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTHONHASHSEED=0
     export ASCEND_CONNECT_TIMEOUT=16000
@@ -2391,22 +2408,22 @@ Select the tab that matches the deployment hardware.
     ##### Start the Decode Nodes with Pooling
 
     Save the following script as `run_dp_template.sh` on the four Decode nodes. Set
-    `MOONCAKE_CONFIG_DIR` for the local environment:
+    `local_ip`, `nic_name`, and `MOONCAKE_CONFIG_DIR` for the local environment:
 
     ```shell
     MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
 
-    local_ip=xx.xx.xx.5/6/7/8
-    nic_name="xxxx"
+    local_ip=xx.xx.xx.5/6/7/8 # change to your own ip
+    nic_name="xxxx" # change to your own nic name
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export HCCL_EXEC_TIMEOUT=2040
-    export HCCL_CONNECT_TIMEOUT=1200
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTHONHASHSEED=0
     export ASCEND_CONNECT_TIMEOUT=16000
@@ -2541,7 +2558,7 @@ Select the tab that matches the deployment hardware.
 
 Once your server is started, you can query the model with input prompts:
 
-For PD-colocated deployment, replace `<node0_ip>:<port>` with Node0's IP address and API port. For PD-disaggregated deployment, including KV cache pooling, use the proxy node's IP address and listening port instead.
+Replace `<node0_ip>:<port>` with the IP address and port of the node that serves requests: for the mixed deployment in Section 5.1, use the primary node (Node0) that exposes the API server; for the PD separation deployment in Section 5.2, use the proxy node instead, since all requests are routed to the Prefill and Decode pools through the proxy.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
