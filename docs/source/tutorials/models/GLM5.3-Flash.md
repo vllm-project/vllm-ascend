@@ -804,6 +804,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "0", "kv_port": "36680"}'
     ```
 
+    <a id="glm53-flash-a3-prefill-command"></a>
+
     Start two DP2/TP8 Prefill engines. `--dp-address` uses the Prefill node IP.
     The launcher assigns API ports `9081-9082`.
 
@@ -879,6 +881,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
     ```
 
+    <a id="glm53-flash-a3-decode-command"></a>
+
     Start four TP4 Decode engines(total DP4). `--dp-address` uses the Decode node
     IP. The launcher assigns API ports `9900-9903`.
 
@@ -890,6 +894,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
       --dp-address "<DECODE_NODE_IP>" \
       --vllm-start-port 9900
     ```
+
+    <a id="glm53-flash-a3-proxy"></a>
 
     ##### Deploy the PD Proxy
 
@@ -976,7 +982,7 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     two Decode nodes D0/D1. P0 serves the Prefill API endpoint; P1 is
     headless. The proxy addresses the API endpoints on both Decode nodes.
 
-    The shared `launch_online_dp.py` launcher from Section 5.3 starts the
+    The shared `launch_online_dp.py` launcher from [Section 5.3](#53-1p1d-pd-disaggregated-deployment) starts the
     engines on all four nodes. Save the common serving templates below and the
     node-specific wrapper scripts on their respective nodes. Replace all IP,
     NIC, and model-path placeholders.
@@ -1097,6 +1103,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     export SERVER_ROLE_ARGS="--headless --data-parallel-start-rank 1"
     exec bash ./run_p.sh "$@"
     ```
+
+    <a id="glm53-flash-a2-prefill-command"></a>
 
     Start the two Prefill ranks with the shared launcher:
 
@@ -1231,6 +1239,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
     exec bash ./run_d.sh "$@"
     ```
 
+    <a id="glm53-flash-a2-decode-command"></a>
+
     Start four TP2 engines on each Decode node(total DP8). `--dp-rank-start` is
     `0` on D0 and `4` on D1. `--dp-address` is D0's IP on both nodes, and
     the launcher assigns API ports `9900-9903` on each node.
@@ -1275,6 +1285,8 @@ address, DP RPC port, and TP size to each role script as `$1` through `$7`.
        and D1 with `curl http://127.0.0.1:<port>/v1/models` and check the
        headless P1 initialization logs. Start the proxy, then send requests
        to `<PREFILL_NODE0_IP>:8081`.
+
+    <a id="glm53-flash-a2-proxy"></a>
 
     ##### Deploy the PD proxy
 
@@ -1358,7 +1370,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     #### A3 series {: #glm53-flash-5-4-a3 }
 
     Reuse the A3 series DP2/TP8 Prefill and DP4/TP4 Decode topology, launcher, and
-    proxy endpoint mapping from Section 5.3.
+    proxy endpoint mapping from [Section 5.3](#glm53-flash-5-3-a3).
 
     ##### Prepare the Memcache Backend
 
@@ -1426,7 +1438,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Add the Pool Environment Variables
 
-    In both `run_p.sh` and `run_d.sh`, keep the Section 5.3 environment variables
+    In both `run_p.sh` and `run_d.sh`, keep the [Section 5.3](#glm53-flash-5-3-a3) environment variables
     and add the following exports before `exec vllm serve`:
 
     ```shell
@@ -1443,13 +1455,13 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Use the same `PYTHONHASHSEED` and Memcache service endpoints on both nodes.
-    Keep the HCCS communication settings from Section 5.3, including
+    Keep the HCCS communication settings from [Section 5.3](#glm53-flash-5-3-a3), including
     `ASCEND_GLOBAL_RESOURCE_CONFIG` and `ASCEND_LOCAL_COMM_RES`.
 
     ##### Update the Prefill and Decode Connectors
 
     For A3 series KV Cache Pool deployment, add `--enable-prefix-caching` to both
-    `run_p.sh` and `run_d.sh` in Section 5.3, and keep
+    `run_p.sh` and `run_d.sh` in [Section 5.3](#glm53-flash-5-3-a3), and keep
     chunked prefill enabled (the model default). GLM-5.3-Flash has
     linear-attention state, and `AscendStoreConnector`
     requires `mamba_cache_mode=align`; the model configuration selects this mode
@@ -1458,7 +1470,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Prefill flags from Section 5.3, including
+    the remaining A3 series Prefill flags from [Section 5.3](#glm53-flash-5-3-a3), including
     `--max-num-seqs 64`.
 
     ```shell
@@ -1491,7 +1503,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
     following fragment. Apart from the prefix-caching change above, keep
-    the remaining A3 series Decode flags from Section 5.3, including
+    the remaining A3 series Decode flags from [Section 5.3](#glm53-flash-5-3-a3), including
     `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1527,7 +1539,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     `$4` is the DP rank passed by `launch_online_dp.py`. Each engine must have a
     unique `lookup_rpc_port`. The Prefill lookup values are `37000-37001`, and the
     Decode lookup values are `37100-37103`. Keep the role-specific Mooncake KV
-    base ports from Section 5.3; its workers and schedulers derive their own
+    base ports from [Section 5.3](#glm53-flash-5-3-a3); its workers and schedulers derive their own
     ports from the topology.
 
     Keep `memcache_dp_init_barrier` set to `true` on every rank in each DP
@@ -1553,14 +1565,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
        python -c "from memcache_hybrid import MetaService; MetaService.main()"
        ```
 
-    2. Start Decode with the A3 series launcher command in Section 5.3. Wait until
+    2. Start Decode with the [A3 series launcher command in Section 5.3](#glm53-flash-a3-decode-command). Wait until
        all four Decode engines on ports `9900-9903` are ready and their
        Memcache LocalServices have reserved the configured DDR pool memory.
-    3. Start Prefill with the A3 series launcher command in Section 5.3. Wait until
+    3. Start Prefill with the [A3 series launcher command in Section 5.3](#glm53-flash-a3-prefill-command). Wait until
        both Prefill engines on ports `9081-9082` are ready and their Memcache
        LocalServices have reserved the configured DDR pool memory.
-    4. Start the A3 series proxy from Section 5.3. Send inference requests to
-       `<PREFILL_NODE_IP>:8081` using the examples in Section 6.
+    4. Start the [A3 series proxy from Section 5.3](#glm53-flash-a3-proxy). Send inference requests to
+       `<PREFILL_NODE_IP>:8081` using the examples in [Section 6](#6-functional-verification).
 
     <a id="glm53-flash-pool-reuse"></a>
 
@@ -1585,11 +1597,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     Reuse the `launch_online_dp.py` launcher, the P0/P1 and D0/D1 scripts, the
     DP2/TP8 Prefill and DP8/TP2 Decode topology, and the proxy configuration from
-    Section 5.3. A2 series nodes do not have the A3 series HCCS fabric: the
+    [Section 5.3](#glm53-flash-5-3-a2). A2 series nodes do not have the A3 series HCCS fabric: the
     pool runs over the A2 series RoCE network with the `P2PHANDSHAKE` metadata server
     and the `ascend` protocol, and the A3 series fabric-memory exports do not apply.
 
-    Retain the Prefill internal-LB settings from Section 5.3, including
+    Retain the Prefill internal-LB settings from [Section 5.3](#glm53-flash-5-3-a2), including
     P1's `--headless --data-parallel-start-rank 1` wrapper and the P0-only
     proxy endpoint. The pool fragments derive distinct lookup ports from `$4`;
     this does not require adding `--data-parallel-rank` to the Prefill serving
@@ -1631,7 +1643,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Add the Pool Environment Variables
 
-    In both `run_p.sh` and `run_d.sh`, keep the Section 5.3 environment
+    In both `run_p.sh` and `run_d.sh`, keep the [Section 5.3](#glm53-flash-5-3-a2) environment
     variables and add the following exports before `exec vllm serve`. Replace
     `<CONFIG_DIRECTORY>` with the absolute directory containing that node's
     `mooncake.json`.
@@ -1659,7 +1671,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     `align` automatically.
 
     Replace the final `--kv-transfer-config` argument in `run_p.sh` with the
-    following fragment. Keep the remaining Prefill flags from Section 5.3,
+    following fragment. Keep the remaining Prefill flags from [Section 5.3](#glm53-flash-5-3-a2),
     including `--max-num-seqs 64`.
 
     ```shell
@@ -1695,7 +1707,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ```
 
     Replace the final `--kv-transfer-config` argument in `run_d.sh` with the
-    following fragment. Keep the remaining Decode flags from Section 5.3,
+    following fragment. Keep the remaining Decode flags from [Section 5.3](#glm53-flash-5-3-a2),
     including `FULL_DECODE_ONLY` graph mode and the MTP configuration.
 
     ```shell
@@ -1756,16 +1768,16 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
          --client_ttl=120
        ```
 
-    2. Start D0 and D1 with the launcher commands from Section 5.3
+    2. Start D0 and D1 with the [launcher commands from Section 5.3](#glm53-flash-a2-decode-command)
        (`--dp-rank-start 0` and `4`; four engines per node on ports
        `9900-9903`). Wait until all eight Decode engines answer
        `curl /v1/models`.
-    3. Start P0 and P1 with the launcher commands from Section 5.3
+    3. Start P0 and P1 with the [launcher commands from Section 5.3](#glm53-flash-a2-prefill-command)
        (`--dp-rank-start 0` and `1`; P0 serves the API endpoint on port
        `9081`, while P1 is headless). Wait until the P0 API endpoint is
        ready and P1 logs confirm successful initialization.
-    4. Start the A2 series proxy from Section 5.3. Send inference requests to
-       `<PREFILL_NODE0_IP>:8081` using the examples in Section 6.
+    4. Start the [A2 series proxy from Section 5.3](#glm53-flash-a2-proxy). Send inference requests to
+       `<PREFILL_NODE0_IP>:8081` using the examples in [Section 6](#6-functional-verification).
 
     ##### Verify KV Cache Reuse
 
