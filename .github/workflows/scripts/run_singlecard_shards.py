@@ -169,7 +169,6 @@ def build_metadata(runtime: dict, args: argparse.Namespace, files: list[Path], d
         except (OSError, subprocess.SubprocessError):
             return None
 
-    cache_root = os.environ.get("TRITON_CACHE_DIR", str(Path.home() / ".triton" / "cache"))
     environment = {
         "runner": args.runner,
         "soc_version": args.soc_version,
@@ -180,8 +179,9 @@ def build_metadata(runtime: dict, args: argparse.Namespace, files: list[Path], d
         "packages": runtime.get("packages", {}),
         "workers": len(devices),
         "cache": {
-            "triton_root": cache_root,
-            "per_worker_namespaces": True,
+            "triton_root": os.environ.get("TRITON_CACHE_DIR"),
+            "per_worker_namespaces": False,
+            "TRITON_HOME": os.environ.get("TRITON_HOME"),
             "TRITON_ALWAYS_COMPILE": os.environ.get("TRITON_ALWAYS_COMPILE"),
             "TRITON_DISABLE_FFTS": os.environ.get("TRITON_DISABLE_FFTS"),
         },
@@ -266,8 +266,6 @@ def stream_log(worker: WorkerRun, log: Path) -> None:
 def start_worker(worker: WorkerRun, output_dir: Path) -> None:
     env = os.environ.copy()
     env["ASCEND_RT_VISIBLE_DEVICES"] = worker.device
-    cache_root = Path(env.get("TRITON_CACHE_DIR", str(Path.home() / ".triton" / "cache")))
-    env["TRITON_CACHE_DIR"] = str(cache_root / "singlecard-shards" / f"worker-{worker.rank}")
     command = [
         sys.executable,
         "-m",
@@ -513,7 +511,7 @@ def run_shards(shards: list[list[Path]], devices: list[str], output_dir: Path, m
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tests", required=True, type=Path)
-    parser.add_argument("--workers", required=True, help="'auto' or a positive integer")
+    parser.add_argument("--workers", default="auto", help="Worker count; defaults to the runner allocation")
     parser.add_argument("--runner", default=os.environ.get("VLLM_CI_RUNNER", ""))
     parser.add_argument("--image", default="", help="Image reference used by the workflow")
     parser.add_argument("--soc-version", default="")

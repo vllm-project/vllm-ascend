@@ -247,16 +247,17 @@ You can run tests with `pytest` as well. Typical examples:
 
 ##### Parallel single-card operator tests
 
-The A3 560T and A5 `singlecard-ops` nightly entries use
-`pytest_workers: auto`. Auto mode derives the expected worker count from the
-runner's allocated resources, requires `--runner`, and strictly checks that
-the container-visible NPU count equals that capacity. The number of pytest
-processes is capped at the number of discovered test files, so a smaller test
-set does not start idle workers. A manual positive integer may be used for
-`pytest_workers` when it does not exceed the runner's resource allocation; `1`
-keeps the legacy serial `pytest -sv` path. Workflow sharding accepts only the
-exact `tests/e2e/nightly/single_node/ops/singlecard_ops` path, optionally with
-one trailing slash.
+The two reusable nightly workflows invoke the shard runner only when the test
+path is exactly `tests/e2e/nightly/single_node/ops/singlecard_ops`, optionally
+with one trailing slash. Other test paths continue to use the existing
+`pytest` command. The workflow YAML does not configure or pass a worker count.
+The script defaults `--workers` to `auto`, derives the runner's allocated
+capacity from `--runner`, and strictly checks that the container-visible NPU
+count equals that capacity. It starts `min(visible NPU count, discovered test
+file count)` workers. This includes the one-card case, which uses the same
+shard-runner route with one worker, reporting, and process cleanup. For manual
+debugging, `--workers N` limits the worker count to a positive integer no
+greater than the runner allocation.
 
 The shard runner assigns each complete test file once, including files under
 `triton/`, and preserves parametrization, assertions, skip conditions, and
@@ -276,16 +277,19 @@ To reproduce inside an already provisioned multi-NPU test container:
 ```bash
 python3 .github/workflows/scripts/run_singlecard_shards.py \
     --tests tests/e2e/nightly/single_node/ops/singlecard_ops/ \
-    --workers auto --runner linux-aarch64-a3-800i-8 \
+    --runner linux-aarch64-a3-800i-8 \
     --image "$TEST_IMAGE" --soc-version a3-560t \
     --output-dir /tmp/singlecard-run
 ```
 
 Use a new output directory for each run. The script respects an existing
 `ASCEND_RT_VISIBLE_DEVICES` allocation and otherwise uses only runtime-visible
-devices inside the container. Each worker has a separate Triton cache namespace
-under the existing cache root; these namespaces may be reused on later runs.
-It does not force recompilation or install dependencies.
+devices inside the container. Workers inherit the job's `TRITON_CACHE_DIR` and
+`TRITON_HOME` without overriding either setting; Triton resolves the cache
+location using its normal configuration and defaults. The shard
+runner does not change cache directories per worker, clear or prewarm caches,
+force recompilation, or install dependencies. Shared-cache behavior on real
+eight-card hardware has not been validated.
 
 The uploaded `singlecard-shards-*` artifact contains run metadata, a
 file/device manifest, per-worker logs and JUnit reports, and `summary.json`.
