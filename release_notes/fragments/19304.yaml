@@ -1,5 +1,0 @@
-pr: 19304
-entries:
-  - category: performance
-    text: Enabled the existing fused RMSNorm and FP32 cast operator on Atlas A2.
-    hardware: [A2]
