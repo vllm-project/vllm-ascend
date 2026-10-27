@@ -19,9 +19,8 @@ import torch_npu
 PYTEST_DIR = "/vllm-workspace/vllm-ascend/csrc/attention/quant_lightning_indexer_v2/tests/pytest"
 sys.path.insert(0, PYTEST_DIR)
 
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
-
 import quant_lightning_indexer_v2_golden as golden  # noqa: E402
+import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
 
 CAND_TOPK_BLOCKS = 2048
 CAND_BLOCK_SIZE = 8
@@ -83,9 +82,7 @@ def call_v3(data, metadata, mode, candidates):
         cu_seqlens_k=None,
         seqused_q=data["seqused_q"].npu() if data["seqused_q"] is not None else None,
         seqused_k=data["seqused_k"].npu() if data["seqused_k"] is not None else None,
-        cmp_residual_k=data["cmp_residual_k_for_npu"].npu()
-        if data["cmp_residual_k_for_npu"] is not None
-        else None,
+        cmp_residual_k=data["cmp_residual_k_for_npu"].npu() if data["cmp_residual_k_for_npu"] is not None else None,
         block_table=data["block_table"].npu(),
         metadata=metadata,
         max_seqlen_q=data["max_seqlen_q_meta"],
@@ -154,12 +151,13 @@ def run_case(name, seqused_k, boundary_rank, total_blocks, seed):
                 bad_rows += 1
                 if bad_rows <= 2:
                     diff_idx = np.where(a != b)[0][:5]
-                    print(f"[{name}] row=({t},{n}) mismatch @{diff_idx}: "
-                          f"m2={a[diff_idx]} m4={b[diff_idx]}")
-    print(f"[{name}] {'PASS' if bad_rows == 0 else 'FAIL'} "
-          f"(boundary_blk={boundary_blk}, valid_tail={valid_tail}, "
-          f"boundary_rank={boundary_rank}, "
-          f"boundary_dst={boundary_rank * CAND_BLOCK_SIZE}, bad={bad_rows})")
+                    print(f"[{name}] row=({t},{n}) mismatch @{diff_idx}: m2={a[diff_idx]} m4={b[diff_idx]}")
+    print(
+        f"[{name}] {'PASS' if bad_rows == 0 else 'FAIL'} "
+        f"(boundary_blk={boundary_blk}, valid_tail={valid_tail}, "
+        f"boundary_rank={boundary_rank}, "
+        f"boundary_dst={boundary_rank * CAND_BLOCK_SIZE}, bad={bad_rows})"
+    )
     return bad_rows == 0
 
 

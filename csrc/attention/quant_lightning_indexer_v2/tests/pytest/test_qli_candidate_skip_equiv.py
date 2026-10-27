@@ -17,9 +17,8 @@ import torch_npu
 PYTEST_DIR = "/vllm-workspace/vllm-ascend/csrc/attention/quant_lightning_indexer_v2/tests/pytest"
 sys.path.insert(0, PYTEST_DIR)
 
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401  # 触发 torch.ops._C_ascend 注册
-
 import quant_lightning_indexer_v2_golden as golden  # noqa: E402
+import vllm_ascend.vllm_ascend_C  # noqa: E402,F401  # 触发 torch.ops._C_ascend 注册
 
 CAND_TOPK_BLOCKS = 2048
 CAND_BLOCK_SIZE = 8
@@ -32,39 +31,39 @@ def build_params(batch_size, q_seq, seqused_k_list, cmp_residual_list, block_num
     for _ in range(batch_size):
         cu_q.append(cu_q[-1] + q_seq)
     return (
-        batch_size,                    # batch_size
-        q_seq,                         # q_seq (每 batch query 行数)
-        max(seqused_k_list),           # k_seq
-        batch_size * q_seq,            # q_t_size (TND T)
-        0,                             # k_t_size (PA_BBND 不用)
-        64,                            # q_head_num (metadata 校验要求 64)
-        1,                             # k_head_num (MLA 单 kv 头)
-        128,                           # head_dim
-        128,                           # block_size (K 物理块)
-        block_num,                     # block_num
-        "INT8",                        # qk_dtype
-        "FP16",                        # weight_dtype
-        "FLOAT16",                     # dequant_dtype
-        "INT32",                       # actual_seq_dtype
-        cu_q,                          # cu_seqlens_q (TND 必传)
-        None,                          # cu_seqlens_k (PA_BBND 不传)
-        [q_seq] * batch_size,          # seqused_q
-        seqused_k_list,                # seqused_k (压缩域 S2 长度)
-        cmp_residual_list,             # cmp_residual_k
-        -1,                            # max_seqlen_q
-        2,                             # quant_mode (INT8, 2201 仅支持 2)
-        "TND",                         # layout_query
-        "PA_BBND",                     # layout_key
-        SPARSE_COUNT,                  # sparse_count
-        3,                             # sparse_mode
-        (-2, 2),                       # query_datarange
-        (-2, 2),                       # key_datarange
-        (-2, 2),                       # weights_datarange
-        (0.5, 1.5),                    # q_scale_datarange
-        (0.5, 1.5),                    # k_scale_datarange
-        2,                             # cmp_ratio
-        0,                             # return_value
-        None,                          # output_idx_offset
+        batch_size,  # batch_size
+        q_seq,  # q_seq (每 batch query 行数)
+        max(seqused_k_list),  # k_seq
+        batch_size * q_seq,  # q_t_size (TND T)
+        0,  # k_t_size (PA_BBND 不用)
+        64,  # q_head_num (metadata 校验要求 64)
+        1,  # k_head_num (MLA 单 kv 头)
+        128,  # head_dim
+        128,  # block_size (K 物理块)
+        block_num,  # block_num
+        "INT8",  # qk_dtype
+        "FP16",  # weight_dtype
+        "FLOAT16",  # dequant_dtype
+        "INT32",  # actual_seq_dtype
+        cu_q,  # cu_seqlens_q (TND 必传)
+        None,  # cu_seqlens_k (PA_BBND 不传)
+        [q_seq] * batch_size,  # seqused_q
+        seqused_k_list,  # seqused_k (压缩域 S2 长度)
+        cmp_residual_list,  # cmp_residual_k
+        -1,  # max_seqlen_q
+        2,  # quant_mode (INT8, 2201 仅支持 2)
+        "TND",  # layout_query
+        "PA_BBND",  # layout_key
+        SPARSE_COUNT,  # sparse_count
+        3,  # sparse_mode
+        (-2, 2),  # query_datarange
+        (-2, 2),  # key_datarange
+        (-2, 2),  # weights_datarange
+        (0.5, 1.5),  # q_scale_datarange
+        (0.5, 1.5),  # k_scale_datarange
+        2,  # cmp_ratio
+        0,  # return_value
+        None,  # output_idx_offset
     )
 
 
@@ -82,9 +81,7 @@ def call_v3(data, metadata, mode, candidates):
         cu_seqlens_k=None,
         seqused_q=data["seqused_q"].npu() if data["seqused_q"] is not None else None,
         seqused_k=data["seqused_k"].npu() if data["seqused_k"] is not None else None,
-        cmp_residual_k=data["cmp_residual_k_for_npu"].npu()
-        if data["cmp_residual_k_for_npu"] is not None
-        else None,
+        cmp_residual_k=data["cmp_residual_k_for_npu"].npu() if data["cmp_residual_k_for_npu"] is not None else None,
         block_table=data["block_table"].npu(),
         metadata=metadata,
         max_seqlen_q=data["max_seqlen_q_meta"],
@@ -153,16 +150,17 @@ def run_case(name, params, seed):
                 bad_rows += 1
                 if bad_rows <= 2:
                     diff_idx = np.where(a != b)[0][:5]
-                    print(f"[{name}] row=({t},{n}) multiset mismatch @{diff_idx}: "
-                          f"m2={a[diff_idx]} m4={b[diff_idx]}")
+                    print(f"[{name}] row=({t},{n}) multiset mismatch @{diff_idx}: m2={a[diff_idx]} m4={b[diff_idx]}")
     try:
         seqused_dbg = data["actual_seq_lengths_key"].tolist()
     except Exception:
         seqused_dbg = list(data["actual_seq_lengths_key"])
-    print(f"[{name}] {'PASS' if bad_rows == 0 else 'FAIL'} "
-          f"(rows={sel2a.shape[0]}x{sel2a.shape[1]}, bad={bad_rows}, "
-          f"seqused_k={seqused_dbg}, cand_non_neg1_first_row="
-          f"{int((cand_cpu[0, 0] >= 0).sum().item())})")
+    print(
+        f"[{name}] {'PASS' if bad_rows == 0 else 'FAIL'} "
+        f"(rows={sel2a.shape[0]}x{sel2a.shape[1]}, bad={bad_rows}, "
+        f"seqused_k={seqused_dbg}, cand_non_neg1_first_row="
+        f"{int((cand_cpu[0, 0] >= 0).sum().item())})"
+    )
     return bad_rows == 0
 
 
@@ -170,12 +168,12 @@ def main():
     torch_npu.npu.set_device(0)
     cases = [
         # (name, batch, q_seq, seqused_k 压缩长度列表, residual, block_num)
-        ("tiny_leak", 1, 6, [100], [0], 4),               # 13 块 ≤ 2048: 全候选, -1 填充泄漏区
-        ("small_allcand", 1, 6, [8192], [0], 80),          # 1024 块 ≤ 2048: 全候选无 pad
-        ("large_filter", 1, 6, [25600], [0], 220),         # 3200 块 > 2048: 真实过滤
-        ("large_tailodd", 1, 6, [25605], [1], 220),        # 尾块不对齐 + residual<cmp_ratio: 修正链路径
+        ("tiny_leak", 1, 6, [100], [0], 4),  # 13 块 ≤ 2048: 全候选, -1 填充泄漏区
+        ("small_allcand", 1, 6, [8192], [0], 80),  # 1024 块 ≤ 2048: 全候选无 pad
+        ("large_filter", 1, 6, [25600], [0], 220),  # 3200 块 > 2048: 真实过滤
+        ("large_tailodd", 1, 6, [25605], [1], 220),  # 尾块不对齐 + residual<cmp_ratio: 修正链路径
         ("varlen_b2", 2, 6, [30000, 12345], [0, 1], 400),  # 变长 batch: 每行候选不同 (block_num 覆盖 235+97)
-        ("boundary_2048", 1, 6, [16384], [0], 140),        # 恰 2048 块: 边界
+        ("boundary_2048", 1, 6, [16384], [0], 140),  # 恰 2048 块: 边界
     ]
     ok = True
     for i, (name, b, q, klist, res, bn) in enumerate(cases):
