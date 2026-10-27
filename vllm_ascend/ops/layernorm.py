@@ -18,6 +18,7 @@
 import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.device.device_op import DeviceOperator
@@ -89,9 +90,23 @@ class AscendRMSNorm(RMSNorm):
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
             enable_custom_op()
-            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x, residual, self.weight, self.bias, self.variance_epsilon
-            )
+            try:
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            except (AttributeError, RuntimeError):
+                # Older CANN releases do not ship aclnnAddRmsNormBias. The
+                # unfused path is equivalent when the checkpoint has no norm
+                # bias, which is the normal Qwen3 case.
+                if self.bias is not None:
+                    raise
+                logger.warning_once(
+                    "npu_add_rms_norm_bias is unavailable; "
+                    "falling back to torch_npu.npu_add_rms_norm"
+                )
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, self.weight, self.variance_epsilon
+                )
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
