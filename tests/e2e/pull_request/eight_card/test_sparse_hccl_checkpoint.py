@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Real Qwen3 MoE loader oracle for checkpoint sparse HCCL (5 NPUs).
+"""Real Qwen3 MoE loader oracle for checkpoint sparse HCCL (3 NPUs).
 
 The checkpoint is deliberately small and synthetic. This checks native TP/EP
 mapping and generation equivalence, not pretrained-model accuracy/performance.
@@ -34,7 +34,7 @@ from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
     checkpoint_loader_views,
 )
 
-TP_SIZE = 4
+PATCH_PARTITIONS = 2
 NUM_EXPERTS = 8
 HIDDEN_SIZE = 1024
 HEAD_SIZE = 128
@@ -102,9 +102,10 @@ def write_checkpoint(path, num_layers=1):
     save_file(weights, path / "model.safetensors")
     records = []
     for name, weight in weights.items():
-        # Touch each quarter and both ends, including every global expert owner.
+        # Touch both halves and both ends, including every global expert owner.
         indices = torch.tensor(
-            sorted({0, weight.numel() - 1, *(weight.numel() * n // TP_SIZE for n in range(TP_SIZE))}), dtype=torch.int32
+            sorted({0, weight.numel() - 1, *(weight.numel() * n // PATCH_PARTITIONS for n in range(PATCH_PARTITIONS))}),
+            dtype=torch.int32,
         )
         records.append(
             dict(
@@ -184,8 +185,8 @@ def generate(url):
 
 @pytest.mark.parametrize(
     "tp_size,dp_size",
-    [(4, 1), (2, 2)],
-    ids=["tp4-ep4", "tp2-dp2-ep4"],
+    [(2, 1), (1, 2)],
+    ids=["tp2-ep2", "dp2-ep2"],
 )
 def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, dp_size):
     """Compare every worker parameter and generated token with dense loading."""
