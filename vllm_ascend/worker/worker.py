@@ -1182,8 +1182,8 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        if vllm_version_is("0.31.0"):
-            # v0.31.0's engine core never issues this RPC, and the upstream
+        if vllm_version_is("0.32.0"):
+            # v0.32.0's engine core never issues this RPC, and the upstream
             # `._find_simple_cpu_offload_connector` / `get_aligned_num_cpu_blocks`
             # helpers do not exist on that lane.
             return None

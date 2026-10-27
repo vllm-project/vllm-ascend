@@ -17,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
@@ -274,7 +275,7 @@ def test_prefill_filters_target_only_metadata():
         CUDAGraphMode.NONE,
         None,
     ]
-    if not vllm_version_is("0.31.0"):
+    if not vllm_version_is("0.32.0"):
         # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
         expected_args.append(False)
     parent_prefill.assert_called_once_with(*expected_args)
@@ -282,14 +283,14 @@ def test_prefill_filters_target_only_metadata():
 
 def test_prefill_forwards_skip_sample_on_main():
     """main's propose passes `skip_sample`; the override must forward it upstream."""
-    speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     draft_metadata = object()
     attn_metadata = {"draft": draft_metadata}
     speculator.draft_attn_layer_names = {"draft"}
     speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, None))
-    with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
+    with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=True)
-    if vllm_version_is("0.31.0"):
+    if vllm_version_is("0.32.0"):
         assert "skip_sample" not in parent_prefill.call_args.kwargs
         assert len(parent_prefill.call_args.args) == 7
     else:

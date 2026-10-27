@@ -28,6 +28,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
@@ -451,7 +452,7 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
     kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only num_reqs_override")
+@pytest.mark.skipif(vllm_version_is("0.32.0"), reason="main-only num_reqs_override")
 def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
     """vLLM main (#58984) forwards the DP-synced request count positionally."""
     kernel = MagicMock()

@@ -90,8 +90,8 @@ def _pack_conv_weights(conv1d: nn.Module) -> None:
         .contiguous()
     )
     # vLLM main (#62326) keeps the parameter object by default and drops
-    # `prefer_copy`; v0.31.0 still requires `prefer_copy=True`.
-    if vllm_version_is("0.31.0"):
+    # `prefer_copy`; v0.32.0 still requires `prefer_copy=True`.
+    if vllm_version_is("0.32.0"):
         replace_parameter(
             conv1d,
             _PACKED_CONV_WEIGHT_NAME,

@@ -84,6 +84,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1001,9 +1002,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.g_proj = kwargs.get("g_proj")
         # vLLM main fuses Kimi-K3's output gate into the QKV-A projection as a
         # trailing shard, making its per-rank layout ``[q_a | kv_a | gate]`` and
-        # dropping the standalone ``g_proj``. Release v0.31.0 keeps the separate
+        # dropping the standalone ``g_proj``. Release v0.32.0 keeps the separate
         # ``g_proj`` and a two-shard projection.
-        if vllm_version_is("0.31.0"):
+        if vllm_version_is("0.32.0"):
             self.qkv_a_gate_fused = False
             self.use_output_gate = self.g_proj is not None
         else:
@@ -1295,7 +1296,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # reload has to refresh the stored tensors in place instead of
         # rebinding the attributes to freshly allocated tensors.
         # `replace_parameter(..., prefer_copy=True)` does exactly that on
-        # v0.31.0: it copies into the existing storage while the new value stays
+        # v0.32.0: it copies into the existing storage while the new value stays
         # compatible, and rebinds only when shape/dtype/device actually
         # changes. vLLM main (#62326) dropped `prefer_copy` and keeps the
         # parameter object by default. This mirrors how upstream vLLM refreshes
@@ -1303,7 +1304,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # raise on a shape mismatch.
         w_uv = W_UV.transpose(0, 1).contiguous()  # (L, N, V) -> (N, L, V)
         w_uk_t = W_UK.permute(1, 2, 0).contiguous()  # (L, N, P) -> (N, P, L)
-        if vllm_version_is("0.31.0"):
+        if vllm_version_is("0.32.0"):
             replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
             replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
         else:
@@ -3242,13 +3243,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
     # vLLM main fuses Kimi-K3's output gate into the trailing shard of the
-    # QKV-A projection; v0.31.0 never has that shard, so the release lane keeps
+    # QKV-A projection; v0.32.0 never has that shard, so the release lane keeps
     # the original two-way ``[q_a | kv_a]`` split.
-    if vllm_version_is("0.31.0"):
+    if vllm_version_is("0.32.0"):
 
         @property
         def _fused_qkv_a_kv_end(self) -> int | None:
-            """v0.31.0 keeps the plain two-shard QKV-A projection."""
+            """v0.32.0 keeps the plain two-shard QKV-A projection."""
             return None
 
         def _split_fused_qkv_lora(self, qkv_lora: torch.Tensor):
