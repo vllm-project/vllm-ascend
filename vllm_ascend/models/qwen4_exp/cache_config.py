@@ -50,16 +50,21 @@ class CacheOwner:
 
 @dataclass(frozen=True)
 class SlabRegion:
-    """One region in a slot backing: all physical blocks are contiguous."""
+    """A state component with dense contents and an explicit byte block stride."""
 
     name: str
     offset: int
     page_size_bytes: int
     num_blocks: int
+    block_stride_bytes: int | None = None
+
+    @property
+    def block_stride(self) -> int:
+        return self.page_size_bytes if self.block_stride_bytes is None else self.block_stride_bytes
 
     @property
     def size(self) -> int:
-        return self.page_size_bytes * self.num_blocks
+        return (self.num_blocks - 1) * self.block_stride + self.page_size_bytes
 
     @property
     def end(self) -> int:
@@ -273,15 +278,20 @@ def build_qwen4_kv_cache_layout(
         )
     )
     r2_bytes = max(max_ssm_bytes, *(k + v for k, v in main_pages))
-    page_sizes = {
-        "r1": max(_state_bytes(spec, 0) for spec in gdn_specs),
-        "r2": round_up(r2_bytes, subpage_alignment),
+    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
+    state_bytes = round_up(r2_bytes, subpage_alignment)
+    # Conv and SSM share each physical block. QSA K/V aliases only its SSM
+    # component; whole-page stride padding preserves GBSA's virtual page map.
+    state_stride = round_up(conv_bytes + state_bytes, subpage_alignment)
+    regions = [
+        SlabRegion("r1", 0, conv_bytes, num_blocks, state_stride),
+        SlabRegion("r2", conv_bytes, state_bytes, num_blocks, state_stride),
+    ]
+    cursor = state_stride * num_blocks
+    for name, page_size in {
         "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
         "r5": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_COMPRESSED]),
-    }
-    regions: list[SlabRegion] = []
-    cursor = 0
-    for name, page_size in page_sizes.items():
+    }.items():
         cursor = round_up(cursor, alignment)
         regions.append(SlabRegion(name, cursor, page_size, num_blocks))
         cursor += page_size * num_blocks
@@ -313,12 +323,13 @@ def build_qwen4_kv_cache_layout(
         num_blocks=num_blocks,
     )
 
-    previous_end = 0
+    assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
+    assert layout.region("r2").offset + state_bytes <= state_stride
+    assert layout.region("r4").offset >= state_stride * num_blocks
+    assert layout.region("r5").offset >= layout.region("r4").end
     for region in layout.regions:
-        assert region.offset >= previous_end
         assert region.offset % alignment == 0
         assert region.end <= slot_backing_size
-        previous_end = region.end
     for owner in layout.owners:
         if owner.role in (HIDDEN, PLE):
             continue
@@ -614,7 +625,7 @@ def get_qwen4_exp_kv_cache_config(
 
     private_owners = [owner for owner in probe.owners if owner.role in (HIDDEN, PLE)]
     private_bytes_per_block = sum(_private_page_bytes(owner) for owner in private_owners)
-    slab_bytes_per_block = sum(region.page_size_bytes for region in probe.regions)
+    slab_bytes_per_block = probe.slot_backing_size
     bytes_per_block = probe.slot_count * slab_bytes_per_block + private_bytes_per_block
     candidate = available_memory // bytes_per_block
     while candidate > 0:
@@ -657,7 +668,7 @@ def get_qwen4_exp_kv_cache_config(
                     size=backing_size,
                     layers=[owner.layer_name for owner in owners],
                     layer_stride=layout.slot_backing_size,
-                    block_stride=region.page_size_bytes,
+                    block_stride=region.block_stride,
                     offset=region.offset + owners[0].slot * layout.slot_backing_size,
                 )
             )

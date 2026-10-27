@@ -161,20 +161,23 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     return specs
 
 
-def test_six_region_offsets_are_contiguous_non_overlapping_slabs() -> None:
+def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> None:
     layout = build_qwen4_kv_cache_layout(_groups(), num_blocks=3)
     assert layout is not None
     assert layout.slot_count == 3
-    assert [(region.name, region.offset, region.page_size_bytes, region.size) for region in layout.regions] == [
-        ("r1", 0, 512, 1536),
-        ("r2", 1536, 32768, 98304),
-        ("r4", 99840, 512, 1536),
-        ("r5", 101376, 2048, 6144),
-    ]
-    assert layout.slot_backing_size == 107520
-    for left, right in zip(layout.regions, layout.regions[1:]):
-        assert right.offset >= left.end
-        assert right.offset % layout.alignment == 0
+    conv, ssm = layout.region("r1"), layout.region("r2")
+    assert conv.block_stride == ssm.block_stride == 49152
+    assert ssm.offset == conv.page_size_bytes
+    occupied = []
+    for block in range(3):
+        for region in (conv, ssm):
+            start = region.offset + block * region.block_stride
+            occupied.append((start, start + region.page_size_bytes))
+    occupied.sort()
+    assert all(left[1] <= right[0] for left, right in zip(occupied, occupied[1:]))
+    assert layout.region("r4").offset >= occupied[-1][1]
+    assert layout.region("r5").offset >= layout.region("r4").end
+    assert layout.slot_backing_size >= layout.region("r5").end
 
     for slot, source in enumerate(
         [
@@ -207,7 +210,7 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
             num_blocks=num_blocks,
             item_shape=shape,
             storage_offset=layout.region(region_name).offset,
-            block_stride=layout.region(region_name).page_size_bytes,
+            block_stride=layout.region(region_name).block_stride,
         )
 
     views = {
@@ -227,9 +230,9 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
         region = layout.region(region_for_view[name])
         assert slab.untyped_storage().data_ptr() == storage_ptr
         assert slab[0].is_contiguous()
-        assert slab.is_contiguous()
+        assert slab.is_contiguous() == (region.block_stride == slab[0].numel() * slab.element_size())
         assert slab.storage_offset() * slab.element_size() == region.offset
-        assert slab.stride(0) * slab.element_size() == region.page_size_bytes
+        assert slab.stride(0) * slab.element_size() == region.block_stride
         assert slab[0].numel() * slab.element_size() <= region.page_size_bytes
 
     packed = [
@@ -239,13 +242,13 @@ def test_six_region_views_are_contiguous_and_advanced_index_is_bounded() -> None
             num_blocks=num_blocks,
             item_shape=(128, 1, 64),
             storage_offset=layout.region("r2").offset + offset,
-            block_stride=layout.region("r2").page_size_bytes,
+            block_stride=layout.region("r2").block_stride,
         )
         for offset in (0, 16384)
     ]
     keys, values = packed
     assert not keys.is_contiguous() and not values.is_contiguous()
-    assert keys.stride(0) * keys.element_size() == 32768
+    assert keys.stride(0) * keys.element_size() == layout.region("r2").block_stride
     keys[1].fill_(7)
     values[1].fill_(11)
     ssm = views["gdn_ssm"]
@@ -460,11 +463,11 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
         ):
             region = layout.region(region_name)
             assert state[0].is_contiguous()
-            assert state.is_contiguous()
+            assert not state.is_contiguous()
             assert state.storage_offset() * state.element_size() == (
                 owner.slot * layout.slot_backing_size + region.offset
             )
-            assert state.stride(0) * state.element_size() == region.page_size_bytes
+            assert state.stride(0) * state.element_size() == region.block_stride
             assert state.untyped_storage().data_ptr() == (backing.untyped_storage().data_ptr())
             assert state[0].numel() * state.element_size() <= region.page_size_bytes
 
@@ -486,7 +489,7 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     k, v = caches["model.layers.11.self_attn.attn"]
     ssm = caches["model.layers.0.linear_attn"][1]
     assert k.shape == v.shape == (3, 128, 1, 64)
-    assert k.stride() == v.stride() == (16384, 64, 64, 1)
+    assert k.stride() == v.stride() == (24576, 64, 64, 1)
     assert v.data_ptr() - k.data_ptr() == 16384
     assert k.data_ptr() == ssm.data_ptr()
     k[2].fill_(5)
@@ -678,6 +681,7 @@ def test_mamba_state_groups_merge_shares_one_block_table() -> None:
                 num_blocks=3,
                 item_shape=owner.spec.shapes[1],
                 dtype=owner.spec.dtypes[1],
+                block_stride=region.block_stride,
             )
         )
     assert len({view.data_ptr() for view in views}) == 1
@@ -705,7 +709,7 @@ def test_mamba_state_groups_merge_shares_one_block_table() -> None:
     assert all(raw[name] is raw[names[0]] for name in names)
     assert raw[names[0]].numel() == 13 * layout.slot_backing_size
     states = [caches[name][1] for name in names]
-    assert all(state.is_contiguous() for state in states)
+    assert all(state[0].is_contiguous() and not state.is_contiguous() for state in states)
     for block_id, state in enumerate(states):
         state[block_id].fill_(block_id + 1)
     for state in states:

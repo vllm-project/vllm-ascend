@@ -6106,7 +6106,7 @@ class NPUModelRunner(GPUModelRunner):
                                 num_blocks=kv_cache_config.num_blocks,
                                 item_shape=(spec.block_size, spec.num_kv_heads, head_size),
                                 storage_offset=slot_offset + region.offset + offset,
-                                block_stride=region.page_size_bytes,
+                                block_stride=region.block_stride,
                             )
                             for head_size, offset in ((spec.head_size, 0), (spec.head_size_v, k_bytes))
                         )
@@ -6185,7 +6185,7 @@ class NPUModelRunner(GPUModelRunner):
                                 dtype=dtype,
                                 num_blocks=kv_cache_config.num_blocks,
                                 item_shape=tuple(shape),
-                                block_stride=six_region_layout.region(region_name).page_size_bytes,
+                                block_stride=six_region_layout.region(region_name).block_stride,
                                 storage_offset=(
                                     slot_offset
                                     + six_region_layout.region(

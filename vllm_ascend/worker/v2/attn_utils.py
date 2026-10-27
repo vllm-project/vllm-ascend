@@ -1729,7 +1729,7 @@ def _reshape_kv_cache_v2(
                             num_blocks=kv_cache_config.num_blocks,
                             item_shape=(kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, head_size),
                             storage_offset=slot_offset + region.offset + offset,
-                            block_stride=region.page_size_bytes,
+                            block_stride=region.block_stride,
                         )
                         for head_size, offset in ((kv_cache_spec.head_size, 0), (kv_cache_spec.head_size_v, k_bytes))
                     )
@@ -1800,7 +1800,7 @@ def _reshape_kv_cache_v2(
                             num_blocks=kv_cache_config.num_blocks,
                             item_shape=tuple(shape),
                             storage_offset=slot_offset + six_region_layout.region(region_name).offset,
-                            block_stride=six_region_layout.region(region_name).page_size_bytes,
+                            block_stride=six_region_layout.region(region_name).block_stride,
                         )
                         for shape, dtype, region_name in zip(
                             kv_cache_spec.shapes,
