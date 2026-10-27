@@ -295,7 +295,7 @@ Run the selected command inside the container. Replace the weight-path placehold
 
 **Note**: In the scripts above, `max-num-seqs` limits the number of sequences scheduled in one iteration. Tune this limit using the expected input/output lengths and request concurrency, and measure throughput and latency after each change. Increase it only when additional sequences fit in the available KV cache; a higher limit does not guarantee higher throughput and can increase latency or KV-cache preemption.
 
-For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
+Text requests do not require `--limit-mm-per-prompt`, but omitting this flag does not disable multimodal support or its memory planning. For a text-only service that disables multimodal inputs, use `--language-model-only`, as described in [Section 5.5](#55-multimodal-and-vit-dp-optional). For multimodal deployment, configure the limits according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.2 Multi-Node Deployment
 
@@ -895,7 +895,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
 
     To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
@@ -1141,7 +1141,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31060 31061
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
 
     **Scaling to three nodes (still 1P1D)**
 
@@ -1234,7 +1234,7 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
+- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
 
 **Decode node-specific configurations:**
 
@@ -1269,7 +1269,7 @@ This section builds on [Section 5.3.1](#531-prefill-decode-disaggregation). The 
 
 The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload.
 
-For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant options, and hardware-specific pooling exports, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3.1, pay attention to these pooling-only requirements:**
 
@@ -1382,7 +1382,7 @@ The 950DT examples use `64GB` per worker rank on both P and D. Adjust the size t
 
 ##### 5.3.2.2 Environment Variables
 
-Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
@@ -1890,6 +1890,8 @@ Proxy (:8009)
     --client_ttl=120
     ```
 
+    These are example Master settings: `default_kv_lease_ttl=11000` is in milliseconds, while `client_ttl=120` is in seconds. The eviction ratios are dimensionless; see the [Mooncake Master parameter table](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-2-configure-mooncakejson-and-start-mooncake_master) for their meanings and supported ranges. Keep `enable_offload=true` for this SSD-offload deployment.
+
 2. Start the first A3 Decode node (global DP ranks 0–3). Use the pooled Decode template, not the normal-PD template:
 
     ```bash
@@ -1983,7 +1985,7 @@ Proxy (:8009)
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in Section 7.
+    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 7](#7-functional-verification).
 
 ##### 5.3.2.5 Verification
 
@@ -2601,10 +2603,12 @@ Change `"thinking_mode"` to `"enabled"` or `"adaptive"` as needed. The deprecate
 
 **With thinking enabled (Python SDK):**
 
+Set `base_url` to the deployed API address, including `/v1`. The example below uses the Section 5.1 service port; for PD disaggregation, use the proxy address and port instead.
+
 ```python
 from openai import OpenAI
 
-client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:11223/v1")
 
 response = client.chat.completions.create(
     model="minimax-m3",
@@ -2650,7 +2654,7 @@ MiniMax-M3 uses explicit thinking delimiters:
 
 ### 6.3 Tool Call Parser
 
-MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-parser minimax_m3`.
+MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-call-parser minimax_m3`.
 
 #### 6.3.1 Server Configuration
 
@@ -2697,7 +2701,7 @@ curl http://{ip}:{port}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "minimax-m3",
-    "messages": [{"role": "user", "content": "What's the weather like in Shanghai?"}],
+    "messages": [{"role": "user", "content": "What is the weather like in Shanghai?"}],
     "max_tokens": 300,
     "stream": false,
     "tool_choice": "auto",
@@ -2868,6 +2872,8 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
 
 The Video-MME results below are measured on chunk1 and chunk2, not the full dataset.
+
+Obtain the video files and question/answer annotations from the [Video-MME dataset](https://huggingface.co/datasets/lmms-eval/Video-MME), linked by the [official Video-MME repository](https://github.com/MME-Benchmarks/Video-MME#-dataset). Prepare the chunk1/chunk2 videos locally and set the dataset config's `path` and `video_path` to the corresponding metadata and extracted video directories, as described below.
 
 For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the recommended MiniMax-M3 settings are:
 
