@@ -85,6 +85,37 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
+def dsa_v41_write_kv(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Write a V4.1 layer's KV caches without running attention or its MLP."""
+    forward_context = get_forward_context()
+    attn = forward_context.no_compile_layers[layer_name]
+    metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+    attn.v41_impl._update_caches(attn, hidden_states, metadata)
+
+
+def dsa_v41_write_kv_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="dsa_v41_write_kv",
+    op_func=dsa_v41_write_kv,
+    mutates_args=["output"],
+    fake_impl=dsa_v41_write_kv_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
 def _config_value(config: Any, name: str, default: Any = None) -> Any:
     """Read one field from either an HF config object or a raw config dict."""
     if isinstance(config, dict):
