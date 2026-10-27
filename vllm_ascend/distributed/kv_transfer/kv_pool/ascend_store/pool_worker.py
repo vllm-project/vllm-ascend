@@ -81,6 +81,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
+    KVCacheByteRange,
     LayerBlockRange,
     LayerLoadTask,
     LayerMultiBlockReqMeta,
@@ -1404,7 +1405,7 @@ class KVPoolWorker:
         addrs: list[list[int]],
         sizes: list[list[int]],
         block_ids: list[int],
-        views: list[list[torch.Tensor]],
+        views: Sequence[Sequence[torch.Tensor | KVCacheByteRange]],
     ) -> tuple[bool, set[int], int] | None:
         total_bytes = sum(sum(key_sizes) for key_sizes in sizes)
         if not _should_use_mla_read_dedup(total_bytes, self.tp_size):
@@ -1495,7 +1496,7 @@ class KVPoolWorker:
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            view_list: list[list[torch.Tensor]] = []
+            view_list: list[list[KVCacheByteRange]] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
             for group_id in load_group_ids:
                 if group_id >= len(request.block_ids_by_group):
@@ -1524,7 +1525,7 @@ class KVPoolWorker:
                     chunk_filter=chunk_filter,
                 ):
                     if self.mla_read_dedup:
-                        addr, size, views, block_id = self.token_database.prepare_value_with_views(
+                        addr, size, views, block_id = self.token_database.prepare_value_with_ranges(
                             start,
                             end,
                             block_ids,

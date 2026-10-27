@@ -4,7 +4,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import compress
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -16,6 +16,18 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+
+
+class KVCacheByteRange(NamedTuple):
+    """A cache storage span that can be merged before creating a Tensor."""
+
+    storage: Any
+    offset: int
+    size: int
+    device: torch.device
+
+    def as_tensor(self) -> torch.Tensor:
+        return torch.empty(0, dtype=torch.int8, device=self.device).set_(self.storage, self.offset, (self.size,), (1,))
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
@@ -557,7 +569,7 @@ class ChunkedTokenDatabase:
         )
         return addrs, sizes, resolved_block_id
 
-    def prepare_value_with_views(
+    def prepare_value_with_ranges(
         self,
         start: int,
         end: int,
@@ -565,8 +577,8 @@ class ChunkedTokenDatabase:
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
         block_id: int | None = None,
-    ) -> tuple[list[int], list[int], list[torch.Tensor], int]:
-        """Return transfer ranges together with their local int8 views."""
+    ) -> tuple[list[int], list[int], list[KVCacheByteRange], int]:
+        """Return storage spans without allocating a Tensor for each block."""
         addrs, sizes, descriptor_indices, byte_offsets, resolved_block_id = self._prepare_value_layout(
             start,
             end,
@@ -579,17 +591,26 @@ class ChunkedTokenDatabase:
         if addrs and storages is None:
             raise RuntimeError("KV cache storage metadata is unavailable for read deduplication")
 
-        views: list[torch.Tensor] = []
+        ranges: list[KVCacheByteRange] = []
         for descriptor_index, byte_offset, size in zip(descriptor_indices, byte_offsets, sizes):
             storage, storage_offset, device = storages[descriptor_index]  # type: ignore[index]
-            view = torch.empty(0, dtype=torch.int8, device=device).set_(
-                storage,
-                storage_offset + byte_offset,
-                (size,),
-                (1,),
-            )
-            views.append(view)
-        return addrs, sizes, views, resolved_block_id
+            ranges.append(KVCacheByteRange(storage, storage_offset + byte_offset, size, device))
+        return addrs, sizes, ranges, resolved_block_id
+
+    def prepare_value_with_views(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        block_id: int | None = None,
+    ) -> tuple[list[int], list[int], list[torch.Tensor], int]:
+        """Materialize individual views for callers that require Tensor aliases."""
+        addrs, sizes, ranges, resolved_block_id = self.prepare_value_with_ranges(
+            start, end, block_ids, kv_cache_group_id, cache_role, block_id
+        )
+        return addrs, sizes, [span.as_tensor() for span in ranges], resolved_block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)

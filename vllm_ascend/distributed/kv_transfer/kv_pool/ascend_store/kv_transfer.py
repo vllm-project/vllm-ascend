@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tr
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
+    KVCacheByteRange,
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
@@ -136,125 +137,71 @@ def _block_ids_are_contiguous(block_ids: list[int], indices: list[int]) -> bool:
     )
 
 
-def _coalesced_kv_views(
-    views: list[list[torch.Tensor]], indices: list[int], *, assume_contiguous: bool = False
-) -> list[torch.Tensor]:
-    """Return layer-major views, merging adjacent ranges backed by one storage."""
-    max_views = max((len(views[index]) for index in indices), default=0)
-    coalesced: list[torch.Tensor] = []
+def _kv_byte_range(view: torch.Tensor | KVCacheByteRange) -> KVCacheByteRange:
+    if isinstance(view, KVCacheByteRange):
+        return view
+    if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
+        raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
+    return KVCacheByteRange(view.untyped_storage(), view.storage_offset(), view.numel(), view.device)
 
+
+def _same_kv_storage(first: KVCacheByteRange, second: KVCacheByteRange) -> bool:
+    return first.device == second.device and (
+        first.storage is second.storage or first.storage.data_ptr() == second.storage.data_ptr()
+    )
+
+
+def _coalesced_kv_views(
+    views: Sequence[Sequence[torch.Tensor | KVCacheByteRange]], indices: list[int], *, assume_contiguous: bool = False
+) -> list[torch.Tensor]:
+    """Merge layer-major storage spans before materializing exchange tensors."""
+    max_views = max((len(views[index]) for index in indices), default=0)
     if assume_contiguous and indices:
-        first_key = indices[0]
-        last_key = indices[-1]
+        first_key, last_key = indices[0], indices[-1]
         view_count = len(views[first_key])
         if view_count and all(len(views[index]) == view_count for index in indices):
-            fast_views: list[torch.Tensor] = []
-            fast_path = True
-            key_count = len(indices)
+            fast_ranges = []
             for view_index in range(view_count):
-                first = views[first_key][view_index]
-                last = views[last_key][view_index]
+                first = _kv_byte_range(views[first_key][view_index])
+                last = _kv_byte_range(views[last_key][view_index])
+                total_bytes = first.size * len(indices)
                 if (
-                    not isinstance(first, torch.Tensor)
-                    or not isinstance(last, torch.Tensor)
-                    or first.dtype != torch.int8
-                    or last.dtype != torch.int8
-                    or not first.is_contiguous()
-                    or not last.is_contiguous()
-                    or first.numel() == 0
-                    or first.numel() != last.numel()
+                    first.size == 0
+                    or first.size != last.size
+                    or not _same_kv_storage(first, last)
+                    or last.offset + last.size != first.offset + total_bytes
                 ):
-                    fast_path = False
                     break
-                total_bytes = first.numel() * key_count
-                first_storage = first.untyped_storage()
-                last_storage = last.untyped_storage()
-                if (
-                    first_storage.data_ptr() != last_storage.data_ptr()
-                    or last.data_ptr() + last.numel() != first.data_ptr() + total_bytes
+                # Block IDs are a hint: verify interior storage and partial ranges too.
+                if any(
+                    span.size != first.size
+                    or span.offset != first.offset + position * first.size
+                    or not _same_kv_storage(first, span)
+                    for position, key_index in enumerate(indices)
+                    for span in (_kv_byte_range(views[key_index][view_index]),)
                 ):
-                    fast_path = False
                     break
-                fast_views.append(
-                    torch.empty(0, dtype=torch.int8, device=first.device).set_(
-                        first_storage,
-                        first.storage_offset(),
-                        (total_bytes,),
-                        (1,),
-                    )
-                )
-            if fast_path:
-                return fast_views
+                fast_ranges.append(KVCacheByteRange(first.storage, first.offset, total_bytes, first.device))
+            else:
+                return [span.as_tensor() for span in fast_ranges]
 
+    coalesced = []
     for view_index in range(max_views):
-        layer_views: list[torch.Tensor] = []
+        current = None
         for key_index in indices:
             if view_index >= len(views[key_index]):
                 continue
-            view = views[key_index][view_index]
-            if not isinstance(view, torch.Tensor) or view.dtype != torch.int8 or not view.is_contiguous():
-                raise RuntimeError("KV read deduplication requires contiguous int8 cache views")
-            if view.numel() == 0:
+            span = _kv_byte_range(views[key_index][view_index])
+            if span.size == 0:
                 continue
-            layer_views.append(view)
-        if not layer_views:
-            continue
-
-        expected_ptr = layer_views[0].data_ptr()
-        spans_one_storage = True
-        for view in layer_views:
-            if view.data_ptr() != expected_ptr:
-                spans_one_storage = False
-                break
-            expected_ptr += view.numel()
-        if spans_one_storage:
-            first_storage = layer_views[0].untyped_storage()
-            if first_storage.data_ptr() == layer_views[-1].untyped_storage().data_ptr():
-                merged = torch.empty(0, dtype=torch.int8, device=layer_views[0].device).set_(
-                    first_storage,
-                    layer_views[0].storage_offset(),
-                    (expected_ptr - layer_views[0].data_ptr(),),
-                    (1,),
-                )
-                coalesced.append(merged)
+            if current is not None and _same_kv_storage(current, span) and current.offset + current.size == span.offset:
+                current = KVCacheByteRange(current.storage, current.offset, current.size + span.size, current.device)
                 continue
-
-        current_storage = None
-        current_device = None
-        current_start = 0
-        current_end = 0
-        for view in layer_views:
-            storage = view.untyped_storage()
-            storage_offset = view.storage_offset()
-            if (
-                current_storage is not None
-                and current_storage.data_ptr() == storage.data_ptr()
-                and storage_offset == current_end
-            ):
-                current_end += view.numel()
-                continue
-            if current_storage is not None:
-                coalesced.append(
-                    torch.empty(0, dtype=torch.int8, device=current_device).set_(
-                        current_storage,
-                        current_start,
-                        (current_end - current_start,),
-                        (1,),
-                    )
-                )
-            current_storage = storage
-            current_device = view.device
-            current_start = storage_offset
-            current_end = storage_offset + view.numel()
-        if current_storage is not None:
-            coalesced.append(
-                torch.empty(0, dtype=torch.int8, device=current_device).set_(
-                    current_storage,
-                    current_start,
-                    (current_end - current_start,),
-                    (1,),
-                )
-            )
+            if current is not None:
+                coalesced.append(current.as_tensor())
+            current = span
+        if current is not None:
+            coalesced.append(current.as_tensor())
     return coalesced
 
 
@@ -356,6 +303,22 @@ def _all_gather_kv_shards(
 
 
 _P2P_EXCHANGE_VIEW_LIMIT = 4
+_P2P_EXCHANGE_MIN_VIEW_BYTES = 8 * 1024 * 1024
+_P2P_EXCHANGE_LARGE_VIEW_LIMIT = 64
+
+
+def _should_use_p2p_kv_exchange(world_size: int, total_views: int, total_bytes: int) -> bool:
+    """Prefer direct cache writes for few views or large TP=2 spans."""
+    if total_views <= _P2P_EXCHANGE_VIEW_LIMIT:
+        return True
+    # With one peer, large contiguous spans amortize per-view P2P overhead
+    # while avoiding the all-gather pack and copyback of the full KV payload.
+    # Bound the operation count: many large spans still incur costly P2P launches.
+    return (
+        world_size == 2
+        and total_views <= _P2P_EXCHANGE_LARGE_VIEW_LIMIT
+        and total_bytes >= total_views * _P2P_EXCHANGE_MIN_VIEW_BYTES
+    )
 
 
 def sharded_get_all_gather(
@@ -366,7 +329,7 @@ def sharded_get_all_gather(
     addrs: list[list[int]],
     sizes: list[list[int]],
     block_ids: list[int],
-    views: list[list[torch.Tensor]],
+    views: Sequence[Sequence[torch.Tensor | KVCacheByteRange]],
 ) -> tuple[bool, set[int], int]:
     """Load a TP-disjoint KV shard and all-gather it into every local cache."""
     if not (len(keys) == len(addrs) == len(sizes) == len(block_ids) == len(views)):
@@ -423,10 +386,13 @@ def sharded_get_all_gather(
             failure_bytes[byte_index] |= 1 << bit_index
 
     if wire_bytes:
+        # Keep read ownership unchanged, but use the same physical block order
+        # for packing and receiving so reversed/reused allocations still coalesce.
+        local_view_indices = sorted(local_indices, key=block_ids.__getitem__)
         local_views = _coalesced_kv_views(
             views,
-            local_indices,
-            assume_contiguous=_block_ids_are_contiguous(block_ids, local_indices),
+            local_view_indices,
+            assume_contiguous=_block_ids_are_contiguous(block_ids, local_view_indices),
         )
         actual_local_bytes = sum(view.numel() for view in local_views)
         if actual_local_bytes != local_bytes:
@@ -435,7 +401,7 @@ def sharded_get_all_gather(
         for owner in range(world_size):
             if owner == tp_rank:
                 continue
-            owner_indices = _kv_shard_indices(len(keys), world_size, owner)
+            owner_indices = sorted(_kv_shard_indices(len(keys), world_size, owner), key=block_ids.__getitem__)
             owner_view_list = _coalesced_kv_views(
                 views,
                 owner_indices,
@@ -449,7 +415,7 @@ def sharded_get_all_gather(
             owner_views[owner] = owner_view_list
         status_values = missing_bytes + failure_bytes
         total_views = len(local_views) + sum(len(owner_view_list) for owner_view_list in owner_views.values())
-        if total_views <= _P2P_EXCHANGE_VIEW_LIMIT:
+        if _should_use_p2p_kv_exchange(world_size, total_views, sum(shard_lengths)):
             status = torch.tensor(status_values, dtype=torch.uint8, device="cpu")
             status_values = _all_reduce_kv_status(tp_group, status).tolist()
             _exchange_kv_shards(tp_group, tp_rank, local_views, owner_views)
@@ -1936,7 +1902,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            view_list: list[list[torch.Tensor]] = []
+            view_list: list[list[KVCacheByteRange]] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
@@ -1958,7 +1924,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
                     if self.read_dedup:
-                        addr, size, views, block_id = self.token_database.prepare_value_with_views(
+                        addr, size, views, block_id = self.token_database.prepare_value_with_ranges(
                             start,
                             end,
                             block_ids,
