@@ -95,6 +95,7 @@ class TestLookupKeyServer(unittest.TestCase):
                     (64).to_bytes(4, "big"),
                     b"groups",
                     (0).to_bytes(4, "big"),
+                    b"mode",
                     b"hashes",
                 ]
             server_holder["server"].running = False
@@ -106,11 +107,12 @@ class TestLookupKeyServer(unittest.TestCase):
         server = LookupKeyServer(pool_worker, config)
         server_holder["server"] = server
         server.decoder = MagicMock()
-        server.decoder.decode.side_effect = [[0], ["hash"]]
+        server.decoder.decode.side_effect = [[0], "suffix", ["hash"]]
         target = mock_thread_cls.call_args.kwargs["target"]
 
         target()
 
+        pool_worker.lookup_scheduler.assert_called_once()
         mock_socket.send.assert_called_once_with((0).to_bytes(4, "big"))
         mock_socket.close.assert_called_once_with(linger=0)
         mock_context_cls.return_value.term.assert_called_once_with()
