@@ -3,6 +3,5 @@ entries:
   - category: performance
     text: >-
       Automatically budget concurrent attention and history-pack cores for
-      Ascend 950 FlashMLA DCP speculative decoding, adapting to device resources
+      FlashMLA DCP speculative decoding, adapting to device resources
       and retaining full-grid execution for larger packs.
-    hardware: [A5]

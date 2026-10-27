@@ -10,7 +10,7 @@ attention is the independent reference; this is not NPU or ACL graph evidence.
 import ast
 import runpy
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
@@ -162,12 +162,9 @@ def runtime(monkeypatch):
         return values, -values
 
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
-    load("vllm_ascend.attention.flashmla_core_budget", "vllm_ascend/attention/flashmla_core_budget.py")
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
     core_budget_factory = Mock(return_value=None)
-    monkeypatch.setitem(
-        api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", core_budget_factory
-    )
+    monkeypatch.setitem(api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", core_budget_factory)
 
     def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
         return torch.cat((lengths, cu_seqlens_q, seqused_q))
@@ -444,10 +441,10 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
 ):
     runtime.context.capturing = capturing
     if budgeted:
-        budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+        budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
         monkeypatch.setitem(
             runtime.api.FlashMLAMetadataBuilder.__init__.__globals__,
-            "create_flashmla_core_budget",
+            "_create_core_budget",
             lambda *args: budget,
         )
     torch.manual_seed(41)
@@ -674,9 +671,9 @@ def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
 
 
 def test_budgeted_metadata_refresh_orders_streams_and_preserves_graph_buffers(runtime, monkeypatch):
-    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
     create = Mock(return_value=budget)
-    monkeypatch.setitem(runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", create)
+    monkeypatch.setitem(runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", create)
     state = runtime.builder()
     inputs = common([20, 4], [4, 4], tokens=8)
     flash = state.build(inputs, 2, 8, False, retain_for_graph=True)
@@ -706,9 +703,9 @@ def test_budgeted_metadata_refresh_orders_streams_and_preserves_graph_buffers(ru
 
 
 def test_large_pack_uses_original_stream_and_metadata(runtime, monkeypatch):
-    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 14, 28, 28)
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, 28, 16 * 56)
     monkeypatch.setitem(
-        runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "create_flashmla_core_budget", lambda *args: budget
+        runtime.api.FlashMLAMetadataBuilder.__init__.__globals__, "_create_core_budget", lambda *args: budget
     )
     state = runtime.builder(heads=12)
     large = state.build(common([32], [32], tokens=32), 1, 32, False, retain_for_graph=True)
@@ -726,3 +723,105 @@ def test_core_policy_is_automatic_for_dcp_speculation(runtime, size, speculative
     assert runtime.core_budget_factory.call_count == expected_calls
     if expected_calls:
         runtime.core_budget_factory.assert_called_once_with(torch.device("cpu"))
+
+
+@pytest.fixture
+def core_runtime(runtime, monkeypatch):
+    parent, dedicated = object(), object()
+    limits = {parent: dict(cube_core_num=18, vector_core_num=36)}
+
+    def set_limit(stream, cube_num, vector_num):
+        limits[stream] = dict(cube_core_num=cube_num, vector_core_num=vector_num)
+
+    runtime = SimpleNamespace(
+        device=lambda _: nullcontext(),
+        current_device=lambda: 0,
+        get_device_properties=Mock(return_value=SimpleNamespace(cube_core_num=28, vector_core_num=56)),
+        get_device_limit=Mock(return_value=dict(cube_core_num=20, vector_core_num=40)),
+        get_stream_limit=Mock(side_effect=lambda stream: limits[stream]),
+        current_stream=lambda: parent,
+        Stream=Mock(return_value=dedicated),
+        set_stream_limit=Mock(side_effect=set_limit),
+        reset_stream_limit=Mock(side_effect=lambda stream: limits.pop(stream, None)),
+    )
+    monkeypatch.setattr(torch, "npu", runtime, raising=False)
+    return runtime, parent, dedicated, limits
+
+
+@pytest.mark.parametrize(
+    "cube,vector,expected",
+    [
+        (28, 56, (14, 28, 28)),
+        (32, 64, (16, 32, 32)),
+        (20, 40, (10, 20, 20)),
+        (17, 35, (8, 16, 19)),
+        (28, 20, (5, 10, 10)),
+        (1, 3, (1, 2, 1)),
+        (1, 2, None),
+        (0, 56, None),
+    ],
+)
+def test_core_allocation(runtime, core_runtime, cube, vector, expected):
+    npu, parent, dedicated, limits = core_runtime
+    npu.get_device_properties.return_value = SimpleNamespace(cube_core_num=cube, vector_core_num=vector)
+    npu.get_device_limit.return_value = limits[parent] = dict(cube_core_num=cube, vector_core_num=vector)
+    budget = runtime.api._create_core_budget(torch.device("cpu"))
+    if expected is None:
+        assert budget is None
+        npu.set_stream_limit.assert_not_called()
+    else:
+        aic, aiv, pack = expected
+        npu.set_stream_limit.assert_called_once_with(dedicated, cube_num=aic, vector_num=aiv)
+        assert budget.pack_vector_cores == pack
+        assert budget.max_pack_rows == 16 * vector
+
+
+@pytest.mark.parametrize("device_name", ["Ascend910B", "Ascend950DT", "unknown"])
+def test_core_budget_uses_capabilities_and_respects_application_limits(runtime, core_runtime, device_name):
+    npu, parent, dedicated, limits = core_runtime
+    npu.get_device_properties.return_value.name = device_name
+    budget = runtime.api._create_core_budget(torch.device("cpu"))
+    assert budget.stream is dedicated
+    assert budget.pack_vector_cores == 18
+    assert budget.max_pack_rows == 16 * 36
+    assert limits[parent] == dict(cube_core_num=18, vector_core_num=36)
+    npu.set_stream_limit.assert_called_once_with(dedicated, cube_num=9, vector_num=18)
+
+
+@pytest.mark.parametrize("failure", ["missing_api", "query", "set", "readback", "invalid_count", "missing_count"])
+def test_core_budget_fallback_preserves_shared_stream(runtime, core_runtime, failure):
+    npu, parent, dedicated, limits = core_runtime
+    if failure == "missing_api":
+        del npu.get_device_limit
+    elif failure == "query":
+        npu.get_device_limit.side_effect = RuntimeError("unsupported runtime")
+    elif failure == "set":
+
+        def partial_set(stream, **kwargs):
+            limits[stream] = dict(cube_core_num=9, vector_core_num=36)
+            raise RuntimeError("unsupported vector limit")
+
+        npu.set_stream_limit.side_effect = partial_set
+    elif failure == "readback":
+        npu.get_stream_limit.side_effect = lambda _: limits[parent]
+    elif failure == "missing_count":
+        npu.get_device_limit.return_value = {}
+    else:
+        npu.get_device_limit.return_value["vector_core_num"] = 0
+    assert runtime.api._create_core_budget(torch.device("cpu")) is None
+    assert limits[parent] == dict(cube_core_num=18, vector_core_num=36)
+    assert dedicated not in limits
+    if failure in ("set", "readback"):
+        npu.reset_stream_limit.assert_called_once_with(dedicated)
+    else:
+        npu.set_stream_limit.assert_not_called()
+
+
+@pytest.mark.parametrize("vector", [56, 64, 40])
+def test_pack_admission_scales_with_available_resources(runtime, vector):
+    budget = runtime.api.FlashMLACoreBudget(runtime.attn_stream, vector // 2, 16 * vector)
+    runtime.core_budget_factory.return_value = budget
+    builder = runtime.builder(size=8, heads=8)
+    tokens = vector // 4
+    assert builder._core_budget_for(tokens) is budget
+    assert builder._core_budget_for(tokens + 1) is None
