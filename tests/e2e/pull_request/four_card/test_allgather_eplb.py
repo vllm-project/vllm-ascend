@@ -192,7 +192,7 @@ def _run_probe():
                 loader.set_log2phy_map(torch.tensor(log2phy))
                 loader.updated_allgather_maps = tuple(torch.tensor(v) for v in allgather)
                 loader.generate_expert_d2d_transfer_task(send, recv, torch.tensor(updated), layer_id)
-                requests = []
+                requests: list[dist.Work] = []
                 loader.asyn_expert_weight_transfer(requests)
                 loader.update_expert_map_and_weight(requests)
             maps = new_maps
