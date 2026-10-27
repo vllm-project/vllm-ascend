@@ -32,7 +32,7 @@ on:
         options:
           - main
       test_cases:
-        description: 'Test cases to run (comma-separated, e.g., "Qwen3_235b_w8a8_A5,DeepSeek_V4_Flash_A5" or "all" for all tests)'
+        description: 'Test cases to run (comma-separated, e.g., "Qwen3_235b_w8a8_A5,multi-node-Qwen3-235B-W8A8-EPLB-A5" or "all" for all tests)'
         required: false
         default: 'all'
         type: string
@@ -56,6 +56,11 @@ on:
         required: false
         default: false
         type: boolean
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
+        required: false
+        default: '{}'
+        type: string
 
 permissions:
   contents: read
@@ -144,7 +149,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -171,10 +176,12 @@ jobs:
     with:
       target: a5
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '950'
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   multi-node-tests:
     name: multi-node
@@ -194,18 +201,29 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
+      test_frequency: weekly
       runner: linux-aarch64-a5-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
       testcase_timeout: 600
+      request_id: ${{ inputs.request_id || '' }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -217,6 +235,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A5_B64 }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   single-node-tests:
     name: single-node
@@ -236,11 +255,14 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      soc_version: a5
+      test_frequency: weekly
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: tests/e2e/weekly/single_node/configs/
+      config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -252,6 +274,17 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
     runs-on: linux-aarch64-a5-0
