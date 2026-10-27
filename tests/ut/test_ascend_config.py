@@ -1814,8 +1814,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             "enable_dsa_cp": "false",
             "enable_pcp_o_proj_weight_sharding": "true",
             "draft_window_size": "4096",
-            "yoco_prefill_truncation_mode": "mask",
-            "yoco_prefill_keep_tokens": "140",
             "yoco_prefill_max_backtrack_tokens": "12",
         }
 
@@ -1824,13 +1822,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(config.enable_dsa_cp)
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
-        self.assertEqual(config.yoco_prefill_truncation_mode, "mask")
-        self.assertEqual(config.yoco_prefill_keep_tokens, 140)
+        self.assertEqual(config.yoco_prefill_truncation_mode, "off")
         self.assertEqual(config.yoco_prefill_max_backtrack_tokens, 12)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_yoco_keep_tokens_defaults_and_floor_check(self, mock_fix):
+    def test_yoco_modes_rejected_until_runtime_wired(self, mock_fix):
         vc = VllmConfig()
         vc.model_config = SimpleNamespace(
             hf_text_config=SimpleNamespace(
@@ -1844,8 +1841,8 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             architectures=[],
         )
         vc.additional_config = {"yoco_prefill_truncation_mode": "compact"}
-        config = init_ascend_config(vc)
-        self.assertEqual(config.yoco_prefill_keep_tokens, 140)
+        with self.assertRaisesRegex(ValueError, "not executable yet"):
+            init_ascend_config(vc)
 
         vc_bad = VllmConfig()
         vc_bad.model_config = vc.model_config

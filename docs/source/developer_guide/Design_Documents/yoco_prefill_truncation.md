@@ -27,8 +27,10 @@ match. `keep_tokens >= sliding_window + max_backtrack` (V4.1 Flash default:
 }
 ```
 
-Requires a YOCO HF topology (`n_prefill_layer < num_hidden_layers`). Compact
-mode currently rejects PCP / CP > 1 (mask remains available).
+Requires a YOCO HF topology (`n_prefill_layer < num_hidden_layers`). **Executable
+`mask` / `compact` are rejected at config/model init until runner + attention
+wiring lands** (`prepare_yoco_prefill` has no caller today). CPU metadata helpers
+and L1 tests remain available for the follow-up.
 
 ## YOCO truncation vs decoder bounded replay
 
@@ -79,18 +81,19 @@ DeepInfer sources of truth (concepts, not a wholesale copy):
 
 ## Phase scope
 
-**In this PR (Phase A+B)**
+**In this PR (scaffolding)**
 
-- Config surface with keep ≥ window + backtrack validation
+- Config surface (modes fail closed until wiring); shared keep/backtrack defaults
 - CPU mask/compact metadata (pivots, `query_indices`, `cu_seqlens`, store slots)
-- CP=1 compact gather at the first consumer layer
+- CP=1 compact gather helper + model hook (inactive without metadata)
 - Mask vs compact equivalence tests on the retained suffix
-- Ascend-native helper to zero SWA lengths outside the keep-tail (`apply_yoco_mask_to_window_lengths`)
+- Ascend-native length helper that clips to keep-tail ∩ SWA (`apply_yoco_mask_to_window_lengths`)
 
-**Follow-ups**
+**Follow-ups (required for executable modes)**
 
+- Runner: build metadata each prefill and call `prepare_yoco_prefill`
+- Attention: apply length (and index) rewrite for mask; switch consumer view for compact
 - CP>1 “compact then redistribute” (DeepInfer `yoco_cp_*` + TileLang)
-- Full runner wiring that rebuilds consumer attention metadata every step
 - Engram-in-consumer edge cases (DeepInfer: compact disallows some Engram cases)
 - Multi-node EP stress
 

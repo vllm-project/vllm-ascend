@@ -3,9 +3,10 @@ pr: 19859
 entries:
   - category: feature
     text: >
-      Added YOCO mask/compact prefill truncation for DeepSeek-V4.1 via
-      additional_config yoco_prefill_truncation_mode and yoco_prefill_keep_tokens,
-      reducing consumer-layer prefill work on long prompts (CP=1 compact first).
+      Added DeepSeek-V4.1 YOCO mask/compact prefill truncation scaffolding
+      (additional_config yoco_prefill_* plus CPU metadata helpers). Executable
+      mask/compact modes are rejected until runner and attention wiring land;
+      default remains off.
     model: deepseek-v4.1
   - category: documentation
     text: >

@@ -436,7 +436,7 @@ class AscendConfig:
             "draft_window_size": null,
             "yoco_prefill_truncation_mode": "off",
             "yoco_prefill_keep_tokens": null,
-            "yoco_prefill_max_backtrack_tokens": 12,
+            "yoco_prefill_max_backtrack_tokens": null,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
@@ -586,16 +586,13 @@ class AscendConfig:
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
-    # YOCO consumer prefill truncation (DeepSeek-V4.1 Flash). ``off`` keeps
-    # today's full-token consumer prefill. ``mask`` empties SWA visibility
-    # outside the keep-tail (correctness reference). ``compact`` gathers to
-    # keep_tokens rows at the first consumer layer (real FLOP savings; CP=1).
+    # YOCO consumer prefill truncation (DeepSeek-V4.1 Flash). ``off`` is the
+    # only executable value today; ``mask`` / ``compact`` are rejected until
+    # runner + attention wiring lands (CPU metadata helpers exist for tests).
+    # Defaults for keep/backtrack live in deepseek_v41.yoco (single source).
     yoco_prefill_truncation_mode: Literal["off", "mask", "compact"] = "off"
-    # Retained suffix length for mask/compact. Default 140 (= SWA 128 + 12
-    # backtrack margin) when mode is not off and this field is left unset.
     yoco_prefill_keep_tokens: int | None = None
-    # Speculative backtrack margin baked into the keep_tokens floor check.
-    yoco_prefill_max_backtrack_tokens: int = 12
+    yoco_prefill_max_backtrack_tokens: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -1043,22 +1040,32 @@ class AscendConfig:
             )
 
     def _validate_yoco_prefill_truncation(self, vllm_config: VllmConfig) -> None:
-        """Normalize and validate YOCO mask/compact prefill truncation settings."""
-        mode = self.yoco_prefill_truncation_mode
-        if mode == "off":
-            return
+        """Normalize defaults; reject mask/compact until runner/attn wiring lands."""
+        # Shared defaults with deepseek_v41.yoco (single source of truth).
+        from vllm_ascend.models.deepseek_v41.yoco import (
+            DEFAULT_YOCO_KEEP_TOKENS,
+            DEFAULT_YOCO_MAX_BACKTRACK,
+            YOCO_RUNTIME_NOT_WIRED,
+        )
+
+        if self.yoco_prefill_max_backtrack_tokens is None:
+            self.yoco_prefill_max_backtrack_tokens = DEFAULT_YOCO_MAX_BACKTRACK
         if self.yoco_prefill_max_backtrack_tokens < 0:
             raise ValueError(
                 f"yoco_prefill_max_backtrack_tokens must be >= 0; got {self.yoco_prefill_max_backtrack_tokens}"
             )
-        # DeepSeek-V4.1 Flash default: SWA 128 + 12 backtrack margin.
+
+        mode = self.yoco_prefill_truncation_mode
+        if mode == "off":
+            return
+
+        # Shared keep default (SWA 128 + 12 backtrack → 140) only when enabling.
         if self.yoco_prefill_keep_tokens is None:
-            self.yoco_prefill_keep_tokens = 140
+            self.yoco_prefill_keep_tokens = DEFAULT_YOCO_KEEP_TOKENS
         keep = self.yoco_prefill_keep_tokens
-        if keep <= 0:
+        if keep is None or keep <= 0:
             raise ValueError(f"yoco_prefill_keep_tokens must be > 0 when mode={mode!r}; got {keep}")
         backtrack = self.yoco_prefill_max_backtrack_tokens
-        window = None
         model_config = getattr(vllm_config, "model_config", None)
         if model_config is not None:
             text = getattr(model_config, "hf_text_config", None) or getattr(model_config, "hf_config", None)
@@ -1071,18 +1078,21 @@ class AscendConfig:
                         "yoco_prefill_truncation_mode requires a YOCO topology "
                         f"(n_prefill_layer={n_prefill} < num_hidden_layers={n_layers})."
                     )
-        if window is not None:
-            floor = int(window) + backtrack
-            if keep < floor:
-                raise ValueError(
-                    f"yoco_prefill_keep_tokens ({keep}) must be >= sliding_window ({window}) + "
-                    f"yoco_prefill_max_backtrack_tokens ({backtrack}) = {floor}"
-                )
+                if window is not None:
+                    floor = int(window) + int(backtrack)
+                    if keep < floor:
+                        raise ValueError(
+                            f"yoco_prefill_keep_tokens ({keep}) must be >= sliding_window ({window}) + "
+                            f"yoco_prefill_max_backtrack_tokens ({backtrack}) = {floor}"
+                        )
         if mode == "compact" and vllm_config.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError(
                 "yoco_prefill_truncation_mode='compact' currently supports CP=1 only. "
                 "Use mode='mask' with PCP, or set --prefill-context-parallel-size 1."
             )
+        # Fail closed after shape checks: no runner prepare_yoco_prefill caller and
+        # no attention mask apply yet.
+        raise ValueError(YOCO_RUNTIME_NOT_WIRED.format(mode=mode))
 
     @classmethod
     def _check_mooncake_c8_kv_cache_quant(cls, vllm_config: VllmConfig) -> None:

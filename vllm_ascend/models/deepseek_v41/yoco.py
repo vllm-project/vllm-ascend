@@ -329,11 +329,19 @@ def apply_yoco_mask_to_window_lengths(
     query_start_loc: Sequence[int] | torch.Tensor,
     keep_tokens: int,
 ) -> torch.Tensor:
-    """Zero SWA window lengths for query rows outside each request's keep-tail.
+    """Clip SWA window lengths to keep-tail ∩ causal window (DeepInfer mask).
 
-    Ascend-native mask path: keep the full query layout through consumer layers
-    but empty the visible window for tokens before ``N - keep_tokens``. Returns
-    a cloned lengths tensor (does not mutate ``lengths`` in place).
+    For each query row at absolute ``pos`` with sequence length ``N``:
+
+    * ``rect_lo = N - keep_tokens``
+    * visible count = ``max(0, min(length, pos - rect_lo + 1))``
+
+    So rows before the keep-tail become empty, and retained rows whose raw SWA
+    still reaches before ``rect_lo`` are shortened (e.g. N=1000, keep=140,
+    W=128, pos=860 → length 1, not 128). Returns a clone; does not mutate
+    ``lengths``. Callers that also pass sparse indices must rebuild those
+    indices to match — length clipping alone is not enough for index-driven
+    kernels.
 
     Fully vectorized: no per-token ``.item()`` host syncs.
     """
@@ -366,15 +374,22 @@ def apply_yoco_mask_to_window_lengths(
     else:
         positions_t = positions.to(device=device, dtype=torch.long)
 
-    thresholds = torch.repeat_interleave(seq_lens_t - keep_tokens, q_lens)
-    mask = positions_t < thresholds
-    out.view(out.shape[0], -1)[mask] = 0
+    # Cap = keys in [rect_lo, pos]; empty when pos < rect_lo.
+    rect_lo = torch.repeat_interleave(seq_lens_t - keep_tokens, q_lens)
+    keep_cap = torch.clamp(positions_t - rect_lo + 1, min=0).to(dtype=out.dtype)
+    flat = out.view(out.shape[0], -1)
+    flat.copy_(torch.minimum(flat, keep_cap.unsqueeze(-1).expand_as(flat)))
     return out
 
 
 @dataclass
 class YocoPrefillRuntime:
-    """Per-forward YOCO truncation state attached to the model (CP=1)."""
+    """Per-forward YOCO truncation state attached to the model (CP=1).
+
+    Executable mask/compact paths are not wired yet (no runner metadata attach,
+    no attention length/index rewrite). Constructing this for a non-``off`` mode
+    raises via :func:`make_yoco_prefill_runtime`.
+    """
 
     mode: YocoTruncationMode
     keep_tokens: int
@@ -394,15 +409,22 @@ class YocoPrefillRuntime:
         return self.mode == "mask" and self.metadata is not None
 
 
+YOCO_RUNTIME_NOT_WIRED = (
+    "yoco_prefill_truncation_mode={mode!r} is not executable yet: the runner never "
+    "calls prepare_yoco_prefill() and consumer attention does not apply YOCO SWA "
+    "masking/compaction. CPU metadata helpers remain for unit tests; leave the "
+    "setting at 'off' until the wiring follow-up lands."
+)
+
+
 def make_yoco_prefill_runtime(config: Any, ascend_config: Any) -> YocoPrefillRuntime | None:
-    """Build a model-scoped YOCO runtime from Ascend + HF config, or ``None`` if off."""
+    """Build a model-scoped YOCO runtime, or ``None`` if off.
+
+    Non-``off`` modes raise :class:`NotImplementedError` until runner/attention
+    wiring exists. Prefer AscendConfig normalization for keep/backtrack defaults.
+    """
     mode: YocoTruncationMode = getattr(ascend_config, "yoco_prefill_truncation_mode", "off")
     if mode == "off":
         return None
-    consumer_start = resolve_yoco_consumer_start(config)
-    if consumer_start is None:
-        raise ValueError(
-            "yoco_prefill_truncation_mode requires HF config.n_prefill_layer < num_hidden_layers"
-        )
-    keep = getattr(ascend_config, "yoco_prefill_keep_tokens", None) or DEFAULT_YOCO_KEEP_TOKENS
-    return YocoPrefillRuntime(mode=mode, keep_tokens=int(keep), consumer_start=consumer_start)
+    # Defense in depth if config validation was bypassed.
+    raise NotImplementedError(YOCO_RUNTIME_NOT_WIRED.format(mode=mode))

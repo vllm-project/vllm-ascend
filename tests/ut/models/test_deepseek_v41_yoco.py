@@ -120,21 +120,15 @@ def test_resolve_yoco_consumer_start():
     assert yoco_enabled(SimpleNamespace(num_hidden_layers=40, n_prefill_layer=24))
 
 
-def test_make_yoco_prefill_runtime_off_and_on():
+def test_make_yoco_prefill_runtime_off_only_until_wired():
     cfg = SimpleNamespace(num_hidden_layers=40, n_prefill_layer=24, sliding_window=128)
     assert make_yoco_prefill_runtime(cfg, SimpleNamespace(yoco_prefill_truncation_mode="off")) is None
-    runtime = make_yoco_prefill_runtime(
-        cfg,
-        SimpleNamespace(yoco_prefill_truncation_mode="mask", yoco_prefill_keep_tokens=140),
-    )
-    assert runtime is not None
-    assert runtime.mode == "mask"
-    assert runtime.consumer_start == 24
-    assert runtime.keep_tokens == 140
-
-
-def test_make_yoco_prefill_runtime_rejects_non_yoco():
-    with pytest.raises(ValueError, match="n_prefill_layer"):
+    with pytest.raises(NotImplementedError, match="not executable yet"):
+        make_yoco_prefill_runtime(
+            cfg,
+            SimpleNamespace(yoco_prefill_truncation_mode="mask", yoco_prefill_keep_tokens=140),
+        )
+    with pytest.raises(NotImplementedError, match="not executable yet"):
         make_yoco_prefill_runtime(
             SimpleNamespace(num_hidden_layers=40, n_prefill_layer=40),
             SimpleNamespace(yoco_prefill_truncation_mode="compact", yoco_prefill_keep_tokens=140),
@@ -236,7 +230,7 @@ def test_compact_yoco_boundary_gather_cp1():
 
 
 def test_apply_yoco_mask_zeros_lengths_outside_keep_tail():
-    # One request, N=20, q_len=20, keep=8 → positions 0..11 empty, 12..19 keep SWA.
+    # N=20, keep=8 → rect_lo=12. Early rows empty; retained rows clipped to pos-rect_lo+1.
     positions = torch.arange(20, dtype=torch.int32)
     lengths = torch.full((20, 1), 8, dtype=torch.int32)
     masked = apply_yoco_mask_to_window_lengths(
@@ -247,8 +241,29 @@ def test_apply_yoco_mask_zeros_lengths_outside_keep_tail():
         keep_tokens=8,
     )
     assert masked[:12].sum().item() == 0
-    assert torch.equal(masked[12:], lengths[12:])
+    expect = torch.tensor([[min(8, p - 12 + 1)] for p in range(12, 20)], dtype=torch.int32)
+    assert torch.equal(masked[12:], expect)
     assert not torch.equal(masked, lengths)  # clone, not in-place
+
+
+def test_apply_yoco_mask_clips_retained_row_to_rect_lo():
+    """Pivot math vs length helper must agree at the keep-tail boundary.
+
+    N=1000, keep=140, W=128, pos=860 → visible keys = {860} (length 1), not raw W.
+    """
+    n, keep, window, pos = 1000, 140, 128, 860
+    positions = torch.tensor([pos], dtype=torch.int32)
+    lengths = torch.tensor([[window]], dtype=torch.int32)
+    masked = apply_yoco_mask_to_window_lengths(
+        positions,
+        lengths,
+        seq_lens=[n],
+        query_start_loc=[0, 1],
+        keep_tokens=keep,
+    )
+    ref = reference_visible_keys(YocoSeqSpec(n, 0, n), pos, keep, window)
+    assert len(ref) == 1 and ref[0] == pos
+    assert masked.item() == len(ref)
 
 
 def test_build_rejects_keep_below_window_plus_backtrack():
