@@ -78,7 +78,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
