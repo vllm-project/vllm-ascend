@@ -278,7 +278,6 @@ To reproduce inside an already provisioned multi-NPU test container:
 python3 .github/workflows/scripts/run_singlecard_shards.py \
     --tests tests/e2e/nightly/single_node/ops/singlecard_ops/ \
     --runner linux-aarch64-a3-800i-8 \
-    --image "$TEST_IMAGE" --soc-version a3-560t \
     --output-dir /tmp/singlecard-run
 ```
 
@@ -288,13 +287,14 @@ devices inside the container. Workers inherit the job's `TRITON_CACHE_DIR` and
 `TRITON_HOME` without overriding either setting; Triton resolves the cache
 location using its normal configuration and defaults. The shard
 runner does not change cache directories per worker, clear or prewarm caches,
-force recompilation, or install dependencies. Shared-cache behavior on real
-eight-card hardware has not been validated.
+force recompilation, or install dependencies. Focused eight-NPU probes have
+verified shared-cache reuse and process cleanup; full-directory performance
+validation remains pending.
 
 The uploaded `singlecard-shards-*` artifact contains run metadata, a
 file/device manifest, per-worker logs and JUnit reports, and `summary.json`.
 Metadata records the tested Git commit separately from the workflow commit,
-the runner and image reference, hardware, Python and package versions,
+the runner, runtime hardware, Python and package versions,
 effective worker count, device assignment, and Triton cache settings.
 The GitHub step summary reports whether execution completed, per-worker
 durations, aggregate durations, and the failed test list. The JSON summary

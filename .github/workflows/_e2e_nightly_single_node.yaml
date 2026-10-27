@@ -379,26 +379,23 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
-          TEST_IMAGE: ${{ inputs.image }}
-          TEST_SOC_VERSION: ${{ inputs.soc_version }}
-          TEST_PATH: ${{ inputs.tests }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-          echo "Running pytest with tests path: $TEST_PATH"
+          echo "Running pytest with tests path: ${{ inputs.tests }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          case "$TEST_PATH" in
+          case "${{ inputs.tests }}" in
             tests/e2e/nightly/single_node/ops/singlecard_ops|tests/e2e/nightly/single_node/ops/singlecard_ops/)
               echo "singlecard_shards=true" >> "$GITHUB_OUTPUT"
               python3 .github/workflows/scripts/run_singlecard_shards.py \
-                --tests "$TEST_PATH" \
-                --runner "$VLLM_CI_RUNNER" --image "$TEST_IMAGE" --soc-version "$TEST_SOC_VERSION" \
+                --tests "${{ inputs.tests }}" \
+                --runner "$VLLM_CI_RUNNER" \
                 --output-dir /tmp/test-logs/singlecard-shards \
                 2>&1 | tee /tmp/test-logs/pytest-driven.log
               ;;
             *)
-              pytest -sv "$TEST_PATH" 2>&1 | tee /tmp/test-logs/pytest-driven.log
+              pytest -sv "${{ inputs.tests }}" 2>&1 | tee /tmp/test-logs/pytest-driven.log
               ;;
           esac
 

@@ -171,8 +171,6 @@ def build_metadata(runtime: dict, args: argparse.Namespace, files: list[Path], d
 
     environment = {
         "runner": args.runner,
-        "soc_version": args.soc_version,
-        "image": args.image,
         "device_name": runtime.get("device_name"),
         "architecture": runtime.get("architecture", platform.machine()),
         "python": runtime.get("python", platform.python_version()),
@@ -513,8 +511,6 @@ def main() -> int:
     parser.add_argument("--tests", required=True, type=Path)
     parser.add_argument("--workers", default="auto", help="Worker count; defaults to the runner allocation")
     parser.add_argument("--runner", default=os.environ.get("VLLM_CI_RUNNER", ""))
-    parser.add_argument("--image", default="", help="Image reference used by the workflow")
-    parser.add_argument("--soc-version", default="")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--timings", type=Path, help="Successful summary.json from the same environment and test scope")
     args = parser.parse_args()
