@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.bulk.argument_fixtures import bulk_arguments
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import layout as memcache_layout
@@ -70,7 +71,7 @@ def test_runtime_reuses_layout_and_does_not_mutate_bulk():
     case = make_case(layers=(3, 4), heads=1, head_slices=1)
     bulk = case.bind()
     keys = bulk.key_namer.keys(["hash"])
-    before = bulk.arguments(keys, [1])
+    before = bulk_arguments(bulk, keys, [1])
     mapping = case.bind_layers(
         remote_object_layout_factory=partial(
             build_memcache_object_layouts,
@@ -90,7 +91,7 @@ def test_runtime_reuses_layout_and_does_not_mutate_bulk():
         first = layer_arguments(mapping, selection, layer_id=3)
         layer_arguments(mapping, selection, layer_id=4)
         assert layer_arguments(mapping, selection, layer_id=3) == first
-    assert bulk.arguments(keys, [1]) == before
+    assert bulk_arguments(bulk, keys, [1]) == before
     assert all(
         not layout.remote_segment_offsets_bytes.flags.writeable
         for layers in mapping.layer_layouts.values()

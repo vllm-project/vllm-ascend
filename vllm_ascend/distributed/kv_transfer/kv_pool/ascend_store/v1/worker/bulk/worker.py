@@ -45,6 +45,7 @@ from .transfer import (
     _empty_store_completions,
     _failed_store_completions,
     _store_completions,
+    materialize_bulk_arguments,
     select_store_writer_records,
 )
 
@@ -338,12 +339,4 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         return _store_completions(selected, evidence)
 
     def _materialize_bulk_arguments(self, batch: KVTransferBatch) -> BulkBackendArguments:
-        keys, addresses, sizes = [], [], []
-        for group in batch.groups:
-            group_keys, group_addresses, group_sizes = self._mappings[group.group_id].arguments(
-                group.keys_by_partition, group.local_block_ids, selected_keys=group.transfer_candidate_mask
-            )
-            keys.extend(group_keys)
-            addresses.extend(group_addresses)
-            sizes.extend(group_sizes)
-        return BulkBackendArguments(keys, addresses, sizes)
+        return materialize_bulk_arguments(self._mappings, batch)

@@ -8,12 +8,10 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from .local_layout import LocalMemorySegments, bind_local_layout
 from .object_layout import RemoteObjectLayoutFactory, build_default_object_layouts
 from .object_naming import KeyBuilder, KeyNamer, bind_canonical_keys
-from .types import LayerTransferArguments, UInt64Array
+from .types import UInt64Array
 
 if TYPE_CHECKING:
     import torch
@@ -124,44 +122,3 @@ class LayerwiseMapping:
         self.layer_layouts: Mapping[int, tuple[LayerPartitionLayout, ...]] = MappingProxyType(
             {layer_id: tuple(layouts) for layer_id, layouts in layers.items()}
         )
-
-    def arguments(
-        self,
-        selected_keys: tuple[str, ...],
-        selected_local_block_ids_by_partition: tuple[UInt64Array, ...],
-        selected_transfer_slices_by_partition: tuple[slice, ...],
-        *,
-        layer_id: int,
-    ) -> LayerTransferArguments:
-        """Combine selected keys/block IDs with this layer's cached transfer layouts.
-
-        The caller supplies the selected keys, block IDs and matching partition slices.
-        Absent or empty layers and unselected objects produce no arguments.
-        Each returned Python row is independently mutable; cached layouts and
-        prepared selections remain unchanged across Load/Store and repeated calls.
-        """
-        layer = self.layer_layouts.get(layer_id)
-        if not selected_keys or layer is None:
-            return [], [], [], []
-        keys: list[str] = []
-        addresses: list[list[int]] = []
-        lengths: list[list[int]] = []
-        offsets: list[list[int]] = []
-        for layout in layer:
-            local_block_ids = selected_local_block_ids_by_partition[layout.partition_index]
-            if not len(local_block_ids):
-                continue
-            partition_keys = selected_keys[selected_transfer_slices_by_partition[layout.partition_index]]
-            segments = layout.local_segments
-            local = (
-                local_block_ids[:, None] * segments.group_block_strides_bytes + segments.block_zero_segment_addresses
-            )
-            sizes = np.broadcast_to(
-                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
-            ).tolist()
-            positions = layout.remote_segment_offsets_bytes.tolist()
-            keys.extend(partition_keys)
-            addresses.extend(local.tolist())
-            lengths.extend(sizes.copy() for _ in partition_keys)
-            offsets.extend(positions.copy() for _ in partition_keys)
-        return keys, addresses, lengths, offsets

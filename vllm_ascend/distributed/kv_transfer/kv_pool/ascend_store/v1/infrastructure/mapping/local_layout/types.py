@@ -1,6 +1,9 @@
 """Local byte geometry and numeric object coordinates, independent of Key encoding."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+import numpy as np
 
 from ..types import UInt64Array
 
@@ -26,6 +29,17 @@ class LocalMemorySegments:
     block_zero_segment_addresses: UInt64Array
     group_block_strides_bytes: UInt64Array
     segment_lengths_bytes: UInt64Array
+
+    def addresses(self, local_block_ids: Sequence[int] | UInt64Array) -> UInt64Array:
+        """Evaluate [input block, bound segment] addresses without selecting or reordering.
+
+        Allocation bounds remain caller-owned. Arithmetic retains uint64 wrapping,
+        matching the registered local-address formula used by both transfer routes.
+        """
+        ids = np.asarray(local_block_ids, dtype=np.uint64)
+        if ids.ndim != 1:
+            raise ValueError("Local block IDs must be one-dimensional")
+        return ids[:, None] * self.group_block_strides_bytes + self.block_zero_segment_addresses
 
 
 @dataclass(frozen=True, slots=True)

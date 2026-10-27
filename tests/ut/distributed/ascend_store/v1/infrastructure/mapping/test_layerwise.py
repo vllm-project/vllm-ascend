@@ -16,6 +16,7 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import
     make_hybrid_case,
     read_bytes,
 )
+from tests.ut.distributed.ascend_store.v1.worker.bulk.argument_fixtures import bulk_arguments
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
     layerwise,
@@ -97,7 +98,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                             for index in range(len(keys) * len(ids))
                         ]
                     )
-                    actual_keys, addresses, lengths = bulk.arguments(keys, ids, selected_keys=mask)
+                    actual_keys, addresses, lengths = bulk_arguments(bulk, keys, ids, selected_keys=mask)
                     expected = {
                         keys[prefix_index][row]: expected_head_bytes(
                             case, physical_layers, prefix_index % head_slices, block_id
@@ -188,7 +189,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             with (
                 patch.object(head_slicing, "inspect_entries", wraps=head_slicing.inspect_entries) as inspect,
                 patch.object(head_slicing, "compile_geometries", wraps=head_slicing.compile_geometries) as compile,
-                patch.object(layerwise.np, "cumsum", wraps=np.cumsum) as scans,
+                patch.object(np, "cumsum", wraps=np.cumsum) as scans,
             ):
                 mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
             self.assertEqual(scans.call_count, len(layouts))
@@ -216,16 +217,16 @@ class LayerwiseMappingTests(unittest.TestCase):
                 selection.selected_local_block_ids_by_partition[0], selection.selected_local_block_ids_by_partition[1]
             )
             with (
-                patch.object(layerwise.np, "cumsum", side_effect=AssertionError("runtime offsets")),
-                patch.object(layerwise.np, "flatnonzero", side_effect=AssertionError("runtime selection")),
-                patch.object(layerwise.np, "count_nonzero", side_effect=AssertionError("runtime mask scan")),
+                patch.object(np, "cumsum", side_effect=AssertionError("runtime offsets")),
+                patch.object(np, "flatnonzero", side_effect=AssertionError("runtime selection")),
+                patch.object(np, "count_nonzero", side_effect=AssertionError("runtime mask scan")),
             ):
                 for layer_id in mapping.layer_layouts:
                     layer_arguments(mapping, selection, layer_id=layer_id)
 
     def test_bulk_does_not_build_object_offsets(self):
         for head_slices, pp in itertools.product((None, 1, 2), (None, (1, 3))):
-            with patch.object(layerwise.np, "cumsum", side_effect=AssertionError("Bulk has no use for byte offsets")):
+            with patch.object(np, "cumsum", side_effect=AssertionError("Bulk has no use for byte offsets")):
                 make_case(head_slices=head_slices, pp_layer_counts=pp).bind()
 
     def test_layer_evaluation_visits_only_its_key_prefixes(self):
@@ -247,7 +248,7 @@ class LayerwiseMappingTests(unittest.TestCase):
         selection = prepare_layer_group(mapping, bulk.key_namer.keys(["a", "b"]), [0, 1])
         prefix_selections = CountedPrefixSelections(selection.selected_local_block_ids_by_partition)
         selection = replace(selection, selected_local_block_ids_by_partition=prefix_selections)
-        with patch.object(type(bulk), "arguments", side_effect=AssertionError("no all-layer arguments")):
+        with patch.object(type(bulk), "__init__", side_effect=AssertionError("no all-layer binding")):
             layer_arguments(mapping, selection, layer_id=0)
             self.assertEqual(prefix_selections.visits, [0, 1])
             prefix_selections.visits.clear()
@@ -261,7 +262,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             bulk = case.bind()
             mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
             keys = bulk.key_namer.keys(["a", "b"])
-            names, addresses, lengths = bulk.arguments(keys, [0, 2])
+            names, addresses, lengths = bulk_arguments(bulk, keys, [0, 2])
             expected = {key: read_bytes(a, n) for key, a, n in zip(names, addresses, lengths, strict=True)}
             selection = prepare_layer_group(mapping, keys, [0, 2])
             self.assertEqual(assemble_layers(mapping, selection, {k: len(v) for k, v in expected.items()}), expected)
@@ -288,8 +289,8 @@ class LayerwiseMappingTests(unittest.TestCase):
                 mapping, keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))]
             )
             with (
-                patch.object(layerwise.np, "broadcast_to", side_effect=AssertionError("unused segments")),
-                patch.object(layerwise.np, "empty", side_effect=AssertionError("unused allocation")),
+                patch.object(np, "broadcast_to", side_effect=AssertionError("unused segments")),
+                patch.object(np, "empty", side_effect=AssertionError("unused allocation")),
             ):
                 for selection, layer_id in (
                     (all_rows, 1),
@@ -402,7 +403,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                             }
                             payloads = assemble_layers(mapping, prepare_layer_group(mapping, keys, [1, 2]), sizes)
                         else:
-                            names, addresses, lengths = bulk.arguments(keys, [1, 2])
+                            names, addresses, lengths = bulk_arguments(bulk, keys, [1, 2])
                             payloads = {
                                 key: read_bytes(a, n) for key, a, n in zip(names, addresses, lengths, strict=True)
                             }
@@ -415,7 +416,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                         bulk, mapping = bindings[id(case)]
                         keys = bulk.key_namer.keys(["a", "b"])
                         if source_layerwise:
-                            names, addresses, lengths = bulk.arguments(keys, [1, 2])
+                            names, addresses, lengths = bulk_arguments(bulk, keys, [1, 2])
                             for key, destinations, sizes in zip(names, addresses, lengths, strict=True):
                                 cursor = 0
                                 for address, size in zip(destinations, sizes, strict=True):

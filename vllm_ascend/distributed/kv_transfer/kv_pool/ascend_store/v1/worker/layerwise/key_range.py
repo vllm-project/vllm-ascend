@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import repeat
 from typing import Any, cast
 
+import numpy as np
 from vllm.logger import logger
 
 from ....attention_fence import reset_attention_compute_start_gate
@@ -129,6 +131,24 @@ class KeyRangeArguments:
     offsets: list[list[int]]
 
 
+def materialize_group_layer_ranges(
+    mapping: LayerwiseMapping, group: LayerTransferGroup, layer_id: int
+) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+    """Combine the Worker's partition selection with independent byte layouts."""
+    addresses, sizes, offsets = [], [], []
+    for layout in mapping.layer_layouts.get(layer_id, ()):
+        ids = group.selected_local_block_ids_by_partition[layout.partition_index]
+        if not len(ids):
+            continue
+        segments = layout.local_segments
+        addresses.extend(segments.addresses(ids).tolist())
+        lengths = np.broadcast_to(segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape).tolist()
+        positions = layout.remote_segment_offsets_bytes.tolist()
+        sizes.extend(lengths.copy() for _ in repeat(None, len(ids)))
+        offsets.extend(positions.copy() for _ in repeat(None, len(ids)))
+    return addresses, sizes, offsets
+
+
 def materialize_store_layer_ranges(
     mappings: dict[int, LayerwiseMapping],
     groups: tuple[LayerTransferGroup, ...],
@@ -140,12 +160,7 @@ def materialize_store_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in groups:
-        _, local, group_sizes, group_offsets = mappings[group.group_id].arguments(
-            group.selected_keys,
-            group.selected_local_block_ids_by_partition,
-            group.selected_transfer_slices_by_partition,
-            layer_id=layer_id,
-        )
+        local, group_sizes, group_offsets = materialize_group_layer_ranges(mappings[group.group_id], group, layer_id)
         addresses.extend(local)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
@@ -163,11 +178,8 @@ def materialize_load_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in plan.groups_by_layer[layer_id]:
-        _, group_addresses, group_sizes, group_offsets = mappings[group.group_id].arguments(
-            group.selected_keys,
-            group.selected_local_block_ids_by_partition,
-            group.selected_transfer_slices_by_partition,
-            layer_id=layer_id,
+        group_addresses, group_sizes, group_offsets = materialize_group_layer_ranges(
+            mappings[group.group_id], group, layer_id
         )
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)

@@ -175,22 +175,25 @@ def materialize_layer_gva(
     local_addresses: list[int] = []
     sizes: list[int] = []
     for group in plan.groups_by_layer[layer_id]:
-        _, local_rows, size_rows, offset_rows = mappings[group.group_id].arguments(
-            group.selected_keys,
-            group.selected_local_block_ids_by_partition,
-            group.selected_transfer_slices_by_partition,
-            layer_id=layer_id,
-        )
-        layer_bases = [
-            int(base)
-            for layout in mappings[group.group_id].layer_layouts.get(layer_id, ())
-            for base in remote_object_bases_by_group[group.group_id][
-                group.selected_transfer_slices_by_partition[layout.partition_index]
+        for layout in mappings[group.group_id].layer_layouts.get(layer_id, ()):
+            partition_index = layout.partition_index
+            ids = group.selected_local_block_ids_by_partition[partition_index]
+            if not len(ids):
+                continue
+            bases = remote_object_bases_by_group[group.group_id][
+                group.selected_transfer_slices_by_partition[partition_index]
             ]
-        ]
-        remote_addresses.extend(
-            base + offset for base, offsets in zip(layer_bases, offset_rows, strict=True) for offset in offsets
-        )
-        local_addresses.extend(address for row in local_rows for address in row)
-        sizes.extend(size for row in size_rows for size in row)
+            segments = layout.local_segments
+            local_rows = segments.addresses(ids).tolist()
+            lengths = np.broadcast_to(
+                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
+            ).tolist()
+            offsets = layout.remote_segment_offsets_bytes.tolist()
+            size_rows = [lengths.copy() for _ in ids]
+            offset_rows = [offsets.copy() for _ in ids]
+            remote_addresses.extend(
+                int(base) + offset for base, positions in zip(bases, offset_rows, strict=True) for offset in positions
+            )
+            local_addresses.extend(address for row in local_rows for address in row)
+            sizes.extend(size for row in size_rows for size in row)
     return remote_addresses, local_addresses, sizes

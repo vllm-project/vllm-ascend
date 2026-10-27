@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ...infrastructure.configuration.topology import KVPoolTopology
+from ...infrastructure.mapping import BulkMapping
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
 from ..transfer.rows import StoreTransferRecords
@@ -19,6 +20,38 @@ class BulkBackendArguments:
     keys: list[str]
     addresses: list[list[int]]
     sizes: list[list[int]]
+
+
+def materialize_bulk_arguments(mappings: dict[int, BulkMapping], batch: KVTransferBatch) -> BulkBackendArguments:
+    """Select full local payloads and produce the Bulk Backend's final lists."""
+    keys, addresses, lengths = [], [], []
+    for group in batch.groups:
+        record_count = group.transfer_record_count
+        if not record_count:
+            continue
+        masks = (
+            None
+            if group.transfer_candidate_mask is None
+            else group.transfer_candidate_mask.reshape(len(group.keys_by_partition), record_count)
+        )
+        for partition_index, partition in enumerate(mappings[group.group_id].local_layout.partitions):
+            indices = None
+            if masks is not None:
+                selected_count = np.count_nonzero(masks[partition_index])
+                if not selected_count:
+                    continue
+                if selected_count != record_count:
+                    indices = np.flatnonzero(masks[partition_index])
+            ids = group.local_block_ids if indices is None else group.local_block_ids[indices]
+            partition_keys = group.keys_by_partition[partition_index]
+            keys.extend(partition_keys if indices is None else (partition_keys[i] for i in indices))
+            segments = partition.local_segments
+            addresses.extend(segments.addresses(ids).tolist())
+            sizes = np.broadcast_to(
+                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
+            ).tolist()
+            lengths.extend(sizes.copy() for _ in ids)
+    return BulkBackendArguments(keys, addresses, lengths)
 
 
 def select_store_writer_records(

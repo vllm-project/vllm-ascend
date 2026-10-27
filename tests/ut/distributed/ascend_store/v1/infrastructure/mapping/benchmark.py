@@ -30,6 +30,7 @@ import time
 import numpy as np
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.bulk.argument_fixtures import bulk_arguments
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 
 _WARMUP_CALLS = 5
@@ -97,11 +98,16 @@ def bulk_workload(bound, transfer_record_count, mask_kind):
     if mask_kind != "full":
         mask = [mask_kind == "mixed" and index % 3 != 1 for index in range(len(keys) * transfer_record_count)]
 
+    if hasattr(transfer, "arguments"):
+        materialize = transfer.arguments
+    else:
+        materialize = lambda keys, ids, **options: bulk_arguments(transfer, keys, ids, **options)
+
     def keys_and_arguments():
-        return transfer.arguments(naming.keys(hashes), ids, selected_keys=mask)
+        return materialize(naming.keys(hashes), ids, selected_keys=mask)
 
     def arguments_only():
-        return transfer.arguments(keys, ids, selected_keys=mask)
+        return materialize(keys, ids, selected_keys=mask)
 
     return transfer, hashes, ids, mask, keys_and_arguments, arguments_only
 

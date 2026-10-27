@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.bulk.argument_fixtures import bulk_arguments
 from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import BoundLayerwiseKeys
@@ -49,7 +50,7 @@ def test_custom_names_bind_once_to_coordinates_without_encoding_default_prefixes
                 for layer_id in mapping.local_layout.physical_layer_ids:
                     layer_arguments(mapping, selection, layer_id=layer_id)
             else:
-                mapping.arguments(keys, (0, 2))
+                bulk_arguments(mapping, keys, (0, 2))
     assert coordinates == [(0, 0), (0, 1), (1, 0), (1, 1)]
     assert keys[0] == ("stage0@head0@61@custom", "stage0@head0@b@custom")
     bind_local.assert_called_once()
@@ -123,4 +124,4 @@ def test_bulk_does_not_initialize_layerwise_object_offsets():
     case = make_case()
     with patch.object(np, "cumsum", side_effect=AssertionError("unused layer offsets")):
         mapping = case.bind()
-        mapping.arguments(mapping.key_namer.keys(("a",)), (1,))
+        bulk_arguments(mapping, mapping.key_namer.keys(("a",)), (1,))

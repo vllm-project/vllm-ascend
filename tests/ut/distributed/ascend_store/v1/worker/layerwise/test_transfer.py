@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+import torch
 
 from tests.ut.distributed.ascend_store.v1.helpers import make_topology, make_worker
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
@@ -161,6 +162,20 @@ def test_partition_slices_align_layer_keys_gva_bases_and_failure_ownership():
         assert all(source.request_index == group.request_index(source.transfer_candidate_index) for source in sources)
 
 
+def test_plan_omits_physical_layers_with_no_local_segments():
+    case = make_case(pp_layer_counts=(2, 2))
+    case.caches["layer1"] = (torch.empty(0),)
+    for array in case.registration_arrays[:3]:
+        del array[3][2:4]
+    case.registration_arrays[3][3] = [0, 2, 2, 4, 6]
+    mapping = case.bind_layers()
+    group = prepare_layer_group(mapping, mapping.key_namer.keys(("a",)), (0,)).batch
+    batch = KVTransferBatch(("request",), (group,))
+    plan = layer_transfer.prepare_layer_load(batch, {group.group_id: mapping})
+    assert tuple(plan.groups_by_layer) == (0, 2, 3)
+    assert tuple(plan.selected_keys_by_layer) == (0, 2, 3)
+
+
 def test_store_plan_does_not_prepare_load_ownership(monkeypatch):
     group = make_group(0, (0, 2, 5))
     monkeypatch.setattr(KVGroupBatch, "request_index", Mock(side_effect=AssertionError("Store must remain unchanged")))
@@ -238,7 +253,6 @@ def test_plan_reuses_mapping_rows_and_skips_empty_groups(load, selection, monkey
             keys = batch.groups[0].keys_by_partition[0]
             accepted = keys[::2] if selection == "partial" else keys if selection == "full" else ()
             batch = batch.select_keys(set(accepted))
-        mapping = worker._mappings[0]
         prepare = Mock(side_effect=layer_transfer.make_layer_transfer_group)
         monkeypatch.setattr(layer_transfer, "make_layer_transfer_group", prepare)
         flatnonzero = Mock(side_effect=np.flatnonzero)
@@ -267,12 +281,7 @@ def test_plan_reuses_mapping_rows_and_skips_empty_groups(load, selection, monkey
             assert group.selected_transfer_candidate_indices is None and group.request_indices is None
         flatnonzero.side_effect = AssertionError("layer execution must not rescan selection")
         for layer in group.physical_layer_ids:
-            mapping.arguments(
-                group.selected_keys,
-                group.selected_local_block_ids_by_partition,
-                group.selected_transfer_slices_by_partition,
-                layer_id=layer,
-            )
+            materialize_load_layer_ranges(worker._mappings, plan, layer)
             if load:
                 completion = _layer_load_completions(plan, layer, None)
                 assert len(completion[0].failures) == len(group.selected_keys)

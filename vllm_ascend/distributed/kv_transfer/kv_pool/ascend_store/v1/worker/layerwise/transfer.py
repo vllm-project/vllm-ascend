@@ -182,7 +182,7 @@ def make_layer_transfer_plan(
 
     mutable_groups_by_layer: dict[int, list[LayerTransferGroup]] = {}
     for group in groups:
-        for layer_id in group.physical_layer_ids:
+        for layer_id in mappings[group.group_id].layer_layouts:
             mutable_groups_by_layer.setdefault(layer_id, []).append(group)
 
     groups_by_layer = {}
