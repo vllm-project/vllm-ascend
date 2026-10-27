@@ -50,6 +50,7 @@ The following table lists additional configuration options available in vLLM Asc
 |-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------|
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
+| `kv_guard_config`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V1 and V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV cache address guard](../feature_guide/kv_cache_guard.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |

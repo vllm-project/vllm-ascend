@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MRV2 batch ordering, graph updates, dummy writes and lifecycle integration."""
 
-import sys
 from types import SimpleNamespace as NS
 from typing import Any
 
 import pytest
 import torch
 
-from .test_kv_guard_runtime import bind, load, metadata
+from .test_kv_guard_runtime import bind, metadata
 from .test_kv_guard_runtime import runtime_fixture as runtime_fixture
 
 
 @pytest.fixture
-def adapter(runtime, monkeypatch):
-    monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard_runtime", runtime.subject)
-    subject = load("guard_v2_subject", "vllm_ascend/debug/kv_guard_v2.py")
+def adapter(runtime):
+    subject = runtime.subject
     impl = type("AscendAttentionBackendImpl", (), {})()
     runtime.config = NS(
+        use_v2_model_runner=True,
+        additional_config={"kv_guard_config": {"enabled": True}},
         parallel_config=NS(),
         model_config=NS(),
         speculative_config=None,
@@ -36,8 +36,9 @@ def adapter(runtime, monkeypatch):
         next_metadata={},
     )
     runtime.layer_groups.clear()
-    result = subject.KVGuardV2(runner, runtime)
-    result.configure()
+    result = subject._V2RunnerAdapter(runner, runtime)
+    runtime._runner_adapter = result
+    runtime.configure(runner)
     result.subject = subject
     return result
 
@@ -232,11 +233,8 @@ def test_v2_kernel_allocator_coordinate_mismatch_is_rejected(adapter):
         adapter.configure()
 
 
-def test_v2_install_disabled_does_not_wrap_methods(adapter, monkeypatch):
-    from vllm_ascend import envs
-
-    monkeypatch.setattr(envs, "VLLM_ASCEND_KV_GUARD", False)
-    assert adapter.subject.install_guard(NS(vllm_config=NS())) is None
+def test_v2_install_disabled_does_not_wrap_methods(adapter):
+    assert adapter.subject.install_guard(NS(vllm_config=NS(use_v2_model_runner=True))) is None
 
 
 def enable_raise(runtime):
@@ -297,9 +295,9 @@ def test_v2_install_wraps_real_runner_boundaries_and_reinitializes_model_state(a
     assert installed is not None
     # Profiling can replace the model-state object before real cache setup.
     runner.model_state = NS(prepare_attn=lambda batch, mode: runner.next_metadata)
-    installed.configure()
+    installed.configure(runner)
     wrapped = runner.model_state.prepare_attn
-    installed.configure()
+    installed.configure(runner)
     assert runner.model_state.prepare_attn is wrapped
     assert runner.capture_model() == "capture"
     runner.execute_model(message())

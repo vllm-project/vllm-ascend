@@ -65,15 +65,17 @@ def test_guard_preserves_sequential_and_concurrent_generation(use_v2, graph_mode
     results = []
     for enabled in (False, True):
         port = get_open_port()
-        environment = {
-            "VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2)),
-            "VLLM_ASCEND_KV_GUARD": str(int(enabled)),
-            "VLLM_ASCEND_KV_GUARD_ACTION": "raise",
-        }
+        environment = {"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2))}
         with (
             RemoteOpenAIServer(
                 model,
-                [*arguments, "--port", str(port)],
+                [
+                    *arguments,
+                    "--additional-config",
+                    json.dumps({"kv_guard_config": {"enabled": enabled, "action": "raise"}}),
+                    "--port",
+                    str(port),
+                ],
                 env_dict=environment,
                 seed=1234,
                 server_host="127.0.0.1",

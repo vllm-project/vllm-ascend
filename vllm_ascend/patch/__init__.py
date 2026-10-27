@@ -1683,8 +1683,9 @@
 #       Optional KV address diagnostics need allocation generations and request
 #       bindings independently of worker attention metadata.
 #    How:
-#       When KV Guard is enabled, wrap allocation, release, and schedule calls
-#       and attach changed bindings and token ranges to SchedulerOutput.
+#       Wrap the constructor once, then instrument allocation, release, and
+#       schedule only for instances with additional_config.kv_guard_config.enabled.
+#       Attach changed bindings and token ranges to SchedulerOutput.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; this is the opt-in Ascend KV Guard integration.
 #    Future Plan:

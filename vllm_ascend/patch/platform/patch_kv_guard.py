@@ -10,6 +10,8 @@ import functools
 import uuid
 from typing import Any, cast
 
+from vllm_ascend.debug.kv_guard_config import KVGuardConfig
+
 
 def install_scheduler_guard(scheduler_cls):
     if getattr(scheduler_cls.__init__, "_ascend_kv_guard", False):
@@ -19,6 +21,8 @@ def install_scheduler_guard(scheduler_cls):
     @functools.wraps(original_init)
     def initialize(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
+        if not KVGuardConfig.from_vllm_config(self.vllm_config).enabled:
+            return
         pool = self.kv_cache_manager.block_pool
         counters = [0] * len(pool.blocks)
         pool_id = uuid.uuid4().hex

@@ -15,9 +15,11 @@ import functools
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 from vllm_ascend.debug.kv_guard import INVALID_PREFIX, KVGuard
+from vllm_ascend.debug.kv_guard_config import KVGuardConfig
 
 _MAX_REPORT_KEYS = 1024
 
@@ -69,7 +71,8 @@ class GuardRuntime:
         self._reported: OrderedDict[tuple, None] = OrderedDict()
         self._scheduled: dict[str, tuple[int | None, int]] | None = None
         self._failure: str | None = None
-        self.action = "log"
+        self.action = KVGuardConfig.from_vllm_config(vllm_config).action
+        self._runner_adapter: _V2RunnerAdapter | None = None
 
     def _check_failure(self) -> None:
         if self.action == "raise" and self._failure is not None:
@@ -115,11 +118,6 @@ class GuardRuntime:
         self.report("guard.coverage_gap", reason=reason, **fields)
 
     def configure(self, runner: Any) -> None:
-        from vllm_ascend import envs
-
-        self.action = envs.VLLM_ASCEND_KV_GUARD_ACTION
-        if self.action not in ("log", "raise"):
-            raise ValueError("VLLM_ASCEND_KV_GUARD_ACTION must be 'log' or 'raise'")
         config = self.config
         parallel = config.parallel_config
         transfer = config.kv_transfer_config
@@ -163,6 +161,8 @@ class GuardRuntime:
                 "(CP, DBO, speculation, encoder/decoder, connector)"
             )
         self.state.configure(sizes)
+        if self._runner_adapter is not None:
+            self._runner_adapter.configure()
         self.report("guard.enabled", failure_action=self.action)
 
     def write(self, layer: str, slots: Any, token_offset: int = 0) -> None:
@@ -505,10 +505,12 @@ class GuardRuntime:
 
         return observed
 
-    def wrap_execute(self, execute: Any):
-        @functools.wraps(execute)
-        def observed(output, *args, **kwargs):
-            self._check_failure()
+    @contextmanager
+    def execute_scope(self, output: Any, *, bind: bool = True):
+        """Share scheduler binding and cleanup across both runner versions."""
+        self._check_failure()
+        self._scheduled = None
+        if bind:
             binding = getattr(output, "_ascend_kv_guard_context", None)
             if binding is not None:
                 # Receive-only and idle DP steps can return before _update_states.
@@ -522,12 +524,17 @@ class GuardRuntime:
                     self.gap("scheduler_write_plan_missing")
             else:
                 self.gap("scheduler_binding_missing")
-                self._scheduled = None
-            try:
-                self._check_failure()
+        try:
+            self._check_failure()
+            yield
+        finally:
+            self._scheduled = None
+
+    def wrap_execute(self, execute: Any):
+        @functools.wraps(execute)
+        def observed(output, *args, **kwargs):
+            with self.execute_scope(output):
                 return execute(output, *args, **kwargs)
-            finally:
-                self._scheduled = None
 
         return observed
 
@@ -575,12 +582,133 @@ class GuardRuntime:
 
 
 def get_guard(vllm_config: Any) -> GuardRuntime | None:
-    from vllm_ascend import envs
-
-    if not envs.VLLM_ASCEND_KV_GUARD:
+    if not KVGuardConfig.from_vllm_config(vllm_config).enabled:
         return None
     guard = getattr(vllm_config, "_ascend_kv_guard", None)
     if guard is None:
         guard = GuardRuntime(vllm_config)
         vllm_config._ascend_kv_guard = guard
     return guard
+
+
+class _V2RunnerAdapter:
+    """Only V2 batch ordering, metadata timing and capture need adaptation."""
+
+    def __init__(self, runner: Any, runtime: GuardRuntime):
+        self.runner = runner
+        self.runtime = runtime
+        self.input_batch = SimpleNamespace(req_ids=[])
+        self._prepared = False
+
+    def configure(self) -> None:
+        tables = self.runner.block_tables
+        sizes = [group.kv_cache_spec.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
+        if list(tables.block_sizes) != sizes or list(tables.kernel_block_sizes) != sizes:
+            raise ValueError("KV guard: unadapted MRV2 allocator/kernel block coordinates")
+        prepare = self.runner.model_state.prepare_attn
+        if getattr(prepare, "_ascend_kv_guard", False):
+            return
+
+        @functools.wraps(prepare)
+        def observed(input_batch, cudagraph_mode, *args, **kwargs):
+            metadata = prepare(input_batch, cudagraph_mode, *args, **kwargs)
+            if self.runtime._phase is not None:
+                self.input_batch = SimpleNamespace(req_ids=list(input_batch.req_ids[: input_batch.num_reqs]))
+                self._prepared = True
+                self.runtime._full_graph = "FULL" in str(cudagraph_mode)
+                self.runtime.observe_metadata(metadata)
+                scheduled = self.runtime._scheduled
+                if self.runtime._phase == "forward" and scheduled is not None:
+                    ids = self.input_batch.req_ids
+                    if len(ids) != len(set(ids)) or set(ids) != set(scheduled):
+                        self.runtime.gap("v2_batch_request_mismatch")
+                        self.runtime._missing_groups.update(self.runtime.layer_groups.values())
+                self.runtime._check_failure()
+            return metadata
+
+        cast(Any, observed)._ascend_kv_guard = True
+        self.runner.model_state.prepare_attn = observed
+
+    def wrap_execute(self, execute: Any):
+        @functools.wraps(execute)
+        def observed(scheduler_output, *args, **kwargs):
+            # Forward positional and keyword arguments unchanged across vLLM lanes.
+            flags = dict(zip(("intermediate_tensors", "dummy_run", "skip_attn_for_dummy_run", "is_profile"), args))
+            flags.update(kwargs)
+            dummy = bool(flags.get("dummy_run", False))
+            profile = bool(flags.get("is_profile", False))
+            phase = "warmup" if profile else "dummy" if dummy else "forward"
+            required = bool(scheduler_output.total_num_scheduled_tokens) and not (
+                profile and flags.get("skip_attn_for_dummy_run")
+            )
+            self.input_batch = SimpleNamespace(req_ids=[])
+            self._prepared = False
+
+            # Synthetic dummy/profile outputs have no scheduler binding, but
+            # their writes must still be checked against the shared live KV state.
+            with (
+                self.runtime.execute_scope(scheduler_output, bind=not (dummy or profile)),
+                self.runtime.forward_scope(self, phase=phase, required=required),
+            ):
+                result = execute(scheduler_output, *args, **kwargs)
+                if phase == "forward" and required and not self._prepared:
+                    self.runtime.gap("v2_attention_metadata_missing")
+                    self.runtime._missing_groups.update(self.runtime.layer_groups.values())
+                return result
+
+        return observed
+
+    def wrap_update(self, update: Any):
+        @functools.wraps(update)
+        def observed(scheduler_output, *args, **kwargs):
+            result = update(scheduler_output, *args, **kwargs)
+            # The parent has completed the physical operations at this point.
+            zeroed = getattr(scheduler_output, "new_block_ids_to_zero", None)
+            if zeroed:
+                self.runtime.zero_blocks(zeroed)
+            copies = getattr(scheduler_output, "kv_cache_block_copies", None)
+            if copies:
+                self.runtime.copy_blocks(copies)
+            return result
+
+        return observed
+
+    def wrap_capture(self, capture: Any):
+        @functools.wraps(capture)
+        def observed(*args, **kwargs):
+            self.runtime._check_failure()
+            with self.runtime.state._lock:
+                if (
+                    self.runtime.state.requests
+                    or self.runtime.state.pending_loads
+                    or any(block.valid_end != 0 for block in self.runtime.state.blocks.values())
+                ):
+                    raise ValueError(
+                        "KV guard: capture requires empty KV state; live/cache-preserving recapture is unsupported"
+                    )
+            # Startup capture has no request KV to protect. Do not synchronize
+            # metadata to the CPU inside a device graph capture. Real replays
+            # are audited by wrap_execute using their current metadata.
+            return capture(*args, **kwargs)
+
+        return observed
+
+
+def install_guard(runner: Any) -> GuardRuntime | None:
+    """Install one per-engine guard with only the runner-specific hooks."""
+    runtime = get_guard(runner.vllm_config)
+    if runtime is None:
+        return None
+    if getattr(runner.vllm_config, "use_v2_model_runner", False):
+        adapter = _V2RunnerAdapter(runner, runtime)
+        runtime._runner_adapter = adapter
+        cast(Any, runner).execute_model = adapter.wrap_execute(runner.execute_model)
+        cast(Any, runner).update_requests = adapter.wrap_update(runner.update_requests)
+        cast(Any, runner).capture_model = adapter.wrap_capture(runner.capture_model)
+    else:
+        from vllm.forward_context import get_forward_context
+
+        cast(Any, runner)._model_forward = runtime.wrap_forward(runner, runner._model_forward, get_forward_context)
+        cast(Any, runner).execute_model = runtime.wrap_execute(runner.execute_model)
+        cast(Any, runner)._update_states = runtime.wrap_update(runner, runner._update_states)
+    return runtime

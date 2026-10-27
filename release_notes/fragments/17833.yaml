@@ -4,5 +4,6 @@ entries:
     text: >-
       Added opt-in KV cache address-legality diagnostics for adapted dense PA
       and MLA attention paths in Model Runner V1 and V2. The guard is disabled
-      by default and can log failures or stop returning worker results after
-      a violation or incomplete audit.
+      by default and configured per engine through additional_config.kv_guard_config
+      (enabled and action). Both runners share one checker, which can log failures
+      or stop returning worker results after a violation or incomplete audit.

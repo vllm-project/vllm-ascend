@@ -29,11 +29,14 @@ def load(name, path):
 def runtime_fixture(monkeypatch):
     package = ModuleType("vllm_ascend")
     package.__path__ = []
-    cast(Any, package).envs = NS(VLLM_ASCEND_KV_GUARD=True, VLLM_ASCEND_KV_GUARD_ACTION="log")
     debug = ModuleType("vllm_ascend.debug")
     debug.__path__ = []
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
     monkeypatch.setitem(sys.modules, "vllm_ascend.debug", debug)
+    utils = load("guard_config_utils", "vllm_ascend/config_utils.py")
+    monkeypatch.setitem(sys.modules, "vllm_ascend.config_utils", utils)
+    options = load("guard_config_subject", "vllm_ascend/debug/kv_guard_config.py")
+    monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard_config", options)
     state = load("guard_runtime_state", "vllm_ascend/debug/kv_guard.py")
     monkeypatch.setitem(sys.modules, "vllm_ascend.debug.kv_guard", state)
     subject = load("guard_runtime_subject", "vllm_ascend/debug/kv_guard_runtime.py")
@@ -43,7 +46,7 @@ def runtime_fixture(monkeypatch):
     vllm.__path__ = []
     monkeypatch.setitem(sys.modules, "vllm", vllm)
     monkeypatch.setitem(sys.modules, "vllm.logger", logger)
-    config = NS()
+    config = NS(additional_config={"kv_guard_config": {"enabled": True}})
     runtime = subject.get_guard(config)
     assert subject.get_guard(config) is runtime
     runtime.subject = subject
@@ -139,10 +142,75 @@ def test_receive_only_step_binds_before_execute_and_cleans_finished(runtime):
 
 
 def test_disabled_guard_does_not_create_runtime(runtime, monkeypatch):
-    sys.modules["vllm_ascend"].envs.VLLM_ASCEND_KV_GUARD = False
+    monkeypatch.setenv("VLLM_ASCEND_KV_GUARD", "1")
+    monkeypatch.setenv("VLLM_ASCEND_KV_GUARD_ACTION", "raise")
     config = NS()
     assert runtime.subject.get_guard(config) is None
     assert not hasattr(config, "_ascend_kv_guard")
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_guard_configuration_is_per_engine(runtime, use_v2, monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_KV_GUARD", "0")
+    configurations = [
+        NS(use_v2_model_runner=use_v2, additional_config={"kv_guard_config": options})
+        for options in ({"enabled": True}, {"enabled": False}, {"enabled": True, "action": "raise"})
+    ]
+    log_guard, disabled_guard, raise_guard = [runtime.subject.get_guard(config) for config in configurations]
+    assert log_guard is not None and log_guard.action == "log"
+    assert disabled_guard is None
+    assert raise_guard is not None and raise_guard.action == "raise"
+    assert log_guard is not raise_guard
+    assert runtime.subject.get_guard(configurations[0]) is log_guard
+    assert runtime.subject.get_guard(configurations[2]) is raise_guard
+
+
+@pytest.mark.parametrize(
+    "options", [None, [], True, {"enabled": "false"}, {"enabled": 1}, {"action": "stop"}, {"enable": True}]
+)
+def test_guard_rejects_invalid_configuration(runtime, options):
+    config = NS(additional_config={"kv_guard_config": options})
+    with pytest.raises(ValueError):
+        runtime.subject.get_guard(config)
+    assert not hasattr(config, "_ascend_kv_guard")
+
+
+def test_v1_installs_the_shared_runtime_at_existing_boundaries(runtime, monkeypatch):
+    context = NS(cudagraph_runtime_mode="NONE")
+    forward_context = ModuleType("vllm.forward_context")
+    cast(Any, forward_context).get_forward_context = lambda: context
+    monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context)
+    calls = []
+    result = object()
+    runner = NS(vllm_config=runtime.config, input_batch=NS(req_ids=["r"]), requests={"r": NS(block_ids=[[1]])})
+
+    def forward(num_tokens, *, marker):
+        assert marker is result
+        assert runtime._phase == "forward"
+        runtime.write("layer0", torch.tensor([128]))
+        return marker
+
+    def update(output):
+        calls.append("update")
+
+    def execute(output, *, marker):
+        assert runtime._scheduled == {"r": (0, 1)}
+        runner._update_states(output)
+        return runner._model_forward(1, marker=marker)
+
+    runner._model_forward = forward
+    runner._update_states = update
+    runner.execute_model = execute
+    assert runtime.subject.install_guard(runner) is runtime
+    packet = NS(
+        _ascend_kv_guard_context={"pool_id": "pool", "requests": {"r": [[(1, 1)]]}, "scheduled_requests": {"r": (0, 1)}}
+    )
+    assert runner.execute_model(packet, marker=result) is result
+    assert context._kv_guard is runtime
+    assert calls == ["update"]
+    assert runtime.state.blocks[0, 1].valid_end == 1
+    assert runtime._phase is None and runtime._scheduled is None
+    assert not runtime.events
 
 
 @pytest.mark.parametrize("kernel_size, accepted", [(128, True), (16, False)])
@@ -181,8 +249,8 @@ def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime, 
             return [self.blocks[1]]
 
     class Scheduler:
-        def __init__(self):
-            self.vllm_config = NS(use_v2_model_runner=use_v2)
+        def __init__(self, vllm_config):
+            self.vllm_config = vllm_config
             self.pool = Pool()
             self.mapping = {"r": [[1]]}
             self.kv_cache_manager = NS(
@@ -200,7 +268,13 @@ def test_scheduler_preserves_output_and_sends_only_changed_generations(runtime, 
 
     patch.install_scheduler_guard(Scheduler)
     patch.install_scheduler_guard(Scheduler)
-    scheduler = Scheduler()
+    scheduler = Scheduler(NS(use_v2_model_runner=use_v2, additional_config={"kv_guard_config": {"enabled": True}}))
+    for config in (NS(additional_config=None), NS(additional_config={"kv_guard_config": {"enabled": False}})):
+        disabled = Scheduler(vllm_config=config)
+        assert "schedule" not in vars(disabled)
+        assert "get_new_blocks" not in vars(disabled.pool)
+        assert disabled.schedule() is disabled.output
+        assert not hasattr(disabled.output, "_ascend_kv_guard_context")
     scheduler.pool.get_new_blocks(1)
     assert scheduler.schedule() is scheduler.output
     binding = scheduler.output._ascend_kv_guard_context

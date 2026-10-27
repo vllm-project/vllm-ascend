@@ -8,24 +8,36 @@ attention paths in Model Runner V1 and V2.
 
 ## Enable the guard
 
-```bash
-# Model Runner V2
-VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ASCEND_KV_GUARD=1 vllm serve MODEL
-
-# Model Runner V1
-VLLM_USE_V2_MODEL_RUNNER=0 VLLM_ASCEND_KV_GUARD=1 vllm serve MODEL
-```
-
-`VLLM_ASCEND_KV_GUARD_ACTION=log` is the default: it reports failures while
-preserving diagnostic execution. To stop returning worker results after a
-violation or incomplete audit, select `raise`:
+Use the same per-engine configuration for Model Runner V1 and V2:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 \
-VLLM_ASCEND_KV_GUARD=1 \
-VLLM_ASCEND_KV_GUARD_ACTION=raise \
-vllm serve MODEL
+vllm serve MODEL --additional-config '{"kv_guard_config":{"enabled":true}}'
 ```
+
+| `kv_guard_config` option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enable KV address diagnostics for this engine. |
+| `action` | `"log"` or `"raise"` | `"log"` | Report failures or stop returning worker results. |
+
+`action="log"` reports failures while preserving diagnostic execution. To stop
+returning worker results after a violation or incomplete audit, select `raise`:
+
+```bash
+vllm serve MODEL --additional-config '{"kv_guard_config":{"enabled":true,"action":"raise"}}'
+```
+
+For the Python API, pass the same dictionary through `additional_config`:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="MODEL", additional_config={"kv_guard_config": {"enabled": True, "action": "raise"}})
+```
+
+The scheduler and workers read this configuration independently for each engine.
+Omitting `kv_guard_config` or setting `enabled=false` disables instrumentation.
+Invalid option names, non-boolean `enabled` values, and unknown actions are rejected.
+KV guard environment variables are no longer used.
 
 The first failure is latched. Catching the exception does not reset the worker;
 restart it before reuse. This is a worker-level stop, not cancellation of one
@@ -151,15 +163,20 @@ can still synchronize device metadata to CPU. Measure deployment overhead.
 | Component | Responsibility |
 | --- | --- |
 | `vllm_ascend/debug/kv_guard.py` | Allocation, ownership, prefix validity, and read/write rules. |
-| `vllm_ascend/debug/kv_guard_runtime.py` | Independent expected addresses, evidence collection, per-layer audit, and conservative state commit. |
-| `vllm_ascend/debug/kv_guard_v2.py` | Sorted batch IDs, execute/update boundaries, and capture restrictions for Runner V2. |
+| `vllm_ascend/debug/kv_guard_config.py` | Validated per-engine options shared by the scheduler and workers. |
+| `vllm_ascend/debug/kv_guard_runtime.py` | Shared V1/V2 installation, scheduler binding, evidence collection, audit, and conservative state commit. Includes the V2 batch and capture adapter. |
 | `vllm_ascend/patch/platform/patch_kv_guard.py` | Conditional scheduler allocation and request-binding instrumentation. |
 | Runner and attention implementations | Existing execution boundaries and ordered eager access arguments. |
 | Mooncake receiver | Success/failure validity callbacks after receive completion and reformatting. |
 
-The scheduler patch is conditional because current public hooks do not provide
-both allocation generations and the independent scheduler-to-worker request
-contract. Its removal path is an upstream allocation-lifecycle and scheduler
+Both runners use one `GuardRuntime` and one address-checking state machine.
+The internal V2 adapter only handles sorted batch IDs, metadata timing, and
+capture boundaries; it does not implement another checker.
+
+The scheduler constructor is wrapped once; allocation, release, and schedule
+methods are instrumented only for engines with `kv_guard_config.enabled=true`.
+Current public hooks do not provide both allocation generations and the
+independent scheduler-to-worker request contract. Its removal path is an upstream allocation-lifecycle and scheduler
 output extension that supplies the same evidence without wrapping instance
 methods. Changes to those upstream contracts require adapter and lifecycle
 regressions, alongside NPU tests for affected execution paths.

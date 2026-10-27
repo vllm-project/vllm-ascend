@@ -155,7 +155,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.debug.kv_guard_runtime import get_guard
+from vllm_ascend.debug.kv_guard_runtime import install_guard
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -397,11 +397,7 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
-        self._kv_guard = get_guard(vllm_config)
-        if self._kv_guard is not None:
-            cast(Any, self)._model_forward = self._kv_guard.wrap_forward(self, self._model_forward, get_forward_context)
-            self.execute_model = self._kv_guard.wrap_execute(self.execute_model)
-            cast(Any, self)._update_states = self._kv_guard.wrap_update(self, self._update_states)
+        self._kv_guard = install_guard(self)
         self.lookback_token_ids: CpuGpuBuffer | None = None
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
