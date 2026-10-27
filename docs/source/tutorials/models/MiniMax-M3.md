@@ -8,7 +8,7 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (BF16) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
+MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (W8A8) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
@@ -133,7 +133,13 @@ Select the `docker run` command for your hardware platform:
 
 Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
 
-Expected result: The container is listed with status `Up`. You can also verify the vllm Ascend version inside the container:
+In another terminal on the same host, check the container status (replace `minimax-m3-dev` if you changed `NAME`):
+
+```bash
+docker ps --filter name=minimax-m3-dev
+```
+
+Expected result: The container is listed with status `Up`. In the original container terminal, verify the vLLM Ascend version:
 
 ```bash
 pip show vllm-ascend
@@ -143,9 +149,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
-Start the online serving service with the following command:
-
-Select a platform or weight format using the tabs in each section to switch between deployment examples.
+Start the online serving service with the deployment commands in the following sections. Select the tab for your hardware platform and weight format.
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -165,14 +169,19 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     Adding the wrong `--quantization` value (or adding it to BF16 weights) will cause the checkpoint to be misinterpreted and fail to load.
 
+Run the selected command inside the container. Replace the weight-path placeholders with the downloaded model directories from Section 3.1, accessible inside the container. `EAGLE3_WEIGHT_PATH` points to the draft model. `LOG_PATH` defaults to a file in the current directory; change it to another writable location if needed.
+
 === "A3 series (BF16)"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_BF16_PATH>"
+    LOG_PATH="./minimax-m3-bf16.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -197,17 +206,21 @@ Single-node deployment completes both Prefill and Decode within the same node. T
           },
           "multistream_overlap_shared_expert": true,
           "weight_nz_mode": 2
-      }' > ${LOG_PATH} 2>&1 &
+      }' > "${LOG_PATH}" 2>&1 &
     ```
 
 === "A3 series (W8A8)"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_W8A8_PATH>"
+    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    LOG_PATH="./minimax-m3-w8a8.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -238,18 +251,22 @@ Single-node deployment completes both Prefill and Decode within the same node. T
           "multistream_overlap_shared_expert": true,
           "enable_shared_expert_dp": true,
           "weight_nz_mode": 2
-      }' > ${LOG_PATH} 2>&1 &
+      }' > "${LOG_PATH}" 2>&1 &
     ```
 
 === "950DT products"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_MXFP8_PATH>"
+    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    LOG_PATH="./minimax-m3-mxfp8.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -273,7 +290,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --gpu-memory-utilization 0.92 \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
-      --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
+      --safetensors-load-strategy prefetch > "${LOG_PATH}" 2>&1 &
     ```
 
 **Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
