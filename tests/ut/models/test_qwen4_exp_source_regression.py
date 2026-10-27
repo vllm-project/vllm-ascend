@@ -30,7 +30,7 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
     pp_compat = _source("vllm_ascend/patch/platform/patch_qwen4_exp_pp.py")
     model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
-    runner = _source("vllm_ascend/worker/model_runner_v1.py")
+    runner = _source("vllm_ascend/worker/v1/model_runner.py")
 
     assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
     assert "class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer)" in model
@@ -59,7 +59,8 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     assert "and hidden_states.shape[0] == positions.shape[-1]" in model
     assert "hidden_states = sp_all_gather(hidden_states)" in model
     assert "pp_intermediate_tensors_are_full_tokens = True" in model
-    assert "_uses_local_sp_pp_intermediates" in runner
+    assert "def _get_pp_intermediate_tensors" in runner
+    assert "MRV1 transports full PP intermediates" in runner
     assert "pipeline_parallel_size=1" not in model
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in model
     assert "and hidden_states.shape[0] == positions.shape[-1]" in mtp
