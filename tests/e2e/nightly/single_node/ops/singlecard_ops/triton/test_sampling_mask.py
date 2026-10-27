@@ -9,6 +9,8 @@ from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 
@@ -39,6 +41,10 @@ def _to_nested_list(tensors, num_sampled_tokens):
     return cpu_tensors.tolists(num_sampled_tokens.cpu().numpy()).to_nested_list()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
 def test_sampling_mask_matches_finite_support(max_num_kept):
     """Cover the support sizes and fallback boundaries used by upstream."""
@@ -82,6 +88,10 @@ def test_sampling_mask_matches_finite_support(max_num_kept):
     assert result == expected
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_sampling_mask_matches_processed_top_k_top_p_support():
     """Mirror the processed-logits integration case from vLLM v0.29.0."""
     init_device_properties_triton()
@@ -106,6 +116,10 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
         clear_ascend_config()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_sampling_mask_non_contiguous_vocab_dimension():
     init_device_properties_triton()
 

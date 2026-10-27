@@ -19,22 +19,13 @@ if "vllm" not in sys.modules:
     sys.modules["vllm"] = vllm_module
     sys.modules["vllm.envs"] = vllm_envs_module
 
-if "vllm_ascend.sample.sampler" not in sys.modules:
-    sample_sampler_module = ModuleType("vllm_ascend.sample.sampler")
-    sample_sampler_module.DEFAULT_LOGPROBS_MODE = "raw_logprobs"  # type: ignore[attr-defined]
-    sample_sampler_module.AscendSampler = type("AscendSampler", (), {})  # type: ignore[attr-defined]
-    sample_sampler_module.AscendTopKTopPSampler = type(  # type: ignore[attr-defined]
-        "AscendTopKTopPSampler", (), {}
-    )
-    sys.modules["vllm_ascend.sample.sampler"] = sample_sampler_module
-
 if "vllm_ascend.utils" not in sys.modules:
     utils_module = ModuleType("vllm_ascend.utils")
     utils_module.global_stream = lambda: MagicMock()  # type: ignore[attr-defined]
     utils_module.npu_stream_switch = lambda _: nullcontext()  # type: ignore[attr-defined]
     sys.modules["vllm_ascend.utils"] = utils_module
 
-from vllm_ascend._310p.sample import sampler as sampler_310p  # noqa: E402
+from vllm_ascend._310p.worker.v2 import sample_utils as sampler_310p  # noqa: E402
 
 
 class _SourceGenerator:

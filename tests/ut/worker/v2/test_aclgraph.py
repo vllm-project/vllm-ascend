@@ -9,9 +9,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
 from vllm_ascend.utils import vllm_version_is
+
+# vLLM #60335 moved this manager to `target_dependent_ar` on main; the
+# release lane (v0.31.0) still ships `autoregressive.cudagraph_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+else:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+        SpeculatorCudaGraphManager,
+    )
+
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
@@ -171,14 +182,15 @@ def test_capture_draft_prefill_delegates_to_parent():
 def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     """Verify draft decode capture prepares inputs and invokes the forward path."""
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
-    manager.speculator = object()
+    manager.speculator = SimpleNamespace(num_speculative_steps=3)
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
     if vllm_version_is("0.31.0"):
         # v0.31.0 stores dp_size as a plain instance attribute.
         manager.dp_size = 2
     else:
-        # vLLM main exposes dp_size as a read-only property backed by vllm_config.
+        # vLLM #53934 turned `dp_size` into a read-only property backed by
+        # `vllm_config.parallel_config.data_parallel_size`.
         manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
     forward_fn = MagicMock()
     model_state = object()
@@ -234,6 +246,11 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     assert args[2].num_reqs == 3
     assert torch.equal(args[3], torch.tensor([4, 4], dtype=torch.int32))
     assert torch.equal(args[4], torch.tensor([10, 20, 30], dtype=torch.int32))
+    if vllm_version_is("0.31.0"):
+        assert len(args) == 5
+    else:
+        # vLLM #60335 passes `num_speculative_steps` on main.
+        assert args[5] == 3
 
 
 def test_graph_replay_updates_full_graph_params():

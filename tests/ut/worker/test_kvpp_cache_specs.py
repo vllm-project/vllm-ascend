@@ -24,7 +24,7 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
     instance = SimpleNamespace(
         vllm_config=config,
         model_runner=SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names=set(drafts))
+            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names=set(drafts))
         ),
         _kvpp_cache_allocation_plan=None,
     )

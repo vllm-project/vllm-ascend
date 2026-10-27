@@ -11,7 +11,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
     _grouped_conv,
     _score_edges,
 )
-from vllm_ascend.spec_decode.dflash2_proposer import (
+from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import (
     AscendDflash2Proposer,
     greedy_select_path,
     is_dflash2_draft,
@@ -122,7 +122,7 @@ def test_greedy_select_path_sizes_grid_and_dispatches_kernel(monkeypatch):
     launched = MagicMock()
 
     monkeypatch.setattr(
-        "vllm_ascend.spec_decode.dflash2_proposer.dflash2_greedy_selector_walk_kernel",
+        "vllm_ascend.worker.v1.spec_decode.dflash2_proposer.dflash2_greedy_selector_walk_kernel",
         launched,
     )
     num_reqs, num_steps, top_k = 3, 2, 4
@@ -165,7 +165,7 @@ def test_is_dflash2_draft_requires_architecture_and_dflash_method():
 
 
 def test_get_spec_decode_method_dispatches_dflash2():
-    from vllm_ascend.spec_decode import get_spec_decode_method
+    from vllm_ascend.worker.v1.spec_decode import get_spec_decode_method
 
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -174,8 +174,8 @@ def test_get_spec_decode_method_dispatches_dflash2():
         )
     )
     with (
-        patch("vllm_ascend.spec_decode.AscendDflash2Proposer", return_value="dflash2") as d2,
-        patch("vllm_ascend.spec_decode.AscendDflashProposer", return_value="dflash1") as d1,
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflash2Proposer", return_value="dflash2") as d2,
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflashProposer", return_value="dflash1") as d1,
     ):
         assert get_spec_decode_method("dflash", vllm_config, "cpu", None) == "dflash2"
         d2.assert_called_once()
@@ -183,8 +183,8 @@ def test_get_spec_decode_method_dispatches_dflash2():
 
     vllm_config.speculative_config.draft_model_config.architectures = ["DFlashDraftModel"]
     with (
-        patch("vllm_ascend.spec_decode.AscendDflash2Proposer", return_value="dflash2") as d2,
-        patch("vllm_ascend.spec_decode.AscendDflashProposer", return_value="dflash1") as d1,
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflash2Proposer", return_value="dflash2") as d2,
+        patch("vllm_ascend.worker.v1.spec_decode.AscendDflashProposer", return_value="dflash1") as d1,
     ):
         assert get_spec_decode_method("dflash", vllm_config, "cpu", None) == "dflash1"
         d1.assert_called_once()
@@ -223,7 +223,7 @@ def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
         _reference_walk(cand, scores)
     )
     monkeypatch.setattr(
-        "vllm_ascend.spec_decode.dflash2_proposer.dflash2_greedy_selector_walk_kernel",
+        "vllm_ascend.worker.v1.spec_decode.dflash2_proposer.dflash2_greedy_selector_walk_kernel",
         kernel,
     )
 

@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -146,6 +147,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        # Opt in only for synchronous bulk loads, not background retrieval.
+        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
         self.connector_scheduler: KVPoolScheduler | None = None
         self.connector_worker: KVPoolWorker | None = None
@@ -202,15 +205,20 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             cache.save(request, through_tokens, block_ids)
 
     def shutdown(self):
-        """Release the lookup RPC resources owned by this connector."""
+        """Stop store users before closing the backend's native resources."""
         try:
             if self.connector_scheduler is not None:
                 client = self.connector_scheduler.client
-                if client is not None:
-                    client.close()
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
+                    self.connector_scheduler.store_scheduler.close()
         finally:
             if hasattr(self, "lookup_server"):
                 self.lookup_server.close()
+            if self.connector_worker is not None:
+                self.connector_worker.shutdown()
             super().shutdown()
 
     ############################################################
@@ -357,6 +365,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.connector_worker.start_load_kv(metadata)
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Let KVPP observe a layer's loads without advancing attention hooks."""
+        if not self.use_layerwise:
+            return
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load_ready(layer_name)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
@@ -435,6 +450,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._current_step_has_real_forward = False
         done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
+
+    def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished(finished_req_ids)
+        assert self.connector_worker is not None
+        failed = self.connector_worker.get_failed_requests()
+        if self.connector_worker.load_async and not self.use_layerwise:
+            done_recving |= failed
+        return KVConnectorTransferResults(
+            finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return KV block IDs that failed to load on the worker."""
@@ -570,9 +595,4 @@ class LookupKeyServer:
             return
         self._closed = True
         self.running = False
-        self.thread.join(timeout=1)
-        if self.thread.is_alive():
-            logger.warning(
-                "KV pool lookup server thread did not stop within 1 second; "
-                "the active lookup handler may still be running"
-            )
+        self.thread.join()

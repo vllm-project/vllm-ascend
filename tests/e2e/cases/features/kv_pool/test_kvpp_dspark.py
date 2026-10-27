@@ -15,7 +15,6 @@ MAX_TOKENS = 64
 pytestmark = pytest.mark.e2e_model(MODEL)
 
 
-@pytest.mark.parametrize("model_runner_v2", ["0", "1"], ids=["v1", "v2"])
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,dspark,chunked_prefill,prefix_caching",
@@ -26,9 +25,8 @@ pytestmark = pytest.mark.e2e_model(MODEL)
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_glm_dspark_kvpp_outputs(monkeypatch, model_runner_v2):
+def test_glm_dspark_kvpp_outputs():
     """Keep GLM DSpark outputs unchanged across KVPP and repeated mixed batches."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", model_runner_v2)
     results = []
     for enabled in (False, True):
         with VllmRunner(

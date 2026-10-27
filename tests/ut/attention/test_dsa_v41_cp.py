@@ -380,9 +380,7 @@ def _build_planes(builders, batch):
             slots = torch.where(slots >= 0, slots + 128, -1)
         result[PREFIXES[kind]] = builder.build(
             0,
-            batch.local.replace(slot_mapping=slots),
-            pcp_context=batch.context,
-            pcp_cache_group_idx=group,
+            batch.local.replace(slot_mapping=slots, pcp_context=batch.context, pcp_cache_group_idx=group),
             num_actual_reqs=1 if batch.graph else batch.local.num_reqs,
             full_graph_mode=batch.graph,
             common_v41_metadata={},
@@ -665,9 +663,16 @@ class TestPCPMetadata:
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
             builders(dcp=2)
-        builder = builders()["swa"]
-        with pytest.raises(AssertionError, match="global batch context"):
-            builder.build(0, _batch(2, 0, "prefill").local)
+
+    def test_builds_ordinary_metadata_without_pcp_context(self, builders):
+        # A replicated draft decode builds through PCP builders without a
+        # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        common = _batch(2, 0, "decode").local
+        # Replicated drafts keep rank-local slots, unlike target PCP batches.
+        common = common.replace(slot_mapping=common.slot_mapping[: common.num_input_tokens])
+        for builder in builders().values():
+            metadata = builder.build(0, common)
+            assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 
 @pytest.fixture
@@ -696,6 +701,7 @@ def runtime(builders, monkeypatch):
         )
         projector.cv_wq_a, projector.cv_wq_b, projector.cv_wkv = map(CVLinearWrapper, (attn.wq_a, attn.wq_b, attn.wkv))
         monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))
+        monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
             SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
@@ -765,9 +771,11 @@ class TestPCPBatchLifecycle:
     ):
         state = runtime(sharding=sharding, overlap=overlap, decode_sharded=decode_sharded)
         profile_output = torch.empty(4, 4)
+        state.projector.reference_input = torch.zeros_like(profile_output)
+        state.projector.peer_inputs = list(state.projector.reference_input.chunk(2))
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
-        assert not state.events
+        assert state.events == (["project", "reduce"] if sharding else [])
         switches = state.projector._pcp_o_proj_weight_switches or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())
@@ -1371,7 +1379,7 @@ class TestProjectionLayout:
 def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
     config = {"legacy": legacy, "pcp": pcp}
     monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: config["pcp"])
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
     if legacy and pcp:
         with pytest.raises(ValueError, match="cannot be enabled"):
             dsa_v41_cp.get_v41_cp_classes()

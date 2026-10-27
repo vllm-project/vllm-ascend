@@ -66,7 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     validate_register_region_count,
 )
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
@@ -103,7 +103,7 @@ def _resolve_memfabric_transfer_protocol(vllm_config: VllmConfig) -> str | None:
     """Read the optional MemFabric data-path protocol.
 
     Read from ``kv_connector_extra_config["memfabric_transfer_protocol"]``:
-    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for A5 nodes.
+    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for 950PR&950DT Products.
     """
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
     return extra.get("memfabric_transfer_protocol")

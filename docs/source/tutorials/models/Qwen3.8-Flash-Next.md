@@ -5,14 +5,12 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
+Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet (GDN) and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-The current version supports only Atlas A3 series hardware. Atlas A2 series hardware and Ascend 950DT and 950PR products are not yet supported and will be enabled progressively in future releases. This tutorial describes the W8A8 deployment on Atlas 800 A3. Text and multimodal input have been validated on Atlas 800 A3.
-
-This document is validated and written based on **vLLM-Ascend 0.26.0rc release**. The current model (Qwen3.8-Flash-Next) is first supported in this version.
+This document is validated and written based on `vllm-ascend:v0.26.0rc`. The current model (Qwen3.8-Flash-Next) is first supported in this version.
 
 !!! warning
 
@@ -47,7 +45,7 @@ A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https:
 - openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
 - Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
 
-The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in Section 5.1 uses the first eight devices.
+The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in [Section 5.1](#51-single-node-online-deployment) uses the first eight devices.
 
 === "A3 series"
 
@@ -227,7 +225,7 @@ Expected result: the service returns HTTP 200 OK and describes the supplied imag
 
 ### 6.3 Function Calling
 
-Function Calling requires the following startup options, which are already included in Section 5:
+Function Calling requires the following startup options, which are already included in [Section 5](#5-online-service-deployment):
 
 ```text
 --enable-auto-tool-choice --tool-call-parser qwen3_xml
@@ -275,7 +273,7 @@ When the model chooses the function, the parsed result appears in `choices[0].me
 
 ### 6.4 Reasoning Parser and Thinking Control
 
-Reasoning parsing requires the following startup option, which is already included in Section 5:
+Reasoning parsing requires the following startup option, which is already included in [Section 5](#5-online-service-deployment):
 
 ```text
 --reasoning-parser qwen3
@@ -303,7 +301,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
     }'
 ```
 
-The final answer is returned in `choices[0].message.content`, while the parsed reasoning is returned separately in the reasoning field of the response.
+The final answer is returned in `choices[0].message.content`, while the parsed reasoning is returned separately in the `reasoning_content` field of the response.
 
 To disable thinking and request a direct answer, use the validated non-thinking request:
 
@@ -335,7 +333,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 2. After execution, you can get the result. Here are the results of `Qwen3.8-Flash-Next` in `vllm-ascend:v0.26.0rc` for reference only.
 
-The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond with the following result.
+The A3 W8A8 deployment described in [Section 5.1](#51-single-node-online-deployment) was validated on GPQA Diamond with the following result.
 
 | Hardware | Dataset | Metric | Score |
 | --- | --- | --- | --- |

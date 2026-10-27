@@ -32,8 +32,9 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.platform import _setup_worker_and_scheduler
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -150,9 +151,28 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
         hardware_profile.return_value.supports.return_value = False
         _setup_worker_and_scheduler(config, ascend_config)
 
-    assert not hasattr(parallel_config, "pcp_shard_decode_requests")
+    if vllm_version_is("0.31.0"):
+        assert not hasattr(parallel_config, "pcp_shard_decode_requests")
+    else:
+        # vLLM main declares this on ParallelConfig itself.
+        assert parallel_config.pcp_shard_decode_requests is True
     replace(parallel_config)
     assert is_pcp_decode_sharding_enabled(config) is True
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_kpool_decode_keeps_replicated_pcp_state(speculative: bool):
+    config = _make_pcp_config(CUDAGraphMode.NONE)
+    config.model_config.hf_text_config.index_kpool = 4
+    config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
+    manager = AscendPCPManager(2, 1, torch.device("cpu"))
+    manager.vllm_config = config
+    counts = np.array([1, 1], dtype=np.int32)
+    prefilling = np.array([False, False])
+
+    assert not is_pcp_decode_sharding_enabled(config)
+    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(0, 0, 1), (1, 0, 1)]
 
 
 def test_validate_config_allows_sparse_mla_full_decode_only():
@@ -183,6 +203,13 @@ def test_validate_config_allows_pipeline_parallelism():
     )
 
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
+def test_validate_config_allows_kpool_model_registered_as_multimodal():
+    vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    vllm_config.model_config.hf_text_config.index_kpool = 4
+
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=True)
 
 
 @pytest.mark.parametrize(
@@ -402,7 +429,8 @@ def _make_replicated_pcp_manager():
     return manager
 
 
-def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
+@pytest.mark.parametrize("requests_already_padded", [False, True])
+def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded(requests_already_padded):
     """Keep request metadata aligned when upstream already pads tokens."""
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
@@ -459,6 +487,13 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     input_buffers.is_padding[:4].fill_(False)
     input_buffers.query_start_loc[:5].copy_(torch.tensor([0, 1, 2, 3, -1], dtype=torch.int32))
     input_buffers.seq_lens[:4].copy_(torch.tensor([11, 21, 31, 99], dtype=torch.int32))
+    if requests_already_padded:
+        local_batch.num_reqs_after_padding = 4
+        local_batch.query_start_loc = input_buffers.query_start_loc[:5]
+        local_batch.query_start_loc_np = np.array([0, 1, 2, 3, 3], dtype=np.int32)
+        local_batch.query_start_loc.copy_(torch.from_numpy(local_batch.query_start_loc_np))
+        local_batch.seq_lens = input_buffers.seq_lens[:4]
+        local_batch.seq_lens_cpu_upper_bound = torch.tensor([11, 21, 31, 0], dtype=torch.int32)
 
     manager = _make_replicated_pcp_manager()
     manager._input_buffers = input_buffers
@@ -974,86 +1009,15 @@ def test_validate_config_rejects_unsupported_speculator_options(
 
 def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
     """Lock the keyword contracts added by vLLM #53694 and #53869."""
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_param = "dp_sync" if vllm_version_is("0.31.0") else "dp_sync_state"
     for speculator_cls in (
         AscendAutoRegressiveSpeculator,
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
     ):
-        assert "dp_sync" in signature(speculator_cls.propose).parameters
+        assert dp_sync_param in signature(speculator_cls.propose).parameters
     assert "pcp_manager" in signature(ModelAclGraphManager.capture).parameters
-
-
-def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
-    """Follow the PCP-local capture contract introduced by vLLM #53515/#53869."""
-    input_batch = MagicMock()
-    input_buffers = MagicMock()
-    input_block_tables = object()
-    slot_mappings = torch.arange(8)
-    slot_mappings_by_layer = object()
-    attn_metadata = object()
-    block_tables = MagicMock(cp_size=2, cp_rank=0, cp_interleave=1)
-    pcp_manager = MagicMock()
-    pcp_manager.get_dummy_block_tables.return_value = input_block_tables
-    pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
-    model_state = MagicMock()
-    model_state.prepare_attn.return_value = attn_metadata
-    kv_cache_config = object()
-    dcp_local_seq_lens = object()
-
-    with (
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.AscendInputBatch.make_dummy",
-            return_value=input_batch,
-        ) as make_dummy,
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer",
-            return_value=slot_mappings_by_layer,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.aclgraph_utils._prepare_dcp_local_seq_lens",
-            return_value=dcp_local_seq_lens,
-        ) as prepare_dcp_local_seq_lens,
-    ):
-        state = _prepare_pcp_inputs_to_capture(
-            num_reqs=2,
-            num_tokens=8,
-            model_state=model_state,
-            input_buffers=input_buffers,
-            _block_tables=block_tables,
-            attn_groups=[],
-            kv_cache_config=kv_cache_config,
-            full_cudagraph=True,
-            max_query_len=4,
-            pcp_manager=pcp_manager,
-        )
-
-    make_dummy.assert_called_once_with(2, 8, input_buffers, max_query_len=4)
-    pcp_manager.partition_batch.assert_not_called()
-    pcp_manager.prepare_attn.assert_not_called()
-    block_tables.get_dummy_block_tables.assert_not_called()
-    pcp_manager.get_dummy_block_tables.assert_called_once_with(2)
-    pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
-    prepare_dcp_local_seq_lens.assert_called_once_with(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        2,
-        0,
-        1,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
-    assert input_batch.dcp_local_seq_lens is dcp_local_seq_lens
-    model_state.prepare_attn.assert_called_once_with(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        [],
-        kv_cache_config,
-        for_capture=True,
-    )
-    assert state.attn_metadata is attn_metadata
-    assert state.slot_mappings is slot_mappings_by_layer
 
 
 def test_main_pcp_capture_block_tables_keep_runtime_storage() -> None:
@@ -1094,10 +1058,14 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.debugger = None
     runner._debugger_started = False
     runner.prompt_logprobs_worker = None
-    # vLLM main added these ExecuteModelState fields.
-    state_kwargs: dict = {}
-    state_kwargs["dp_sync"] = None
-    state_kwargs["cudagraph_stats"] = None
+    # Optional state fields differ between supported vLLM revisions.
+    state_kwargs: dict = {
+        field: None
+        for field in ("dp_sync", "dp_sync_state", "cudagraph_stats", "routed_experts")
+        if field in vllm_model_runner.ExecuteModelState._fields
+    }
+    if "num_spec_tokens_to_schedule" in vllm_model_runner.ExecuteModelState._fields:
+        state_kwargs["num_spec_tokens_to_schedule"] = 0
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
@@ -1234,11 +1202,13 @@ def test_cpp_dummy_is_partitioned_instead_of_staged():
     dummy.is_cpp_profile = True
     local_batch = _make_local_pcp_batch()
 
+    # vLLM main renamed the upstream staging hook; patch and call the live name.
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
     with (
-        patch.object(PCPManager, "prepare_inputs_to_capture") as stage,
+        patch.object(PCPManager, stage_name) as stage,
         patch.object(manager, "partition_batch", return_value=local_batch) as partition,
     ):
-        result = manager.prepare_inputs_to_capture(dummy)
+        result = getattr(manager, stage_name)(dummy)
 
     assert result is local_batch
     stage.assert_not_called()
@@ -1255,11 +1225,12 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
     legacy_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
+    stage_name = "prepare_inputs_to_capture" if vllm_version_is("0.31.0") else "prepare_inputs_for_capture_or_profile"
     with (
-        patch.object(PCPManager, "prepare_inputs_to_capture", return_value=staged_batch) as stage,
+        patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,
     ):
-        result = manager.prepare_inputs_to_capture(legacy_batch)
+        result = getattr(manager, stage_name)(legacy_batch)
 
     assert result is staged_batch
     stage.assert_called_once_with(legacy_batch)

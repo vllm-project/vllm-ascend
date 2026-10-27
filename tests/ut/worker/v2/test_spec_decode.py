@@ -10,6 +10,27 @@ import torch
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
+
+
+def test_rejection_sample_rejects_block_with_synthetic_rates():
+    """Reject incompatible verification modes before allocating or launching on NPU."""
+    with pytest.raises(AssertionError, match="incompatible with synthetic"):
+        rejection_sample(
+            target_logits=torch.zeros(2, 1),
+            draft_logits=None,
+            draft_sampled=torch.zeros(2, dtype=torch.int64),
+            cu_num_logits=torch.tensor([0, 2], dtype=torch.int32),
+            pos=torch.arange(2, dtype=torch.int32),
+            idx_mapping=torch.zeros(1, dtype=torch.int32),
+            expanded_idx_mapping=torch.zeros(2, dtype=torch.int32),
+            expanded_local_pos=torch.arange(2, dtype=torch.int32),
+            temperature=torch.ones(1),
+            seed=torch.zeros(1, dtype=torch.int64),
+            num_speculative_steps=1,
+            synthetic_conditional_rates=torch.ones(1),
+            use_block_verification=True,
+        )
 
 
 def _make_config(
@@ -28,8 +49,10 @@ def _make_config(
         use_dspark=MagicMock(return_value=use_dspark),
         use_dflash=MagicMock(return_value=use_dflash),
         use_eagle=MagicMock(return_value=use_eagle),
+        uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
+        use_multi_module_mtp=MagicMock(return_value=False),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
     )
     return SimpleNamespace(speculative_config=speculative_config)
@@ -207,23 +230,25 @@ def test_init_speculator_unsupported_method():
         init_speculator(config, torch.device("cpu"))
 
 
-@pytest.mark.parametrize(
-    "use_gemma4_mtp,use_step3p5_mtp",
-    [
-        (True, False),
-        (False, True),
-    ],
-)
-def test_init_speculator_skips_special_mtp(
-    use_gemma4_mtp,
-    use_step3p5_mtp,
-):
-    """Test that Gemma4 and Step3.5 MTP bypass the regular MTP speculator."""
-    config = _make_config(
-        "mtp",
-        use_gemma4_mtp=use_gemma4_mtp,
-        use_step3p5_mtp=use_step3p5_mtp,
+def test_init_speculator_routes_gemma4_mtp(monkeypatch):
+    """Gemma4 MTP routes to AscendGemma4Speculator, not the regular MTP path."""
+    config = _make_config("mtp", use_gemma4_mtp=True)
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.gemma4.speculator",
+        "AscendGemma4Speculator",
     )
+    device = torch.device("cpu")
+
+    result = init_speculator(config, device)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device)
+
+
+def test_init_speculator_skips_special_mtp():
+    """Step3.5 MTP bypasses the regular MTP speculator and stays unsupported."""
+    config = _make_config("mtp", use_step3p5_mtp=True)
 
     with pytest.raises(
         NotImplementedError,
