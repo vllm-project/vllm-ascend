@@ -159,52 +159,17 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
     ]
 
 
-def test_residual_mode_has_arch_specific_kernel_keys():
+def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
     root = Path(__file__).resolve().parents[4]
-    tiling_source = (
-        root / "csrc/attention/generic_block_sparse_attention/op_host/generic_block_sparse_attention_tiling.cpp"
-    ).read_text()
-    arch22_kernel = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/arch22/"
-        "generic_block_sparse_attention_kernel_arch22.h"
-    ).read_text()
-    tiling_keys = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/generic_block_sparse_attention_tilingkey.h"
-    ).read_text()
-    kernel_dispatch = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/generic_block_sparse_attention.cpp"
-    ).read_text()
+    bundled_source = root / "csrc/attention/generic_block_sparse_attention"
+    adapter = (root / "csrc/aclnn_torch_adapter/gbsa_torch_adpt.h").read_text()
+    binding = (root / "csrc/torch_binding.cpp").read_text()
+    loader = (root / "csrc/aclnn_torch_adapter/op_api_common.h").read_text()
 
-    assert "if (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE)" in tiling_source
-    assert "tilingKey += GBSA_RESIDUAL_BLOCK_MODE_TILING_OFFSET;" in tiling_source
-    assert "residualBlockMode_ = tilingData->residualBlockMode;" in arch22_kernel
-    assert "GBSA_BF16_TND_PA_BBND_TILING_RESIDUAL 9200001071023222ULL" in tiling_keys
-    assert "GBSA_BF16_TND_PA_BBND_FP32SM_TILING_RESIDUAL 9250001071023222ULL" in tiling_keys
-    assert "TILING_KEY_IS(GBSA_BF16_TND_PA_BBND_TILING_RESIDUAL);" in kernel_dispatch
-
-
-def test_a3_qsa_arch22_maps_logical_tokens_into_paged_kv():
-    root = Path(__file__).resolve().parents[4]
-    arch22_kernel = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/arch22/"
-        "generic_block_sparse_attention_kernel_arch22.h"
-    ).read_text()
-    qk_mmad = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/attn_infra/gemm/block/block_mmad_qk.hpp"
-    ).read_text()
-    pv_mmad = (
-        root / "csrc/attention/generic_block_sparse_attention/op_kernel/attn_infra/gemm/block/block_mmad_pv.hpp"
-    ).read_text()
-    tiling_source = (
-        root / "csrc/attention/generic_block_sparse_attention/op_host/generic_block_sparse_attention_tiling.cpp"
-    ).read_text()
-
-    assert "blockSize_, kStride0_" in arch22_kernel
-    assert "blockSize_, vStride0_" in arch22_kernel
-    for mmad_source in (qk_mmad, pv_mmad):
-        assert "pageIdx = static_cast<uint32_t>(offsetInKV / pageSize)" in mmad_source
-        assert "physicalPage = gBlockTable.GetValue(pageIdx)" in mmad_source
-        assert "(offsetInKV % pageSize) * strideKV" in mmad_source
-    assert "blockSize_ == 128U" in tiling_source
-    assert "(128U % blockShapeY_) == 0U" in tiling_source
-    assert "GBSA_A3_QSA_MAX_TOPK = 512" in tiling_source
+    assert not bundled_source.exists()
+    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata" in adapter
+    assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttention" in adapter
+    assert '#include "aclnn_torch_adapter/gbsa_torch_adpt.h"' in binding
+    assert '"npu_generic_block_sparse_attention_metadata(' in binding
+    assert '"npu_generic_block_sparse_attention(' in binding
+    assert 'return "libopapi_transformer.so";' in loader
