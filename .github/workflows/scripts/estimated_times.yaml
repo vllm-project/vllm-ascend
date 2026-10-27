@@ -51,7 +51,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 255
   tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 500
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 270
-  tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 205
+  tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 410
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 340
   tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 340
   tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 160

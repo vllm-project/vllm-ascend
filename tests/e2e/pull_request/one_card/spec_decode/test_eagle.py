@@ -22,6 +22,7 @@ MAX_NUM_SEQS = 256
     "dynamic_num_speculative_tokens",
     [
         pytest.param(None, id="static"),
+        pytest.param(2, id="dynamic"),
     ],
 )
 def test_qwen_eagle3_acceptance(
