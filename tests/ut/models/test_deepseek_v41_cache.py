@@ -17,6 +17,7 @@ pytest.importorskip(
 import torch
 import torch_npu
 from vllm.config import set_current_vllm_config
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
@@ -58,6 +59,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
@@ -156,6 +158,9 @@ def runtime(config):
             tensor_parallel_size=1,
         ),
         speculative_config=None,
+        # vLLM main annotates sliding-window specs before global PP planning.
+        # This fixture has no drafter, so no prefill lookahead is retained.
+        num_prefill_lookahead_tokens=0,
         kv_transfer_config=None,
         use_v2_model_runner=False,
         # vLLM main reads attention_config.hisparse_config in the KV cache
@@ -206,13 +211,23 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
 
 
 @pytest.mark.parametrize("packed_groups", [False, True])
-def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, runtime, packed_groups):
+@pytest.mark.parametrize("draft_layers", [0, 3])
+def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, runtime, packed_groups, draft_layers):
     config.num_hidden_layers = 2
     config.compress_ratios = [0, 0]
     config.kv_source_layer_ids = []
     config.index_source_layer_ids = []
     specs = collect_specs(runtime)
-    assert len(specs) == 2
+    for index in range(draft_layers):
+        specs[f"mtp.{index}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
+            block_size=runtime.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=config.head_dim,
+            dtype=torch.bfloat16,
+            sliding_window=config.sliding_window,
+            model_version="deepseek_v41",
+        )
+    assert len(specs) == 2 + draft_layers
     assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values())
     assert is_deepseek_v41_cache(specs)
 
@@ -226,7 +241,7 @@ def test_swa_only_reduced_backbone_uses_independent_cache_allocations(config, ru
     assert _pool_bytes_per_block(runtime, groups) == page_bytes
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(runtime, groups, 10 * page_bytes + 1)
     assert cache_config.num_blocks == 10
-    assert len(cache_config.kv_cache_tensors) == 2
+    assert len(cache_config.kv_cache_tensors) == len(specs)
     assert {tuple(tensor.layers) for tensor in cache_config.kv_cache_tensors} == {(name,) for name in specs}
     assert sum(tensor.size for tensor in cache_config.kv_cache_tensors) == 10 * page_bytes
     for tensor in cache_config.kv_cache_tensors:
@@ -362,6 +377,118 @@ def test_production_layout_matches_design(config, runtime):
     assert cache_config.num_blocks == 3
     _, caches = allocate_cache_views(cache_config)
     assert sum(caches[n].is_contiguous() for n in padded if n.endswith(".swa_cache") and ".mtp." not in f".{n}") == 30
+
+
+@pytest.mark.parametrize("partition", [(20, 20), (23, 17), (14, 26), (8, 12, 20), (8, 6, 6, 20), (1, 13, 13, 13)])
+def test_pp_cache_groups_preserve_all_local_resources(runtime, partition):
+    """PP stages may have uneven SWA columns or no compression state group."""
+    runtime.parallel_config.pipeline_parallel_size = len(partition)
+    specs = collect_specs(runtime)
+    global_groups = make_cache_groups(group_cache_specs(specs))
+    start = 0
+    for count in partition:
+        end = start + count
+        local_specs = {
+            name: spec for name, spec in specs.items() if start <= int(name.split(".layers.")[1].split(".")[0]) < end
+        }
+        groups = make_cache_groups(group_cache_specs(local_specs))
+        assert all(group.layer_names for group in groups)
+        assert {name for group in groups for name in group.layer_names} == set(local_specs)
+        # EngineCore projects global scheduler groups, including empty groups,
+        # onto workers. Both planning paths must allocate every local cache.
+        projected = kv_cache_planning._project_kv_cache_groups_to_worker(global_groups, local_specs)
+        for stage_groups in (groups, projected):
+            page = get_deepseek_v41_pool_bytes_per_block(stage_groups)
+            planned = get_deepseek_v41_kv_cache_config(runtime, stage_groups, page * 3)
+            assert planned.num_blocks == 3
+            assert {name for tensor in planned.kv_cache_tensors for name in tensor.layers} == set(local_specs)
+            _, caches = allocate_cache_views(planned)
+            assert set(caches) == set(local_specs)
+            for group in stage_groups:
+                expected = []
+                for index, name in enumerate(group.layer_names):
+                    cache = caches[name]
+                    for view in cache if isinstance(cache, tuple) else (cache,):
+                        view[1].fill_(index + 1)
+                        expected.append((view[1], index + 1))
+                for view, value in expected:
+                    torch.testing.assert_close(view, torch.full_like(view, value))
+        start = end
+
+
+@pytest.mark.parametrize("partition", [(20, 20), (23, 17), (14, 26), (8, 12, 20), (8, 6, 6, 20), (1, 13, 13, 13)])
+def test_pp_global_cache_planner_normalizes_worker_block_counts(runtime, partition, monkeypatch):
+    runtime.parallel_config.pipeline_parallel_size = len(partition)
+    runtime.model_config.original_max_model_len = runtime.model_config.max_model_len = 256
+    runtime.model_config.supports_kv_cache_grouping = False
+    runtime.max_in_flight_tokens = 64
+    if hasattr(kv_cache_planning, "DefaultKVCacheConfigBuilder"):
+        # CPU tests must select the same platform builder as NPU serving.
+        monkeypatch.setattr(
+            current_platform, "get_kv_cache_config_builder_cls", NPUPlatform.get_kv_cache_config_builder_cls
+        )
+    specs = collect_specs(runtime)
+    global_groups = make_cache_groups(group_cache_specs(specs))
+    workers, available_memory = [], []
+    start = 0
+    for rank, count in enumerate(partition):
+        end = start + count
+        local_specs = {
+            name: spec for name, spec in specs.items() if start <= int(name.split(".layers.")[1].split(".")[0]) < end
+        }
+        workers.append(local_specs)
+        groups = kv_cache_planning._project_kv_cache_groups_to_worker(global_groups, local_specs)
+        available_memory.append(get_deepseek_v41_pool_bytes_per_block(groups) * (128 + rank * 17))
+        start = end
+    planned = kv_cache_planning.get_kv_cache_configs(runtime, workers, available_memory)
+    assert {worker.num_blocks for worker in planned} == {128}
+    for worker, local_specs in zip(planned, workers):
+        assert {name for tensor in worker.kv_cache_tensors for name in tensor.layers} == set(local_specs)
+        page = get_deepseek_v41_pool_bytes_per_block(worker.kv_cache_groups)
+        assert {tensor.size for tensor in worker.kv_cache_tensors} == {worker.num_blocks * page}
+        end = 0
+        for tensor in worker.kv_cache_tensors:
+            assert tensor.offset == end
+            end += worker.num_blocks * tensor.block_stride
+        assert end == worker.num_blocks * page
+    scheduler = kv_cache_utils.generate_scheduler_kv_cache_config(planned)
+    assert scheduler.num_blocks == planned[0].num_blocks
+    assert [group.kv_cache_spec.block_size for group in scheduler.kv_cache_groups] == [
+        group.kv_cache_spec.block_size for group in global_groups
+    ]
+
+
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_pp_cache_regions_use_main_allocation_contract(runtime, monkeypatch, pp_size):
+    from vllm_ascend.worker.v2 import attn_utils
+
+    runtime.parallel_config.pipeline_parallel_size = pp_size
+    groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
+    page_bytes = get_deepseek_v41_pool_bytes_per_block(groups)
+    plan = get_deepseek_v41_kv_cache_config(runtime, groups, page_bytes * 3)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
+    allocations = []
+
+    def allocate(size, alignment, device):
+        value = torch.zeros(size, dtype=torch.uint8, device=device)
+        allocations.append(value)
+        return value
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
+    raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    assert len(allocations) == (1 if pp_size > 1 else len(plan.kv_cache_tensors))
+    assert sum(value.numel() for value in allocations) == plan.num_blocks * page_bytes
+    for index, descriptor in enumerate(plan.kv_cache_tensors):
+        region = raw[descriptor.layers[0]]
+        assert region.numel() == plan.num_blocks * descriptor.block_stride
+        if pp_size > 1:
+            assert region.data_ptr() == allocations[0].data_ptr() + descriptor.offset
+        region.fill_(index + 1)
+    for index, descriptor in enumerate(plan.kv_cache_tensors):
+        assert torch.all(raw[descriptor.layers[0]] == index + 1)
 
 
 def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):

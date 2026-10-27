@@ -12,10 +12,7 @@ pytest.importorskip(
 import torch
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
-from vllm_ascend.models.deepseek_v41.model import (
-    DeepseekV41SharedAttentionState,
-    build_layer_plan,
-)
+from vllm_ascend.models.deepseek_v41.model import DeepseekV41SharedAttentionState, build_layer_plan
 
 
 @pytest.fixture
@@ -67,6 +64,33 @@ def test_source_roles_and_engram_slots(text_config: DeepseekV41Config):
     assert topology.layer(1).engram_slot == 0
     assert topology.layer(14).engram_slot == 1
     assert topology.layer(0).kv_source_layer is None
+
+
+def test_layer_and_boundary_plans_resolve_sources_independent_of_config_order(text_config: DeepseekV41Config):
+    expected = build_layer_plan(text_config)
+    text_config.kv_source_layer_ids = list(reversed(text_config.kv_source_layer_ids))
+    text_config.index_source_layer_ids = list(reversed(text_config.index_source_layer_ids))
+    actual = build_layer_plan(text_config)
+
+    assert actual.layers == expected.layers
+    partitions = tuple((layer, layer + 1) for layer in range(40))
+    assert actual.pp_boundaries(partitions) == expected.pp_boundaries(partitions)
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("compress_ratios", [0, 0], "cover every decoder layer"),
+        ("kv_source_layer_ids", [8, 14, 20], "layer 2.*invalid KV/index source"),
+        ("index_source_layer_ids", [8, 14, 20], "layer 2.*invalid KV/index source"),
+        ("index_source_layer_ids", [-1, 8, 14, 20], "layer 2.*invalid KV/index source"),
+        ("kv_source_layer_ids", [2, 8, 14], "layer 20.*compression ratio"),
+    ],
+)
+def test_invalid_dependencies_fail_in_shared_layer_planner(text_config, field, value, message):
+    setattr(text_config, field, value)
+    with pytest.raises(ValueError, match=message):
+        build_layer_plan(text_config)
 
 
 def test_shared_state_resets_sparse_attention_metadata():

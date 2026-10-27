@@ -109,6 +109,13 @@ def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
     assert support.needs_aux_hidden_states
 
 
+def test_deepseek_v41_dspark_pp_support_requires_aux_transport():
+    support = resolve_spec_pp_support(_make_config("DeepseekV41ForCausalLM"))
+
+    assert support is not None
+    assert support.needs_aux_hidden_states
+
+
 @pytest.mark.parametrize(
     "config",
     [
