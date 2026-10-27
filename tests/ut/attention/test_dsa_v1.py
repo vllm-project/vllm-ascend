@@ -2200,7 +2200,7 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
 
 def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
     with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.is_pcp_enabled", return_value=True),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
     ):
         assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
@@ -2214,7 +2214,7 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
         )
 
     with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.is_pcp_enabled", return_value=True),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
     ):
         for get_backend_cls in (
@@ -2228,6 +2228,7 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
 def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     """Keep the PCP global path for mixed prefill/decode batches."""
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder.use_pcp = True
     builder._is_decode_sharded = False
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
@@ -2312,11 +2313,11 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
         autospec=True,
         return_value=local_metadata,
     ) as build_local:
+        common_attn_metadata.pcp_context = pcp_context
+        common_attn_metadata.pcp_cache_group_idx = 1
         actual = builder.build(
             0,
             common_attn_metadata,
-            pcp_context=pcp_context,
-            pcp_cache_group_idx=1,
             common_ratio_to_sas_metadata={"local": True},
             num_actual_reqs=2,
         )
@@ -2362,6 +2363,7 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
     seq_lens = torch.ones(graph_size, dtype=torch.int32) if is_dummy else torch.tensor([8, 9, 0, 0], dtype=torch.int32)
 
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder.use_pcp = True
     builder._is_decode_sharded = False
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
@@ -2447,11 +2449,11 @@ def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
             return_value=local_metadata,
         ) as build_local,
     ):
+        local_common.pcp_context = pcp_context
+        local_common.pcp_cache_group_idx = 0
         actual = builder.build(
             0,
             local_common,
-            pcp_context=pcp_context,
-            pcp_cache_group_idx=0,
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=shared_local_metadata,
         )

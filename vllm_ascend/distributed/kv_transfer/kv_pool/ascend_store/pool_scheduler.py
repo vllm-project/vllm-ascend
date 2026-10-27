@@ -165,10 +165,6 @@ class KVPoolScheduler:
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
-        # request_id -> block-table reference for the async-load path.
-        # NewRequestData supplies the full table for new requests; allocation
-        # snapshots are not an independent authority for that path.
-        self._full_block_ids: dict[str, list[list[int]]] = {}
         self._loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
@@ -405,7 +401,9 @@ class KVPoolScheduler:
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
         if self.cache_coordinator is not None:
-            return self._lookup_layerwise_with_coordinator(request, token_len)
+            return self._lookup_layerwise_with_coordinator(
+                request, token_len, 0 if self.layerwise_offload else num_computed_tokens
+            )
         return self._lookup_layerwise_contiguous(request, token_len, num_computed_tokens)
 
     def _query_layerwise_block_hits(self, keys_by_block: list[list[str]]) -> list[bool]:
@@ -439,6 +437,7 @@ class KVPoolScheduler:
         self,
         request: "Request",
         token_len: int,
+        num_computed_tokens: int = 0,
     ) -> int:
         """Reachability-aware hit check for hybrid models.
 
@@ -458,7 +457,10 @@ class KVPoolScheduler:
         ) -> list[BlockHash]:
             keys_by_block: list[list[str]] = []
             allowed_hashes: list[BlockHash] = []
+            local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
             for block_idx, block_hash in enumerate(group_block_hashes):
+                if block_idx < local_blocks:
+                    continue
                 if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
                     continue
                 keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
@@ -471,6 +473,7 @@ class KVPoolScheduler:
             token_len,
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
+            hbm_hit_tokens=num_computed_tokens,
         )
 
     def _lookup_layerwise_contiguous(
@@ -479,8 +482,8 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
-        # In layerwise mode, always query from block 0 because the remote
-        # pool stores per-layer data that may not match local prefix cache.
+        # Layer reuse can evict earlier layers from HBM. Otherwise, only
+        # probe blocks beyond the complete local prefix to avoid rewarming it.
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
         hits_per_group: list[int] = []
@@ -489,10 +492,13 @@ class KVPoolScheduler:
             effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
             query_start_block = (
-                0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
+                0
+                if self.layerwise_offload
+                else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
             )
             group_block_hashes = group_block_hashes[query_start_block:]
             if not group_block_hashes:
+                hits_per_group.append(query_start_block * effective_block_size)
                 continue
 
             # Deliberately no cross-request hit cache: in a tiered (DRAM+SSD)
@@ -613,6 +619,9 @@ class KVPoolScheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        # A waiting request can be looked up again before it is admitted.
+        # Never retain a load plan from an earlier hit across a miss/early return.
+        self.load_specs.pop(request.request_id, None)
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -721,43 +730,6 @@ class KVPoolScheduler:
 
         return need_to_allocate, self.load_async and not self.use_layerwise
 
-    def _resolve_base_state_by_group(self, req_id: str, ids_by_group) -> list[str] | None:
-        """Resolve async-load save base state against the recorded reference.
-
-        "ZERO" means the request's block table *is* the authoritative table,
-        i.e. it starts at the request's block 0 -- the only state in which the
-        legacy table-indexed save arrays are valid. Any other state means the
-        table is a suffix window (or cannot be identified), so saving it with
-        the legacy arrays would index it as if it started at block 0; such a
-        request must not be saved. None means no reference was recorded.
-        """
-        full = self._full_block_ids.get(req_id)
-        if not full or ids_by_group is None:
-            return None
-        n = len(ids_by_group)
-        if len(full) != n:
-            return ["UNPROVABLE"] * n
-        states: list[str] = []
-        for ids, full_ids in zip(ids_by_group, full):
-            if list(ids) == list(full_ids):
-                states.append("ZERO")
-            elif ids and ids[0] in full_ids:
-                states.append("WINDOW")
-            else:
-                states.append("UNPROVABLE")
-        return states
-
-    def _resolve_preempted_base_state(self, num_computed_tokens: int) -> list[str]:
-        """Base state for the preempted branch, known by construction.
-
-        A preempted cached request's table is exactly the blocks allocated in
-        this step, so it starts at the block boundary that contains
-        num_computed_tokens: "ZERO" only when that boundary is block 0.
-        """
-        if num_computed_tokens <= 0:
-            return ["ZERO"] * len(self.kv_cache_group_ids)
-        return ["WINDOW"] * len(self.kv_cache_group_ids)
-
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
@@ -770,12 +742,6 @@ class KVPoolScheduler:
             local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
-        # Retain the allocation snapshot as an async-load reference. It may
-        # differ from NewRequestData.block_ids, so new requests replace it
-        # with their full table instead of comparing against it.
-        self._full_block_ids[request.request_id] = (
-            local_block_ids if num_external_tokens > 0 else normalize_block_ids_by_group(blocks.get_block_ids())
-        )
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
             logger.debug(
@@ -859,6 +825,13 @@ class KVPoolScheduler:
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
     ) -> ReqMeta | None:
+        if self.vllm_config.use_v2_model_runner:
+            # MRV2 resumes through scheduled_new_reqs with a full block table.
+            # Clear the marker so the next RUNNING delta extends this table instead
+            # of rebuilding the tracker from the delta and resetting save progress.
+            # MRV1 resumes through cached requests and consumes the marker in
+            # _process_preempted_cached_request.
+            self._preempted_req_ids.discard(request.req_id)
         load_spec = self.load_specs.pop(request.req_id, None)
         num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
         request_tuple = self._unfinished_requests.get(request.req_id)
@@ -870,11 +843,6 @@ class KVPoolScheduler:
         block_ids_by_group = normalize_block_ids_by_group(request.block_ids)
         previous_tracker = self._request_trackers.get(request.req_id)
         prefill_tokens = _new_req_prefill_tokens(request)
-        # NewRequestData.block_ids starts at request block 0, including any
-        # cached prefix. Comparing it to the allocation snapshot can wrongly
-        # mark every group UNPROVABLE and suppress all subsequent saves.
-        _stop_state = ["ZERO"] * len(block_ids_by_group)
-        self._full_block_ids[request.req_id] = block_ids_by_group
         request_tracker = RequestTracker(
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
@@ -887,7 +855,6 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
-            save_window_base_state=_stop_state,
         )
         self._request_trackers[request.req_id] = request_tracker
         return self._build_req_meta(
@@ -918,7 +885,6 @@ class KVPoolScheduler:
         request_real = request_tuple[0]
         num_tokens_to_compute = request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
         previous_tracker = self._request_trackers.get(req_id)
-        _stop_state = self._resolve_preempted_base_state(request_real.num_computed_tokens)
         request_tracker = RequestTracker(
             req_id=req_id,
             token_len=num_tokens_to_compute,
@@ -931,7 +897,6 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
-            save_window_base_state=_stop_state,
         )
         self._request_trackers[req_id] = request_tracker
         return self._build_req_meta(
@@ -1022,7 +987,6 @@ class KVPoolScheduler:
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
-        _stop_state = self._resolve_base_state_by_group(request_id, block_ids)
         request_tracker = RequestTracker(
             req_id=request_id,
             token_len=num_tokens_to_compute,
@@ -1034,7 +998,6 @@ class KVPoolScheduler:
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
-            save_window_base_state=_stop_state,
         )
         self._request_trackers[request_id] = request_tracker
         return ReqMeta.from_request_tracker(
@@ -1061,14 +1024,12 @@ class KVPoolScheduler:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._full_block_ids.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
-            self._full_block_ids.pop(req_id, None)
             self._loading_req_ids.discard(req_id)
 
         meta = AscendConnectorMetadata(

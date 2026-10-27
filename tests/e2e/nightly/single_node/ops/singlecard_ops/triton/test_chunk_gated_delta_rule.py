@@ -1,13 +1,21 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 
 
 class TestChunkGatedDeltaRule(PytestBase):
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    )
     def test_triton_fusion_ops(self):
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.num_decodes = 1
@@ -20,9 +28,22 @@ class TestChunkGatedDeltaRule(PytestBase):
         g = torch.randn(1, 17, 8, dtype=torch.float32).npu()
         beta = torch.randn(1, 17, 8, dtype=torch.bfloat16).npu()
         initial_state = torch.randn(3, 8, 128, 128, dtype=torch.bfloat16).npu()
-        q_start_loc = torch.range(0, 3, dtype=torch.int).npu()
+        q_start_loc = torch.tensor([0, 1, 9, 17], dtype=torch.int32, device="npu")
+        builder = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(hf_text_config=SimpleNamespace(linear_num_value_heads=8)),
+                parallel_config=SimpleNamespace(tensor_parallel_size=1),
+            )
+        )
+        chunk_metadata = _build_non_spec_chunked_prefill_metadata(builder, q_start_loc.cpu(), q.device)
+        chunk_metadata.num_decodes = mock_attn_metadata.num_decodes
+        assert chunk_metadata.cu_seqlens_host == (0, 1, 9, 17)
+        assert chunk_metadata.chunk_indices_chunk64_host == (0, 0, 1, 0, 2, 0)
 
-        with patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context):
+        with (
+            patch("vllm_ascend.ops.triton.fla.chunk.get_forward_context", return_value=mock_forward_context),
+            patch("vllm_ascend.ops.triton.fla.chunk.get_pcp_group", return_value=MagicMock(world_size=1)),
+        ):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -37,12 +58,16 @@ class TestChunkGatedDeltaRule(PytestBase):
                 cu_seqlens=q_start_loc,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
+                prebuilt_meta=chunk_metadata,
             )
 
         assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
         assert last_recurrent_state.shape == (3, 8, 128, 128)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_chunk_gated_delta_rule_310_state_layout_matches_vllm():
     q = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
     k = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)

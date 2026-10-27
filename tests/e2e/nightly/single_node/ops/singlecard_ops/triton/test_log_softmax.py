@@ -2,9 +2,15 @@ import pytest
 import torch
 from vllm.triton_utils import triton
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.worker.v2.sample.logprob import _topk_log_softmax_kernel
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     "batch_size,vocab_size,num_logprobs",
     [
@@ -39,6 +45,7 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, num_logprobs):
         logits,
         logits.stride(0),
         token_ids,
+        token_ids.stride(0),
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,

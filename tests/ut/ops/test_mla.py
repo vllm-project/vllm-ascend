@@ -122,7 +122,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.use_torch_npu_lightning_indexer = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
-        indexer._pcp_active = False
+        indexer.use_pcp = False
         indexer._is_pcp_decode_sharded = False
         indexer._dsa_cp_active = False
         indexer_k_cache = MagicMock(name="indexer_k_cache")
@@ -132,6 +132,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     def _make_indexer_metadata(self):
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
+            uses_pcp_sharded_layout=False,
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
@@ -225,14 +226,16 @@ class TestAscendSFAIndexerBackend(TestBase):
 
     def test_gather_cache_inputs_pcp_gathers_prefill_region(self):
         indexer = self._make_forward_indexer()
-        indexer._pcp_active = True
+        indexer.use_pcp = True
         k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
         k_li_scale = torch.ones(2, 1, dtype=torch.float32)
-        slots = torch.tensor([7, 8], dtype=torch.int64)
+        # The PCP slot mapping covers every rank's padded tokens.
+        slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
         gathered_k_li = torch.arange(16, dtype=torch.float32).view(4, 4)
         gathered_scale = torch.full((4, 1), 2.0)
         gathered_slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
         indexer_metadata = self._make_indexer_metadata()
+        indexer_metadata.uses_pcp_sharded_layout = True
         indexer_metadata.slot_mapping = slots
         indexer_metadata.num_decode_tokens = 1
 
@@ -246,6 +249,30 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertIs(out_k, gathered_k_li)
         self.assertIs(out_scale, gathered_scale)
         self.assertIs(out_slots, gathered_slots)
+
+    def test_gather_cache_inputs_pcp_replicated_draft_decode_writes_locally(self):
+        indexer = self._make_forward_indexer()
+        indexer.use_pcp = True
+        indexer._is_pcp_decode_sharded = True
+        k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
+        slots = torch.tensor([7, -1], dtype=torch.int64)
+        indexer_metadata = self._make_indexer_metadata()
+        # A draft decode built without a PCP context keeps its local slots.
+        indexer_metadata.slot_mapping = slots
+        indexer_metadata.num_decode_tokens = 0
+        indexer_metadata.num_actual_tokens = 1
+
+        with patch(
+            "vllm_ascend.attention.indexer._gather_prefill_cache_inputs",
+            return_value=((k_li[:1],), slots[:1]),
+        ) as gather:
+            out_k, out_scale, out_slots = indexer._gather_cache_inputs(k_li, None, indexer_metadata)
+
+        # Every token is replicated, so the upstream helper keeps them local.
+        gather.assert_called_once_with((k_li,), slots, 1)
+        torch.testing.assert_close(out_k, k_li[:1])
+        self.assertIsNone(out_scale)
+        torch.testing.assert_close(out_slots, slots[:1])
 
     def test_gather_cache_inputs_dsa_cp_all_gathers_k(self):
         indexer = self._make_forward_indexer()

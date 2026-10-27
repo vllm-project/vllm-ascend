@@ -22,17 +22,6 @@ def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
 
 
-# Root cause of "ReqMeta GVA metadata does not cover requested block range":
-# the layerwise save block range is built from absolute block numbers while the
-# per-group GVA array is indexed from the request's table itself. The two only
-# agree when the table starts at the request's block 0. When it does not (the
-# table is a suffix window, e.g. after a preemption), the save either trips the
-# coverage assertion in build_shared, or -- when the range happens to fit --
-# stores the KV of block (base + k) under the key of block k. Requests whose
-# table is known not to be the authoritative one are therefore not saved: not
-# saving loses a cache entry; a save under the wrong key poisons the pool.
-
-
 @dataclass(frozen=True)
 class TPMismatchInfo:
     enabled: bool
@@ -929,11 +918,6 @@ class RequestTracker:
 
     block_sizes: list[int] | None = None
 
-    # Per-group save base state, "ZERO" | "WINDOW" | "UNPROVABLE". "ZERO" for
-    # every group is the only state in which the legacy table-indexed save
-    # arrays are valid. None means "not wired": keep the legacy behaviour.
-    save_window_base_state: list[str] | None = None
-
     def __init__(
         self,
         req_id: str,
@@ -953,7 +937,6 @@ class RequestTracker:
         last_layerwise_snapshot_end_token: int | None = None,
         last_layerwise_snapshot_block_index: int | None = None,
         last_layerwise_snapshot_start_block: int | None = None,
-        save_window_base_state: list[str] | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -974,7 +957,6 @@ class RequestTracker:
         self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
         self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
         self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
-        self.save_window_base_state = save_window_base_state
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1269,40 +1251,6 @@ class ReqMeta:
         # normally.
         if load_spec is not None and load_spec.can_load and not save_partial_block:
             skip_save = True
-
-        # The legacy save path indexes the per-group GVA arrays as if the
-        # request's table started at its block 0. That only holds when the
-        # table IS the authoritative table for every group (state "ZERO").
-        # Anything else -- a suffix window, or a table we cannot identify --
-        # would either trip the coverage assertion in build_shared or, when the
-        # range happens to fit, silently store the KV of block (base + k) under
-        # the key of block k. Skip the save instead: not saving loses a cache
-        # entry, a save under the wrong key poisons the pool. Placed before the
-        # early return below so this skip behaves exactly like any other skip.
-        if not skip_save:
-            _base_state = tracker.save_window_base_state
-            if _base_state is None:
-                # Not wired. Every production creation path sets this field, so
-                # this is a directly-constructed tracker or the transient lookup
-                # placeholder; keep the legacy behaviour there.
-                _stop_mode = "UNTRACKED"
-            elif all(s == "ZERO" for s in _base_state):
-                _stop_mode = "ZERO"
-            elif any(s == "WINDOW" for s in _base_state):
-                _stop_mode = "WINDOW"
-            else:
-                _stop_mode = "UNPROVABLE"
-            if _stop_mode in ("WINDOW", "UNPROVABLE"):
-                skip_save = True
-                logger.warning(
-                    "[KVPOOL] layerwise save skipped mode=%s req=%s state=%s table=%s save_end_token=%d target=%d",
-                    _stop_mode,
-                    tracker.req_id,
-                    _base_state,
-                    [len(x) for x in tracker.allocated_block_ids_by_group],
-                    num_tokens_to_save,
-                    target_token_len,
-                )
         if skip_save and load_spec is None:
             return None
 

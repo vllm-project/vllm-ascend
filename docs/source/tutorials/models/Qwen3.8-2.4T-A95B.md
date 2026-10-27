@@ -5,7 +5,7 @@
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
-    
+
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
 Qwen3.8-2.4T-A95B is a large-scale MoE model with 2400 billion total
@@ -152,7 +152,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 
 Expected output:
 
-```shell
+```output
 vllm and vllm_ascend are ready
 ```
 
@@ -213,7 +213,7 @@ Before starting the service:
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
@@ -268,7 +268,7 @@ Before starting the service:
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
@@ -377,7 +377,7 @@ Before starting the service:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
@@ -441,7 +441,7 @@ Before starting the service:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
-        
+
         # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
@@ -506,7 +506,7 @@ Before starting the service:
 Wait until the engine finishes loading weights and graph capture. A successful
 startup includes output similar to the following:
 
-```text
+```output
 INFO:     Started server process
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -590,7 +590,7 @@ does not affect the serving processes. Refer to
 
 ### 8.2 Performance Service Configuration
 
-Use the deployment in Section 5 as the baseline. Change the following values
+Use the deployment in [Section 5](#5-online-service-deployment) as the baseline. Change the following values
 on all four nodes:
 
 | Parameter | Standard deployment | Performance test |
@@ -628,7 +628,7 @@ reasoning effort, and weight revision together with the result.
 The following configuration is validated in a specific test environment and
 is for reference only. The optimal configuration depends on maximum
 input/output length, request concurrency, prefix cache hit rate, quantization,
-and workload characteristics. Tune the parameters in Section 9.2 based on your
+and workload characteristics. Tune the parameters in [Section 9.2](#92-tuning-guidelines) based on your
 actual workload.
 
 **Table 1: Scenario Overview**
@@ -646,7 +646,7 @@ actual workload.
 | 8 per DP | 131072 | 16384 | 0.85 | 1 | On | Full decode ACL Graph, Fused MC2, CPU binding |
 
 > For complete startup commands and parameter descriptions, refer to the
-> deployment example in Chapter 5.
+> deployment example in [Section 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 
