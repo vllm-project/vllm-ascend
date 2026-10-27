@@ -399,11 +399,28 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                         num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        # `sketchssm` and MambaHybridAttnMetadata.replayssm_decode_base_cpu come
+        # with vllm#61124; without it the plugin is inert and the kwargs stay out
+        # so the metadata class of an older vLLM still constructs.
+        mamba_metadata_kwargs: dict[str, Any] = {}
+        if getattr(self.cache_config, "sketchssm", None) is not None:
+            # Padding rows get a zero origin: prefill_len includes output
+            # tokens replayed on resumption (upstream MambaHybrid contract).
+            replayssm_decode_base_cpu = torch.zeros(num_reqs, dtype=torch.int32)
+            replayssm_decode_base_cpu[: input_batch.num_reqs] = torch.from_numpy(
+                input_batch.prefill_len_np[: input_batch.num_reqs]
+            )
+            mamba_metadata_kwargs["replayssm_decode_base_cpu"] = replayssm_decode_base_cpu
         model_specific_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            **mamba_metadata_kwargs,
         )
+        if mamba_metadata_kwargs:
+            # Consumed by MambaHybridAttnMetadata.get_extra_common_attn_kwargs
+            # to feed the SketchSSM row-metadata helpers.
+            model_specific_metadata._sketchssm_req_idx = input_batch.idx_mapping_np
         # The Mamba model state builds its own complete attention metadata.
         # The optional argument is accepted to match AscendModelState's API.
         self.attn_metadata = build_attn_metadata(
