@@ -147,7 +147,14 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         with disable_profiling_chunk_for_draft(self.vllm_config):
-            return super().load_draft_model(target_model, target_attn_layer_names)
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        # Upstream's MRV2 loader shares the target's vocab layers, but does
+        # not align a DFlash head with a QuaRot residual stream. Reuse the
+        # existing Ascend load-time alignment before any graph or KV setup.
+        from vllm_ascend.models.qwen3_dflash import align_dflash_weights
+
+        align_dflash_weights(model, self.vllm_config)
+        return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req

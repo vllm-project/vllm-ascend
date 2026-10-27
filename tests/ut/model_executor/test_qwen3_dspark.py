@@ -27,9 +27,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
-from vllm_ascend.models import qwen3_dflash2
+from vllm_ascend.models import qwen3_dflash, qwen3_dflash2
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 
 
@@ -63,7 +64,9 @@ class TestQwen3DSparkWeightLoading:
         torch.testing.assert_close(model.lm_head.weight, head_before)
 
 
-@pytest.mark.parametrize("model_cls", [qwen3_dspark.AscendQwen3DSparkForCausalLM, DFlash2Qwen3ForCausalLM])
+@pytest.mark.parametrize(
+    "model_cls", [qwen3_dspark.AscendQwen3DSparkForCausalLM, DFlash2Qwen3ForCausalLM, DFlashQwen3ForCausalLM]
+)
 def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
     embed_name = "language_model.model.embed_tokens.weight"
     head_name = "language_model.lm_head.weight"
@@ -84,7 +87,9 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
     model.rotation_path = rotation_path
     model.target_model_path = tmp_path
     model.enable_confidence_head = False
-    model.model = SimpleNamespace(embed_tokens=nn.Linear(2, 3, bias=False), fc=nn.Linear(2, 2, bias=False))
+    model.model = SimpleNamespace(
+        embed_tokens=nn.Linear(2, 3, bias=False), fc=nn.Linear(2, 2, bias=False), use_aux_hidden_state=True
+    )
     model.lm_head = nn.Linear(2, 3, bias=False)
     for layer in (model.model.embed_tokens, model.lm_head):
         layer.weight.data.fill_(99)
@@ -104,10 +109,14 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
     with (
         patch.object(qwen3_dspark, "get_rotation_path", return_value=rotation_path),
         patch.object(qwen3_dflash2, "get_rotation_path", return_value=rotation_path),
+        patch.object(qwen3_dflash, "get_rotation_path", return_value=rotation_path),
         patch.object(qwen3_dspark, "VocabParallelEmbedding", side_effect=vocab_layer),
         patch.object(qwen3_dspark, "ParallelLMHead", side_effect=vocab_layer),
     ):
-        model.post_process(config)
+        if model_cls is DFlashQwen3ForCausalLM:
+            qwen3_dflash.align_dflash_weights(model, config)
+        else:
+            model.post_process(config)
     assert model.model.embed_tokens is not original_embed
     assert model.lm_head is not original_head
     torch.testing.assert_close(original_embed.weight, torch.full((3, 2), 99.0))
