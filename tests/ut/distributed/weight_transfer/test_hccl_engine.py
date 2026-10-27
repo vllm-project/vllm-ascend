@@ -40,6 +40,7 @@ def _make_engine():
     engine.model = MagicMock()
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
+    engine._last_update_info = {}
     return engine
 
 
@@ -79,6 +80,9 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
     engine.parallel_config = SimpleNamespace(data_parallel_index=0, world_size=1, rank=0)
     old_group = MagicMock()
     engine.model_update_group = old_group
+    engine._last_update_info[engine.model] = HCCLWeightTransferUpdateInfo(
+        names=["stale"], dtype_names=["float32"], shapes=[[1]]
+    )
     init_info = HCCLWeightTransferInitInfo(master_address="127.0.0.1", master_port=12345, rank_offset=1, world_size=2)
 
     def create_group(*args, **kwargs):
@@ -91,6 +95,7 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
 
     init.assert_called_once_with("127.0.0.1", 12345, 1, 2, device=0)
     assert engine.model_update_group is not old_group
+    assert engine._last_update_info == {}
 
 
 def test_inherits_upstream_orchestration():
@@ -328,4 +333,6 @@ def test_worker_loads_on_assigned_device_in_both_modes(packed):
 
     with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer", side_effect=receive):
         engine.receive_weights(info)
+        engine.receive_weights(HCCLWeightTransferUpdateInfo(packed=packed))
+    assert engine.model.load_weights.call_count == 2
     assert engine.model.load_weights.call_args.args[0][0][0] == "w"

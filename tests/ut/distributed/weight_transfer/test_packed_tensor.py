@@ -194,7 +194,7 @@ def test_consumer_reuses_upstream_event_chain_without_post_load_host_wait():
         operations.append(("receive", stream.index))
         tensor.zero_()
 
-    loaded = []
+    loaded: list[Any] = []
 
     def load(weights):
         operations.append(("load", len(loaded)))
