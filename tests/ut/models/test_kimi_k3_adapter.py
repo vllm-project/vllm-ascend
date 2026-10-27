@@ -739,7 +739,7 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="The AMD specialized-decode hooks we inherit are main-only.",
 )
 def test_kimi_lm_initializes_specialized_decode(monkeypatch):
@@ -781,7 +781,7 @@ def test_kimi_lm_initializes_specialized_decode(monkeypatch):
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="The AMD specialized-decode hooks we inherit are main-only.",
 )
 def test_kimi_lm_uses_ascend_hybrid_model_state():
@@ -794,7 +794,7 @@ def test_kimi_lm_uses_ascend_hybrid_model_state():
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="Upstream passes the specialized-decode step only on main.",
 )
 def test_kimi_model_forwards_specialized_decode_step(monkeypatch):

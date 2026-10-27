@@ -483,7 +483,7 @@ def test_mla_replicated_draft_decode_skips_pcp_kv_gather() -> None:
     metadata.num_input_tokens = 1
     metadata.slot_mapping = torch.tensor([5], dtype=torch.int64)
     with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
-        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None)
+        assert impl._mla_preprocess("draft", torch.zeros(1, 4), (), metadata) == ("decode", None, None)
     assert impl.mla_preprocess_decode.call_args.args[-1] is None
 
 
@@ -501,7 +501,7 @@ def test_mla_sharded_decode_empty_rank_writes_pcp_kv() -> None:
     metadata.num_input_tokens = 1
     metadata.slot_mapping = torch.tensor([-1, 7], dtype=torch.int64)
     with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written"):
-        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None)
+        assert impl._mla_preprocess("target", torch.zeros(1, 4), (), metadata) == (None, None, None)
     impl.layerwise_kv_cache_hook.wait_for_layer.assert_called_once_with("target")
     impl.exec_kv_prefill.assert_called_once()
 
@@ -1908,8 +1908,8 @@ class TestAscendMLAImpl(TestBase):
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         self.impl.fused_qkv_a_proj.output_sizes = [64, 32, 128]
         # Only vLLM main builds the three-shard QKV-A-gate projection; release
-        # v0.31.0 keeps a separate gate and a two-shard projection.
-        gate_fused = not vllm_version_is("0.31.0")
+        # v0.32.0 keeps a separate gate and a two-shard projection.
+        gate_fused = not vllm_version_is("0.32.0")
 
         impl = self._rebuild_impl()
 
@@ -3645,7 +3645,7 @@ def test_split_fused_qkv_lora_plain_layout_has_no_gate():
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.31.0"),
+    vllm_version_is("0.32.0"),
     reason="gate-fused QKV-A layout is vLLM main only",
 )
 def test_split_fused_qkv_lora_peels_kimi_output_gate():

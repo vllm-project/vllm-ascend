@@ -26,17 +26,16 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
 
@@ -105,22 +104,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        # Step3p5MTP set has_own_lm_head to True in v0.32.0, so here we
-        # add keep_own_heads to make sure that each layer's share_head stays independent.
-        # When v0.32.0 is supported, this can be removed.
         self.draft_vllm_config = self._create_draft_vllm_config()
-        keep_own_heads = getattr(self.draft_model_config.hf_config, "model_type", "") == "step3p5_mtp"
-        if keep_own_heads and vllm_version_is("0.31.0"):
-            import vllm.v1.worker.gpu.spec_decode.eagle.utils as _eagle_utils
-
-            _orig_should_share = _eagle_utils._should_share
-
-            def _keep_checkpoint_mtp_heads(eagle, flag, draft, target):
-                if flag == "has_own_lm_head":
-                    return False
-                return _orig_should_share(eagle, flag, draft, target)
-
-            _eagle_utils._should_share = _keep_checkpoint_mtp_heads
         return load_eagle_model(target_model, self.draft_vllm_config)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -140,7 +124,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         )
         # The Ascend manager needs this speculator to rebuild draft metadata
         # and FIA graph-update params on replay (mirrors
-        # AscendAutoRegressiveSpeculator.init_cudagraph_manager).
+        # AscendTargetDependentARSpeculator.init_cudagraph_manager).
         self.cudagraph_manager.speculator = self
         self.cudagraph_manager.update_stream = self.update_stream
         # Backend class used to select the replay parameter-update path.

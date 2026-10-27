@@ -56,8 +56,7 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
-        # vLLM main reads this during model/parallel validation; the v0.31.0
-        # lane ignores the extra attribute.
+        # Both supported vLLM lanes read this during model/parallel validation.
         enable_hc_sp=False,
     )
 
@@ -84,8 +83,7 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         enable_expert_parallel=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
-        # vLLM main reads this during model/parallel validation; the v0.31.0
-        # lane ignores the extra attribute.
+        # Both supported vLLM lanes read this during model/parallel validation.
         enable_hc_sp=False,
     )
 
