@@ -772,6 +772,11 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         torch.ops.vllm.dsa_v41_forward(hidden_states, output, self.v41_layer_name)
         return output
 
+    def write_kv(self, hidden_states):
+        """Write this layer's caches without running query attention or output projection."""
+        output = torch.empty(0, dtype=hidden_states.dtype, device=hidden_states.device)
+        torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
+
 
 class DeepseekV41DecoderLayer(nn.Module):
     """V4.1 block with the checkpoint's delayed mHC coefficient handoff."""
@@ -928,6 +933,20 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
         hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
         return hidden_states, ffn_pre
+
+    def write_kv(self, hidden_states, pre_mix, positions, input_ids=None):
+        """Write the attention KV for the full batch before replaying this layer."""
+        del positions, input_ids
+        assert not self.use_sequence_parallel and not self.enable_dsa_cp
+        x, _, _, _ = self.hc_pre(
+            hidden_states,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            pre_mix,
+        )
+        x = self.input_layernorm(x)
+        self.self_attn.write_kv(x)
 
 
 @support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0, "inputs_embeds": 0})

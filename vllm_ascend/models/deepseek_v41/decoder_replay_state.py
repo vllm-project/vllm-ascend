@@ -62,6 +62,7 @@ class DecoderReplayState:
         self._pcp_replay_start = CpuGpuBuffer(local_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.slots: torch.Tensor | None = None
         self.builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
+        self.first_swa_builder: tuple[int, list[str], AscendDSAV41MetadataBuilder] | None = None
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
         self.num_tokens = 0
         self.num_actual_tokens = 0
@@ -175,6 +176,17 @@ class DecoderReplayState:
                         builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)
                         builder.prepare_source_rope()
                         self.builders.append((group_id, group.layer_names, builder))
+                        if self.layers.first_swa_prefix in group.layer_names:
+                            assert self.first_swa_builder is None
+                            first_swa_builder = builder_cls(
+                                group.kv_cache_spec, group.layer_names, self.config, self.rows.device
+                            )
+                            first_swa_builder.prepare_source_rope()
+                            self.first_swa_builder = (group_id, group.layer_names, first_swa_builder)
+        if self.layers.first_swa_prefix is not None:
+            assert self.first_swa_builder is not None, (
+                f"No decoder replay metadata builder owns {self.layers.first_swa_prefix}"
+            )
         self._gather(inputs, warmup=True)
 
     def _gather(self, inputs: DecoderReplayInputs, *, warmup: bool = False) -> None:
@@ -336,6 +348,44 @@ class DecoderReplayState:
                 task.run()
             for name in layer_names:
                 metadata[name] = value
+
+        # The cut layer writes SWA KV for every batch row before it is replayed.
+        # Its attention therefore keeps the batch's original window floor, while
+        # later replay layers must stay within the KV rows rebuilt by the replay.
+        if self.first_swa_builder is not None:
+            group_id, layer_names, builder = self.first_swa_builder
+            common = AscendCommonAttentionMetadata(
+                query_start_loc=self.offsets[: num_reqs + 1],
+                query_start_loc_cpu=torch.from_numpy(offsets),
+                seq_lens=batch.seq_lens[:num_reqs],
+                seq_lens_cpu=torch.from_numpy(batch.seq_lens_np[:num_reqs]),
+                num_reqs=num_reqs,
+                num_actual_tokens=self.num_actual_tokens,
+                num_input_tokens=self.num_tokens,
+                max_query_len=max(int(np.diff(offsets).max()), batch.max_query_len or 0),
+                max_seq_len=self.config.model_config.max_model_len,
+                block_table_tensor=inputs.block_tables[group_id][:num_reqs],
+                slot_mapping=slot_mappings[group_id],
+                positions=positions,
+                attn_state=batch.attn_state,
+                is_prefilling=torch.from_numpy(batch.is_prefilling_np[:num_reqs]),
+                replay_start=inputs.encoder_replay_start[:num_reqs],
+            )
+            build_kwargs = {}
+            if self.replay_pcp_context is not None:
+                build_kwargs = {"pcp_context": self.replay_pcp_context, "pcp_cache_group_idx": group_id}
+            value = builder.build(
+                0,
+                common,
+                num_actual_reqs=num_reqs,
+                common_v41_batch_metadata={},
+                common_v41_metadata={},
+                rope_views=rope,
+                **build_kwargs,
+            )
+            for task in builder.take_device_metadata_tasks():
+                task.run()
+            metadata[self.layers.first_swa_prefix] = value
         return metadata
 
     @contextmanager

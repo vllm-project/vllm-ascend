@@ -26,10 +26,15 @@ class AscendDecoderReplayLayers:
         window: int,
         run_layers: Callable[..., tuple[torch.Tensor, ...]],
         row_buffers: list[torch.Tensor],
+        *,
+        write_batch_kv: Callable[..., None] | None = None,
+        first_swa_prefix: str | None = None,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
+        self.write_batch_kv = write_batch_kv
+        self.first_swa_prefix = first_swa_prefix
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
         self.num_actual_rows = 0
@@ -42,12 +47,22 @@ class AscendDecoderReplayLayers:
         self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
-        if in_piecewise_cudagraph():
-            desc = get_forward_context().batch_descriptor
-            assert desc is not None
-            if self.graph_uses_replay_batch(desc.num_tokens):
+        if self.uses_replay_batch():
+            # The cut layer publishes KV for the complete batch before the
+            # eager graph break switches to the compact replay rows.
+            if self.write_batch_kv is not None:
+                self.write_batch_kv(*states)
+            if in_piecewise_cudagraph():
                 return self._run_in_graph_break(*states)
         return self._run(*states)
+
+    def uses_replay_batch(self) -> bool:
+        """Whether this forward uses replay rows, including during capture."""
+        if in_piecewise_cudagraph():
+            batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None
+            return self.graph_uses_replay_batch(batch_descriptor.num_tokens)
+        return self.rows is not None
 
     def graph_uses_replay_batch(self, num_tokens: int) -> bool:
         return self.trim_threshold is not None and num_tokens >= self.trim_threshold
@@ -166,22 +181,61 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
     ):
         reason = "prompt embeddings need a separate replay graph input layout"
     else:
-        model.decoder_replay_start = cut + 1
-        logger.info_once(
-            "Ascend MRV2 decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
-            cut + 1,
-            model.end_layer - 1,
-            model.config.sliding_window,
+        # Replay the last KV-source layer too when its input layout can be
+        # reproduced without sequence/context parallelism or an Engram lookup.
+        # Other supported layouts keep the existing cut+1 replay boundary.
+        cut_replay_supported = (
+            parallel.pipeline_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and not parallel.use_ubatching
+            and not model.use_sequence_parallel
+            and not enable_dsa_cp()
+            and not any(layer >= cut for layer in model.config.engram_layer_ids)
+            and hasattr(model, "layers")
         )
+        cut_layer = model.layers[cut] if cut_replay_supported else None
+        write_batch_kv = cut_layer.write_kv if cut_layer is not None else None
+        first_swa_prefix = cut_layer.self_attn.v41_impl.swa_prefix if cut_layer is not None else None
+        model.decoder_replay_start = cut if cut_layer is not None else cut + 1
+
+        index_sources = set(getattr(model.config, "index_source_layer_ids", ()))
+        candidate_source = int(getattr(model.config, "candidate_source_layer_id", -1))
+        cut_is_replayed = write_batch_kv is not None
+        row_buffers = []
+        if (not cut_is_replayed or cut not in index_sources) and model.topk_indices_buffer is not None:
+            row_buffers.append(model.topk_indices_buffer)
+        if not cut_is_replayed or cut != candidate_source:
+            row_buffers.extend(
+                buffer
+                for buffer in (model.candidate_indices_buffer, model.candidate_lengths_buffer)
+                if buffer is not None
+            )
+        if (not cut_is_replayed or cut not in index_sources) and model.topk_lengths_buffer is not None:
+            row_buffers.append(model.topk_lengths_buffer)
+
+        if write_batch_kv is not None:
+            logger.info_once(
+                "Ascend MRV2 decoder bounded replay: layer %d writes full-batch KV, "
+                "then layers %d-%d replay each prefill's last %d tokens.",
+                cut,
+                cut,
+                model.end_layer - 1,
+                model.config.sliding_window,
+            )
+        else:
+            logger.info_once(
+                "Ascend MRV2 decoder bounded replay: layers %d-%d keep each prefill's last %d tokens.",
+                cut + 1,
+                model.end_layer - 1,
+                model.config.sliding_window,
+            )
         replay = AscendDecoderReplayLayers(
             model.config.sliding_window,
             model._run_replay_layers,
-            [
-                model.topk_indices_buffer,
-                model.candidate_indices_buffer,
-                model.candidate_lengths_buffer,
-                model.topk_lengths_buffer,
-            ],
+            row_buffers,
+            write_batch_kv=write_batch_kv,
+            first_swa_prefix=first_swa_prefix,
         )
         replay.sequence_parallel = model.use_sequence_parallel
         if (
