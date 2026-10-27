@@ -80,7 +80,7 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   # Reserve for up to 16384 tokens at TP1: DispatchFFNCombine needs 2314 MiB.
-  HCCL_BUFFSIZE: "3072"
+  HCCL_BUFFSIZE: "2560"
   VLLM_USE_FASTOKENS: "1"
   VLLM_PP_LAYER_PARTITION: "42,36"
 
