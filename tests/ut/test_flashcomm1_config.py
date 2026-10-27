@@ -17,6 +17,7 @@ import copy
 import os
 from unittest.mock import patch
 
+import pytest
 from vllm.config import VllmConfig
 
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -80,3 +81,48 @@ def test_serialized_parallel_config_preserves_sp_decision_for_worker_subprocess(
     worker_config = copy.deepcopy(config.parallel_config)
 
     assert worker_config.use_sequence_parallel_moe
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_enable_sp_with_explicit_worker_config_needs_no_current_context(enabled):
+    clear_ascend_config()
+    config = _sp_config({"enable_flashcomm1": enabled})
+    with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": str(int(not enabled))}):
+        init_ascend_config(config)
+    worker_config = copy.deepcopy(config)
+
+    with patch(
+        "vllm.config.get_current_vllm_config", side_effect=AssertionError("Current vLLM config is not set")
+    ) as current:
+        assert enable_sp(worker_config) is enabled
+        current.assert_not_called()
+        assert enable_sp() is False
+
+
+@pytest.mark.parametrize("legacy_value", [None, "0"])
+def test_flashcomm_defaults_to_disabled(legacy_value):
+    clear_ascend_config()
+    config = _sp_config({})
+    with patch.dict(os.environ):
+        os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+        if legacy_value is not None:
+            os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = legacy_value
+        init_ascend_config(config)
+    assert not enable_sp(config)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_conflicting_legacy_value_logs_explicit_override(enabled):
+    clear_ascend_config()
+    config = _sp_config({"enable_flashcomm1": enabled})
+    legacy_value = str(int(not enabled))
+    with (
+        patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": legacy_value}),
+        patch("vllm_ascend.ascend_config.logger.warning_once") as warning,
+    ):
+        init_ascend_config(config)
+    warning.assert_any_call(
+        "additional_config.enable_flashcomm1=%s overrides VLLM_ASCEND_ENABLE_FLASHCOMM1=%s.",
+        enabled,
+        legacy_value,
+    )

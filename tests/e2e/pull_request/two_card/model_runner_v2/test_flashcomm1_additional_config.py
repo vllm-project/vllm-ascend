@@ -16,6 +16,7 @@
 import os
 from math import isfinite
 
+import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -26,47 +27,92 @@ PROMPTS = [
     "The capital of France is",
     "用三句话解释张量并行。",
 ]
+OUTPUT_TOKENS = 8
 
 
-@wait_until_npu_memory_free(target_free_percentage=0.7)
-def test_flashcomm1_additional_config_tp2_eager(monkeypatch) -> None:
+class FlashCommWorker:
+    def check_flashcomm_state(self):
+        from vllm_ascend.utils import enable_sp
+
+        enabled = enable_sp(self.vllm_config)
+        layers = self.model_runner.model.model.layers
+        assert any(layer.use_sequence_parallel_moe for layer in layers) is enabled
+        return enabled
+
+
+def _generate(runner, prompts):
+    outputs = runner.model.generate(
+        prompts=prompts,
+        sampling_params=SamplingParams(
+            max_tokens=OUTPUT_TOKENS,
+            ignore_eos=True,
+            temperature=0.0,
+            logprobs=20,
+            seed=1234,
+        ),
+        use_tqdm=False,
+    )
+    assert len(outputs) == len(prompts)
+    sequences = [output.outputs[0] for output in outputs]
+    for sequence in sequences:
+        assert len(sequence.token_ids) == OUTPUT_TOKENS
+        assert sequence.logprobs is not None
+        assert len(sequence.logprobs) == OUTPUT_TOKENS
+        assert all(len(topk) >= 20 for topk in sequence.logprobs)
+        assert all(isfinite(value.logprob) for topk in sequence.logprobs for value in topk.values())
+    return sequences
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
+@wait_until_npu_memory_free(target_free_percentage=0.4)
+def test_flashcomm1_additional_config_tp2(monkeypatch, enforce_eager) -> None:
     # The explicit additional-config value must win over the legacy environment
     # switch and reach worker subprocesses without a current-vLLM-config lookup.
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    with VllmRunner(
-        MODEL,
-        max_model_len=1024,
-        max_num_seqs=3,
-        max_num_batched_tokens=256,
-        enforce_eager=True,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.75,
-        additional_config={"enable_flashcomm1": True},
-    ) as runner:
-        outputs = runner.generate_greedy(PROMPTS, max_tokens=8)
-        single_request_outputs = runner.model.generate(
-            prompts=["用三句话解释张量并行。"],
-            sampling_params=SamplingParams(
-                max_tokens=8,
-                temperature=0.0,
-                top_p=1.0,
-                top_k=0,
-                logprobs=20,
-                seed=1234,
-            ),
-        )
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("HCCL_DETERMINISTIC", "true")
+    monkeypatch.setenv("LCCL_DETERMINISTIC", "1")
+    monkeypatch.setenv("ATB_MATMUL_SHUFFLE_K_ENABLE", "0")
+    monkeypatch.setenv("CLOSE_MATMUL_K_SHIFT", "1")
+    results = []
+    for additional_config, legacy_value, enabled in (
+        ({}, "1", True),
+        ({"enable_flashcomm1": True}, "0", True),
+        ({"enable_flashcomm1": False}, "1", False),
+    ):
+        monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", legacy_value)
+        options = {}
+        if not enforce_eager:
+            options["compilation_config"] = {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+                "cudagraph_capture_sizes": [1, 2, 4],
+            }
+        with VllmRunner(
+            MODEL,
+            max_model_len=1024,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            enforce_eager=enforce_eager,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            worker_extension_cls=f"{__name__}.FlashCommWorker",
+            gpu_memory_utilization=0.3,
+            kv_cache_memory_bytes=2 * 1024**3,
+            additional_config=additional_config,
+            **options,
+        ) as runner:
+            assert runner.model.collective_rpc("check_flashcomm_state") == [enabled] * 2
+            # The second call guarantees several single-token decode steps in
+            # the same TP2/EP engine, including the ambiguous one-row SP case.
+            sequences = _generate(runner, PROMPTS) + _generate(runner, [PROMPTS[-1]])
+            if enabled:
+                results.append(sequences)
 
-    assert outputs
-    assert all(text for _, text in outputs)
-    # A one-token decode step on TP2 is rank-local size 1 as well as full batch
-    # size 1. The decoder must track the SP layout explicitly instead of
-    # inferring it from that ambiguous row count.
-    sequence = single_request_outputs[0].outputs[0]
-    assert sequence.token_ids
-    assert sequence.logprobs is not None
-    logprobs = [value.logprob for topk in sequence.logprobs for value in topk.values()]
-    assert logprobs
-    assert all(isfinite(value) for value in logprobs)
+    # Migration must preserve the legacy SP execution path. SP on/off can use
+    # different reduction orders, so bitwise greedy parity across those paths
+    # is not a configuration-migration invariant.
+    for baseline, sequence_parallel in zip(*results):
+        assert baseline.token_ids == sequence_parallel.token_ids
+        for token, baseline_topk, sp_topk in zip(baseline.token_ids, baseline.logprobs, sequence_parallel.logprobs):
+            assert sp_topk[token].logprob == pytest.approx(baseline_topk[token].logprob, abs=1e-2, rel=1e-3)

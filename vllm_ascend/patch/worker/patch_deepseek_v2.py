@@ -367,8 +367,10 @@ def _deepseek_v2_decoder_layer_forward(
     if self.use_sequence_parallel_moe:
         tp_world_size = get_tensor_model_parallel_world_size()
         sp_pad = (-hidden_states.shape[0]) % tp_world_size
-        if sp_pad:
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+        # Keep zero padding in the compiled graph: an even profiling batch can
+        # be followed by an odd prefill batch, and collectives need contiguous
+        # storage even when the current batch requires no extra rows.
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
         hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
         if not input_is_sequence_parallel:
             residual = sequence_parallel_chunk(residual)
