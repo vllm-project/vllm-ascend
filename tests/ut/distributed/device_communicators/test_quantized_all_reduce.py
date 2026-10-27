@@ -28,11 +28,13 @@ slower than minimum/maximum on Ascend).
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.distributed.device_communicators import npu_communicator
 from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
     QuantizedAllReduce,
 )
@@ -166,6 +168,79 @@ class TestQuantizedAllReduce(unittest.TestCase):
         payload = captured["payload"][1]
         self.assertTrue(torch.equal(payload, q_fake))
         mock_aq.assert_called_once()
+
+
+def _make_communicator(unique_name: str, world_size: int, enable: bool = True):
+    """Build an NPUCommunicator with the base init stubbed out."""
+    cfg = SimpleNamespace(quantized_all_reduce_config=SimpleNamespace(enable=enable, min_numel=8))
+
+    def fake_base_init(self, cpu_group=None, device=None, device_group=None, unique_name="", **kwargs):
+        self.unique_name = unique_name
+        self.world_size = world_size
+        self.device_group = device_group
+
+    with (
+        patch.object(npu_communicator.DeviceCommunicatorBase, "__init__", fake_base_init),
+        patch.object(npu_communicator, "get_ascend_config", return_value=cfg),
+        patch.object(npu_communicator.torch.npu, "current_device", return_value=0, create=True),
+        patch(
+            "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+    ):
+        return npu_communicator.NPUCommunicator(None, unique_name=unique_name)
+
+
+class TestQuantizedAllReduceGroupScope(unittest.TestCase):
+    """The wrapper must only be built for the tensor-parallel group."""
+
+    def test_is_tp_group(self):
+        for name in ("tp:0", "tp:1"):
+            with self.subTest(name=name):
+                self.assertTrue(npu_communicator._is_tp_group(name))
+        # TP-like variants and every other parallel group must not match.
+        for name in (
+            "ep:0",
+            "mc2:0",
+            "dp:0",
+            "dcp:0",
+            "pcp:0",
+            "pp:0",
+            "eplb:0",
+            "kvpp:0",
+            "p_tp_0:0",
+            "mlptp:0",
+            "otp:0",
+            "emtp:0",
+            "etp:0",
+            "world:0",
+            "anonymous:0",
+            "",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(npu_communicator._is_tp_group(name))
+
+    def test_only_tp_group_builds_the_wrapper(self):
+        tp_comm = _make_communicator("tp:0", world_size=4)
+        self.assertIsNotNone(tp_comm.quantized_ar)
+        self.assertEqual(tp_comm.quantized_ar.world_size, 4)
+        self.assertEqual(tp_comm.quantized_ar.max_q, 31)
+
+        # A 16-rank EP/MC2 group must neither build a wrapper nor raise.
+        for name in ("ep:0", "mc2:0"):
+            with self.subTest(group=name):
+                comm = _make_communicator(name, world_size=16)
+                self.assertIsNone(comm.quantized_ar)
+        comm = _make_communicator("dp:0", world_size=8)
+        self.assertIsNone(comm.quantized_ar)
+
+    def test_disabled_builds_nothing(self):
+        comm = _make_communicator("tp:0", world_size=4, enable=False)
+        self.assertIsNone(comm.quantized_ar)
+
+    def test_tp_group_still_rejects_too_large_tp(self):
+        with self.assertRaisesRegex(RuntimeError, "supports TP size up to"):
+            _make_communicator("tp:0", world_size=16)
 
 
 if __name__ == "__main__":
