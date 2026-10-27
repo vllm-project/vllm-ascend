@@ -312,6 +312,21 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 
     impl = getattr(layer, "impl", None)
+    if (
+        type(impl) is AscendAttentionBackendImpl
+        and spec.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+        and spec.page_size_bytes == spec.real_page_size_bytes
+    ):
+        # The head_dim=512 MTP verify step is captured as a FIA-v2 BNSD paged
+        # op (B1), and that op rejects the block-interleaved K/V views produced
+        # by the combined single-buffer allocation on A2/A3. Give these layers
+        # private contiguous K and V buffers instead. This cannot ride on
+        # using_paged_attention(): speculative decoding turns it off, even
+        # though the 512 verify step still runs through the paged path.
+        from vllm_ascend.utils import is_950
+
+        return not is_950()
     return (
         type(impl) is AscendAttentionBackendImpl
         and impl.sliding_window is None
@@ -319,6 +334,96 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
         and spec.page_size_bytes == spec.real_page_size_bytes
         and using_paged_attention(None, vllm_config, spec.head_size)
     )
+
+
+# ---------------------------------------------------------------------------
+# B1 paged verify for Gemma4 head_dim=512 MTP verify.
+# Ported from swimming2007-doge/vllm-ascend branch MTP-A2-b1-paged-verify
+# (bca3a6b "feat(attention): B1 paged verify for 512-dim MTP verify (FIA-v2
+# BNSD)" plus its follow-up fixes). The 512-dim target verify step is captured
+# as a npu_fused_infer_attention_score_v2 BNSD paged op: per-seq block_table
+# (no per-query expansion), explicit [B, 1, k+1, W] bool mask, sparse_mode=0.
+# ---------------------------------------------------------------------------
+
+_VERIFY_MASK_KPOS_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
+_VERIFY_MASK_KPOS_CACHE_MAX = 8
+
+
+def build_paged_verify_mask(
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    num_speculative_tokens: int,
+    block_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build the [B, 1, k+1, W] bool mask for the B1 FIA-v2 BNSD paged verify.
+
+    MTP verify semantics: query row j (j = 0..k) of request b may attend kv
+    positions 0..seq_lens[b] - (k+1) + j. True = masked out. W is tied to the
+    per-step block-table width so long contexts only pay for reachable blocks.
+
+    Runs on the default stream at metadata-build time; the ACLGraph replay path
+    synchronizes the current stream before the graph-param update stream
+    consumes the result.
+    """
+    k = num_speculative_tokens
+    qlen = k + 1
+    B = seq_lens.shape[0]
+    W = block_table.shape[1] * block_size
+    cache_key = (W, device)
+    kpos = _VERIFY_MASK_KPOS_CACHE.get(cache_key)
+    if kpos is None:
+        if len(_VERIFY_MASK_KPOS_CACHE) >= _VERIFY_MASK_KPOS_CACHE_MAX:
+            _VERIFY_MASK_KPOS_CACHE.clear()
+        kpos = torch.arange(W, device=device).view(1, 1, 1, W)
+        _VERIFY_MASK_KPOS_CACHE[cache_key] = kpos
+    seqv = seq_lens.to(device=device, dtype=torch.int32).view(B, 1, 1, 1)
+    qpos = torch.arange(qlen, device=device).view(1, 1, qlen, 1)
+    return kpos > (seqv - qlen + qpos)
+
+
+def maybe_route_512_capture(impl, attn_metadata) -> bool:
+    """True if a head_dim=512 non-sliding layer must route to the
+    paged-attention graph path during capture.
+
+    FIA TND does not support head_dim=512 (Gemma4 global attention), and during
+    MTP capture forward_impl's PA gate never fires because the dummy metadata is
+    not DecodeOnly. This covers both the target's verify layers and the
+    KV-sharing draft 512 layer, which runs one token per request and reads the
+    target's layer-59 cache. A5 (950) is skipped: full_graph_pa faults there and
+    its original FIA path works.
+    """
+    from vllm_ascend.utils import is_950
+
+    return (
+        getattr(impl, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+        and getattr(impl, "sliding_window", None) is None
+        and not is_950()
+    )
+
+
+def _maybe_b1_paged_verify(impl, attn_metadata, num_tokens: int) -> bool:
+    """True when a captured 512-dim step can use the FIA-v2 BNSD paged op.
+
+    Capture-time dummy metadata is not labeled SpecDecoding (it is
+    ChunkedPrefill), so the query shape is the discriminator. The target runs
+    the MTP verify with k+1 queries per request; the draft runs step 0 with the
+    same verify layout and its remaining steps with one query per request.
+    Anything else keeps the PagedAttention path.
+    """
+    if not maybe_route_512_capture(impl, attn_metadata):
+        return False
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+    num_seqs = attn_metadata.seq_lens.shape[0]
+    if num_seqs <= 0 or num_tokens % num_seqs:
+        return False
+    query_len = num_tokens // num_seqs
+    spec_cfg = getattr(impl.vllm_config, "speculative_config", None)
+    verify_len = spec_cfg.num_speculative_tokens + 1 if spec_cfg is not None else None
+    if getattr(_EXTRA_CTX, "is_draft_model", False):
+        return query_len == 1 or query_len == verify_len
+    return verify_len is not None and query_len == verify_len
 
 
 def is_dcp_enabled():
