@@ -733,7 +733,8 @@ def _commit_kda_state_grouped_kernel(
     SPEC_QUERY_LEN: tl.constexpr = 6,
     BH: tl.constexpr = 2,
 ):
-    # Vectorize two independent heads while keeping one state tile live.
+    # Commit two independent heads per program with BV64, matching the
+    # state-element count of a single-head BV128 tile.
     tl.static_assert(not ALIGN_MODE)
     tl.static_assert(SPEC_QUERY_LEN == 6)
     tl.static_assert(K == 128)
@@ -932,8 +933,9 @@ def kda_recoverssm_verify(
     # Grid specialization: large tiles halve redundant K-side loads and win once
     # enough programs keep the NPU busy; below that, smaller tiles keep more
     # programs in flight. Measured crossover: 96 programs (batch*heads*V tiles).
+    is_a5 = is_950()
     block_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE)
-    if block_v < RECOVERSSM_VALUE_TILE_LARGE and batch * num_heads >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
+    if is_a5 and block_v < RECOVERSSM_VALUE_TILE_LARGE and batch * num_heads >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
         large_v = min(triton.next_power_of_2(value_dim), RECOVERSSM_VALUE_TILE_LARGE)
         if batch * num_heads * triton.cdiv(value_dim, large_v) >= RECOVERSSM_LARGE_TILE_MIN_PROGRAMS:
             block_v = large_v
@@ -1251,17 +1253,21 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        # Group adjacent heads on A5 without increasing the state tile size.
-        # Keep the existing path for align, other dtypes/shapes and devices.
+        is_a5 = is_950()
+        # Group two adjacent heads in one program to reconstruct and commit their states.
         grouped_commit = (
-            is_950()
+            is_a5
             and block_table is None
             and state_ref.dtype == torch.float32
             and key_dim == value_dim == 128
             and num_heads in (32, 64)
             and self.spec_query_len == 6
         )
-        value_tile = RECOVERSSM_VALUE_TILE if block_table is not None or grouped_commit else RECOVERSSM_VALUE_TILE * 2
+        # A3 needs BV64 to fit UB; grouped A5 also uses BV64 for two heads.
+        # Only ordinary, non-align A5 commit may use BV128.
+        value_tile = RECOVERSSM_VALUE_TILE
+        if is_a5 and block_table is None and not grouped_commit:
+            value_tile *= 2
         block_v = min(triton.next_power_of_2(value_dim), value_tile)
         head_groups = num_heads // RECOVERSSM_COMMIT_HEAD_TILE if grouped_commit else num_heads
         grid = (triton.cdiv(value_dim, block_v), batch, num_layers * head_groups)
