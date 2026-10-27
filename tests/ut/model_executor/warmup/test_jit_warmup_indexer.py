@@ -1,14 +1,12 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the DSV4.1 indexer warmup wrappers."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_registry
+from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config
 from vllm_ascend.ops.triton import prepare_indexer_indices as pi
-from vllm_ascend.ops.triton import quantize_indexer_query as qi
 
 
 def test_keys_cover_both_write_lengths_variants():
@@ -29,5 +27,3 @@ def test_keys_cover_both_write_lengths_variants():
         # write_lengths widens BLOCK_COLS to the reduction width.
         assert key.block_cols == (32 if key.write_lengths else 8)
         assert key.positions_dtype == torch.int64
-
-

@@ -1283,9 +1283,7 @@ def build_rejection_warmup_context(vllm_config: Any) -> RejectionWarmupContext |
         sub_block=4 * 1024,
         epsilon=1e-10,
         vocab_size_rep=triton_scalar_specialization_rep(vocab_size),
-        global_vocab_size_rep=triton_scalar_specialization_rep(
-            vllm_config.model_config.get_vocab_size()
-        ),
+        global_vocab_size_rep=triton_scalar_specialization_rep(vllm_config.model_config.get_vocab_size()),
     )
 
 

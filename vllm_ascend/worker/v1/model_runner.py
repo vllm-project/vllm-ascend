@@ -4735,9 +4735,8 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                with get_tp_context(self.drafter):
-                    with self.jit_warmup_registry.activate():
-                        self.drafter.load_model(self.model)
+                with get_tp_context(self.drafter), self.jit_warmup_registry.activate():
+                    self.drafter.load_model(self.model)
 
             pp_group = get_pp_group()
             should_configure_aux_hidden_states = (

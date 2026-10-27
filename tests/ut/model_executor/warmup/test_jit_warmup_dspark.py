@@ -1,8 +1,6 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the DSpark SWA indices warmup wrapper."""
 
-from unittest.mock import patch
-
 import torch
 
 from tests.ut.model_executor.warmup.helpers import make_registry
@@ -52,31 +50,40 @@ def test_register_respects_supported_gate_and_window():
 
     # Unsupported geometry is refused even inside a window.
     with registry.activate():
-        assert ds.register_dspark_swa_indices_warmup(
-            window_size=4096,
-            block_size=100,
-            index_width=4608,
-            block_table_width=1024,
-            num_speculative_tokens=3,
-        ) is False
+        assert (
+            ds.register_dspark_swa_indices_warmup(
+                window_size=4096,
+                block_size=100,
+                index_width=4608,
+                block_table_width=1024,
+                num_speculative_tokens=3,
+            )
+            is False
+        )
     assert len(registry) == 0
 
     with registry.activate():
-        assert ds.register_dspark_swa_indices_warmup(
+        assert (
+            ds.register_dspark_swa_indices_warmup(
+                window_size=4096,
+                block_size=128,
+                index_width=4608,
+                block_table_width=1024,
+                num_speculative_tokens=3,
+            )
+            is True
+        )
+    assert len(registry) == 1
+
+    # Outside a window: reports success but registers nothing.
+    assert (
+        ds.register_dspark_swa_indices_warmup(
             window_size=4096,
             block_size=128,
             index_width=4608,
             block_table_width=1024,
             num_speculative_tokens=3,
-        ) is True
-    assert len(registry) == 1
-
-    # Outside a window: reports success but registers nothing.
-    assert ds.register_dspark_swa_indices_warmup(
-        window_size=4096,
-        block_size=128,
-        index_width=4608,
-        block_table_width=1024,
-        num_speculative_tokens=3,
-    ) is True
+        )
+        is True
+    )
     assert len(registry) == 1

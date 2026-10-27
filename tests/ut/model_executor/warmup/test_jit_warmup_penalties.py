@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import torch
 
-from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config, make_registry
-from vllm_ascend.ops.triton import bincount, penalty
+from tests.ut.model_executor.warmup.helpers import make_mock_vllm_config
+from vllm_ascend.ops.triton import penalty
 
 
 def _keys(module, kernel, config):
@@ -31,5 +31,3 @@ def test_penalty_key_uses_vocab_specialization_class():
     config = make_mock_vllm_config(vocab_size=1025)
     (key,) = _keys(penalty, penalty._APPLY_ALL_PENALTIES_KERNEL, config)
     assert key.vocab_size == 2  # generic class
-
-

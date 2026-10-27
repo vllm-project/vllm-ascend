@@ -1,7 +1,6 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for the v1 rejection-sampler warmup wrappers."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -28,9 +27,7 @@ def _context(config):
 
 
 def test_context_synthetic_and_block_verify_gates():
-    spec = make_mock_spec_config(
-        num_speculative_tokens=3, rejection_sample_method="synthetic"
-    )
+    spec = make_mock_spec_config(num_speculative_tokens=3, rejection_sample_method="synthetic")
     config = make_mock_vllm_config(speculative_config=spec)
     with (
         patch.object(rs, "get_vectorcore_num", return_value=4),
@@ -79,5 +76,3 @@ def test_expand_dtype_axis_covers_runtime_dtypes():
         torch.int64,
         torch.float32,
     }
-
-

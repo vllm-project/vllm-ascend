@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for ``nz_warmup``."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -48,5 +48,3 @@ def test_warm_nz_format_cast_swallows_failures():
         nz_warmup.warm_nz_format_cast("test")
 
     assert nz_warmup._NZ_WARMED is True
-
-

@@ -148,11 +148,7 @@ def _prune_unlaunchable_registrations(registry) -> int:
     """
     from vllm_ascend.ops.triton.ascend_jit_warmup import AscendTritonJitKernel
 
-    pruned = [
-        kernel
-        for kernel in registry._registrations
-        if not isinstance(kernel, AscendTritonJitKernel)
-    ]
+    pruned = [kernel for kernel in registry._registrations if not isinstance(kernel, AscendTritonJitKernel)]
     for kernel in pruned:
         del registry._registrations[kernel]
     return len(pruned)

@@ -488,9 +488,7 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(
-                kv_cache_config, kv_cache_allocation_context
-            )
+            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._uses_flashmla = any(
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups

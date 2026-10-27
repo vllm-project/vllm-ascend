@@ -98,9 +98,7 @@ def test_dspark_walker_v2_speculator_path_registers_nested_groups(mock_register)
     worker, _ = _make_worker()
     group, _ = _make_dspark_builder()
     nested_group, _ = _make_dspark_builder()
-    worker.model_runner.speculator = SimpleNamespace(
-        attn_groups=[[group], nested_group]
-    )
+    worker.model_runner.speculator = SimpleNamespace(attn_groups=[[group], nested_group])
     block_table = MagicMock()
     block_table.get_device_tensor.return_value.shape = [0, 1024]
     worker.model_runner.input_batch = SimpleNamespace(block_table=[block_table])
@@ -111,9 +109,7 @@ def test_dspark_walker_v2_speculator_path_registers_nested_groups(mock_register)
     assert mock_register.call_args_list[0].kwargs["index_width"] == 4608
 
 
-@patch(
-    "vllm_ascend.ops.triton.dspark_swa_indices.register_dspark_swa_indices_warmup"
-)
+@patch("vllm_ascend.ops.triton.dspark_swa_indices.register_dspark_swa_indices_warmup")
 @patch.object(kw, "HAS_TRITON", True)
 def test_dspark_walker_skips_eager_builders(mock_register):
     """Eager-path builders compile lazily at first call; no pre-capture key."""
@@ -132,6 +128,7 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
     # The v2 runner's base is the MRv2 GPUModelRunner, a different class
     # from the v1-path vllm.v1.worker.gpu_model_runner.GPUModelRunner.
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2BaseRunner
+
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner as V2Runner
 
     config = make_mock_vllm_config()
@@ -141,9 +138,7 @@ def test_v2_initialize_kv_cache_upstream_holds_registry_window():
 
     with patch.object(V2BaseRunner, "initialize_kv_cache") as super_init:
         # init_attn_backend constructs the DSA builder, which registers here.
-        super_init.side_effect = (
-            lambda *a, **k: rms_norm._TRITON_Q_RMS_KERNEL.register_warmup(config)
-        )
+        super_init.side_effect = lambda *a, **k: rms_norm._TRITON_Q_RMS_KERNEL.register_warmup(config)
         runner._initialize_kv_cache_upstream(MagicMock(), None)
     super_init.assert_called_once()
     assert len(registry) == 1

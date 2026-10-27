@@ -195,7 +195,7 @@ class DsparkSwaIndicesKernel(AscendTritonJitKernel["DsparkSwaIndicesKernel.Compi
         row_pow2: int,
         q_pow2: int,
         bt_stride: int,
-    ) -> "DsparkSwaIndicesKernel.CompileKey":
+    ) -> DsparkSwaIndicesKernel.CompileKey:
         return self.CompileKey(
             window_size=window_size,
             block_size=block_size,
@@ -214,7 +214,7 @@ class DsparkSwaIndicesKernel(AscendTritonJitKernel["DsparkSwaIndicesKernel.Compi
         index_width: int,
         block_table_width: int,
         num_speculative_tokens: int,
-    ) -> list["DsparkSwaIndicesKernel.CompileKey"]:
+    ) -> list[DsparkSwaIndicesKernel.CompileKey]:
         # The whole constexpr set is pinned by the startup configuration, so
         # each registration expands to exactly one key. All capacity scalars
         # are do_not_specialize; only stride_bt_r carries a value class.
@@ -229,7 +229,7 @@ class DsparkSwaIndicesKernel(AscendTritonJitKernel["DsparkSwaIndicesKernel.Compi
             bt_stride=triton_scalar_specialization_rep(int(block_table_width)),
         )
 
-    def warmup_inputs(self, compile_key: "DsparkSwaIndicesKernel.CompileKey") -> dict[str, Any]:
+    def warmup_inputs(self, compile_key: DsparkSwaIndicesKernel.CompileKey) -> dict[str, Any]:
         W = compile_key.index_w
         # Pointer specialization of the runtime buffers (all torch-allocated,
         # 16-byte aligned) is reproduced with aligned TritonWarmupTensors; the
