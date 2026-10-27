@@ -1173,9 +1173,11 @@ async def handle_completions_impl(api: str, request: Request):
                             logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
                             continue
+                        recompute = False
                         match chunk_json:
                             case {"error": {"type": "RecomputeRequiredError"}, "partial_response": partial}:
                                 chunk_json = partial
+                                recompute = True
                         choices = chunk_json.get("choices", [])
                         if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
@@ -1190,14 +1192,13 @@ async def handle_completions_impl(api: str, request: Request):
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
                             else (completion_tokens + usage.get("completion_tokens", 0))
                         )
-                        if stop_reason == "recomputed":
+                        if recompute:
                             retry = True
                             retry_count += 1
                             if chat_flag:

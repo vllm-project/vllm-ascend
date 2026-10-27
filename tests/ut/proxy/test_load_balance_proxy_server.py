@@ -51,7 +51,7 @@ def _encode_items(items: list[dict]) -> list[dict]:
     return out
 
 
-def _sse(content: str = "hi", stop_reason: str | None = None) -> bytes:
+def _sse(content: str = "hi", stop_reason: str | int | None = None) -> bytes:
     obj = {
         "id": "x",
         "choices": [
@@ -451,14 +451,23 @@ def test_healthcheck(proxy_server):
 
 
 def test_recompute(proxy_server):
-    """Recompute (stop_reason=recomputed) retries and returns normal content."""
+    """Explicit recomputation errors retry and return normal content."""
     _set_script(
         MOCK_DECODE_PORT,
         [
             {
                 "kind": "stream",
                 "status": 200,
-                "chunks": [_sse("gen", stop_reason="recomputed")],
+                "chunks": [
+                    b"data: "
+                    + json.dumps(
+                        {
+                            "error": {"type": "RecomputeRequiredError", "code": 500},
+                            "partial_response": json.loads(_sse("gen", stop_reason=-1)[6:]),
+                        }
+                    ).encode()
+                    + b"\n\n"
+                ],
             },
             {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]},
         ],
@@ -567,33 +576,27 @@ def test_usage_cached_tokens(proxy_server):
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("fragmented", [False, True])
 @pytest.mark.parametrize("chat", [False, True])
-def test_recompute_error_preserves_legacy_continuation(proxy_server, stream, fragmented, chat):
-    """New error envelopes must produce the same next attempt as legacy terminals."""
+def test_recompute_error_continues_with_conflicting_user_stop(proxy_server, stream, fragmented, chat):
+    """A configured user stop must not disable explicit error continuation."""
     next_attempts = []
-    for wrapped in (False, True):
+    for user_stop in (None, "recomputed"):
         partial: dict[str, Any] = {
-            "choices": [
-                {"index": 0, "stop_reason": "recomputed", "delta" if stream else "message": {"content": "partial"}}
-            ],
+            "choices": [{"index": 0, "stop_reason": -1, "delta" if stream else "message": {"content": "partial"}}],
             "usage": {"completion_tokens": 2},
         }
         if not chat:
-            partial["choices"][0] = {"index": 0, "stop_reason": "recomputed", "text": "partial"}
-        terminal = (
-            partial
-            if not wrapped
-            else {
-                "error": {"type": "RecomputeRequiredError", "code": 500, "message": "interrupted"},
-                "partial_response": partial,
-            }
-        )
+            partial["choices"][0] = {"index": 0, "stop_reason": -1, "text": "partial"}
+        terminal = {
+            "error": {"type": "RecomputeRequiredError", "code": 500, "message": "interrupted"},
+            "partial_response": partial,
+        }
         if stream:
             body = b"data: " + json.dumps(terminal).encode() + b"\n\n" + DONE
             chunks = [body[:13], body[13:37], body[37:]] if fragmented else [body]
             first = {"kind": "stream", "status": 200, "chunks": chunks}
             final = {"kind": "stream", "status": 200, "chunks": [_sse("done"), DONE]}
         else:
-            first = {"kind": "json", "status": 500 if wrapped else 200, "body": terminal}
+            first = {"kind": "json", "status": 500, "body": terminal}
             final = {
                 "kind": "json",
                 "status": 200,
@@ -613,6 +616,7 @@ def test_recompute_error_preserves_legacy_continuation(proxy_server, stream, fra
                 final["body"] = done
         _set_script(MOCK_DECODE_PORT, [first, final])
         payload = _chat_req(stream=stream)
+        payload["stop"] = user_stop
         if not chat:
             payload.pop("messages")
             payload["prompt"] = "hi"
@@ -631,3 +635,32 @@ def test_recompute_error_preserves_legacy_continuation(proxy_server, stream, fra
         next_attempts.append((sent[1]["messages" if chat else "prompt"], sent[1]["max_tokens"]))
     assert next_attempts[0] == next_attempts[1]
     assert "partial" in str(next_attempts[1][0])
+
+
+@pytest.mark.parametrize("proxy_server", ["standard", "layerwise"], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("chat", [False, True])
+def test_user_stop_recomputed_does_not_retry(proxy_server, stream, chat):
+    choice: dict[str, Any] = {"index": 0, "finish_reason": "stop", "stop_reason": "recomputed"}
+    if chat:
+        choice["delta" if stream else "message"] = {"content": "finished"}
+    else:
+        choice["text"] = "finished"
+    terminal = {"choices": [choice], "usage": {"completion_tokens": 1}}
+    first = (
+        {"kind": "stream", "status": 200, "chunks": [b"data: " + json.dumps(terminal).encode() + b"\n\n", DONE]}
+        if stream
+        else {"kind": "json", "status": 200, "body": terminal}
+    )
+    _set_script(MOCK_DECODE_PORT, [first])
+    payload = _chat_req(stream=stream)
+    payload["stop"] = "recomputed"
+    if not chat:
+        payload.pop("messages")
+        payload["prompt"] = "hi"
+    status, result = _post(
+        proxy_server, payload, stream=stream, api="/v1/chat/completions" if chat else "/v1/completions"
+    )
+    assert status == 200 and b"finished" in result
+    assert b"RecomputeRequiredError" not in result
+    assert len(httpx.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()) == 1
