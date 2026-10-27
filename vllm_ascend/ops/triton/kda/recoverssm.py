@@ -131,10 +131,7 @@ def _kda_recoverssm_verify_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    EVEN_V: tl.constexpr,
 ):
     # Advance a register-held checkpoint and record each token's compact
     # correction/key/gate; persistent checkpoint pages remain read-only.
@@ -151,19 +148,19 @@ def _kda_recoverssm_verify_kernel(
     offs_v = pid_v * BV + tl.arange(0, BV)
     # Provably-full tiles (K a power of two, BV dividing V) drop their
     # predication masks entirely; ragged shapes keep the original masks.
-    if EVEN_K:
+    if K == BK:
         mask_k = None
     else:
         mask_k = offs_k < K
-    if EVEN_V:
+    if V % BV == 0:
         mask_v = None
     else:
         mask_v = offs_v < V
-    if EVEN_K and EVEN_V:
+    if (K == BK) and (V % BV == 0):
         mask_state = None
-    elif EVEN_K:
+    elif K == BK:
         mask_state = tl.broadcast_to((offs_v < V)[:, None], (BV, BK))
-    elif EVEN_V:
+    elif V % BV == 0:
         mask_state = tl.broadcast_to((offs_k < K)[None, :], (BV, BK))
     else:
         mask_state = (offs_v < V)[:, None] & (offs_k < K)[None, :]
@@ -527,21 +524,21 @@ def _commit_kda_state_kernel(
     boundary_recovery_lens_ptr,
     lower_bound,
     null_block_id,
-    stride_state_head: tl.constexpr,
-    stride_state_v: tl.constexpr,
-    stride_state_k: tl.constexpr,
-    stride_correction_cache_head: tl.constexpr,
-    stride_correction_cache_pos: tl.constexpr,
-    stride_correction_cache_dim: tl.constexpr,
-    stride_kg_cache_head: tl.constexpr,
-    stride_kg_cache_pos: tl.constexpr,
-    stride_kg_cache_dim: tl.constexpr,
-    stride_A_layer: tl.constexpr,
-    stride_A_head: tl.constexpr,
-    stride_dt_bias_layer: tl.constexpr,
-    stride_dt_bias_head: tl.constexpr,
-    stride_dt_bias_dim: tl.constexpr,
-    stride_state_indices: tl.constexpr,
+    stride_state_head,
+    stride_state_v,
+    stride_state_k,
+    stride_correction_cache_head,
+    stride_correction_cache_pos,
+    stride_correction_cache_dim,
+    stride_kg_cache_head,
+    stride_kg_cache_pos,
+    stride_kg_cache_dim,
+    stride_A_layer,
+    stride_A_head,
+    stride_dt_bias_layer,
+    stride_dt_bias_head,
+    stride_dt_bias_dim,
+    stride_state_indices,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -717,21 +714,21 @@ def _commit_kda_state_grouped_kernel(
     boundary_recovery_lens_ptr,
     lower_bound,
     null_block_id,
-    stride_state_head: tl.constexpr,
-    stride_state_v: tl.constexpr,
-    stride_state_k: tl.constexpr,
-    stride_correction_cache_head: tl.constexpr,
-    stride_correction_cache_pos: tl.constexpr,
-    stride_correction_cache_dim: tl.constexpr,
-    stride_kg_cache_head: tl.constexpr,
-    stride_kg_cache_pos: tl.constexpr,
-    stride_kg_cache_dim: tl.constexpr,
-    stride_A_layer: tl.constexpr,
-    stride_A_head: tl.constexpr,
-    stride_dt_bias_layer: tl.constexpr,
-    stride_dt_bias_head: tl.constexpr,
-    stride_dt_bias_dim: tl.constexpr,
-    stride_state_indices: tl.constexpr,
+    stride_state_head,
+    stride_state_v,
+    stride_state_k,
+    stride_correction_cache_head,
+    stride_correction_cache_pos,
+    stride_correction_cache_dim,
+    stride_kg_cache_head,
+    stride_kg_cache_pos,
+    stride_kg_cache_dim,
+    stride_A_layer,
+    stride_A_head,
+    stride_dt_bias_layer,
+    stride_dt_bias_head,
+    stride_dt_bias_dim,
+    stride_state_indices,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -739,13 +736,12 @@ def _commit_kda_state_grouped_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
-    SPEC_QUERY_LEN: tl.constexpr = 6,
+    SPEC_QUERY_LEN: tl.constexpr,
     BH: tl.constexpr = 2,
 ):
     # Commit two independent heads per program with BV64, matching the
     # state-element count of a single-head BV128 tile.
     tl.static_assert(not ALIGN_MODE)
-    tl.static_assert(SPEC_QUERY_LEN == 6)
     tl.static_assert(K == 128)
     tl.static_assert(V == 128)
     tl.static_assert(BK == 128)
@@ -992,10 +988,7 @@ def kda_recoverssm_verify(
         V=value_dim,
         BK=block_k,
         BV=block_v,
-        SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        EVEN_K=block_k == key_dim,
-        EVEN_V=value_dim % block_v == 0,
         num_warps=4,
         num_stages=2,
     )
@@ -1283,7 +1276,6 @@ class KDARecoverSSMCommitContext:
             and state_ref.dtype == torch.float32
             and key_dim == value_dim == 128
             and num_heads in (32, 64)
-            and self.spec_query_len == 6
         )
         # Grouped commit uses BV64; ordinary commit is also capped by its UB budget.
         value_tile = RECOVERSSM_VALUE_TILE

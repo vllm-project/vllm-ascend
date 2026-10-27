@@ -40,37 +40,43 @@ def kda_recoverssm_commit(state, correction, kg, a_log, bias, bound, starts, ind
     context.commit(counts, indices, starts)
 
 
-def page_view(shape, dtype, padding):
+def page_view(shape, dtype, padding, head_padding=0):
     elements = 1
     inner_strides: list[int] = []
     for size in reversed(shape[1:]):
         inner_strides.insert(0, elements)
         elements *= size
+    inner_strides[0] += head_padding
+    elements += (shape[1] - 1) * head_padding
     backing = torch.full((shape[0], elements + padding), 11.0, dtype=dtype, device="npu")
     return backing, backing.as_strided(shape, (elements + padding, *inner_strides))
 
 
+@pytest.mark.parametrize("head_padding", [0, 128])
 @pytest.mark.parametrize("heads", [2, 32, 64])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("padding", [0, 128])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype, padding, heads):
+def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype, padding, heads, head_padding):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(73)
     dim, length, slots = 128, 6, 5
     blocks, starts, accepted = [3, 1, 0], [0, 6, 8, 8], [4, 2, 0]
     indices = torch.tensor(blocks, dtype=torch.int32, device="npu")
+    if head_padding:
+        # Vary the runtime metadata stride together with the cache head strides.
+        indices = torch.stack((indices, torch.zeros_like(indices)), dim=1).flatten()[::2]
     offsets = torch.tensor(starts, dtype=torch.int32, device="npu")
     # Sampler contains non-spec requests and uses a different row order.
     counts = torch.tensor([2, 0, 4, 0, 0], dtype=torch.int32, device="npu")
     request_indices = torch.tensor([2, 0, 1], dtype=torch.int32, device="npu")
-    layers, expectations, backings = [], [], []
+    layers, expectations, backings, head_gaps = [], [], [], []
     for _ in range(2):
-        state_backing, state = page_view((slots, heads, dim, dim), state_dtype, padding)
-        correction_backing, correction = page_view((slots, heads, length, dim), torch.float32, padding)
-        kg_backing, kg = page_view((slots, heads, length, 2 * dim), torch.bfloat16, padding)
+        state_backing, state = page_view((slots, heads, dim, dim), state_dtype, padding, head_padding)
+        correction_backing, correction = page_view((slots, heads, length, dim), torch.float32, padding, head_padding)
+        kg_backing, kg = page_view((slots, heads, length, 2 * dim), torch.bfloat16, padding, head_padding)
         conv_shape = (slots, 3 * heads * dim, length + 2)
         if not is_conv_state_dim_first():
             conv_shape = (slots, length + 2, 3 * heads * dim)
@@ -109,12 +115,19 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(state_dtype
         layers.append(layer)
         expectations.append((expected_state, expected_conv))
         backings.extend([state_backing, correction_backing, kg_backing, conv_backing])
+        if head_padding:
+            for backing, view in ((state_backing, state), (correction_backing, correction), (kg_backing, kg)):
+                for head in range(heads - 1):
+                    start = (head + 1) * view.stride(1) - head_padding
+                    head_gaps.append(backing[:, start : start + head_padding])
     context = KDARecoverSSMCommitContext.create(layers, spec_query_len=length, max_num_reqs=3)
     context.commit(counts, indices, offsets, request_indices=request_indices)
     tolerance = 2e-3 if state_dtype == torch.float32 else 2e-2
     for layer, (state, conv) in zip(layers, expectations):
         torch.testing.assert_close(layer.kv_cache[1], state, atol=tolerance, rtol=tolerance)
         torch.testing.assert_close(layer.kv_cache[0], conv, atol=0, rtol=0)
+    for gap in head_gaps:
+        torch.testing.assert_close(gap, torch.full_like(gap, 11.0), atol=0, rtol=0)
     if padding:
         for backing in backings:
             torch.testing.assert_close(
@@ -431,3 +444,37 @@ def test_recoverssm_matches_ascendc_small_norms(amplitude):
         accepted = torch.full_like(indices, count)
         kda_recoverssm_commit(restored, correction, kg, a_log, bias, -5.0, starts, indices, accepted)
         torch.testing.assert_close(restored[1], native[count], atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("key_dim,value_dim", [(7, 5), (7, 8), (8, 5)])
+@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound):
+    if not torch.npu.is_available():
+        pytest.skip("requires an Ascend NPU")
+    torch.manual_seed(83)
+    heads, capacity, slots = 2, 3, 4
+    starts, blocks, accepted = [0, 3, 5, 6], [2, 1, 0], [2, 1, 0]
+    q, k, gate = (torch.randn(1, 6, heads, key_dim, dtype=torch.bfloat16, device="npu") for _ in range(3))
+    v = torch.randn(1, 6, heads, value_dim, dtype=torch.bfloat16, device="npu")
+    beta = torch.randn(1, 6, heads, dtype=torch.bfloat16, device="npu")
+    state = torch.randn(slots, heads, value_dim, key_dim, device="npu") * 0.05
+    initial = state.clone()
+    correction = torch.empty(slots, heads, capacity, value_dim, device="npu")
+    kg = torch.empty(slots, heads, capacity, 2 * key_dim, dtype=q.dtype, device="npu")
+    a_log = torch.randn(heads, device="npu") * 0.1
+    bias = torch.randn(heads * key_dim, device="npu") * 0.1
+    offsets, indices, counts = (
+        torch.tensor(values, dtype=torch.int32, device="npu") for values in (starts, blocks, accepted)
+    )
+    expected_output, expected_state = reference(
+        q, k, v, gate, beta, a_log, bias, lower_bound, initial, starts, blocks, accepted
+    )
+    output = kda_recoverssm_verify(
+        q, k, v, gate, beta, a_log, bias, lower_bound, state, correction, kg, offsets, indices, capacity
+    )
+    torch.testing.assert_close(output.float(), expected_output, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(state, initial, atol=0, rtol=0)
+    kda_recoverssm_commit(state, correction, kg, a_log, bias, lower_bound, offsets, indices, counts)
+    torch.testing.assert_close(state, expected_state, atol=2e-3, rtol=2e-2)
