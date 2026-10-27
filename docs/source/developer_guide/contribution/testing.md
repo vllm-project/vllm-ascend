@@ -251,58 +251,46 @@ The two reusable nightly workflows invoke the shard runner only when the test
 path is exactly `tests/e2e/nightly/single_node/ops/singlecard_ops`, optionally
 with one trailing slash. Other test paths continue to use the existing
 `pytest` command. The workflow YAML does not configure or pass a worker count.
-The script defaults `--workers` to `auto`, derives the runner's allocated
-capacity from `--runner`, and strictly checks that the container-visible NPU
-count equals that capacity. It starts `min(visible NPU count, discovered test
-file count)` workers. This includes the one-card case, which uses the same
-shard-runner route with one worker, reporting, and process cleanup. For manual
-debugging, `--workers N` limits the worker count to a positive integer no
-greater than the runner allocation.
+The script defaults to automatic worker selection based on the runner and
+runtime-visible NPU count, and checks that the container-visible count matches
+the runner allocation. It starts `min(visible NPU count, discovered test file
+count)` workers. This includes the one-card case, which uses the same route
+with one worker.
 
 The shard runner assigns each complete test file once, including files under
 `triton/`, and preserves parametrization, assertions, skip conditions, and
-existing conftest fixtures. With no timing data it assigns equal weight to
-each file and greedily balances shards. A supplied `--timings
-/path/to/summary.json` must be a successful complete run with exactly matching
-environment metadata (including package versions such as vLLM-Ascend) and the
-same complete test file list; its recorded file durations drive the greedy
-assignment. It does not automatically fetch historical timing data. The
-runner continues remaining shards after a test failure and returns failure if
-a shard fails, cannot collect, or lacks a valid report. If interrupted or a
-worker cannot start, it saves a partial summary; workers may be marked
-`interrupted`, `aborted`, or `not_started` to make incomplete execution clear.
+existing conftest fixtures. It evenly distributes complete files in a
+deterministic order; there is no historical `--timings` input. The runner
+continues remaining shards after a test failure and returns failure if a shard
+fails, cannot collect, or lacks a valid report.
 
 To reproduce inside an already provisioned multi-NPU test container:
 
 ```bash
 python3 .github/workflows/scripts/run_singlecard_shards.py \
     --tests tests/e2e/nightly/single_node/ops/singlecard_ops/ \
-    --runner linux-aarch64-a3-800i-8 \
-    --output-dir /tmp/singlecard-run
+    --runner linux-aarch64-a3-800i-8
 ```
 
-Use a new output directory for each run. The script respects an existing
-`ASCEND_RT_VISIBLE_DEVICES` allocation and otherwise uses only runtime-visible
-devices inside the container. Workers inherit the job's `TRITON_CACHE_DIR` and
-`TRITON_HOME` without overriding either setting; Triton resolves the cache
-location using its normal configuration and defaults. The shard
-runner does not change cache directories per worker, clear or prewarm caches,
-force recompilation, or install dependencies. Focused eight-NPU probes have
-verified shared-cache reuse and process cleanup; full-directory performance
-validation remains pending.
+The script respects an existing `ASCEND_RT_VISIBLE_DEVICES` allocation and
+otherwise uses only runtime-visible devices inside the container. Workers
+inherit the job's `TRITON_CACHE_DIR` and `TRITON_HOME` without overriding either
+setting; Triton resolves the cache location using its normal configuration and
+defaults. The shard runner does not change cache directories per worker, clear
+or prewarm caches, force recompilation, or install dependencies. Focused
+eight-NPU probes have verified shared-cache reuse and process cleanup;
+full-directory performance validation remains pending.
 
-The uploaded `singlecard-shards-*` artifact contains run metadata, a
-file/device manifest, per-worker logs and JUnit reports, and `summary.json`.
-Metadata records the tested Git commit separately from the workflow commit,
-the runner, runtime hardware, Python and package versions,
-effective worker count, device assignment, and Triton cache settings.
-The GitHub step summary reports whether execution completed, per-worker
-durations, aggregate durations, and the failed test list. The JSON summary
-separates passed, skipped, failed, and error results. Skips include expected
-failures as represented by JUnit. `cumulative_case_seconds` sums setup, call,
-and teardown durations; `wall_seconds` measures the parallel test phase,
-including pytest startup, collection, and reporting. Neither includes the
-earlier build/install steps. These two durations should not be added together.
+Worker output is prefixed with `[worker N]` and streamed to stdout. In the
+nightly workflows it is captured in the single
+`/tmp/test-logs/pytest-driven.log` file and shown in the Actions console. The
+final stdout summary reports each worker's status and exit code, separate
+pass/skip/fail/error counts, wall time, and cumulative case time. Missing or invalid JUnit
+reports make the run incomplete and cause failure. JUnit XML and pytest cache
+files live in temporary directories and are cleaned up on normal exit or a
+controlled exception. The runner produces no manifest, `summary.json`,
+`summary.md`, or per-worker log files, and does not write a GitHub Step Summary
+or actively clear the Triton cache.
 
 For running nightly single-node model test cases locally, refer to the following example.
 

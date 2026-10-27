@@ -380,11 +380,9 @@ jobs:
           set -o pipefail
           case "${{ inputs.tests }}" in
             tests/e2e/nightly/single_node/ops/singlecard_ops|tests/e2e/nightly/single_node/ops/singlecard_ops/)
-              echo "singlecard_shards=true" >> "$GITHUB_OUTPUT"
               python3 .github/workflows/scripts/run_singlecard_shards.py \
                 --tests "${{ inputs.tests }}" \
                 --runner "$VLLM_CI_RUNNER" \
-                --output-dir /tmp/test-logs/singlecard-shards \
                 2>&1 | tee /tmp/test-logs/pytest-driven.log
               ;;
             *)
@@ -658,15 +656,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           include-hidden-files: true
-
-      - name: Upload singlecard shard logs
-        if: ${{ always() && steps.pytest-driven.outputs.singlecard_shards == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: singlecard-shards-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/test-logs/
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Collect requested path
         if: ${{ always() && inputs.download_path != '' }}
