@@ -33,6 +33,8 @@ import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
@@ -40,6 +42,12 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
+from vllm_ascend.models.deepseek_v4.decode_row_shard import DecodeIndexerRowPlan
+from vllm_ascend.models.deepseek_v4.decode_row_shard_graph import (
+    GraphDecodeIndexerState,
+    gather_graph_decode_indexer_topk,
+    select_graph_decode_indexer_inputs,
+)
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import (
@@ -131,6 +139,28 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     # upstream's ``STR_DTYPE_TO_TORCH_DTYPE``: that table maps ``"fp8"`` to the
     # storage dtype ``torch.uint8``, not ``torch.float8_e4m3fn``.
     return expected_dtype
+
+
+def _select_decode_rows(value: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    # Gathering raw bytes also preserves FP8 bit patterns on unsupported gather dtypes.
+    if value.element_size() == 1:
+        return value.view(torch.uint8).index_select(0, rows).view(value.dtype)
+    return value.index_select(0, rows)
+
+
+def gather_decode_indexer_topk(
+    local_topk: torch.Tensor, plan: DecodeIndexerRowPlan, restore_rows: torch.Tensor
+) -> torch.Tensor:
+    """Gather equal-size payloads and invert the request round-robin mapping."""
+    group = get_tp_group()
+    if group.world_size != plan.tp_size or group.rank_in_group != plan.tp_rank:
+        raise ValueError("Decode indexer plan does not match the TP group")
+    if local_topk.shape[0] != len(plan.query_rows):
+        raise ValueError("Local TopK row count does not match the decode plan")
+    padded = local_topk.new_full((plan.max_local_rows, *local_topk.shape[1:]), -1)
+    padded[: local_topk.shape[0]].copy_(local_topk)
+    gathered = group.all_gather(padded.contiguous(), dim=0)
+    return gathered.index_select(0, restore_rows)
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
@@ -243,7 +273,36 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        shard = getattr(metadata, "decode_row_shard", None)
+        op_metadata = metadata
+        graph_shard = isinstance(shard, GraphDecodeIndexerState)
+        if graph_shard:
+            query, weights, query_scale = select_graph_decode_indexer_inputs(
+                shard,
+                query,
+                self.device_operator.prepare_dsa_indexer_weights(weights),
+                self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
+            )
+            op_metadata = shard
+        elif shard is not None:
+            plan = shard.plan
+            if query.shape[0] != plan.num_requests * plan.rows_per_request:
+                raise ValueError("Decode row sharding requires the unpadded uniform query layout")
+            query = _select_decode_rows(query, shard.query_rows)
+            weights = _select_decode_rows(weights, shard.query_rows)
+            query_scale = _select_decode_rows(query_scale, shard.query_rows)
+            op_metadata = shard
+            logger.info_once(
+                "DSV4 decode indexer TP row sharding active: TP=%d, requests=%d, rows_per_request=%d, "
+                "rank=%d, local_requests=%d (eager)",
+                plan.tp_size,
+                plan.num_requests,
+                plan.rows_per_request,
+                plan.tp_rank,
+                len(plan.request_ids),
+            )
+        if not graph_shard:
+            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata.qli_metadata))
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
@@ -252,17 +311,21 @@ class AscendIndexerOps:
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
             quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
-            cu_seqlens_q=metadata.qli_cu_seqlens_q,
-            seqused_k=metadata.qli_seqused_k,
-            cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
-            metadata=metadata.qli_metadata,
+            cu_seqlens_q=op_metadata.qli_cu_seqlens_q,
+            seqused_k=op_metadata.qli_seqused_k,
+            cmp_residual_k=op_metadata.qli_cmp_residual_k,
+            block_table=op_metadata.block_table,
+            metadata=op_metadata.qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,
             cmp_ratio=4,
             return_value=0,
         )
+        if graph_shard:
+            return gather_graph_decode_indexer_topk(shard, topk_idxs, get_tp_group())
+        if shard is not None:
+            return gather_decode_indexer_topk(topk_idxs, shard.plan, shard.restore_rows)
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(
