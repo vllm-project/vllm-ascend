@@ -103,13 +103,13 @@ def test_recurrent_decode_speculation_and_indexed_state_io(states):
         assert torch.isfinite(expected).all().item()
         torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
         check_states(conv, ssm, dense_conv, dense_ssm)
-    indices = torch.tensor([7, 2], dtype=torch.int32, device=device)
+    state_indices = torch.tensor([7, 2], dtype=torch.int32, device=device)
     mask = torch.tensor([True, False], dtype=torch.bool, device=device)
-    selected = gather_ssm_states(ssm, indices, mask)
-    expected = dense_ssm[indices.long()].clone()
+    selected = gather_ssm_states(ssm, state_indices, mask)
+    expected = dense_ssm[state_indices.long()].clone()
     expected[1].zero_()
     torch.testing.assert_close(selected, expected)
     selected.add_(0.25)
-    scatter_ssm_states_(ssm, indices, selected)
-    dense_ssm[indices.long()] = selected
+    scatter_ssm_states_(ssm, state_indices, selected)
+    dense_ssm[state_indices.long()] = selected
     check_states(conv, ssm, dense_conv, dense_ssm)

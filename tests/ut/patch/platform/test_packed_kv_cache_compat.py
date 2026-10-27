@@ -79,6 +79,7 @@ def test_main_builder_uses_ascend_pool_accounting():
     )
     if builder_cls is None:
         pytest.skip("vLLM lane predates KVCacheConfigBuilder")
+        return
 
     builder = builder_cls()
     config = SimpleNamespace()
