@@ -34,6 +34,7 @@ class D2DExpertWeightLoader:
         self.comm_op_list = None
         self.updated_expert_map = None
         self.updated_log2phy_map = None
+        self.updated_allgather_maps = None
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
@@ -108,17 +109,18 @@ class D2DExpertWeightLoader:
         if self.comm_op_list is not None:
             self.comm_op_list = None
 
-        # update expert_map
-        self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
-
-        # update log2phy_map
-        self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
-
         # update expert weight
         buffer_tensor_id = 0
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
+
+        # Publish routing only after all weights and quantization parameters
+        # have been copied, on the same execution stream as graph replay.
+        self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
+        self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
+        if self.updated_allgather_maps is not None:
+            self.eplb_adaptor.do_update_allgather_maps(self.layer_id, self.updated_allgather_maps)
 
         logger.debug(
             "[eplb/d2d_loader] Layer %s D2D transfer completed, updated_experts=%s",
@@ -134,5 +136,6 @@ class D2DExpertWeightLoader:
 
         self.recv_expert_list = []
         self.updated_expert_map = None
+        self.updated_allgather_maps = None
         self.layer_id = -1
         self.state = ExpertWeightUpdateState.WAITING

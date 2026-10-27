@@ -198,6 +198,19 @@ class VllmEplbAdaptor:
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        layer = self.moe_layers[layer_id]
+        layer.ascend_expert_map.copy_(updated_expert_map)
+        layer.global_expert_map[self.ep_rank].copy_(updated_expert_map)
+
+    def do_update_allgather_maps(self, layer_id, updated_maps):
+        layer = self.moe_layers[layer_id]
+        # These buffers are referenced by captured graphs. Never replace them.
+        for target, source in zip((layer.allgather_slots, layer.allgather_replica_counts), updated_maps):
+            source = source.to(dtype=target.dtype)
+            if target.device.type != "cpu":
+                source = source.pin_memory()
+            target.copy_(source, non_blocking=True)
+        layer.global_expert_map.copy_(updated_maps[2])
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         expert_weight_key = self.expert_weight_key_per_layer[layer_id]

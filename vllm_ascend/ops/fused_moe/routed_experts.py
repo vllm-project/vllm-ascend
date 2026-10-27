@@ -33,6 +33,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.allgather import build_allgather_routing, count_local_routes, route_allgather
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
@@ -544,6 +545,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # which maps logical expert IDs to the local physical slots.
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
+        self.allgather_slots = None
+        self.allgather_replica_counts = None
+        if self.log2phy is not None:
+            slots, counts = build_allgather_routing(self.global_expert_map)
+            self.allgather_slots = slots.to(self.log2phy.device)
+            self.allgather_replica_counts = counts.to(self.log2phy.device)
         self.multi_stage = False
         self.load_counter = None
         self.num_iter = None
@@ -567,6 +574,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
         # ascend_expert_map stays a plain CPU attribute and does not need promotion.
         self._promote_attr_to_buffer("log2phy")
+        self._promote_attr_to_buffer("allgather_slots")
+        self._promote_attr_to_buffer("allgather_replica_counts")
         if self.dynamic_eplb:
             self._promote_attr_to_buffer("moe_load")
             if self.multi_stage:
@@ -650,7 +659,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             input_ids=input_ids,
         )
         if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
+            if isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl):
+                topk_ids = route_allgather(topk_ids, self.allgather_slots, self.allgather_replica_counts)
+            else:
+                topk_ids = self.log2phy[topk_ids]
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
@@ -763,6 +775,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 if group_list_type == 1
                 else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
             )
+            if isinstance(moe_comm_method, AllGatherCommImpl):
+                # The kernel's group list may span global slots and includes
+                # graph padding. Policy input must count only live local work.
+                valid_rows = prepare_output.mc2_mask
+                if valid_rows is None:
+                    raise RuntimeError("ALLGATHER EPLB load collection requires a valid-token mask")
+                local_load = count_local_routes(topk_ids, valid_rows, self.ep_rank, self.local_num_experts)
             assert self.moe_load is not None
             if self.multi_stage:
                 assert self.load_counter is not None and self.num_iter is not None
