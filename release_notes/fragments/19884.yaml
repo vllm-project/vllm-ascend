@@ -1,0 +1,7 @@
+pr: 19884
+entries:
+  - category: feature
+    text: >-
+      Added opt-in Decoder Append-Prefill for agentic workloads, routing follow-up
+      session requests to their owner Decoder to reuse resident KV cache and
+      falling back to the Prefiller when a usable local prefix is unavailable.

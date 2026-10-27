@@ -102,6 +102,14 @@ class RecomputeScheduler(Scheduler):
 
     prefill_capacity_bound: bool
 
+    def _can_admit_decoder_waiting_request(self, request: Request) -> bool:
+        """Hook for decoder-local admission while traversing waiting requests."""
+        return True
+
+    def _can_admit_local_prefix(self, request: Request, local_hits: int) -> bool:
+        """Hook for decoder-local admission before connector lookup/allocation."""
+        return True
+
     def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
         allocate = getattr(super(), "_allocate_encoder_inputs", None)
         if allocate is not None:
@@ -432,6 +440,12 @@ class RecomputeScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -525,6 +539,11 @@ class RecomputeScheduler(Scheduler):
                     skip_request(request_queue)
                     continue
 
+                # delta for decoder_append_prefill: skip requests pending cache-miss rejection.
+                if not self._can_admit_decoder_waiting_request(request):
+                    skip_request(request_queue)
+                    continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -553,6 +572,11 @@ class RecomputeScheduler(Scheduler):
                         request.shared_prefix_boundary,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
+
+                    # delta for decoder_append_prefill: check local admission before connector lookup/allocation.
+                    if not self._can_admit_local_prefix(request, num_new_local_computed_tokens):
+                        skip_request(request_queue)
+                        continue
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
