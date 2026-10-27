@@ -88,8 +88,9 @@ def test_batch_metadata_waits_for_h2d_before_reusing_host_buffer(monkeypatch):
     buffers.batch_metadata_copy_done.synchronize()
     assert len(completed) == 2
     event_factory.assert_called_once()
-    for actual, expected in zip(result, (idx, cu, query)):
+    for actual, expected in zip(result, (idx, cu)):
         torch.testing.assert_close(actual, torch.from_numpy(expected))
+    torch.testing.assert_close(buffers.query_start_loc, torch.from_numpy(query))
 
 
 def _make_runner(need_timing: bool = True):

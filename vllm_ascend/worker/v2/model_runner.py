@@ -798,7 +798,7 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping_np: np.ndarray,
         cu_num_logits_np: np.ndarray,
         query_start_loc_np: np.ndarray,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         capacity = self.max_num_reqs
         num_reqs = idx_mapping_np.size
 
@@ -829,7 +829,6 @@ class NPUModelRunner(GPUModelRunner):
         return (
             buffers.idx_mapping_buffer[:num_reqs],
             buffers.cu_num_logits_buffer[: num_reqs + 1],
-            buffers.query_start_loc,
         )
 
     def _prepare_inputs_impl(
@@ -960,12 +959,16 @@ class NPUModelRunner(GPUModelRunner):
                 uniform_query_len=batch_desc.uniform_token_count,
             )
 
+        # The packed upload writes into the persistent input buffers, so the
+        # device view is the same in both paths.
+        query_start_loc = self.input_buffers.query_start_loc
         if merge_metadata_upload:
-            idx_mapping, cu_num_logits, query_start_loc = self._upload_batch_metadata(
-                idx_mapping_np, cu_num_logits_np, query_start_loc_np
+            idx_mapping, cu_num_logits = self._upload_batch_metadata(
+                idx_mapping_np,
+                cu_num_logits_np,
+                query_start_loc_np,
             )
         else:
-            query_start_loc = self.input_buffers.query_start_loc
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         assert idx_mapping is not None
