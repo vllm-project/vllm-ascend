@@ -315,6 +315,88 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+        self._bind_sparse_offload_layer_groups()
+
+    def _bind_sparse_offload_layer_groups(self) -> None:
+        """Bind attention layer names and collect LIM selection groups.
+
+        Runs once after model load and before any KV cache spec creation:
+        no in-tree model passes ``layer_name`` into the attention impl
+        constructor, so bind it from the forward context (the offload
+        pipeline's layer->offload-id lookup, MTP classification and LIM
+        group names all depend on it). Under ``offload_shared_indexer_only``
+        also track each owner's shared members: owners with members keep
+        running LIM so their group reuses the selection, singleton owners
+        fall back to the standard indexer selection.
+        """
+        # Production runners always carry ascend_config from __init__;
+        # partially-mocked test runners may not, in which case fall back to
+        # the process singleton (and skip silently if that is unavailable
+        # too — binding is a no-op unless the fused offload path is on).
+        ascend_cfg = getattr(self, "ascend_config", None)
+        if ascend_cfg is None:
+            try:
+                ascend_cfg = get_ascend_config()
+            except Exception:
+                return
+        sparse_cfg = ascend_cfg.sparse_kv_offload_config
+        self._lim_shared_only_groups: dict[str, list[str]] = {}
+        if not (sparse_cfg.enabled and sparse_cfg.use_fused_copy_sfa):
+            return
+
+        from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+        from vllm_ascend.utils import is_mtp_layer
+
+        owners: dict[int, AscendSFAKVOffloadImpl] = {}
+        for layer_name, layer in self.compilation_config.static_forward_context.items():
+            impl = getattr(layer, "impl", None)
+            if not isinstance(impl, AscendSFAKVOffloadImpl):
+                continue
+            if impl.layer_name is None:
+                impl.layer_name = layer_name
+                impl._is_mtp_layer = is_mtp_layer(self.model_config.hf_config, layer_name)
+                # Re-derive the selection-preprocess flag with the corrected
+                # MTP classification (same expression the skip_topk property
+                # setter maintains).
+                impl.skip_indexer_pre_process = impl.skip_topk and not impl._is_mtp_layer
+                impl.lim_full_resident = AscendSFAKVOffloadImpl.is_full_resident_layer(
+                    offload_shared_indexer_only=impl.lim_shared_only,
+                    skip_topk=impl.skip_topk,
+                    is_mtp_layer=impl._is_mtp_layer,
+                )
+            shared = impl.topk_indices_buffer
+            if shared is None:
+                continue
+            key = shared.data_ptr()
+            if impl.skip_topk:
+                if key not in owners:
+                    raise RuntimeError("fused_copy_sfa shared attention precedes its indexer owner")
+                impl.lim_indexer_owner = owners[key]
+                owner = owners[key]
+                if sparse_cfg.offload_shared_indexer_only:
+                    owner._lim_share_members.append(impl)
+                    self._lim_shared_only_groups.setdefault(owner.layer_name, []).append(impl.layer_name)
+            else:
+                owners[key] = impl
+
+    def _full_resident_offload_layer_names(self) -> list[str]:
+        """Attention layers kept on NPU paged caches under offload_shared_indexer_only."""
+        ascend_cfg = getattr(self, "ascend_config", None)
+        if ascend_cfg is None:
+            try:
+                ascend_cfg = get_ascend_config()
+            except Exception:
+                return []
+        sparse_cfg = ascend_cfg.sparse_kv_offload_config
+        if not (sparse_cfg.enabled and sparse_cfg.offload_shared_indexer_only):
+            return []
+        from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+        return [
+            layer_name
+            for layer_name, layer in self.compilation_config.static_forward_context.items()
+            if isinstance(getattr(layer, "impl", None), AscendSFAKVOffloadImpl) and layer.impl.lim_full_resident
+        ]
 
     def _restore_replicated_draft_target_states(self) -> None:
         """Restore target states consumed by a replicated PCP draft."""
@@ -590,14 +672,27 @@ class NPUModelRunner(GPUModelRunner):
         super().shutdown()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
-        """Bind host pools before the V2 KV connector registers its destinations."""
+        """Bind host pools before the V2 KV connector registers its destinations.
+
+        Under offload_shared_indexer_only the manager also receives the
+        device-resident full layer names (their rank-local paged caches are
+        PD-pull destinations) and the LIM selection groups for the
+        side-stream miss onboarding (miss_onboard_mode=side_stream). The
+        registration is idempotent: the profiling pass and the real
+        allocation pass both land here, and configure_lim_groups rebuilds
+        its fixed stream/event objects before any graph capture.
+        """
         manager = self.sparse_kv_offload_manager
         if manager is None:
             return
-        manager.register_kv_caches(kv_caches)
-        if not self.ascend_config.sparse_kv_offload_config.use_fused_copy_sfa:
+        sparse_cfg = self.ascend_config.sparse_kv_offload_config
+        manager.register_kv_caches(kv_caches, full_resident_layer_names=self._full_resident_offload_layer_names())
+        if not sparse_cfg.use_fused_copy_sfa:
             return
 
+        # Owner grouping runs once at load (_bind_sparse_offload_layer_groups);
+        # re-resolve ownership here defensively in case binding was skipped
+        # (e.g. a load path that bypasses load_model's tail).
         from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
         owners: dict[int, AscendSFAKVOffloadImpl] = {}
@@ -618,6 +713,8 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name in manager.offload_layer_names:
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
+        if sparse_cfg.offload_shared_indexer_only:
+            manager.configure_lim_groups(getattr(self, "_lim_shared_only_groups", {}))
 
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:

@@ -79,6 +79,27 @@ def test_non_fused_config_does_not_require_fused_kernel_fields():
     _validate_fused_copy_sfa_config(SimpleNamespace(), SimpleNamespace(use_fused_copy_sfa=False))
 
 
+def test_fused_config_rejects_dummy_ring_overflow():
+    """The inactive-request dummy ring indexes LIM history arrays sized
+    2 * (max_num_seqs + 2); max_num_seqs + 2 below the ring size would let
+    the ring indices run past them."""
+    runtime = SimpleNamespace(
+        speculative_config=None,
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+    )
+    with pytest.raises(ValueError, match="dummy hot-row ring"):
+        _validate_fused_copy_sfa_config(
+            runtime,
+            SimpleNamespace(use_fused_copy_sfa=True, topk=2048, topk_buffer_size=4096),
+        )
+    # The boundary itself (max_num_seqs + 2 == ring size) is accepted.
+    runtime.scheduler_config = SimpleNamespace(max_num_seqs=6)
+    _validate_fused_copy_sfa_config(
+        runtime,
+        SimpleNamespace(use_fused_copy_sfa=True, topk=2048, topk_buffer_size=4096),
+    )
+
+
 def test_fused_config_rejects_topk_outside_kernel_contract():
     with pytest.raises(ValueError, match="TopK=2048"):
         _validate_fused_copy_sfa_config(

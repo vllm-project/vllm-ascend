@@ -144,7 +144,27 @@ class GlobalMemfabricTE:
         Unknown names fail fast here as well: a wrong protocol otherwise only
         surfaces later as an obscure engine initialization failure.
         """
-        from memfabric_hybrid import TransDataOpType  # type: ignore
+        try:
+            from memfabric_hybrid import TransDataOpType  # type: ignore
+        except ImportError:
+            # pip-packaged memfabric_hybrid 1.2.0 imports the pybind extension
+            # as a top-level module ("_pymf_transfer") and does not re-export
+            # TransDataOpType; importing the canonical submodule name again
+            # trips pybind's duplicate type registration. Fetch it from
+            # sys.modules instead. sys.modules.get (rather than []) keeps a
+            # missing memfabric installation from surfacing as a bare KeyError.
+            import sys
+
+            pymf = sys.modules.get("_pymf_transfer")
+            if pymf is None or not hasattr(pymf, "TransDataOpType"):
+                raise ImportError(
+                    "memfabric_hybrid is not usable: it exposes neither "
+                    "memfabric_hybrid.TransDataOpType nor a loaded "
+                    "_pymf_transfer.TransDataOpType, so the transfer protocol "
+                    "cannot be mapped. Please install a compatible "
+                    "memfabric_hybrid build."
+                ) from None
+            TransDataOpType = pymf.TransDataOpType
 
         protocol_map = {
             "sdma": TransDataOpType.SDMA,

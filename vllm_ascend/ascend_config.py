@@ -1642,6 +1642,16 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+# Shared dummy hot-row ring for inactive/padded tokens in the fused copy-SFA
+# pipeline: dummy rows are written but never read (token_active masks their
+# attention), so a small modulo ring replaces one dedicated hot row per dummy
+# slot. Kept beside SparseKVOffloadConfig because its validation ties the
+# ring to the request-slot capacity: the LIM history arrays are sized
+# 2 * (max_num_seqs + 2), so the ring's highest row index
+# (max_num_seqs + 2 + DUMMY_POOL_ROW_COUNT - 1) must stay in bounds.
+DUMMY_POOL_ROW_COUNT = 8
+
+
 @config
 class SparseKVOffloadConfig:
     """
@@ -1655,11 +1665,35 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    # offload_shared_indexer_only: keep the KV cache of full (indexer-owner)
+    # layers resident in NPU HBM paged caches and only offload the
+    # shared-indexer layers. Full layers then run the standard (non-offload)
+    # decode flow - no miss onboarding, no D2H, attention straight over the
+    # paged cache - while owners with shared members still run the LIM
+    # operator so their group reuses the selection.
+    offload_shared_indexer_only: bool = False
+    # miss_onboard_mode: how miss KV rows are moved from the host DRAM pool
+    # into the request-owned hot rows during decode.
+    # Unset / "inline": the fused Copy-SFA operator resolves misses inside
+    #         the attention kernel (host reads in the critical path).
+    # "side_stream": after the group owner's LIM, one aclnnLimCopyDescriptors
+    #         launch per member pre-copies all misses on a side stream
+    #         (overlapped with the owner's SFA + MoE compute); the member
+    #         then runs the Copy-SFA operator with an all-zero miss plan -
+    #         pure direct-addressed HBM attention with no host reads.
+    #         Requires offload_shared_indexer_only and the
+    #         aclnnLimCopyDescriptors extension; auto-falls back to inline
+    #         when the extension is unavailable.
+    miss_onboard_mode: str = "inline"
 
     @property
     def use_fused_copy_sfa(self) -> bool:
         """Use fused LIM + Copy-SFA unless the overlap operator is selected."""
         return self.enabled and not self.use_fused_overlap
+
+    @property
+    def use_side_stream_onboard(self) -> bool:
+        return self.miss_onboard_mode == "side_stream"
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1667,6 +1701,23 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if self.offload_shared_indexer_only and self.use_fused_overlap:
+            raise ValueError(
+                "sparse_kv_offload_config.offload_shared_indexer_only requires the "
+                "fused Copy-SFA path (it is incompatible with use_fused_overlap; the "
+                "shared layers are driven by the owner's LIM selection)"
+            )
+        if self.miss_onboard_mode not in ("inline", "side_stream"):
+            raise ValueError(
+                f"sparse_kv_offload_config.miss_onboard_mode must be inline or "
+                f"side_stream, got {self.miss_onboard_mode!r}"
+            )
+        if self.use_side_stream_onboard and not self.offload_shared_indexer_only:
+            raise ValueError(
+                "sparse_kv_offload_config.miss_onboard_mode=side_stream requires "
+                "offload_shared_indexer_only=true (the side stream is driven by "
+                "the group owner's LIM)"
+            )
         return self
 
     @classmethod

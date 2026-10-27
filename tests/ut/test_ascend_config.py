@@ -991,6 +991,63 @@ class TestSparseKVOffloadConfig(TestBase):
             with self.subTest(size=size), self.assertRaises(ValueError):
                 SparseKVOffloadConfig(topk_buffer_size=size)
 
+    def _shared_only_vllm_config(self, num_speculative_tokens=None, method="deepseek_mtp"):
+        spec = None
+        if num_speculative_tokens:
+            spec = SimpleNamespace(method=method, num_speculative_tokens=num_speculative_tokens)
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
+            use_v2_model_runner=True,
+            speculative_config=spec,
+        )
+
+    # Scenario B = default fused Copy-SFA offload; scenario C adds the
+    # shared-indexer-only offload with the side-stream miss onboard.
+    _SHARED_ONLY_SCENARIOS = (
+        {"enabled": True},
+        {
+            "enabled": True,
+            "offload_shared_indexer_only": True,
+            "miss_onboard_mode": "side_stream",
+        },
+    )
+
+    def test_mtp_supported_for_both_shared_only_scenarios(self):
+        """Scenarios B and C accept MTP across 1-6 speculative tokens; the
+        side-stream property only follows miss_onboard_mode."""
+        for num_spec in (1, 2, 3, 6):
+            for scenario in self._SHARED_ONLY_SCENARIOS:
+                config = SparseKVOffloadConfig.from_additional_config(
+                    self._shared_only_vllm_config(num_spec), dict(scenario)
+                )
+                self.assertTrue(config.use_fused_copy_sfa)
+                self.assertTrue(
+                    config.offload_shared_indexer_only is scenario.get("offload_shared_indexer_only", False)
+                )
+                expected_side_stream = scenario.get("miss_onboard_mode") == "side_stream"
+                self.assertIs(config.use_side_stream_onboard, expected_side_stream)
+
+    def test_shared_indexer_only_rejects_overlap_operator(self):
+        with self.assertRaisesRegex(ValueError, "offload_shared_indexer_only requires the"):
+            SparseKVOffloadConfig(enabled=True, offload_shared_indexer_only=True, use_fused_overlap=True)
+
+    def test_invalid_miss_onboard_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "miss_onboard_mode must be inline or side_stream"):
+            SparseKVOffloadConfig(enabled=True, miss_onboard_mode="bogus")
+        # The default stays valid without any miss_onboard_mode key.
+        config = SparseKVOffloadConfig(enabled=True)
+        self.assertFalse(config.use_side_stream_onboard)
+
+    def test_side_stream_onboard_requires_shared_indexer_only(self):
+        with self.assertRaisesRegex(ValueError, "side_stream requires"):
+            SparseKVOffloadConfig(enabled=True, miss_onboard_mode="side_stream")
+
     def test_default_operator_selection_requires_enabled_offload(self):
         self.assertFalse(SparseKVOffloadConfig().use_fused_copy_sfa)
         config = SparseKVOffloadConfig(enabled=True)
