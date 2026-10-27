@@ -377,11 +377,11 @@ msgstr ""
 "[GLM-4.x](../../tutorials/models/GLM4.x.md) |"
 
 msgid ""
-"    | GLM-5.1             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ "
+"    | GLM-5.1             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ "
 "| ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | "
 "[GLM-5.1](../../tutorials/models/GLM5.md) |"
 msgstr ""
-"    | GLM-5.1             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ "
+"    | GLM-5.1             |   ✅    |      |  ✅ |       A2/A3        | ✅ | ✅ "
 "| ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | "
 "[GLM-5.1](../../tutorials/models/GLM5.md) |"
 
