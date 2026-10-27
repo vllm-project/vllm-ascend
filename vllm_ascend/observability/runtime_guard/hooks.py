@@ -47,6 +47,7 @@ from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
+from vllm_ascend.utils import vllm_version_is
 
 logger = init_logger_ascend(__name__)
 
@@ -343,3 +344,13 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
         output = self._inner.get_output()
         _safe_check_after_sample(self._runner, output)
         return output
+
+    # vLLM main makes ``get_kv_connector_output`` abstract on
+    # ``AsyncModelRunnerOutput``: it salvages the step's KV output when
+    # ``get_output`` fails. v0.31.0 neither declares nor calls it, so the
+    # release lane needs no override.
+    if not vllm_version_is("0.31.0"):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
+
+        def get_kv_connector_output(self) -> KVConnectorOutput | None:
+            return self._inner.get_kv_connector_output()

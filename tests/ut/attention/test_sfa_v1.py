@@ -178,6 +178,44 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertIs(actual_softmax_sum, softmax_sum)
         self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
 
+    def test_execute_sparse_flash_attention_nope_single_cache_returns_lse(self):
+        (
+            impl,
+            ql_nope,
+            _,
+            topk_indices,
+            attn_metadata,
+            actual_seq_lengths_query,
+            actual_seq_lengths_key,
+        ) = self._make_common_inputs()
+        impl.qk_rope_head_dim = 0
+        kv_cache = (torch.randn(4, 1, 1, 8),)
+        result = (torch.randn(3, 4, 8), torch.zeros(1, 3, 4), torch.ones(1, 3, 4))
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_flash_attention",
+            create=True,
+            return_value=result,
+        ) as mock_sfa:
+            actual = DeviceOperator.execute_sparse_flash_attention_process(
+                impl,
+                ql_nope,
+                torch.empty(3, 4, 0),
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=0,
+                return_lse=True,
+            )
+
+        self.assertIs(actual, result)
+        self.assertIsNone(mock_sfa.call_args.kwargs["query_rope"])
+        self.assertIsNone(mock_sfa.call_args.kwargs["key_rope"])
+        self.assertTrue(mock_sfa.call_args.kwargs["return_softmax_lse"])
+
     def test_execute_sparse_flash_attention_c8_returns_softmax_components(self):
         (
             impl,
@@ -664,7 +702,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
-        indexer._pcp_active = False
+        indexer.use_pcp = False
         indexer._dsa_cp_active = False
         indexer.write_cache = MagicMock()
 

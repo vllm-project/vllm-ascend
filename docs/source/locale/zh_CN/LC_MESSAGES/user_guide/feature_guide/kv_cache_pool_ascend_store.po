@@ -595,8 +595,8 @@ msgstr ""
 "单边通信连接是在实例启动后延迟创建的，全互联连接会产生一次性开销（每个连接占用 4 MB 设备内存）。预热建议：输入序列长度 8k，输出序列长度 "
 "1，总请求数为设备数量的 2-3 倍。"
 
-msgid "## Scenario 2: Memcache Backend"
-msgstr "## 场景 2：Memcache 后端"
+msgid "## Scenario 2: Memcache Backend {: #scenario-2-memcache-backend }"
+msgstr "## 场景 2：Memcache 后端 {: #scenario-2-memcache-backend }"
 
 msgid ""
 "<details markdown=\"1\">\n"
@@ -1637,8 +1637,8 @@ msgstr ""
 msgid "## Reference"
 msgstr "## 参考"
 
-msgid "### kv-transfer-config Common Parameters"
-msgstr "### kv-transfer-config 通用参数"
+msgid "### kv-transfer-config Common Parameters {: #kv-transfer-config-common-parameters }"
+msgstr "### kv-transfer-config 通用参数 {: #kv-transfer-config-common-parameters }"
 
 msgid ""
 "| `Parameter` | Type | Default | Required | Value Range | Description |"
@@ -1775,8 +1775,8 @@ msgstr ""
 "| `fabric_memory.max_capacity` | int | 无默认值 | 仅当 fabric 内存预算不足时 | 整数（每进程 GB）"
 " | Fabric 内存配额。 |"
 
-msgid "### HDK and CANN Version Compatibility Reference"
-msgstr "### HDK 与 CANN 版本兼容性参考"
+msgid "### HDK and CANN Version Compatibility Reference {: #hdk-and-cann-version-compatibility-reference }"
+msgstr "### HDK 与 CANN 版本兼容性参考 {: #hdk-and-cann-version-compatibility-reference }"
 
 msgid ""
 "| Hardware Series | HDK Requirement | CANN Requirement | Other Dependencies "

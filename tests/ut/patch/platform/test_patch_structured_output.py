@@ -58,6 +58,9 @@ def make_manager() -> StructuredOutputManager:
     manager.vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_vocab_size=lambda: 128))
     manager.tokenizer = object()
     manager._use_async_grammar_compilation = False
+    # vLLM main's ``StructuredOutputManager.grammar_init`` reads this; it is
+    # set by ``__init__``, which this stub bypasses.
+    manager.backend_name = None
     return manager
 
 
