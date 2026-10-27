@@ -454,11 +454,13 @@ def _get_deepseek_v4_cache_layout(
         specs = group.kv_cache_spec.kv_cache_specs
         b: dict[int, list[str]] = defaultdict(list)
         for name in group.layer_names:
+            padded = getattr(specs[name], "page_size_padded", None)
+            page_size = padded if padded is not None else specs[name].page_size_bytes
             if "mtp" not in name:
-                b[specs[name].page_size_bytes].append(name)
+                b[page_size].append(name)
             else:
                 mtp_layer_names.append(name)
-                mtp_page_size = specs[name].page_size_bytes
+                mtp_page_size = page_size
         bucketed.append(b)
 
     # num_layer_tuples = longest bucket list across all groups. For the
