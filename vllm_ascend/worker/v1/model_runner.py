@@ -4694,6 +4694,17 @@ class NPUModelRunner(GPUModelRunner):
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
 
+    def _jit_warmup_window(self) -> AbstractContextManager[None]:
+        """Registry collection window; optional for partial runners.
+
+        Unit tests build runners with ``__new__`` (no upstream ``__init__``)
+        and call ``load_model`` directly; those have no registry and the
+        window degrades to a no-op instead of failing on an unrelated
+        attribute.
+        """
+        registry = getattr(self, "jit_warmup_registry", None)
+        return registry.activate() if registry is not None else nullcontext()
+
     def load_model(self) -> None:
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
@@ -4724,7 +4735,7 @@ class NPUModelRunner(GPUModelRunner):
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             # Model construction (e.g. the DSV4.1 indexer) registers its JIT
             # warmup kernels under this window.
-            with self.jit_warmup_registry.activate():
+            with self._jit_warmup_window():
                 self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
@@ -4735,7 +4746,7 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                with get_tp_context(self.drafter), self.jit_warmup_registry.activate():
+                with get_tp_context(self.drafter), self._jit_warmup_window():
                     self.drafter.load_model(self.model)
 
             pp_group = get_pp_group()
