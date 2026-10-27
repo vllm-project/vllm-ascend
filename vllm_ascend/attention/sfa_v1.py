@@ -427,7 +427,7 @@ class AscendSFAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
     pcp_slot_mapping: torch.Tensor | None = None
     # Resolved by the builder; execution must not infer layout from tensor sizes.
-    pcp_sharded_layout: bool = False
+    uses_pcp_sharded_layout: bool = False
     pcp_prolog_local_slots: torch.Tensor | None = None
     pcp_prolog_global_slots: torch.Tensor | None = None
     # All PCP ranks must join prefill KV gathers even when a rank has only padding.
@@ -467,7 +467,7 @@ def needs_pcp_kv_gather(attn_metadata: AscendSFAMetadata, is_decode_sharded: boo
     gather when another rank has one. A step built without a PCP context
     (e.g. a replicated draft decode) keeps an unexpanded slot mapping.
     """
-    if not attn_metadata.pcp_sharded_layout:
+    if not attn_metadata.uses_pcp_sharded_layout:
         return False
     return is_decode_sharded or attn_metadata.num_prefills > 0 or attn_metadata.pcp_has_global_prefill
 
@@ -708,7 +708,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             pcp_slot_mapping=pcp_slot_mapping,
-            pcp_sharded_layout=(
+            uses_pcp_sharded_layout=(
                 pcp_context is not None and uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp)
             ),
             pcp_has_global_prefill=bool(pcp_context is not None and pcp_context.global_batch.is_prefilling_np.any()),

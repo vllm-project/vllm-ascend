@@ -688,7 +688,7 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
         num_decode_tokens=1,
         num_prefills=1,
         num_input_tokens=2,
-        pcp_sharded_layout=True,
+        uses_pcp_sharded_layout=True,
         pcp_slot_mapping=torch.arange(4),
     )
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
@@ -730,7 +730,7 @@ def test_sfa_pcp_gathers_nope_kv_without_rope() -> None:
     attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1, num_input_tokens=2)
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     slots = torch.tensor([0, 1, 0, 5], dtype=torch.int64)
-    attn_metadata.pcp_sharded_layout = True
+    attn_metadata.uses_pcp_sharded_layout = True
     attn_metadata.pcp_slot_mapping = slots
     gathered_prefill_kv = torch.tensor([[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]])
     gathered_kv = torch.cat((kv_no_split[:1], gathered_prefill_kv))
@@ -779,7 +779,7 @@ def test_sfa_pcp_gathers_nope_kv_with_padded_rank_slots(packed_cache: bool, num_
     # Slot mapping keeps eight positions per PCP rank, while NoPE KV has five.
     slots = torch.tensor([0, 1, 2, 3, 4, -1, -1, -1, 8, 9, 10, 11, 12, -1, -1, -1])
     slots[8 : 8 + num_decode_tokens] = slots[:num_decode_tokens]
-    attn_metadata.pcp_sharded_layout = True
+    attn_metadata.uses_pcp_sharded_layout = True
     attn_metadata.pcp_slot_mapping = slots
     kv_cache = (torch.empty(1),)
 
@@ -850,7 +850,7 @@ def test_sfa_pcp_gathers_nope_kv_when_local_rank_has_no_prefill() -> None:
         pcp_has_global_prefill=True,
     )
     slots = torch.tensor([-1] * 8 + [8, 9, 10, -1, -1, -1, -1, -1])
-    metadata.pcp_sharded_layout = True
+    metadata.uses_pcp_sharded_layout = True
     metadata.pcp_slot_mapping = slots
     group = SimpleNamespace(
         world_size=2,
@@ -1526,7 +1526,7 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
         num_decode_tokens=num_decode_tokens,
         num_prefills=int(rows > 0),
         num_input_tokens=num_tokens,
-        pcp_sharded_layout=True,
+        uses_pcp_sharded_layout=True,
         pcp_slot_mapping=slots.flatten(),
         pcp_has_global_prefill=False,
         pcp_prolog_local_slots=expected_local_slots if rows else None,
@@ -1672,8 +1672,8 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
         metadata = builder.build(0, common)
         draft_metadata = builder.build_for_drafting(common, draft_index=0)
     assert metadata.num_prefills == 0
-    assert metadata.pcp_sharded_layout
-    assert not draft_metadata.pcp_sharded_layout
+    assert metadata.uses_pcp_sharded_layout
+    assert not draft_metadata.uses_pcp_sharded_layout
     assert metadata.pcp_has_global_prefill is global_has_prefill
     assert not draft_metadata.pcp_has_global_prefill
     if global_has_prefill:
@@ -1714,7 +1714,7 @@ def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
         num_decode_tokens=1,
         num_prefills=0,
         num_input_tokens=2,
-        pcp_sharded_layout=True,
+        uses_pcp_sharded_layout=True,
         pcp_slot_mapping=torch.tensor([0, 1, -1, -1], dtype=torch.int64),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=torch.tensor([0, -1], dtype=torch.int64),
@@ -1764,7 +1764,7 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
         num_decode_tokens=0,
         num_prefills=0,
         num_input_tokens=1,
-        pcp_sharded_layout=True,
+        uses_pcp_sharded_layout=True,
         pcp_slot_mapping=torch.full((2,), -1),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=slots,
@@ -1799,7 +1799,7 @@ def test_sfa_pcp_padded_decode_skips_kv_gather():
         num_decode_tokens=num_decode_tokens,
         num_prefills=0,
         num_input_tokens=num_input_tokens,
-        pcp_sharded_layout=True,
+        uses_pcp_sharded_layout=True,
         pcp_slot_mapping=torch.cat((slots, torch.full((num_input_tokens,), -1))),
         pcp_has_global_prefill=False,
     )
@@ -1829,7 +1829,7 @@ def test_sfa_pcp_replicated_draft_decode_skips_kv_gather():
         num_decode_tokens=0,
         num_prefills=0,
         num_input_tokens=2,
-        pcp_sharded_layout=False,
+        uses_pcp_sharded_layout=False,
         pcp_slot_mapping=slots,
         pcp_has_global_prefill=False,
     )

@@ -132,7 +132,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     def _make_indexer_metadata(self):
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
-            pcp_sharded_layout=False,
+            uses_pcp_sharded_layout=False,
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
@@ -235,7 +235,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         gathered_scale = torch.full((4, 1), 2.0)
         gathered_slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
         indexer_metadata = self._make_indexer_metadata()
-        indexer_metadata.pcp_sharded_layout = True
+        indexer_metadata.uses_pcp_sharded_layout = True
         indexer_metadata.slot_mapping = slots
         indexer_metadata.num_decode_tokens = 1
 

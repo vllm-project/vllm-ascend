@@ -269,7 +269,7 @@ class AscendMLAMetadata:
     pcp_cos: torch.Tensor | None = None
     pcp_sin: torch.Tensor | None = None
     # Resolved by the builder; execution must not infer layout from tensor sizes.
-    pcp_sharded_layout: bool = False
+    uses_pcp_sharded_layout: bool = False
     external_flashmla: FlashMLADecode | None = None
 
     def __post_init__(self):
@@ -683,7 +683,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
             )
 
-        metadata.pcp_sharded_layout = True
+        metadata.uses_pcp_sharded_layout = True
         metadata.slot_mapping = expanded_slot_mapping
         if metadata.num_prefills > 0:
             prefill_metadata = metadata.prefill
@@ -3253,7 +3253,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         # Sharded decode writes other ranks' KV even without local queries; a
         # replicated draft decode keeps its local slots and per-path writes.
-        writes_sharded_pcp_kv = self.is_pcp_decode_sharded and attn_metadata.pcp_sharded_layout
+        writes_sharded_pcp_kv = self.is_pcp_decode_sharded and attn_metadata.uses_pcp_sharded_layout
         should_write_kv_cache = has_decode or has_prefill or writes_sharded_pcp_kv
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
