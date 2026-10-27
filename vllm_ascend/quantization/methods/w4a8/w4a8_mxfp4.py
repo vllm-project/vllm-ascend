@@ -240,8 +240,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             if _EXTRA_CTX.use_mega_moe:
                 w1 = layer.w13_weight_list
                 w2 = layer.w2_weight_list
-                w1_scale = layer.w13_weight_scale_list
-                w2_scale = layer.w2_weight_scale_list
+                # Reinterpret checkpoint bytes without copying: EPLB updates
+                # the same scale storage that MegaMoe consumes.
+                w1_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w13_weight_scale_list]
+                w2_scale = [scale.view(torch.float8_e8m0fnu) for scale in layer.w2_weight_scale_list]
             else:
                 w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
             return MoEWeights(
@@ -252,27 +254,14 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale_bias=None,
                 w2_scale_bias=None,
             )
-        if _EXTRA_CTX.use_mega_moe:
-            # MegaMoe consumes the non-transposed per-expert weight/scale lists
-            # built in process_weights_after_loading (the non-mega path uses the
-            # transposed single tensors below).
-            return MoEWeights(
-                w1=layer.cann_mega_moe_w13_weight_list,
-                w2=layer.cann_mega_moe_w2_weight_list,
-                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
-                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
-                w1_scale_bias=None,
-                w2_scale_bias=None,
-            )
-        else:
-            return MoEWeights(
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_scale_bias=None,
-                w2_scale_bias=None,
-            )
+        return MoEWeights(
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_scale_bias=None,
+            w2_scale_bias=None,
+        )
 
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list:
@@ -295,10 +284,13 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
         Records the original shapes and marks the layer transformed so
         ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
-        EPLB list weights are intentionally not reversible for RL reload.
+        Expert-list weights are intentionally not reversible for RL reload.
         """
         if getattr(layer, "_mxfp4_transformed", False):
             return
+        # MegaMoe and EPLB share one canonical, non-transposed NZ list.
+        # Evaluate after distributed initialization, when the EP group exists.
+        self.use_expert_weight_list = self.use_expert_weight_list or use_cann_megamoe(get_current_vllm_config())
         if not hasattr(layer, "_mxfp4_original_shapes"):
             layer._mxfp4_original_shapes = {
                 "w13_weight": tuple(layer.w13_weight.data.shape),
@@ -354,47 +346,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w2_weight_scale
             torch.npu.empty_cache()
 
-        # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
-        # (out, in) layout — weight1=(E, 2*inter, hidden//2), weight2=(E,
-        # hidden, inter//2) for packed FP4 — and the reshaped (not transposed)
-        # scales. Capture per-expert FRACTAL_NZ lists before the non-mega path
-        # below format-casts and transposes everything.
-        elif use_cann_megamoe(get_current_vllm_config()):
-            layer.cann_mega_moe_w13_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                for weight in layer.w13_weight.data
-            ]
-            layer.cann_mega_moe_w2_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                for weight in layer.w2_weight.data
-            ]
-            # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
-            layer.cann_mega_moe_w13_weight_scale_list = [
-                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
-                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
-            ]
-            layer.cann_mega_moe_w2_weight_scale_list = [
-                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
-                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
-            ]
-            tensor_names = (
-                "w13_weight",
-                "w2_weight",
-                "w13_weight_scale",
-                "w2_weight_scale",
-            )
-            for tensor_name in tensor_names:
-                dispose_tensor(getattr(layer, tensor_name))
         else:
             # Non-mega path (npu_grouped_matmul): format-cast to FRACTAL_NZ and
             # transpose to (in, out) so the packed FP4 K is interpreted correctly.
@@ -431,7 +382,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         if not getattr(layer, "_mxfp4_transformed", False):
             return
         if self.use_expert_weight_list:
-            raise RuntimeError("RL weight reload is not supported together with W4A8-MXFP EPLB.")
+            raise RuntimeError("RL weight reload is not supported with W4A8-MXFP expert lists (EPLB or MegaMoe).")
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
         layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 2)
