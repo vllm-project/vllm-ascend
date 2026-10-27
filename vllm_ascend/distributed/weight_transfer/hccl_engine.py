@@ -91,7 +91,8 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
-        self._last_update_info.clear()
+        # vLLM releases before metadata reuse do not define this attribute.
+        self._last_update_info = {}
         # Preserve the parent's handshake attributes, resetting omitted values
         # on re-init. _wire_params still supports legacy per-update overrides.
         self.packed = init_info.packed if init_info.packed is not None else False

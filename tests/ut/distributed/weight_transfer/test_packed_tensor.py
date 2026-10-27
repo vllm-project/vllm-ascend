@@ -33,9 +33,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.distributed.weight_transfer import packed_tensor as upstream_packed
 
-from vllm_ascend.distributed.weight_transfer import packed_tensor as packed_module
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_broadcast_consumer,
@@ -62,10 +60,10 @@ class _FakeNpuStream:
     def synchronize(self) -> None:
         return None
 
-    def wait_event(self, event) -> None:
+    def wait_stream(self, stream) -> None:
         return None
 
-    def wait_stream(self, stream) -> None:
+    def wait_event(self, event) -> None:
         return None
 
     def __enter__(self) -> _FakeNpuStream:
@@ -87,11 +85,10 @@ def _stub_torch_npu():
     to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
-    caller_stream = _FakeNpuStream()
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
         Event=MagicMock,
-        current_stream=lambda: caller_stream,
+        current_stream=_FakeNpuStream,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
@@ -105,15 +102,12 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    packed_module._get_npu_streams.cache_clear()
     with (
         patch.object(torch, "npu", fake_npu, create=True),
         patch.object(torch, "empty", _fake_empty),
-        patch.object(torch.accelerator, "current_device_index", return_value=0),
         patch.object(torch.Tensor, "record_stream", return_value=None),
     ):
         yield
-    packed_module._get_npu_streams.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -131,155 +125,106 @@ def test_cpu_fixture_redirects_all_npu_device_forms(device):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("producer", [True, False])
-def test_reuses_upstream_code_with_isolated_npu_bindings(producer):
-    function = (
-        upstream_packed.packed_nccl_broadcast_producer if producer else upstream_packed.packed_nccl_broadcast_consumer
-    )
-    original_globals = dict(function.__globals__)
-    bound_functions = []
-
-    def bind(*args):
-        bound = types.FunctionType(*args)
-        bound_functions.append(bound)
-        return bound
-
-    with patch(f"{_MODULE}.FunctionType", side_effect=bind):
-        if producer:
-            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1])
-        else:
-            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, lambda weights: None)
-
-    assert bound_functions[0].__code__ is function.__code__
-    assert bound_functions[0].__globals__ is not function.__globals__
-    assert bound_functions[0].__globals__["torch"].cuda is torch.npu
-    assert bound_functions[0].__globals__["torch"].Event is torch.npu.Event
-    assert function.__globals__ == original_globals
-
-
-def test_packed_slots_are_cached_per_device_and_buffer_count():
-    _get_npu_streams = packed_module._get_npu_streams
-
-    first = _get_npu_streams(0, 2)
-    assert _get_npu_streams(0, 2) is first
-    assert _get_npu_streams(1, 2) is not first
-    assert len(_get_npu_streams(0, 3)) == 3
-
-
-def test_consumer_reuses_upstream_event_chain_without_post_load_host_wait():
-    operations: list[tuple[Any, ...]] = []
-    streams: list[Any] = []
-    events: list[Any] = []
-
-    class Stream(_FakeNpuStream):
-        def __init__(self):
-            self.index = len(streams)
-            streams.append(self)
-
-        def synchronize(self):
-            operations.append(("sync", self.index))
-
-        def wait_event(self, event):
-            operations.append(("event_wait", self.index, event.index))
-
-    class Event:
-        def __init__(self):
-            self.index = len(events)
-            events.append(self)
-
-        def record(self, stream):
-            operations.append(("event_record", self.index, stream.index))
-
-    def receive(tensor, *, src, stream):
-        operations.append(("receive", stream.index))
-        tensor.zero_()
-
-    loaded: list[Any] = []
-
-    def load(weights):
-        operations.append(("load", len(loaded)))
-        loaded.append(weights)
-
-    with patch.object(torch.npu, "Stream", Stream), patch.object(torch.npu, "Event", Event):
-        packed_broadcast_consumer(
-            iter((str(i), ([1], torch.float32)) for i in range(2)),
-            types.SimpleNamespace(broadcast=receive),
-            0,
-            load,
-            1,
-            2,
-        )
-
-    assert ("event_wait", 1, 0) in operations
-    assert operations.index(("receive", 1)) < operations.index(("event_wait", 1, 0))
-    assert operations.index(("event_wait", 1, 0)) < operations.index(("load", 1))
-    between = operations[operations.index(("load", 0)) + 1 : operations.index(("receive", 1))]
-    assert between == [("event_record", 1, 0), ("sync", 1)]
-    assert ("event_wait", 1, 1) in operations
-    assert operations.index(("event_wait", 1, 1)) < operations.index(("load", 1))
-
-
-@pytest.mark.parametrize("num_buffers", [2, 3])
-def test_packed_clones_are_tracked_before_the_loader_can_release_them(num_buffers):
-    caller_stream = torch.npu.current_stream()
-    streams = packed_module._get_npu_streams(0, num_buffers)
-    recorded = []
-
-    def record(tensor, stream):
-        recorded.append((tensor.untyped_storage().data_ptr(), stream))
-
-    raw_pointers = []
-
-    def receive(tensor, **kwargs):
-        recorded.clear()
-        tensor.zero_()
-        raw_pointers.append(tensor.untyped_storage().data_ptr())
-
-    def load(weights):
-        for _, tensor in weights:
-            pointer = tensor.untyped_storage().data_ptr()
-            assert pointer != raw_pointers[-1]
-            assert all((pointer, stream) in recorded for stream in (*streams, caller_stream))
-
-    with patch.object(torch.Tensor, "record_stream", record):
-        packed_broadcast_consumer(
-            iter((str(i), ([1], torch.float32)) for i in range(4)),
-            types.SimpleNamespace(broadcast=receive),
-            0,
-            load,
-            1,
-            num_buffers,
-        )
-
-
-@pytest.mark.parametrize("producer", [False, True])
-def test_packed_slots_join_the_caller_without_a_caller_host_wait(producer):
-    caller_stream = torch.npu.current_stream()
-    joined = []
-
-    class Stream(_FakeNpuStream):
-        def wait_stream(self, stream):
-            assert stream is caller_stream
-            joined.append(self)
-
-    with (
-        patch.object(torch.npu, "Stream", Stream),
-        patch.object(caller_stream, "synchronize", side_effect=AssertionError("unexpected caller host wait")),
-    ):
-        if producer:
-            packed_broadcast_producer(iter([]), _make_group_mock(), 0, lambda item: item[1], num_buffers=3)
-        else:
-            packed_broadcast_consumer(iter([]), _make_group_mock(), 0, lambda weights: None, num_buffers=3)
-
-    assert len(joined) == 3
-    assert tuple(joined) == packed_module._get_npu_streams(0, 3)
-
-
 def _make_group_mock() -> MagicMock:
     """Return a fake process group that records every broadcast payload."""
     group = MagicMock()
     group.broadcast = MagicMock()
     return group
+
+
+@pytest.mark.parametrize("num_buffers", [2, 3])
+def test_packed_cross_chunk_event_orders_loader_and_tracks_clones(num_buffers):
+    """A later stream may overtake pending clone and loader work without an event."""
+    active = None
+    streams = []
+    operations = []
+    retained = []
+    observed = []
+    tracked = []
+
+    class Stream(_FakeNpuStream):
+        def __init__(self):
+            self.pending = []
+            streams.append(self)
+
+        def synchronize(self):
+            while self.pending:
+                self.pending.pop(0)()
+
+        def wait_event(self, event):
+            operations.append("wait")
+            self.pending.append(event.complete)
+
+        def __enter__(self):
+            nonlocal active
+            self.previous, active = active, self
+            return self
+
+        def __exit__(self, *exc):
+            nonlocal active
+            active = self.previous
+
+    class Event:
+        def record(self, stream):
+            operations.append("record")
+            self.stream = stream
+            self.remaining = len(stream.pending)
+
+        def complete(self):
+            while self.remaining:
+                self.stream.pending.pop(0)()
+                self.remaining -= 1
+
+    caller = _FakeNpuStream()
+    payloads = iter([1.0, 2.0])
+
+    def broadcast(packed, *, src, stream):
+        value = next(payloads)
+        stream.pending.append(lambda: packed.view(torch.float32).fill_(value))
+
+    def clone(raw, *args, **kwargs):
+        owned = torch.zeros_like(raw)
+        active.pending.append(lambda: owned.copy_(raw))
+        return owned
+
+    def load(weights):
+        operations.append("load")
+        retained.extend(tensor for _, tensor in weights)
+        if len(retained) == 1:
+            active.pending.append(lambda: observed.append("first callback complete"))
+        else:
+
+            def read():
+                assert observed == ["first callback complete"]
+                torch.testing.assert_close(retained[0], torch.tensor([1.0]))
+                observed.append("second read complete")
+
+            active.pending.append(read)
+            # Force this slot to execute before the final drain of other slots.
+            active.synchronize()
+
+    with (
+        patch.object(torch.npu, "Stream", Stream),
+        patch.object(torch.npu, "current_stream", return_value=caller),
+        patch.object(torch.npu, "Event", Event),
+        patch.object(torch.Tensor, "clone", new=clone),
+        patch.object(torch.Tensor, "record_stream", lambda tensor, stream: tracked.append((tensor, stream))),
+    ):
+        packed_broadcast_consumer(
+            iter((str(i), ([1], torch.float32)) for i in range(2)),
+            types.SimpleNamespace(broadcast=broadcast),
+            0,
+            load,
+            1,
+            num_buffers,
+        )
+    assert operations == ["load", "record", "wait", "load", "record"]
+    assert observed == ["first callback complete", "second read complete"]
+    assert len(tracked) == 2 * (num_buffers + 1)
+    for tensor in retained:
+        assert all(
+            any(item is tensor and recorded is stream for item, recorded in tracked) for stream in (*streams, caller)
+        )
 
 
 def test_packed_broadcast_producer_single_tensor():
@@ -1189,46 +1134,37 @@ def test_packed_transfer_drains_storage_before_propagating_error(producer):
     assert pinned == []
 
 
-def test_packed_consumer_queues_unpack_after_receive_on_the_same_stream():
-    """Keep the native receive boundary before torch queues unpack clones."""
-    operations = []
-    active = []
+def test_packed_consumer_waits_for_receive_before_unpacking():
+    """An external HCCL receive must finish before torch queues unpack clones."""
+    events = []
     original = torch.tensor([2.5])
 
-    class Stream(_FakeNpuStream):
+    class ReceiveStream(_FakeNpuStream):
+        pending = None
+
         def synchronize(self):
-            operations.append("sync")
+            if self.pending is not None:
+                self.pending()
+                self.pending = None
+                events.append("ready")
 
-        def __enter__(self):
-            active.append(self)
-            return self
+    stream = ReceiveStream()
 
-        def __exit__(self, *exc):
-            active.pop()
-
-    stream = Stream()
-
-    def receive(packed, *, src, stream):
-        assert active == [stream]
-        operations.append("receive")
-        packed.copy_(original.view(torch.uint8))
+    def receive(packed, **kwargs):
+        assert kwargs["stream"] is stream
+        stream.pending = lambda: packed.copy_(original.view(torch.uint8))
+        events.append("receive")
 
     def load(weights):
-        assert active == [stream]
-        assert operations[-2:] == ["receive", "sync"]
+        assert events == ["receive", "ready"]
         assert torch.equal(weights[0][1], original)
-        operations.append("load")
+        events.append("load")
 
     with patch.object(torch.npu, "Stream", return_value=stream):
         packed_broadcast_consumer(
-            iter([("w", ([1], torch.float32))]),
-            types.SimpleNamespace(broadcast=receive),
-            0,
-            load,
-            4,
-            1,
+            iter([("w", ([1], torch.float32))]), types.SimpleNamespace(broadcast=receive), 0, load, 4, 1
         )
-    assert operations.index("receive") < operations.index("load")
+    assert events == ["receive", "ready", "load"]
 
 
 @pytest.mark.parametrize("backend", ["hccl", "ipc"])
@@ -1394,8 +1330,8 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
 
     class BroadcastStream(_FakeNpuStream):
         def synchronize(self):
-            if self in pending:
-                pending.remove(self)
+            if pending == [self]:
+                pending.clear()
 
     streams = [BroadcastStream() for _ in range(num_buffers)]
     active: list[_FakeNpuStream] = []
@@ -1412,7 +1348,7 @@ def test_packed_producer_passes_packing_stream_to_broadcast(num_buffers):
 
     def broadcast(tensor, *, src, stream):
         assert active == [stream]
-        assert not pending, "native HCCL broadcasts must keep their submission order"
+        assert not pending, "previous broadcast must complete before the next collective"
         pending.append(stream)
 
     group = types.SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
@@ -1485,14 +1421,7 @@ def test_packed_cleanup_drains_all_slots_reports_retention_and_prioritizes_signa
         else:
             packed_broadcast_consumer(iter([("w", ([1], torch.float32))]), group, 0, finish, 8, 3)
     assert error.value is expected
-    # A producer first probes its next slot for iterator exhaustion. Upstream
-    # may then fail a final wait before the adapter drains all slots again.
-    prefix = []
-    if body_error is None:
-        prefix = [1] if producer else []
-        if not producer or second_error is None:
-            prefix.append(0)
-    assert drained == prefix + [0, 1, 2]
+    assert drained == [0, 1, 2]
     assert len(pinned) == 1
     assert pinned[0].numel() == 4
     log_error.assert_called_once()

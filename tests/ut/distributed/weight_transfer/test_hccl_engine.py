@@ -74,8 +74,9 @@ def test_shutdown_closes_session_once():
     assert engine.model_update_group is None
 
 
+@pytest.mark.parametrize("has_previous_cache", [False, True])
 @patch("torch.accelerator.current_device_index", return_value=0)
-def test_reinit_closes_previous_session_before_creating_next(_mock_device):
+def test_reinit_closes_previous_session_before_creating_next(_mock_device, has_previous_cache):
     engine = _make_engine()
     engine.parallel_config = SimpleNamespace(data_parallel_index=0, world_size=1, rank=0)
     old_group = MagicMock()
@@ -83,6 +84,8 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
     engine._last_update_info[engine.model] = HCCLWeightTransferUpdateInfo(
         names=["stale"], dtype_names=["float32"], shapes=[[1]]
     )
+    if not has_previous_cache:
+        del engine._last_update_info  # vLLM release engines do not define it.
     init_info = HCCLWeightTransferInitInfo(master_address="127.0.0.1", master_port=12345, rank_offset=1, world_size=2)
 
     def create_group(*args, **kwargs):
@@ -333,6 +336,6 @@ def test_worker_loads_on_assigned_device_in_both_modes(packed):
 
     with patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer", side_effect=receive):
         engine.receive_weights(info)
-        engine.receive_weights(HCCLWeightTransferUpdateInfo(packed=packed))
+        engine.receive_weights(HCCLWeightTransferUpdateInfo(names=[], dtype_names=[], shapes=[], packed=packed))
     assert engine.model.load_weights.call_count == 2
     assert engine.model.load_weights.call_args.args[0][0][0] == "w"
