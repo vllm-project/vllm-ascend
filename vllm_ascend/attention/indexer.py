@@ -72,10 +72,6 @@ class AscendSFAIndexerMetadata:
     sin: torch.Tensor
     cos: torch.Tensor
     block_size: int = 0
-    # Parallel-layout sequence lengths consumed by the top-k kernel. Base/PCP
-    # modes use the unsharded values.
-    actual_seq_lengths_query: torch.Tensor | None = None
-    actual_seq_lengths_key: torch.Tensor | None = None
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
@@ -443,8 +439,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
-        assert indexer_metadata.actual_seq_lengths_query is not None
-        assert indexer_metadata.actual_seq_lengths_key is not None
 
         if hidden_states is k_hidden_states:
             # The k path already ran wk_weights_proj on these hidden states
@@ -514,8 +508,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,
-            indexer_metadata.actual_seq_lengths_query,
-            indexer_metadata.actual_seq_lengths_key,
+            indexer_metadata.cum_query_lens,
+            indexer_metadata.seq_lens,
             self.enable_sparse_li_c8,
             self.enable_sparse_li_c4,
             self.use_torch_npu_lightning_indexer,
@@ -931,8 +925,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        actual_seq_lengths_query = cum_query_lens
-        actual_seq_lengths_key = seq_lens
         if copy_rope:
             cos, sin = self._copy_rope_to_metadata_buffers(
                 cos,
@@ -960,8 +952,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             sin=sin,
             cos=cos,
             block_size=block_size,
-            actual_seq_lengths_query=actual_seq_lengths_query,
-            actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
         )

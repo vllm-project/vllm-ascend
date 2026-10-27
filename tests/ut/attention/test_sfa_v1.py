@@ -709,8 +709,8 @@ class TestAscendSFAKPathFusion(TestBase):
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
-            actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
-            actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
+            cum_query_lens=torch.tensor([num_tokens], dtype=torch.int32),
+            seq_lens=torch.tensor([num_tokens], dtype=torch.int32),
         )
 
         k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
