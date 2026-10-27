@@ -211,6 +211,10 @@ def bincount(
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
+    if num_tokens == 0 or num_blocks == 0:
+        # Dummy runs and empty batches have no rows to count. Launching a
+        # Triton grid with a zero dimension fails on Ascend with coreDim=0.
+        return
     _bincount_kernel[(num_tokens, num_blocks)](
         expanded_idx_mapping,
         all_token_ids,
