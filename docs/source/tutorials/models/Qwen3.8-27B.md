@@ -516,7 +516,7 @@ curl http://localhost:8000/v1/chat/completions \
         "max_completion_tokens": 1024,
         "temperature": 1.0,
         "top_p": 0.95,
-        "reasoning_effort": "medium",
+        "reasoning_effort": "xhigh",
         "chat_template_kwargs": {
             "enable_thinking": true,
             "preserve_thinking": true
@@ -527,7 +527,7 @@ curl http://localhost:8000/v1/chat/completions \
 Thinking mode is on by default and can be disabled by setting `enable_thinking` to `false` in `chat_template_kwargs`. The example above keeps thinking mode on, and `preserve_thinking` retains the reasoning context of historical messages.
 
 Set `reasoning_effort` in the top-level Chat Completions request body to adjust
-the model's reasoning depth. The example above uses `medium`; omit the field to
+the model's reasoning depth. The example above uses `xhigh`; omit the field to
 use the default `xhigh`. The model officially supports these levels:
 
 - `xhigh`: default; deeper reasoning for complex tasks.
