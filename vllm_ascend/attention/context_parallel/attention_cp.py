@@ -128,7 +128,6 @@ class AscendAttentionDCPMetadataBuilder(
     """Build attention metadata for decode context parallelism."""
 
     metadata_cls = AscendAttentionDCPMetadata
-    consumes_pcp_context = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -142,22 +141,12 @@ class AscendAttentionDCPMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
-        *,
-        pcp_context: "AscendPCPAttentionContext | None" = None,
-        pcp_cache_group_idx: int | None = None,
     ) -> AscendAttentionDCPMetadata:
-        self._pcp_context = pcp_context
-        self._pcp_cache_group_idx = pcp_cache_group_idx
+        self._pcp_context = common_attn_metadata.pcp_context
+        self._pcp_cache_group_idx = common_attn_metadata.pcp_cache_group_idx
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         assert isinstance(metadata, AscendAttentionDCPMetadata)
         return metadata
-
-    def build_for_cudagraph_capture(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        **kwargs,
-    ) -> AscendAttentionDCPMetadata:
-        return self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata, **kwargs)
 
     def _split_decodes_and_prefills(
         self,

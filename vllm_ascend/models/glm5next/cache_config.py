@@ -12,10 +12,6 @@ from dataclasses import dataclass
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.core.kv_cache_utils import (
-    create_kv_cache_group_specs,
-    may_override_num_blocks,
-)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -27,6 +23,20 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
+from vllm_ascend.utils import vllm_version_is
+
+# vLLM #61183 moved these helpers to `kv_cache_planning` on main; the v0.31.0
+# lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.31.0"):
+    from vllm.v1.core.kv_cache_utils import (
+        create_kv_cache_group_specs,
+        may_override_num_blocks,
+    )
+else:
+    from vllm.v1.core.kv_cache_planning import (
+        create_kv_cache_group_specs,
+        may_override_num_blocks,
+    )
 
 
 @dataclass(frozen=True)

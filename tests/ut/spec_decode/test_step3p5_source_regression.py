@@ -13,8 +13,8 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-STEP3P5 = ROOT / "vllm_ascend" / "spec_decode" / "step3p5.py"
-BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
+STEP3P5 = ROOT / "vllm_ascend" / "worker" / "v1" / "spec_decode" / "step3p5.py"
+BASE_PROPOSER = ROOT / "vllm_ascend" / "worker" / "v1" / "spec_decode" / "llm_base_proposer.py"
 WORKER_PATCH_INIT = ROOT / "vllm_ascend" / "patch" / "worker" / "__init__.py"
 LEGACY_STEP3P7_PATCH = ROOT / "vllm_ascend" / "patch" / "worker" / "patch_step3p5_mtp.py"
 
