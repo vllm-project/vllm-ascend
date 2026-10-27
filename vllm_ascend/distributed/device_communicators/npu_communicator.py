@@ -26,6 +26,17 @@ from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
 )
 
 
+def _is_tp_group(unique_name: str) -> bool:
+    """Whether this communicator belongs to the tensor-parallel group.
+
+    ``unique_name`` is ``"<group_name>:<counter>"`` (e.g. ``"tp:0"``,
+    ``"ep:0"``, ``"p_tp_0:0"``); only the base name identifies the parallel
+    dimension. TP-like variants (``p_tp_*``, ``mlptp``, ``otp``, ``emtp``,
+    ``etp``) have different collective semantics, so match ``tp`` exactly.
+    """
+    return unique_name.split(":")[0] == "tp"
+
+
 class _NpuAll2AllManager:
     """No-op all2all_manager for NPU. Used by vLLM main's fault-tolerance
     check (data_parallel_size > 1 and is_moe); NPU does not register a real
@@ -67,11 +78,18 @@ class NPUCommunicator(DeviceCommunicatorBase):
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
         # Optional int8 quantized all-reduce for large bf16 TP collectives,
-        # configured through --additional-config (ascend_config).
+        # configured through --additional-config (ascend_config). The switch is
+        # scoped to the tensor-parallel group: this communicator is also built
+        # for dp/ep/mc2/... groups, whose sizes can exceed the supported TP
+        # range and whose collectives are out of scope.
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | None = None
-        if quantized_cfg.enable:
-            self.quantized_ar = QuantizedAllReduce(self.device_group, min_numel=quantized_cfg.min_numel)
+        if quantized_cfg.enable and _is_tp_group(self.unique_name) and self.world_size > 1:
+            self.quantized_ar = QuantizedAllReduce(
+                self.device_group,
+                min_numel=quantized_cfg.min_numel,
+                world_size=self.world_size,
+            )
             logger.info(
                 "Quantized all-reduce enabled (min_numel=%d, max_q=%d).",
                 self.quantized_ar.min_numel,
