@@ -1286,10 +1286,10 @@ Take `serve` as an example:
 export VLLM_USE_MODELSCOPE=True
 
 vllm bench serve \
-  --model Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
+  --model Eco-Tech/Qwen3.5-397B-A17B-w8a8 \
   --served-model-name qwen3.5 \
   --dataset-name random \
-  --random-input 200 \
+  --random-input-len 200 \
   --num-prompts 200 \
   --request-rate 1 \
   --save-result \
