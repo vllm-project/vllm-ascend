@@ -68,13 +68,12 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
     x = ep_group.all_gather(x, 0)
     if dp_metadata is not None:
         if local_sizes is not None:
-            if all(size == local_sizes[0] for size in local_sizes):
-                # Uniform SP layout (ceil-div + repeat_interleave, the common
-                # SP-MoE case): every rank holds the same token count, so the
-                # gathered rows are already the global tokens in EP rank order
-                # and the view/cat re-assembly would be an identity copy.
-                pass
-            else:
+            # Uniform SP layout (ceil-div + repeat_interleave, the common
+            # SP-MoE case): every rank holds the same token count, so the
+            # gathered rows are already the global tokens in EP rank order
+            # and the re-assembly below would be an identity copy — run it
+            # only for genuinely uneven layouts.
+            if not all(size == local_sizes[0] for size in local_sizes):
                 max_local_size = max(local_sizes)
                 x = x.view(len(local_sizes), max_local_size, *x.shape[1:])
                 x = torch.cat([x[idx, :size] for idx, size in enumerate(local_sizes)], dim=0)
@@ -110,21 +109,24 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(dp_metadata, ep_group)
     if local_sizes is not None:
-        max_local_size = max(local_sizes)
-        if all(size == local_sizes[0] for size in local_sizes):
-            # Uniform SP layout: x is already the (world_size * max_local_size,
-            # ...) buffer that reduce_scatter consumes, and the per-rank trim
-            # below would be a no-op — skip the identity pad/rebuild.
-            return ep_group.reduce_scatter(x, 0)
-        padded_x = x.new_zeros((len(local_sizes), max_local_size, *x.shape[1:]))
-        offset = 0
-        for idx, size in enumerate(local_sizes):
-            padded_x[idx, :size] = x[offset : offset + size]
-            offset += size
-        reduced = ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
-        # The collective needs equal-sized chunks, while the next
-        # sequence-parallel layer expects this rank's original token count.
-        return reduced[: local_sizes[ep_group.rank_in_group]]
+        # Non-uniform layout: pad each rank's shard to the common length
+        # before the collective, then trim the result back to this rank's
+        # original token count.
+        if not all(size == local_sizes[0] for size in local_sizes):
+            max_local_size = max(local_sizes)
+            padded_x = x.new_zeros((len(local_sizes), max_local_size, *x.shape[1:]))
+            offset = 0
+            for idx, size in enumerate(local_sizes):
+                padded_x[idx, :size] = x[offset: offset + size]
+                offset += size
+            reduced = ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+            # The collective needs equal-sized chunks, while the next
+            # sequence-parallel layer expects this rank's original token count.
+            return reduced[: local_sizes[ep_group.rank_in_group]]
+        # Uniform SP layout: x is already the (world_size * max_local_size,
+        # ...) buffer that reduce_scatter consumes, and the per-rank trim
+        # above would be a no-op — skip the identity pad/rebuild.
+        return ep_group.reduce_scatter(x, 0)
 
     # Pad each DP shard back to the common length before EP reduce-scatter.
     dp_size = get_dp_group().world_size
