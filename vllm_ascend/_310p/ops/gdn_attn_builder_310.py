@@ -35,6 +35,9 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     its kernel wrapper; it still uses the shared speculative conv metadata.
     """
 
+    # Its independent forward core only verifies chains.
+    supports_linear_attn_verify = False
+
     # The 310P conv kernel expects PAD_SLOT_ID, not a valid state block.
     _SPEC_GRAPH_PAD_SLOT_ID = PAD_SLOT_ID
     _USE_COMMON_KERNEL_METADATA = False

@@ -449,6 +449,28 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             output[:num_tokens] = out
         return out
 
+    def _verify_spec_rows(self, extension, metadata, mixed_qkv, a, b, kv_cache, out=None):
+        if metadata.num_prefills or metadata.num_decodes:
+            a = a.index_select(0, metadata.spec_token_indx)
+            b = b.index_select(0, metadata.spec_token_indx)
+        if out is None:
+            out = mixed_qkv.new_empty((mixed_qkv.shape[0], self.num_v_heads // self.tp_size, self.head_v_dim))
+        # Reuse the upstream GDNSpecRows dispatch. NPU stores convolution
+        # state as [slot, width - 1, channel]; this view exposes the upstream
+        # contract and keeps extension writes in the original allocation.
+        self._forward_spec_rows(
+            extension,
+            metadata,
+            mixed_qkv,
+            a,
+            b,
+            kv_cache[0].transpose(-1, -2),
+            self.conv1d.weight.view(self.conv1d.weight.shape[0], -1),
+            kv_cache[1],
+            out,
+        )
+        return out
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -503,6 +525,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
 
+        verify_extension = getattr(attn_metadata, "verify_extension", None)
+        use_verify_extension = spec_sequence_masks is not None and verify_extension is not None
+        if use_verify_extension:
+            spec_out = core_attn_out[:num_actual_tokens] if mixed_qkv_non_spec is None else None
+            core_attn_out_spec = self._verify_spec_rows(
+                verify_extension, attn_metadata, mixed_qkv_spec, a, b, self_kv_cache, out=spec_out
+            ).unsqueeze(0)
+            if mixed_qkv_non_spec is None:
+                maybe_save_kv_layer_to_connector("", [])
+                return
+
         # FLA's head-first convolution requires one common Q/K/V head width.
         # Other models retain the existing flat-output path.
         conv_head_num = 0
@@ -510,7 +543,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_head_num = (2 * self.num_k_heads + self.num_v_heads) // self.tp_size
 
         # 1.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and not use_verify_extension:
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
@@ -649,7 +682,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        if mixed_qkv_spec is not None:
+        if mixed_qkv_spec is not None and not use_verify_extension:
             query_spec, key_spec, value_spec = _rearrange_decode_qkv(
                 mixed_qkv_spec,
                 self.key_dim // self.tp_size,
@@ -701,7 +734,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and not use_verify_extension:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
@@ -721,7 +754,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ),
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
             ).unsqueeze(0)
-        else:
+        elif not use_verify_extension:
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
