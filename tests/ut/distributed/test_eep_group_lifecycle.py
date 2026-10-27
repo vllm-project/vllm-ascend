@@ -152,10 +152,7 @@ class _DummyModel:
             expected = float(i + 1) * 100 + sender_rank
             got = self.state_dict()[name].data
             if not torch.allclose(got, torch.full_like(got, expected)):
-                raise RuntimeError(
-                    f"param {name}: got {got.flatten()[0].item()}, "
-                    f"expected {expected}"
-                )
+                raise RuntimeError(f"param {name}: got {got.flatten()[0].item()}, expected {expected}")
 
 
 def _worker(rank: int, ports: dict, result_path: str) -> None:
@@ -201,19 +198,19 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
         # vllm.config package) so it stays active for the worker lifetime.
         vllm_config_vllm_mod._current_vllm_config = stub
 
-        from vllm.distributed.parallel_state import (
-            _replace_active_groups,
-            get_dp_group,
-            get_world_group,
-            init_distributed_environment,
-            initialize_model_parallel,
-        )
         from vllm.distributed.elastic_ep.elastic_execute import (
             batch_transfer_weights,
         )
         from vllm.distributed.elastic_ep.standby_state import (
             create_standby_groups,
             pop_standby_groups,
+        )
+        from vllm.distributed.parallel_state import (
+            _replace_active_groups,
+            get_dp_group,
+            get_world_group,
+            init_distributed_environment,
+            initialize_model_parallel,
         )
 
         # ---- stage: boot ------------------------------------------------
@@ -231,14 +228,11 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
             decode_context_model_parallel_size=1,
             backend="hccl",
         )
-        assert get_world_group().rank == rank, (
-            f"world rank {get_world_group().rank} != {rank}"
-        )
+        assert get_world_group().rank == rank, f"world rank {get_world_group().rank} != {rank}"
         assert get_dp_group().world_size == dp_size
         assert get_dp_group().device_communicator is not None
         assert get_dp_group().device_communicator.device == device, (
-            f"device communicator device "
-            f"{get_dp_group().device_communicator.device} != {device}"
+            f"device communicator device {get_dp_group().device_communicator.device} != {device}"
         )
         stages["boot"] = "PASS"
         finish()
@@ -328,9 +322,7 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
         dist.all_reduce(t, group=get_dp_group().device_group)
         expected = 10.0  # 1 + 2 + 3 + 4
         if t[0].item() != expected:
-            raise RuntimeError(
-                f"final all_reduce got {t[0].item()}, expected {expected}"
-            )
+            raise RuntimeError(f"final all_reduce got {t[0].item()}, expected {expected}")
         b = torch.zeros(4, dtype=torch.float32, device=device)
         if rank == 0:
             b.fill_(7.0)
@@ -389,10 +381,7 @@ def test_eep_group_lifecycle_2_to_4() -> None:
         if os.path.exists(path):
             os.remove(path)
 
-    procs = [
-        ctx.Process(target=_worker, args=(r, ports, paths[r]))
-        for r in range(NEW_DP_SIZE)
-    ]
+    procs = [ctx.Process(target=_worker, args=(r, ports, paths[r])) for r in range(NEW_DP_SIZE)]
     for proc in procs:
         proc.start()
 
@@ -413,9 +402,7 @@ def test_eep_group_lifecycle_2_to_4() -> None:
                     data = json.load(f)
                 if any(v.startswith("FAIL") for v in data.values()):
                     any_fail = True
-                if "cleanup" not in data and not any(
-                    v.startswith("FAIL") for v in data.values()
-                ):
+                if "cleanup" not in data and not any(v.startswith("FAIL") for v in data.values()):
                     all_done = False  # still mid-run (or waiting on peers)
             except (OSError, json.JSONDecodeError):
                 all_done = False
@@ -451,9 +438,7 @@ def test_eep_group_lifecycle_2_to_4() -> None:
             if not (mark == "PASS" or mark.startswith("WARN")):
                 failed = True
             marks.append(mark if mark.startswith("PASS") or mark.startswith("WARN") else mark)
-        line = f"{stage:22s} " + " | ".join(
-            m if len(m) <= 40 else m[:40] + "..." for m in marks
-        )
+        line = f"{stage:22s} " + " | ".join(m if len(m) <= 40 else m[:40] + "..." for m in marks)
         print(line, flush=True)
         for r, m in enumerate(marks):
             if not (m == "PASS" or m.startswith("WARN")):

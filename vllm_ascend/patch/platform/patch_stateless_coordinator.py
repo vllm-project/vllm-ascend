@@ -61,6 +61,7 @@
 #   of hardcoding CudaCommunicator in stateless_coordinator.py.
 
 import vllm.distributed.stateless_coordinator as _stateless_coordinator
+
 from vllm_ascend.distributed.device_communicators.npu_communicator import (
     NPUCommunicator,
 )

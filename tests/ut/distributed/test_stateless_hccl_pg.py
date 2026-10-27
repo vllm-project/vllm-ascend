@@ -118,12 +118,12 @@ def _n0_worker(
     try:
         import torch
         import torch.distributed as dist
-
-        import vllm_ascend  # noqa: F401  (register NPU platform plugin)
         from vllm.distributed.utils import (
             stateless_destroy_torch_distributed_process_group,
             stateless_init_torch_distributed_process_group,
         )
+
+        import vllm_ascend  # noqa: F401  (register NPU platform plugin)
 
         torch.npu.set_device(rank)
 
@@ -147,10 +147,7 @@ def _n0_worker(
             dist.all_reduce(tensor, group=pg)
             expected = float(sum(range(1, ws + 1)))
             if not torch.allclose(tensor, torch.full_like(tensor, expected)):
-                raise RuntimeError(
-                    f"all_reduce mismatch: got {tensor[0].item()}, "
-                    f"expected {expected}"
-                )
+                raise RuntimeError(f"all_reduce mismatch: got {tensor[0].item()}, expected {expected}")
 
         def check_all_gather(pg, ws: int, group_rank: int) -> None:
             tensor = torch.full(
@@ -159,18 +156,12 @@ def _n0_worker(
                 dtype=torch.float32,
                 device="npu",
             )
-            gathered = [
-                torch.empty_like(tensor) for _ in range(ws)
-            ]
+            gathered = [torch.empty_like(tensor) for _ in range(ws)]
             dist.all_gather(gathered, tensor, group=pg)
             for idx in range(ws):
                 expected = float(idx + 1)
-                if not torch.allclose(
-                    gathered[idx], torch.full_like(tensor, expected)
-                ):
-                    raise RuntimeError(
-                        f"all_gather mismatch at index {idx}"
-                    )
+                if not torch.allclose(gathered[idx], torch.full_like(tensor, expected)):
+                    raise RuntimeError(f"all_gather mismatch at index {idx}")
 
         # ---- Scenario 1: repeated create -> collective -> destroy ----
         if _scenario_enabled("create_destroy_cycles"):
@@ -215,14 +206,10 @@ def _n0_worker(
         # and the standby group must remain fully functional afterwards.
         if _scenario_enabled("active_standby_switch"):
             try:
-                active_pg = make_group(
-                    ports.active_port, world_size, rank, "n0_active"
-                )
+                active_pg = make_group(ports.active_port, world_size, rank, "n0_active")
                 check_all_reduce(active_pg, world_size, rank)
 
-                standby_pg = make_group(
-                    ports.standby_port, world_size, rank, "n0_standby"
-                )
+                standby_pg = make_group(ports.standby_port, world_size, rank, "n0_standby")
                 # Both groups usable concurrently.
                 check_all_reduce(active_pg, world_size, rank)
                 check_all_reduce(standby_pg, world_size, rank)
@@ -272,9 +259,7 @@ def _n0_worker(
                     dtype=torch.float32,
                     device="npu",
                 )
-                recv_tensor = torch.zeros(
-                    COLLECTIVE_TENSOR_NUMEL, dtype=torch.float32, device="npu"
-                )
+                recv_tensor = torch.zeros(COLLECTIVE_TENSOR_NUMEL, dtype=torch.float32, device="npu")
                 p2p_ops = []
                 for op_fn, tensor, peer in (
                     (torch.distributed.isend, send_tensor, send_dst),
@@ -287,13 +272,8 @@ def _n0_worker(
                     p2p_ops.append(op)
                 comm.batch_isend_irecv(p2p_ops)
                 expected = float(((rank - 1) % world_size) + 1)
-                if not torch.allclose(
-                    recv_tensor, torch.full_like(recv_tensor, expected)
-                ):
-                    raise RuntimeError(
-                        f"irecv mismatch: got {recv_tensor[0].item()}, "
-                        f"expected {expected}"
-                    )
+                if not torch.allclose(recv_tensor, torch.full_like(recv_tensor, expected)):
+                    raise RuntimeError(f"irecv mismatch: got {recv_tensor[0].item()}, expected {expected}")
                 stateless_destroy_torch_distributed_process_group(pg)
                 record("bidirectional_p2p", True)
             except Exception as exc:  # noqa: BLE001
@@ -305,20 +285,14 @@ def _n0_worker(
         json.dump(results, f, indent=2)
 
 
-@pytest.mark.skipif(
-    not NPU_AVAILABLE, reason="NPU hardware is required for the N0 test"
-)
+@pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU hardware is required for the N0 test")
 def test_stateless_hccl_pg_qualification():
     """N0 qualification: stateless HCCL group lifecycle on real NPU."""
     world_size = int(os.getenv("N0_WORLD_SIZE", DEFAULT_WORLD_SIZE))
     if world_size < 2 or world_size % 2 != 0:
-        pytest.fail(
-            f"N0_WORLD_SIZE must be an even number >= 2, got {world_size}"
-        )
+        pytest.fail(f"N0_WORLD_SIZE must be an even number >= 2, got {world_size}")
     if torch.npu.device_count() < world_size:
-        pytest.skip(
-            f"need {world_size} NPUs, found {torch.npu.device_count()}"
-        )
+        pytest.skip(f"need {world_size} NPUs, found {torch.npu.device_count()}")
 
     total_ports = (
         NUM_CREATE_DESTROY_CYCLES + 2 + 2 + 1  # cycles + subgroups + switch + p2p
@@ -326,19 +300,14 @@ def test_stateless_hccl_pg_qualification():
     free_ports = _find_free_ports(total_ports)
     ports = ScenarioPorts(
         cycle_ports=free_ports[:NUM_CREATE_DESTROY_CYCLES],
-        subgroup_ports=free_ports[
-            NUM_CREATE_DESTROY_CYCLES : NUM_CREATE_DESTROY_CYCLES + 2
-        ],
+        subgroup_ports=free_ports[NUM_CREATE_DESTROY_CYCLES : NUM_CREATE_DESTROY_CYCLES + 2],
         active_port=free_ports[-3],
         standby_port=free_ports[-2],
         p2p_port=free_ports[-1],
     )
 
     with tempfile.TemporaryDirectory(prefix="n0_stateless_hccl_") as tmpdir:
-        result_paths = [
-            os.path.join(tmpdir, f"rank{rank}.json")
-            for rank in range(world_size)
-        ]
+        result_paths = [os.path.join(tmpdir, f"rank{rank}.json") for rank in range(world_size)]
         ctx = mp.get_context("spawn")
         workers = [
             ctx.Process(
@@ -363,10 +332,7 @@ def test_stateless_hccl_pg_qualification():
         failures = []
         for rank, path in enumerate(result_paths):
             if not os.path.exists(path):
-                failures.append(
-                    f"rank {rank}: no result file (worker crashed, "
-                    f"exitcode={workers[rank].exitcode})"
-                )
+                failures.append(f"rank {rank}: no result file (worker crashed, exitcode={workers[rank].exitcode})")
                 continue
             with open(path, encoding="utf-8") as f:
                 results = json.load(f)

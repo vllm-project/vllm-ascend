@@ -61,6 +61,11 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
+    import torch.distributed  # noqa: F401
+    from torch.distributed import ProcessGroup
+    from torch.distributed.distributed_c10d import PrefixStore
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
@@ -265,11 +270,11 @@ class NPUPlatform(Platform):
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
-        prefix_store: "PrefixStore",
+        prefix_store: PrefixStore,
         group_rank: int,
         group_size: int,
-        timeout: "timedelta",
-    ) -> "ProcessGroup":
+        timeout: timedelta,
+    ) -> ProcessGroup:
         """Create a stateless HCCL process group.
 
         Used by vLLM elastic EP to create standby groups that live outside
@@ -288,10 +293,7 @@ class NPUPlatform(Platform):
         if not is_hccl_available():
             raise RuntimeError("HCCL is not available")
         if backend != "hccl":
-            raise ValueError(
-                f"Unsupported stateless distributed backend on Ascend NPU: "
-                f"{backend}, expected 'hccl'"
-            )
+            raise ValueError(f"Unsupported stateless distributed backend on Ascend NPU: {backend}, expected 'hccl'")
 
         hccl_backend = Backend("hccl")
         pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
@@ -308,9 +310,7 @@ class NPUPlatform(Platform):
         # group_id lets sequentially created comms collide on HCCL's
         # identity-scoped resources (e.g. the EI0019 port-60000 bind).
         underlying_store = prefix_store.underlying_store
-        pg_options.group_id = (
-            f"tcp://{underlying_store.host}:{underlying_store.port}/"
-        )
+        pg_options.group_id = f"tcp://{underlying_store.host}:{underlying_store.port}/"
         # Give each stateless group its own HCCL host-socket port window.
         # Listeners used for rootInfo detection are not always released
         # when a group is destroyed, so a later group can hit
@@ -319,11 +319,16 @@ class NPUPlatform(Platform):
         # every rank, and HCCL comm init is lazy (at the first collective),
         # so the env value seen at init time is this group's. Window:
         # [base, base + 100), 50 windows starting at 60000. An explicitly
-        # configured HCCL_IF_BASE_PORT (operator override) wins.
-        if "HCCL_IF_BASE_PORT" not in os.environ:
-            os.environ["HCCL_IF_BASE_PORT"] = str(
-                60000 + (underlying_store.port % 50) * 100
-            )
+        # configured HCCL_IF_BASE_PORT (operator override) wins. We capture
+        # the operator override once and always assign a unique port window
+        # per stateless group otherwise, because reusing the same environment
+        # value across groups causes EI0019 port collisions.
+        if not hasattr(cls, "_operator_hccl_if_base_port"):
+            cls._operator_hccl_if_base_port = os.environ.get("HCCL_IF_BASE_PORT")
+        if cls._operator_hccl_if_base_port is not None:
+            os.environ["HCCL_IF_BASE_PORT"] = cls._operator_hccl_if_base_port
+        else:
+            os.environ["HCCL_IF_BASE_PORT"] = str(60000 + (underlying_store.port % 50) * 100)
         # The NPU-adapter socket used for rootInfo detection defaults to a
         # single port (16666) shared by every process on the host. An
         # elastic-EP worker hosts several HCCL comms at once (its local
@@ -332,14 +337,10 @@ class NPUPlatform(Platform):
         # Communication_Error_Bind_IP_Port (EI0020, "port already bound").
         ensure_hccl_socket_port_range()
 
-        backend_class = ProcessGroupHCCL(
-            prefix_store, group_rank, group_size, pg_options
-        )
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size, pg_options)
         backend_class._set_sequence_number_for_group()
 
-        pg._register_backend(
-            torch.device("npu"), ProcessGroup.BackendType.CUSTOM, backend_class
-        )
+        pg._register_backend(torch.device("npu"), ProcessGroup.BackendType.CUSTOM, backend_class)
         return pg
 
     @classmethod
