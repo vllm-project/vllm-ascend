@@ -1715,7 +1715,7 @@ def _reshape_kv_cache_v2(
                 slot_offset = owner.slot * six_region_layout.slot_backing_size
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
-                    region = six_region_layout.region("r2")
+                    region = six_region_layout.region("r0")
                     k_bytes = (
                         kv_cache_spec.block_size
                         * kv_cache_spec.num_kv_heads
