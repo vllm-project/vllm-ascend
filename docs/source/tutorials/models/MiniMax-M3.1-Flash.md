@@ -31,10 +31,10 @@ The official release of MiniMax-M3.1-Flash is available on [Hugging Face](https:
 
 | Weight Version | Deployment | Model Path |
 | --- | --- | --- |
-| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
-| MiniMax-M3.1-Flash-MXFP8 | 950DT products, two-node PD disaggregation | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
+| MiniMax-M3.1-Flash-W8A8 | Atlas 800I A3, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8) |
+| MiniMax-M3.1-Flash-MXFP8 | 950DT products, three-node PD disaggregation (1P2D) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Minimax-M3.1-Flash-w8a8-mxfp8) |
 
-Download the weight variant used by the serving commands to the same model directory on both nodes. It is recommended to place the model weight in a shared cache directory.
+Download the weight variant used by the serving commands to the same model directory on all participating nodes. It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -271,25 +271,28 @@ Single-node deployment runs Prefill and Decode on the same host. Both examples u
 
     Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
-### 5.2 PD Disaggregation
+### 5.2 PD Disaggregation (1P2D) {: #52-pd-disaggregation }
 
-PD disaggregation runs Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
+Both platforms use one Prefill node and two Decode nodes (1P2D), with Prefill and Decode on separate hosts. Both platforms use DSpark speculative decoding with seven draft tokens and probabilistic draft sampling. Configure the host-specific values at the beginning of each Prefill and Decode script before starting the service.
 
-Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress and `Application startup complete` to judge readiness. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
+Monitor the role logs while weights load and graph capture completes. Startup duration depends on storage, hardware, and the selected configuration; use continuing log progress to monitor initialization, and wait for `Application startup complete` on each HTTP-serving instance to judge readiness. Headless workers join the distributed Decode service without exposing their own HTTP API. If logs stop progressing or report an error, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails) before starting the proxy.
 
 === "A3 series (W8A8)"
+
+    Use one Prefill node and two Decode nodes, each with all 16 NPUs. Prefill uses DP1 × TP4 × PP4. Decode uses DP8 × TP4 × PP1 across the two nodes: D1 runs global DP ranks 0–3, and D2 runs ranks 4–7. Each rank starts one TP4 service on four local NPUs. All eight Decode ranks share the D1 communication IP as their DP master address and use the same RPC port. Use the same image and weights on all three nodes.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
-    | DP × TP × PP | 1 × 4 × 4 | 4 × 4 × 1 |
+    | DP × TP × PP | 1 × 4 × 4 | 8 × 4 × 1 across two nodes |
+    | Global DP ranks | 0 | D1: 0–3; D2: 4–7 |
     | PP layer partition | 15,15,15,15 | — |
     | max-num-seqs | 32 | 128 per replica |
     | Execution mode | Eager | FULL_DECODE_ONLY |
     | HCCL_BUFFSIZE (MB) | 512 | 2048 |
 
-    **Prefill Node**
+    **Prefill Node (P)**
 
     Save the following as `run_prefill.sh` on the Prefill node.
 
@@ -370,7 +373,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
-                "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
     ```
@@ -381,10 +384,9 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     nohup bash run_prefill.sh > prefill.log 2>&1 &
     ```
 
-    **Decode Node**
+    **Decode Node 1 (D1, DP ranks 0–3)**
 
-    Save the following as `run_decode_rank.sh` on the Decode node. Each invocation
-    starts one TP4 replica with a distinct DP rank, port range, and device group.
+    Save the following as `run_decode_node1_rank.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to D1's reachable communication IP. Keep the image, weights, global parallelism, and RPC port identical on both Decode nodes. Each invocation starts one TP4 service; global DP ranks identify services across both nodes, while local ranks select the NPU group on the current node.
 
     ```bash
     #!/usr/bin/env bash
@@ -394,7 +396,9 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
+    DECODE_HEAD_IP="<DECODE1_NODE_IP>"
     DP_RANK=${1:-0}
+    LOCAL_DP_RANK=$DP_RANK
     SERVICE_PORT=$((19200 + DP_RANK))
     DP_RPC_PORT=16920
     KV_PORT=$((25000 + DP_RANK*32))
@@ -410,7 +414,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     unset HCCL_INTRA_ROCE_ENABLE
     export HCCL_OP_EXPANSION_MODE=AIV
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
-    export ASCEND_RT_VISIBLE_DEVICES="$((DP_RANK*4)),$((DP_RANK*4+1)),$((DP_RANK*4+2)),$((DP_RANK*4+3))"
+    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_DP_RANK*4)),$((LOCAL_DP_RANK*4+1)),$((LOCAL_DP_RANK*4+2)),$((LOCAL_DP_RANK*4+3))"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -439,10 +443,10 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --reasoning-parser minimax_m3 \
         --enable-auto-tool-choice \
         --tool-call-parser minimax_m3 \
-        --data-parallel-size 4 \
+        --data-parallel-size 8 \
         --data-parallel-size-local 1 \
         --data-parallel-rank "$DP_RANK" \
-        --data-parallel-address "$LOCAL_IP" \
+        --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --disable-hybrid-kv-cache-manager \
@@ -467,16 +471,116 @@ Monitor the role logs while weights load and graph capture completes. Startup du
             "kv_connector_extra_config":{
                 "use_ascend_direct":true,
                 "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
-                "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
             }
         }'
     ```
 
-    Start all four Decode replicas:
+    Start all four D1 services inside the D1 container, then start D2 without waiting for D1 to become ready:
 
     ```bash
     for rank in 0 1 2 3; do
-        nohup bash run_decode_rank.sh "$rank" > "decode-$rank.log" 2>&1 &
+        nohup bash run_decode_node1_rank.sh "$rank" > "decode-$rank.log" 2>&1 &
+    done
+    ```
+
+    **Decode Node 2 (D2, DP ranks 4–7)**
+
+    Save the following as `run_decode_node2_rank.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to D1's reachable communication IP. Keep the image, weights, global parallelism, and RPC port identical on both Decode nodes. Each invocation starts one TP4 service; global DP ranks identify services across both nodes, while local ranks select the NPU group on the current node.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    DECODE_HEAD_IP="<DECODE1_NODE_IP>"
+    DP_RANK=${1:-4}
+    LOCAL_DP_RANK=$((DP_RANK - 4))
+    SERVICE_PORT=$((19200 + DP_RANK))
+    DP_RPC_PORT=16920
+    KV_PORT=$((25000 + DP_RANK*32))
+    MAX_NUM_SEQS=128
+    MAX_MODEL_LEN=263000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    # Fixed runtime configuration.
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP="$LOCAL_IP"
+    unset HCCL_INTRA_ROCE_ENABLE
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES="$((LOCAL_DP_RANK*4)),$((LOCAL_DP_RANK*4+1)),$((LOCAL_DP_RANK*4+2)),$((LOCAL_DP_RANK*4+3))"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --hf-overrides '{"architectures":["MiniMaxM3SparseForCausalLM"]}' \
+        --language-model-only \
+        --quantization ascend \
+        --dtype bfloat16 \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
+        --enable-expert-parallel \
+        --distributed-executor-backend mp \
+        --seed 1024 \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --block-size 128 \
+        --kv-cache-dtype bfloat16 \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --data-parallel-size 8 \
+        --data-parallel-size-local 1 \
+        --data-parallel-rank "$DP_RANK" \
+        --data-parallel-address "$DECODE_HEAD_IP" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --disable-hybrid-kv-cache-manager \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "draft_sample_method":"probabilistic"
+        }' \
+        --additional-config '{
+            "enable_cpu_binding":true,
+            "multistream_overlap_shared_expert":true,
+            "enable_shared_expert_dp":true,
+            "enable_flashcomm1":true,
+            "weight_nz_mode":2
+        }' \
+        --kv-transfer-config '{
+            "kv_connector":"MooncakeConnectorV1",
+            "kv_role":"kv_consumer",
+            "kv_port":'"$KV_PORT"',
+            "engine_id":"m31flash-d-dp'"$DP_RANK"'",
+            "kv_connector_extra_config":{
+                "use_ascend_direct":true,
+                "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"15,15,15,15"},
+                "decode":{"dp_size":8,"tp_size":4,"pp_size":1}
+            }
+        }'
+    ```
+
+    Immediately start all four D2 services inside the D2 container. All eight global DP ranks must join before Decode initialization can complete:
+
+    ```bash
+    for rank in 4 5 6 7; do
+        nohup bash run_decode_node2_rank.sh "$rank" > "decode-$rank.log" 2>&1 &
     done
     ```
 
@@ -484,34 +588,46 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
     Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
 
-    After the five engines print `Application startup complete`, run the following
+    After Prefill and all eight Decode services print `Application startup complete`, run the following
     inside the Prefill container:
 
     ```bash
     PREFILL_IP="<PREFILL_NODE_IP>"
-    DECODE_IP="<DECODE_NODE_IP>"
+    DECODE1_IP="<DECODE1_NODE_IP>"
+    DECODE2_IP="<DECODE2_NODE_IP>"
 
     python3 /workspace/load_balance_proxy_server_example.py \
-        --host 0.0.0.0 --port 19080 \
-        --prefiller-hosts "$PREFILL_IP" --prefiller-ports 19100 \
-        --decoder-hosts "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" "$DECODE_IP" \
-        --decoder-ports 19200 19201 19202 19203
+        --host 0.0.0.0 \
+        --port 19080 \
+        --prefiller-hosts "$PREFILL_IP" \
+        --prefiller-ports 19100 \
+        --decoder-hosts \
+            "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" "$DECODE1_IP" \
+            "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" "$DECODE2_IP" \
+        --decoder-ports \
+            19200 19201 19202 19203 \
+            19204 19205 19206 19207
     ```
 
 === "950DT products"
 
-    Use one Prefill node and one Decode node, each with all eight NPUs. Prefill uses DP1 × TP4 × PP2, and Decode uses DP2 × TP4 × PP1. Each node starts one vLLM API service.
+    Use one Prefill node and two Decode nodes (1P2D), each with all eight NPUs. Prefill uses DP1 × TP4 × PP2. The two Decode nodes form one distributed DP4 × TP4 × PP1 / EP16 instance, with two local DP ranks per node. The Decode head runs ranks 0–1 and provides the HTTP API; the headless worker runs ranks 2–3.
+
+    The [reference deployment](https://github.com/CXY-Katrina/workspace/tree/6a00e8b246ebb9274f649956c59ccb2c5ec66adf/minimax_m3/minimax_m3.1_flash/deployments/2026-10-27-a5-1p2d) used `quay.io/atlas-ci/vllm-atlas-temp:minimax-m3.1-flash-a5-openeuler-40260585905-1-arm64-temp` and W8A8-MXFP8 QuaRot l32 weights. Set `IMAGE` and `MODEL_DIR` in Section 4.2 accordingly, keeping the documented container mount path. Use the same image and weights on all three nodes.
 
     The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles.
 
     | Parameter | Prefill | Decode |
     | --- | --- | --- |
-    | DP × TP × PP | 1 × 4 × 2 | 2 × 4 × 1 |
-    | max-num-seqs | 128 | 256 |
-    | HCCL_BUFFSIZE (MB) | 512 | 2048 |
+    | DP × TP × PP | 1 × 4 × 2 | 4 × 4 × 1 across two nodes |
+    | Local DP ranks | 0 | Head: 0–1; worker: 2–3 |
+    | max-num-seqs | 128 | 256 per DP engine |
+    | max-num-batched-tokens | 16384 | 32768 |
+    | gpu-memory-utilization | 0.85 | 0.92 |
+    | HCCL_BUFFSIZE (MB) | 512 | 1024 |
     | Main-model execution | Eager | FULL_DECODE_ONLY |
 
-    **Prefill Node**
+    **Prefill Node (P)**
 
     Save the following as `run_prefill.sh` on the Prefill node. Configure the model path, host IP address, and network interface at the beginning of the script.
 
@@ -528,10 +644,11 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     KV_PORT=30000
     MAX_NUM_SEQS=128
     MAX_MODEL_LEN=133000
-    MAX_BATCHED_TOKENS=32768
-    GPU_MEMORY_UTILIZATION=0.92
+    MAX_BATCHED_TOKENS=16384
+    GPU_MEMORY_UTILIZATION=0.85
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
     export HCCL_BUFFSIZE=512
     export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
@@ -594,7 +711,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
                     "pp_size": 2
                 },
                 "decode": {
-                    "dp_size": 2,
+                    "dp_size": 4,
                     "tp_size": 4,
                     "pp_size": 1
                 }
@@ -608,9 +725,9 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     nohup bash run_prefill.sh > prefill.log 2>&1 &
     ```
 
-    **Decode Node**
+    **Decode Head Node (D1, DP ranks 0–1)**
 
-    Save the following as `run_decode.sh` on the Decode node. Configure the model path, host IP address, and network interface at the beginning of the script.
+    Save the following as `run_decode_head.sh` on D1. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to its reachable communication IP. This node provides the Decode HTTP API. Ensure all three nodes' communication IPs resolve promptly; configure matching `/etc/hosts` entries if needed.
 
     ```bash
     #!/usr/bin/env bash
@@ -620,6 +737,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
     LOCAL_IP="<CURRENT_NODE_IP>"
     NIC_NAME="<CURRENT_NODE_NIC>"
+    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
     SERVICE_PORT=31060
     DP_RPC_PORT=6885
     KV_PORT=26900
@@ -629,7 +747,8 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     GPU_MEMORY_UTILIZATION=0.92
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=2048
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP="$LOCAL_IP"
     export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
@@ -640,9 +759,10 @@ Monitor the role logs while weights load and graph capture completes. Startup du
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
         --port "$SERVICE_PORT" \
-        --data-parallel-size 2 \
+        --data-parallel-size 4 \
         --data-parallel-size-local 2 \
-        --data-parallel-address "$LOCAL_IP" \
+        --data-parallel-start-rank 0 \
+        --data-parallel-address "$DECODE_HEAD_IP" \
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size 4 \
         --pipeline-parallel-size 1 \
@@ -663,8 +783,9 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         --tool-call-parser minimax_m3 \
         --language-model-only \
         --safetensors-load-strategy prefetch \
+        --enable-prefix-caching \
         --seed 1024 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
         --speculative-config '{
             "method":"dspark",
             "num_speculative_tokens":7,
@@ -694,7 +815,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
                     "pp_size": 2
                 },
                 "decode": {
-                    "dp_size": 2,
+                    "dp_size": 4,
                     "tp_size": 4,
                     "pp_size": 1
                 }
@@ -702,27 +823,135 @@ Monitor the role logs while weights load and graph capture completes. Startup du
         }'
     ```
 
-    Start the Decode engine inside the Decode container:
+    Start the Decode head inside its container:
 
     ```bash
-    nohup bash run_decode.sh > decode.log 2>&1 &
+    nohup bash run_decode_head.sh > decode.log 2>&1 &
     ```
+
+    **Decode Worker Node (D2, DP ranks 2–3, headless)**
+
+    Save the following as `run_decode_worker.sh` on D2. Set `LOCAL_IP` and `NIC_NAME` for this host, and set `DECODE_HEAD_IP` to the same D1 communication IP used above. Keep the image, weights, RPC/KV ports, and global parallelism settings identical to D1. This headless node does not expose an HTTP API.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -e
+
+    # Configure these values for the current host.
+    MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8-MXFP8"
+    LOCAL_IP="<CURRENT_NODE_IP>"
+    NIC_NAME="<CURRENT_NODE_NIC>"
+    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
+    SERVICE_PORT=31060
+    DP_RPC_PORT=6885
+    KV_PORT=26900
+    MAX_NUM_SEQS=256
+    MAX_MODEL_LEN=133000
+    MAX_BATCHED_TOKENS=32768
+    GPU_MEMORY_UTILIZATION=0.92
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=1800
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP="$LOCAL_IP"
+    export HCCL_OP_EXPANSION_MODE="CCU_SCHED"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$SERVICE_PORT" \
+        --data-parallel-size 4 \
+        --data-parallel-size-local 2 \
+        --data-parallel-start-rank 2 \
+        --headless \
+        --data-parallel-address "$DECODE_HEAD_IP" \
+        --data-parallel-rpc-port "$DP_RPC_PORT" \
+        --tensor-parallel-size 4 \
+        --pipeline-parallel-size 1 \
+        --served-model-name minimax-m3.1-flash \
+        --trust-remote-code \
+        --dtype bfloat16 \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --disable-hybrid-kv-cache-manager \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --distributed-executor-backend mp \
+        --kv-cache-dtype fp8 \
+        --reasoning-parser minimax_m3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser minimax_m3 \
+        --language-model-only \
+        --safetensors-load-strategy prefetch \
+        --enable-prefix-caching \
+        --seed 1024 \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
+        --speculative-config '{
+            "method":"dspark",
+            "num_speculative_tokens":7,
+            "enforce_eager":true,
+            "kv_cache_dtype":"bfloat16",
+            "draft_sample_method":"probabilistic"
+        }' \
+        --additional-config '{
+            "enable_cpu_binding": true,
+            "ascend_compilation_config": {
+                "fuse_norm_quant": false,
+                "fuse_qknorm_rope": true
+            },
+            "multistream_overlap_shared_expert": true,
+            "enable_shared_expert_dp": true,
+            "enable_flashcomm1": true
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "'"$KV_PORT"'",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {
+                    "dp_size": 1,
+                    "tp_size": 4,
+                    "pp_size": 2
+                },
+                "decode": {
+                    "dp_size": 4,
+                    "tp_size": 4,
+                    "pp_size": 1
+                }
+            }
+        }'
+    ```
+
+    Immediately start the worker inside its container; do not wait for D1 to become ready first:
+
+    ```bash
+    nohup bash run_decode_worker.sh > decode.log 2>&1 &
+    ```
+
+    Both Decode nodes must join before the distributed Decode service can become ready.
 
     **Load-balance Proxy**
 
     Download [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the official repository and save it as `/workspace/load_balance_proxy_server_example.py` inside the Prefill container.
 
-    After both engines print `Application startup complete`, run the following
+    After Prefill and the Decode head print `Application startup complete`, run the following
     inside the Prefill container:
 
     ```bash
     PREFILL_IP="<PREFILL_NODE_IP>"
-    DECODE_IP="<DECODE_NODE_IP>"
+    DECODE_HEAD_IP="<DECODE_HEAD_NODE_IP>"
 
     python3 /workspace/load_balance_proxy_server_example.py \
         --host 0.0.0.0 --port 8009 \
         --prefiller-hosts "$PREFILL_IP" --prefiller-ports 31050 \
-        --decoder-hosts "$DECODE_IP" --decoder-ports 31060
+        --decoder-hosts "$DECODE_HEAD_IP" --decoder-ports 31060 \
+        --max-retries 0 --workers 4
     ```
 
 ## 6 Functional Verification
@@ -859,64 +1088,46 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 ## 8 Performance Evaluation
 
-Use [vLLM serving benchmarks](../../developer_guide/performance_and_debug/performance_benchmark.md#321-online-serving) to measure request throughput, output-token throughput, time to first token (TTFT), and time per output token (TPOT). Start the matching service in [Section 5](#5-online-service-deployment) and wait until it is ready before running the benchmark from a container with the model tokenizer available.
+### 8.1 Using AISBench
 
-Set `SERVICE_HOST` to the reachable API or proxy IP. Use port `11223` for single-node deployment, `19080` for the A3 PD proxy, or `8009` for the 950DT products PD proxy. Set `MODEL_PATH` to the corresponding mounted weight directory from [Section 4](#4-installation); the following example uses the A3 path.
+For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+The following is an example configuration for the performance evaluation config file:
+
+```python
+# Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py
+from ais_bench.benchmark.models import VLLMCustomAPIChat
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
+
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChat,
+        abbr="vllm-api-stream-chat",
+        path="your_model_path",
+        model="minimax-m3.1-flash",
+        stream=True,
+        request_rate=0,
+        use_timestamp=False,
+        retry=2,
+        host_ip="127.0.0.1",
+        host_port=8009,
+        max_out_len=1024,
+        batch_size=32,
+        trust_remote_code=False,
+        generation_kwargs=dict(
+            temperature=0,
+            ignore_eos=True
+        ),
+    )
+]
+```
+
+**Run the performance evaluation using the GSM8K dataset as an example:**
 
 ```bash
-SERVICE_HOST="<SERVICE_IP>"
-SERVICE_PORT=11223
-MODEL_PATH="/models/MiniMax-M3.1-Flash-W8A8"
-mkdir -p ./benchmark_results
-
-vllm bench serve \
-    --backend vllm \
-    --base-url "http://${SERVICE_HOST}:${SERVICE_PORT}" \
-    --endpoint /v1/completions \
-    --model "$MODEL_PATH" \
-    --served-model-name minimax-m3.1-flash \
-    --trust-remote-code \
-    --dataset-name random \
-    --random-input-len 1024 \
-    --random-output-len 128 \
-    --num-prompts 32 \
-    --max-concurrency 4 \
-    --request-rate inf \
-    --ignore-eos \
-    --save-result \
-    --result-dir ./benchmark_results
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 128
 ```
-
-This is an initial benchmark workload, not a peak-performance configuration. A successful run completes all 32 requests with no failed requests and saves a result JSON file under `./benchmark_results`. The output has the following form; `<measured>` fields are placeholders for the values produced by your run, not MiniMax-M3.1-Flash performance measurements:
-
-```text
-============ Serving Benchmark Result ============
-Successful requests:                     32
-Failed requests:                         0
-Benchmark duration (s):                  <measured>
-Total input tokens:                      <measured>
-Total generated tokens:                  <measured>
-Request throughput (req/s):              <measured>
-Output token throughput (tok/s):         <measured>
-Peak output token throughput (tok/s):    <measured>
-Peak concurrent requests:                <measured>
-Total Token throughput (tok/s):          <measured>
----------------Time to First Token----------------
-Mean TTFT (ms):                          <measured>
-Median TTFT (ms):                        <measured>
-P99 TTFT (ms):                           <measured>
------Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          <measured>
-Median TPOT (ms):                        <measured>
-P99 TPOT (ms):                           <measured>
----------------Inter-token Latency----------------
-Mean ITL (ms):                           <measured>
-Median ITL (ms):                         <measured>
-P99 ITL (ms):                            <measured>
-==================================================
-```
-
-Keep the hardware, image tag, weight variant, serving command, input/output lengths, request rate, and concurrency with each result. Increase the number of requests for sustained measurements and repeat the same workload when comparing configurations. Refer to the [benchmark CLI arguments](https://docs.vllm.ai/en/latest/cli/bench/serve/) for workload and result options.
 
 ## 9 Performance Tuning
 
@@ -966,6 +1177,6 @@ The scripts in Section 5.2 already include this setting. It changes only the dra
 
 **Cause:** Weight loading, initialization, and graph capture depend on storage speed, the hardware, and the selected configuration. Elapsed time alone does not distinguish ongoing initialization from a failure.
 
-**Resolution:** Follow the foreground logs for single-node deployment. For PD deployment, use `tail -f prefill.log` on Prefill; use `tail -f decode-0.log decode-1.log decode-2.log decode-3.log` for A3 Decode, or `tail -f decode.log` for 950DT products Decode. Allow initialization to continue while logs show progress. Send requests or start the PD proxy after every required service prints `Application startup complete`; the single-node health check must return `200`.
+**Resolution:** Follow the foreground logs for single-node deployment. For PD deployment, use `tail -f prefill.log` on Prefill; use `tail -f decode-0.log decode-1.log decode-2.log decode-3.log` on A3 D1 and `tail -f decode-4.log decode-5.log decode-6.log decode-7.log` on A3 D2; use `tail -f decode.log` on each 950DT products Decode node. Allow initialization to continue while logs show progress. Send requests or start the PD proxy after every required service prints `Application startup complete`; the single-node health check must return `200`.
 
 If logs stop progressing or the process exits, inspect the first error in every affected role log. Check that `MODEL_PATH` points to the matching weight variant mounted in Section 4, confirm the expected devices are visible with `npu-smi info`, and compare the actual startup command with the corresponding platform example. For PD communication failures, also recheck `LOCAL_IP`, `NIC_NAME`, and [inter-node connectivity](#32-verify-multi-node-communication). For memory errors, review the context budget and concurrency described in [Section 5](#5-online-service-deployment) and the [out-of-memory FAQ](../../faqs.md#12-how-to-handle-the-out-of-memory-issue).
