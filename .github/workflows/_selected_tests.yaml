@@ -354,6 +354,66 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Build and install GDN operators for 310P tests
+        if: ${{ matrix.group.npu_type == '310p' }}
+        env:
+          OPS_TRANSFORMER_REPO: https://gitcode.com/cann/ops-transformer.git
+          OPS_TRANSFORMER_COMMIT: 0340eae051ddf5ab956df0f7e0396dbd6314cfc5
+        run: |
+          set -eo pipefail
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          TORCH_EXTENSIONS_DIR="$(mktemp -d /tmp/gdn-torch-extensions.XXXXXX)"
+          export TORCH_EXTENSIONS_DIR
+
+          python3 -m pip install build wheel setuptools ninja
+
+          GDN_SOURCE="$(mktemp -d /tmp/gdn-ops.XXXXXX)"
+          trap 'rm -rf -- "$GDN_SOURCE"' EXIT
+          git init "$GDN_SOURCE"
+          git -C "$GDN_SOURCE" remote add origin "$OPS_TRANSFORMER_REPO"
+          git -C "$GDN_SOURCE" fetch --depth 1 origin "$OPS_TRANSFORMER_COMMIT"
+          git -C "$GDN_SOURCE" checkout --detach FETCH_HEAD
+          test "$(git -C "$GDN_SOURCE" rev-parse HEAD)" = "$OPS_TRANSFORMER_COMMIT"
+          cd "$GDN_SOURCE"
+
+          bash build.sh --pkg --experimental \
+            --ops=fused_gdn_gating,chunk_gated_delta_rule_compute_wy \
+            --soc=ascend310p -j16
+
+          GDN_RUN_PACKAGE="$(find build_out -maxdepth 1 -type f \
+            -name 'cann-ops-transformer-custom_linux-*.run' -print -quit)"
+          test -n "$GDN_RUN_PACKAGE"
+          bash "$GDN_RUN_PACKAGE"
+
+          bash build.sh --torch_extension --experimental
+          test -n "$ASCEND_HOME_PATH"
+          test -d "$ASCEND_HOME_PATH/python/site-packages"
+
+          python3 -m pip install \
+            --target="$ASCEND_HOME_PATH/python/site-packages" \
+            --upgrade --force-reinstall --no-deps \
+            build_out/cann_ops_transformer-*.whl
+
+          GDN_VENDOR="$ASCEND_HOME_PATH/opp/vendors/custom_transformer"
+          test -d "$GDN_VENDOR/op_api/lib"
+
+          export ASCEND_CUSTOM_OPP_PATH="$GDN_VENDOR${ASCEND_CUSTOM_OPP_PATH:+:$ASCEND_CUSTOM_OPP_PATH}"
+          export LD_LIBRARY_PATH="$GDN_VENDOR/op_api/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PYTHONPATH="$ASCEND_HOME_PATH/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+
+          # Persist the environment for subsequent test steps.
+          {
+            echo "ASCEND_CUSTOM_OPP_PATH=$ASCEND_CUSTOM_OPP_PATH"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+            echo "PYTHONPATH=$PYTHONPATH"
+            echo "TORCH_EXTENSIONS_DIR=$TORCH_EXTENSIONS_DIR"
+          } >> "$GITHUB_ENV"
+
+          cd /tmp
+          python3 -c "import cann_ops_transformer; \
+            print('Loaded package:', cann_ops_transformer.__file__); \
+            from cann_ops_transformer.ops import fused_gdn_gating, chunk_gated_delta_rule_compute_wy"
+
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
