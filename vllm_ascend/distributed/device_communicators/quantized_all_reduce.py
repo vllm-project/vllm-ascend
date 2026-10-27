@@ -18,6 +18,16 @@
 Halves the all-reduce payload (bf16 -> int8 -> reduce -> bf16). Opt-in, and it
 only pays off for large messages, so it is gated by a payload threshold.
 
+Group scope
+-----------
+The wrapper is constructed for every parallel group (tp, ep, mc2, dp, pp, ...),
+because the same ``NPUCommunicator`` backs all of them, but only groups with at
+most 8 ranks take the int8 path. EP/MC2 groups are ``DP x PCP x TP`` sized, so
+they can be larger than any valid TP degree; those groups keep the plain bf16
+path and never fail at start-up. The tensor-parallel degree itself is validated
+when the config is parsed (``QuantizedAllReduceConfig._validate_preconditions``),
+so TP > 8 is still rejected up front.
+
 Configuration
 -------------
 Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
@@ -47,6 +57,7 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
+from vllm.logger import logger
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -54,7 +65,8 @@ from vllm_ascend.device.hardware import AscendDeviceType
 # Validated on A2 (910B, measured end to end); A3 (910C) supports the kernels
 # but its int8 reduce behaviour is unmeasured.
 _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3)
-# TP>8 leaves too few int8 levels (ws=16 -> max_q=7), so refuse instead.
+# Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
+# they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
 
 
@@ -74,22 +86,29 @@ class QuantizedAllReduce:
                 f"but the current device family is {device_type.name}. "
                 "Disable it or use a supported device."
             )
-        if self.world_size > _MAX_VALID_WORLD_SIZE:
-            raise RuntimeError(
-                f"additional_config.quantized_all_reduce_config supports TP size up to "
-                f"{_MAX_VALID_WORLD_SIZE} (the integer-safe bound leaves "
-                f"too few int8 levels beyond that), but the current TP size "
-                f"is {self.world_size}."
-            )
+        # This communicator is also built for non-TP groups (ep/mc2/dp/...),
+        # whose sizes are not a tensor-parallel degree; those groups keep bf16.
+        self.supported = self.world_size <= _MAX_VALID_WORLD_SIZE
         # Integer-safe bound: scale = amax / max_q keeps every rank within
         # +/-max_q, so the TP-way sum is <= 127 and int8 cannot wrap.
         # ws=2 -> 63 (sum 126), ws=4 -> 31 (sum 124), ws=8 -> 15 (sum 120).
-        self.max_q = 127 // self.world_size
+        self.max_q = 127 // self.world_size if self.supported else 0
         # Payload gate in elements (bf16 payload = 2 bytes per element);
         # 64 MiB by default, the measured break-even rounded up. See docstring.
         self.min_numel = min_numel
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if not self.supported:
+            # Oversized groups (ep/mc2 = DP x PCP x TP) are out of scope: keep
+            # the plain bf16 path rather than failing at start-up.
+            logger.warning_once(
+                "quantized all-reduce disabled for this %d-rank group "
+                "(supported groups have at most %d ranks); its collectives stay bf16.",
+                self.world_size,
+                _MAX_VALID_WORLD_SIZE,
+            )
+            dist.all_reduce(input_, group=self.group)
+            return input_
         if input_.dtype != torch.bfloat16 or input_.numel() < self.min_numel:
             dist.all_reduce(input_, group=self.group)
             return input_

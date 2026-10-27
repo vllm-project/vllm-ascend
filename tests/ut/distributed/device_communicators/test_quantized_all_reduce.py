@@ -25,6 +25,11 @@ global_amax / (127 // ws) instead: |x/scale| <= max_q by construction, so
 rounding can never exceed max_q and ws * max_q <= 127 holds for any input.
 This needs no clamp kernel at all (int8 clamp_/clamp/hardtanh are ~250x
 slower than minimum/maximum on Ascend).
+
+The wrapper is also built for non-TP groups (ep/mc2 = DP x PCP x TP). Those can
+exceed the supported group size, so an oversized group must fall back to bf16
+instead of raising: the review reported a 16-rank EP/MC2 group aborting start-up
+while a supported TP=4 was configured.
 """
 
 import unittest
@@ -43,7 +48,7 @@ def _make(
     min_numel: int = 8,
     device_type: AscendDeviceType = AscendDeviceType.A2,
 ) -> QuantizedAllReduce:
-    """Build a wrapper; raises RuntimeError on unvalidated configs."""
+    """Build a wrapper; raises on unvalidated device families only."""
     with patch(
         "vllm_ascend.distributed.device_communicators.quantized_all_reduce.get_ascend_device_type",
         return_value=device_type,
@@ -71,13 +76,47 @@ class TestQuantizedAllReduce(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "only validated on"):
                 _make(world_size=4, device_type=dt)
 
-    def test_raises_above_max_tp_size(self):
-        # ws=16 -> max_q=7 (3 effective int8 levels): refuse instead of
-        # silently degrading accuracy.
-        with self.assertRaisesRegex(RuntimeError, "supports TP size up to"):
-            _make(world_size=16, device_type=AscendDeviceType.A2)
-        wrapper = _make(world_size=8, device_type=AscendDeviceType.A2)
-        self.assertEqual(wrapper.max_q, 15)
+    def test_supported_flag_only_up_to_max_group_size(self):
+        for ws in (2, 4, 8):
+            wrapper = _make(world_size=ws)
+            self.assertTrue(wrapper.supported)
+            self.assertEqual(wrapper.max_q, 127 // ws)
+        # EP/MC2 groups are DP x PCP x TP: larger than any valid TP degree.
+        for ws in (9, 16, 32):
+            wrapper = _make(world_size=ws)
+            self.assertFalse(wrapper.supported)
+            self.assertEqual(wrapper.max_q, 0)
+
+    def test_oversized_group_falls_back_to_bf16_without_raising(self):
+        # 16 ranks = the reported TP=4/DP=4 EP/MC2 group. Must not raise.
+        wrapper = _make(world_size=16, min_numel=1)
+        self.assertFalse(wrapper.supported)
+        x = torch.ones(2, 4, dtype=torch.bfloat16)
+        with (
+            patch("torch.distributed.all_reduce") as mock_ar,
+            patch("torch_npu.npu_quantize", create=True) as mock_q,
+            patch("torch_npu.npu_anti_quant", create=True) as mock_aq,
+        ):
+            out = wrapper.all_reduce(x)
+            # exactly one bf16 all-reduce, no amax sync and no quantization
+            mock_ar.assert_called_once()
+            self.assertEqual(mock_ar.call_args.args[0].dtype, torch.bfloat16)
+            mock_q.assert_not_called()
+            mock_aq.assert_not_called()
+            self.assertTrue(out is x)
+
+    def test_oversized_group_warns_with_its_group_size(self):
+        wrapper = _make(world_size=16, min_numel=1)
+        x = torch.ones(2, 4, dtype=torch.bfloat16)
+        with (
+            patch("vllm_ascend.distributed.device_communicators.quantized_all_reduce.logger") as mock_logger,
+            patch("torch.distributed.all_reduce"),
+            patch("torch_npu.npu_quantize", create=True),
+            patch("torch_npu.npu_anti_quant", create=True),
+        ):
+            wrapper.all_reduce(x)
+        mock_logger.warning_once.assert_called_once()
+        self.assertEqual(mock_logger.warning_once.call_args.args[1], 16)
 
     def test_max_q_integer_safe_for_common_tp_sizes(self):
         for ws in (2, 4, 8):
