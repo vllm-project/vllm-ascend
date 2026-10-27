@@ -264,8 +264,10 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=True)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_megamoe_scales_preserve_e8m0_bytes(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    def test_megamoe_scales_preserve_e8m0_bytes(self, mock_empty_cache, mock_npu, mock_use_cann_megamoe, mock_vllm):
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        self.scheme.use_expert_weight_list = False
         layer = self._make_moe_layer()
         original_scales = {}
         for name in ("w13_weight_scale", "w2_weight_scale"):
@@ -276,14 +278,48 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
         self.scheme.process_weights_after_loading(layer)
 
+        self.assertTrue(self.scheme.use_expert_weight_list)
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+        with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
+            context.use_mega_moe = True
+            weights = self.scheme.get_fused_mc2_weights(layer)
+        self.assertIs(weights.w1, layer.w13_weight_list)
+        self.assertIs(weights.w2, layer.w2_weight_list)
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
         for name, original in original_scales.items():
-            scales = getattr(layer, f"cann_mega_moe_{name}_list")
+            scales = weights.w1_scale if name == "w13_weight_scale" else weights.w2_scale
+            canonical_scales = getattr(layer, f"{name}_list")
             self.assertEqual(len(scales), original.shape[0])
             for expert, scale in enumerate(scales):
                 with self.subTest(name=name, expert=expert):
                     self.assertEqual(scale.dtype, torch.float8_e8m0fnu)
                     self.assertEqual(scale.shape, (original.shape[1], original.shape[2] // 2, 2))
                     torch.testing.assert_close(scale.view(torch.uint8).flatten(), original[expert].flatten())
+                    self.assertEqual(scale.data_ptr(), canonical_scales[expert].data_ptr())
+                    # In-place EPLB updates must be visible through the MegaMoe view.
+                    canonical_scales[expert].fill_(127)
+                    self.assertTrue(torch.all(scale.view(torch.uint8) == 127))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_megamoe_eplb_weights_share_canonical_lists(self, mock_npu, mock_empty_cache):
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        self.scheme.use_expert_weight_list = True
+        layer = self._make_moe_layer()
+        layer.activation = MoEActivation.SITU
+        self.scheme.process_weights_after_loading(layer)
+        with patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX") as context:
+            context.use_mega_moe = True
+            weights = self.scheme.get_fused_mc2_weights(layer)
+        eplb_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertIs(weights.w1, eplb_views[0])
+        self.assertIs(weights.w2, eplb_views[1])
+        self.assertEqual(weights.w1[0].dtype, torch.float4_e2m1fn_x2)
+        self.assertEqual(weights.w1_scale[0].data_ptr(), eplb_views[2][0].data_ptr())
+        self.assertEqual(weights.w2_scale[0].data_ptr(), eplb_views[3][0].data_ptr())
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
