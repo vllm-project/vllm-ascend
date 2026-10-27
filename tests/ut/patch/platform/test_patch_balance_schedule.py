@@ -72,7 +72,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
-from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -1123,7 +1122,7 @@ def test_balance_encoder_only_prefill_budget(encoder_only, chunked_prefill, num_
 
     output = scheduler.schedule()
 
-    can_chunk = chunked_prefill or (encoder_only and not vllm_version_is("0.31.0"))
+    can_chunk = chunked_prefill or encoder_only
     expected = min(num_tokens, token_budget) if can_chunk or num_tokens <= token_budget else 0
     assert output.num_scheduled_tokens.get(request.request_id, 0) == expected
     assert output.total_num_scheduled_tokens == expected

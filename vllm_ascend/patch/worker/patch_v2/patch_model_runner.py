@@ -8,7 +8,6 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -160,7 +159,7 @@ def initialize_kv_cache(
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,
         piecewise_capture_available=piecewise_capture_available,
-        **({"tensor_parallel_size": self.parallel_config.tensor_parallel_size} if vllm_version_is("0.31.0") else {}),
+        **{},
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,

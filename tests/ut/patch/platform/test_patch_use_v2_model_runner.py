@@ -5,7 +5,6 @@ from vllm.config.compilation import CompilationMode
 from vllm.config.vllm import VllmConfig
 
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_use_v2_model_runner_is_driven_by_ascend_default():
@@ -83,5 +82,5 @@ def test_native_v2_spec_pp_validation(method, enable_sp):
     # Spec+PP is natively supported; unrelated upstream guards still apply.
     # vLLM main (#60517) dropped the PassConfig.enable_sp guard, so the V2
     # runner no longer rejects sequence parallelism there.
-    expected_sp = ["sequence parallelism"] if enable_sp and vllm_version_is("0.31.0") else []
+    expected_sp: list[str] = []
     assert unsupported == expected_sp

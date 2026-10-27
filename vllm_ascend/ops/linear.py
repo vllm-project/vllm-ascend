@@ -115,7 +115,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # keep the captured graph's weight reference to the updated weight
             # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
             # and keeps the parameter object by default.
-            if vllm_version_is("0.31.0"):
+            if vllm_version_is("0.32.0"):
                 replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
             else:
                 replace_parameter(layer, "weight_fp32", new_fp32)
