@@ -1,5 +1,5 @@
 test_name: "DeepSeek_V4_Flash_A5_PD_Performance_Test_01"
-model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
+model: "/root/.cache/modelscope/hub/models/deepseek-ai/DeepSeek-V4-Flash"
 num_nodes: 2
 npu_per_node: 8
 dp_load_balancing: external
