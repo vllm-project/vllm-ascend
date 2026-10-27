@@ -16,6 +16,7 @@ from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import
     make_hybrid_case,
     read_bytes,
 )
+from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
     layerwise,
 )
@@ -27,7 +28,7 @@ def assemble_layers(mapping, selection, object_sizes):
     payloads = {key: bytearray(size) for key, size in object_sizes.items()}
     coverage = {key: bytearray(size) for key, size in object_sizes.items()}
     for layer_id in reversed(mapping.layer_layouts):  # Offsets, not call order, locate the bytes.
-        keys, addresses, lengths, offsets = mapping.arguments(selection, layer_id=layer_id)
+        keys, addresses, lengths, offsets = layer_arguments(mapping, selection, layer_id=layer_id)
         for key, sources, sizes, starts in zip(keys, addresses, lengths, offsets, strict=True):
             for source, size, start in zip(sources, sizes, starts, strict=True):
                 end = start + size
@@ -47,8 +48,8 @@ class LayerwiseMappingTests(unittest.TestCase):
         self.assertFalse(hasattr(layerwise, "LayerwiseView"))
         self.assertFalse(hasattr(layerwise, "LayerRange"))
         keys = bulk.key_namer.keys(["a", "a"])
-        selection = mapping.prepare(keys, [1, 1])
-        self.assertEqual(selection.selected_transfer_count, 4)  # Duplicate keys are still distinct input rows.
+        selection = prepare_layer_group(mapping, keys, [1, 1])
+        self.assertEqual(len(selection.selected_keys), 4)  # Duplicate keys are still distinct input rows.
         for prefix_index, layout in enumerate(mapping.layer_layouts[0]):
             self.assertEqual(layout.partition_index, prefix_index)
             self.assertEqual(
@@ -65,7 +66,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                 [base + prefix_index * 8 + token * 16 for base in (k_base, v_base) for token in range(2)],
             )
         peer = case.bind_layers(group_id=bulk.local_layout.group_id)
-        self.assertEqual(peer.arguments(selection, layer_id=0), mapping.arguments(selection, layer_id=0))
+        self.assertEqual(layer_arguments(peer, selection, layer_id=0), layer_arguments(mapping, selection, layer_id=0))
 
     def test_layers_reassemble_exact_bulk_and_tensor_bytes(self):
         comparisons = 0
@@ -111,13 +112,13 @@ class LayerwiseMappingTests(unittest.TestCase):
                         dict(zip(actual_keys, (read_bytes(a, n) for a, n in zip(addresses, lengths, strict=True)))),
                         expected,
                     )
-                    selection = layers.prepare(keys, ids, selected_keys=mask)
-                    self.assertEqual(selection.selected_transfer_count, len(actual_keys))
+                    selection = prepare_layer_group(layers, keys, ids, selected_keys=mask)
+                    self.assertEqual(len(selection.selected_keys), len(actual_keys))
                     self.assertEqual(
                         assemble_layers(layers, selection, {k: len(v) for k, v in expected.items()}), expected
                     )
                     for layer_id in layers.layer_layouts:
-                        layer_keys, sources, sizes, _ = layers.arguments(selection, layer_id=layer_id)
+                        layer_keys, sources, sizes, _ = layer_arguments(layers, selection, layer_id=layer_id)
                         selected = [
                             (prefix_index, row)
                             for prefix_index, physical_layers in enumerate(
@@ -210,15 +211,17 @@ class LayerwiseMappingTests(unittest.TestCase):
                     )
             with self.assertRaises(TypeError):
                 mapping.layer_layouts[100] = ()
-            selection = mapping.prepare(bulk.key_namer.keys(["a", "b"]), [0, 2])
-            self.assertIs(selection.by_partition[0].local_block_ids, selection.by_partition[1].local_block_ids)
+            selection = prepare_layer_group(mapping, bulk.key_namer.keys(["a", "b"]), [0, 2])
+            self.assertIs(
+                selection.selected_local_block_ids_by_partition[0], selection.selected_local_block_ids_by_partition[1]
+            )
             with (
                 patch.object(layerwise.np, "cumsum", side_effect=AssertionError("runtime offsets")),
                 patch.object(layerwise.np, "flatnonzero", side_effect=AssertionError("runtime selection")),
                 patch.object(layerwise.np, "count_nonzero", side_effect=AssertionError("runtime mask scan")),
             ):
                 for layer_id in mapping.layer_layouts:
-                    mapping.arguments(selection, layer_id=layer_id)
+                    layer_arguments(mapping, selection, layer_id=layer_id)
 
     def test_bulk_does_not_build_object_offsets(self):
         for head_slices, pp in itertools.product((None, 1, 2), (None, (1, 3))):
@@ -241,14 +244,14 @@ class LayerwiseMappingTests(unittest.TestCase):
         case = make_case(head_slices=2, pp_layer_counts=(1, 3))
         bulk = case.bind()
         mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
-        selection = mapping.prepare(bulk.key_namer.keys(["a", "b"]), [0, 1])
-        prefix_selections = CountedPrefixSelections(selection.by_partition)
-        selection = replace(selection, by_partition=prefix_selections)
+        selection = prepare_layer_group(mapping, bulk.key_namer.keys(["a", "b"]), [0, 1])
+        prefix_selections = CountedPrefixSelections(selection.selected_local_block_ids_by_partition)
+        selection = replace(selection, selected_local_block_ids_by_partition=prefix_selections)
         with patch.object(type(bulk), "arguments", side_effect=AssertionError("no all-layer arguments")):
-            mapping.arguments(selection, layer_id=0)
+            layer_arguments(mapping, selection, layer_id=0)
             self.assertEqual(prefix_selections.visits, [0, 1])
             prefix_selections.visits.clear()
-            mapping.arguments(selection, layer_id=3)
+            layer_arguments(mapping, selection, layer_id=3)
             self.assertEqual(prefix_selections.visits, [2, 3])
 
     def test_ordinary_segments_preserve_non_token_divisible_lengths(self):
@@ -260,7 +263,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             keys = bulk.key_namer.keys(["a", "b"])
             names, addresses, lengths = bulk.arguments(keys, [0, 2])
             expected = {key: read_bytes(a, n) for key, a, n in zip(names, addresses, lengths, strict=True)}
-            selection = mapping.prepare(keys, [0, 2])
+            selection = prepare_layer_group(mapping, keys, [0, 2])
             self.assertEqual(assemble_layers(mapping, selection, {k: len(v) for k, v in expected.items()}), expected)
 
     def test_empty_layer_bounds_and_absent_or_unselected_work_exit_early(self):
@@ -278,10 +281,12 @@ class LayerwiseMappingTests(unittest.TestCase):
                 tuple(obj.layer_segment_index_boundaries for obj in bulk.local_layout.partitions)[0][-2],
             )
             keys = bulk.key_namer.keys(["a"])
-            all_rows = mapping.prepare(keys, [0])
-            no_rows = mapping.prepare(keys, [0], selected_keys=[False] * len(keys))
-            empty_rows = mapping.prepare(bulk.key_namer.keys([]), [])
-            only_pp0 = mapping.prepare(keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))])
+            all_rows = prepare_layer_group(mapping, keys, [0])
+            no_rows = prepare_layer_group(mapping, keys, [0], selected_keys=[False] * len(keys))
+            empty_rows = prepare_layer_group(mapping, bulk.key_namer.keys([]), [])
+            only_pp0 = prepare_layer_group(
+                mapping, keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))]
+            )
             with (
                 patch.object(layerwise.np, "broadcast_to", side_effect=AssertionError("unused segments")),
                 patch.object(layerwise.np, "empty", side_effect=AssertionError("unused allocation")),
@@ -293,7 +298,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                     (empty_rows, 0),
                     (only_pp0, 2),
                 ):
-                    self.assertEqual(mapping.arguments(selection, layer_id=layer_id), ([], [], [], []))
+                    self.assertEqual(layer_arguments(mapping, selection, layer_id=layer_id), ([], [], [], []))
 
     def test_preparation_snapshots_inputs_and_outputs_do_not_alias(self):
         case = make_case(head_slices=2)
@@ -302,39 +307,22 @@ class LayerwiseMappingTests(unittest.TestCase):
         keys = [list(prefix_keys) for prefix_keys in bulk.key_namer.keys(["same", "other", "same"])]
         ids = np.array([2, 1, 2], dtype=np.uint64)
         mask = [True, False, True, True, True, True]
-        selection = mapping.prepare(keys, ids, selected_keys=mask)
-        expected = mapping.arguments(selection, layer_id=0)
+        selection = prepare_layer_group(mapping, keys, ids, selected_keys=mask)
+        expected = layer_arguments(mapping, selection, layer_id=0)
         ids[:] = 0
         keys[0][0] = "mutated"
         mask[:] = [False] * len(mask)
-        self.assertEqual(mapping.arguments(selection, layer_id=0), expected)
+        self.assertEqual(layer_arguments(mapping, selection, layer_id=0), expected)
         self.assertEqual(expected[0][0], expected[0][1])  # Duplicate input selection are not silently deduplicated.
         self.assertEqual(expected[1][0], expected[1][1])
-        for row in selection.by_partition:
-            self.assertFalse(row.local_block_ids.flags.writeable)
-        result = mapping.arguments(selection, layer_id=0)
+        for ids in selection.selected_local_block_ids_by_partition:
+            self.assertFalse(ids.flags.writeable)
+        result = layer_arguments(mapping, selection, layer_id=0)
         for field in result[1:]:
             first = field[0][0]
             field[0][0] = first + 1
             self.assertEqual(field[1][0], first)
-        self.assertEqual(mapping.arguments(selection, layer_id=0), expected)
-
-    def test_invalid_rows_are_rejected(self):
-        case = make_case(head_slices=2)
-        bulk = case.bind()
-        mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
-        keys = bulk.key_namer.keys(["a", "b"])
-        for ids, mask, key_rows in (
-            ([[0, 1]], None, keys),
-            ([0], None, keys),
-            ([0, 1], [True], keys),
-            ([0, 1], [[True] * 2] * 2, keys),
-            ([0, 1], None, keys[:1]),
-        ):
-            with self.assertRaises(ValueError):
-                mapping.prepare(key_rows, ids, selected_keys=mask)
-        with self.assertRaises(TypeError):
-            mapping.prepare(keys, [0, 1], token_counts=[1, 1])
+        self.assertEqual(layer_arguments(mapping, selection, layer_id=0), expected)
 
     def test_hybrid_groups_have_independent_rows_and_complete_mixed_dtype_payloads(self):
         case = make_hybrid_case(pp_layer_counts=(2, 2), tp_rank=3)
@@ -342,7 +330,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             bulk = case.bind(group_id=group_id)
             mapping = case.bind_layers(group_id=bulk.local_layout.group_id)
             keys = bulk.key_namer.keys([str(i) for i in range(len(ids))])
-            selection = mapping.prepare(keys, ids)
+            selection = prepare_layer_group(mapping, keys, ids)
             expected = {
                 keys[p][i]: expected_group_bytes(case, group_id, layer_ids, block_id)
                 for p, layer_ids in enumerate(tuple(obj.physical_layer_ids for obj in bulk.local_layout.partitions))
@@ -412,7 +400,7 @@ class LayerwiseMappingTests(unittest.TestCase):
                                 )
                                 for key in prefix_keys
                             }
-                            payloads = assemble_layers(mapping, mapping.prepare(keys, [1, 2]), sizes)
+                            payloads = assemble_layers(mapping, prepare_layer_group(mapping, keys, [1, 2]), sizes)
                         else:
                             names, addresses, lengths = bulk.arguments(keys, [1, 2])
                             payloads = {
@@ -434,9 +422,11 @@ class LayerwiseMappingTests(unittest.TestCase):
                                     ctypes.memmove(address, objects[key][cursor : cursor + size], size)
                                     cursor += size
                         else:
-                            selection = mapping.prepare(keys, [1, 2])
+                            selection = prepare_layer_group(mapping, keys, [1, 2])
                             for layer_id in mapping.layer_layouts:
-                                names, addresses, lengths, offsets = mapping.arguments(selection, layer_id=layer_id)
+                                names, addresses, lengths, offsets = layer_arguments(
+                                    mapping, selection, layer_id=layer_id
+                                )
                                 for key, destinations, sizes, starts in zip(
                                     names, addresses, lengths, offsets, strict=True
                                 ):

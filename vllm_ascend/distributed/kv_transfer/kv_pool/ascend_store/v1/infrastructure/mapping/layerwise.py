@@ -1,26 +1,4 @@
-"""Generate one layer's transfers from bound local segments and object geometry.
-
-    Binding: once                         Batch: each prepare() call
-    registration + topology               keys + local_block_ids + mask
-         | LayerwiseMapping(...)                  | prepare(...)
-         v                                        v
-    cached layer_layouts                  LayerwiseSelection
-         |                                        |
-         +-------------------+--------------------+
-                             v
-          +-----------------------------------------+
-          | arguments(selection, layer_id=...)      |
-          |   choose layer_layouts[layer_id]        |
-          |   join by partition_index                  |
-          +-----------------------------------------+
-                             |
-                             v
-              keys, local addresses, lengths, object offsets
-
-The selected object-layout function runs once. Layer arrays share this Mapping's
-local sources, not a separately constructed Bulk view. Readiness, remote
-allocation and transfer execution remain caller-owned.
-"""
+"""Bind reusable per-layer local geometry and remote object offsets."""
 
 from __future__ import annotations
 
@@ -31,7 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import numpy as np
-from numpy.typing import NDArray
 
 from .local_layout import LocalMemorySegments, bind_local_layout
 from .object_layout import RemoteObjectLayoutFactory, build_default_object_layouts
@@ -58,46 +35,15 @@ class LayerPartitionLayout:
                               +-- runtime block ID=3 --> address=2384
 
     Base, stride and length come from local_segments; actual addresses
-    require a Selection's block IDs. No concrete keys/IDs are stored in the layout.
+    require the Worker's selected block IDs. No concrete keys/IDs are stored in the layout.
     The enclosing layer_layouts dictionary supplies layer ID; partition_index
-    joins this layout to Selection rows. Object size includes ALL assigned layers.
+    joins this layout to the Worker's partition selection. Object size includes ALL assigned layers.
     """
 
     partition_index: int
     local_segments: LocalMemorySegments
     remote_segment_offsets_bytes: UInt64Array
     remote_object_size_bytes: int
-
-
-@dataclass(frozen=True, slots=True)
-class _ObjectSelection:
-    """Selected keys/IDs and their original input rows; no request ownership."""
-
-    keys: tuple[str, ...]
-    local_block_ids: UInt64Array
-    selected_transfer_record_indices: range | NDArray[np.intp]
-
-
-@dataclass(frozen=True, slots=True)
-class LayerwiseSelection:
-    """One prepare() call's selected object keys and local cache block IDs.
-
-    Example with simplified names P0: and P1: in bound local object order:
-
-        by_partition[0]     object key       local block ID
-          row 0             P0:A <---------> 3
-          row 1             P0:B <---------> 7
-        by_partition[1] = None                no selected rows
-
-    This selects block rows, NOT layers: reuse it across layer_id calls without
-    filtering again. It snapshots keys/IDs and input-row positions, not transfer
-    addresses or request ownership. selected_transfer_count totals rows across objects
-    (2 above), including duplicates. The caller keeps these object axes aligned
-    with the group's bound layer layouts and resolves request ownership separately.
-    """
-
-    by_partition: tuple[_ObjectSelection | None, ...]
-    selected_transfer_count: int
 
 
 class LayerwiseMapping:
@@ -179,99 +125,43 @@ class LayerwiseMapping:
             {layer_id: tuple(layouts) for layer_id, layouts in layers.items()}
         )
 
-    def prepare(
+    def arguments(
         self,
-        keys: Sequence[Sequence[str]],
-        local_block_ids: Sequence[int] | UInt64Array,
+        selected_keys: tuple[str, ...],
+        selected_local_block_ids_by_partition: tuple[UInt64Array, ...],
+        selected_transfer_slices_by_partition: tuple[slice, ...],
         *,
-        selected_keys: Sequence[bool] | None = None,
-    ) -> LayerwiseSelection:
-        """Snapshot rows for reuse across layers; mask order is local object, then input row.
-
-        Keys come from this mapping's bound identity. Selection is caller-owned, including
-        admission and duplicate writers. Repeated input rows remain repeated here.
-        No local address matrix or per-layer Backend list is allocated yet.
-        """
-        ids = np.asarray(local_block_ids, dtype=np.uint64)
-        if ids.ndim != 1:
-            raise ValueError("Block IDs must be one-dimensional rows")
-        transfer_record_count = len(ids)
-        partition_count = len(self.local_layout.partitions)
-        if len(keys) != partition_count or any(len(object_keys) != transfer_record_count for object_keys in keys):
-            raise ValueError("Keys must align local objects and Block ID rows")
-        selections = None
-        if selected_keys is not None:
-            selections = np.asarray(selected_keys, dtype=np.bool_)
-            if selections.ndim != 1 or selections.size != partition_count * transfer_record_count:
-                raise ValueError("Key selection must be a flat object-major row mask")
-            selections = selections.reshape(partition_count, transfer_record_count)
-        if not transfer_record_count:
-            return LayerwiseSelection((None,) * partition_count, 0)
-
-        selections_by_object: list[_ObjectSelection | None] = []
-        shared_ids = None
-        selected_transfer_count = 0
-        for partition_index, object_keys in enumerate(keys):
-            selected_transfer_record_indices = None
-            if selections is not None:
-                selected_count = np.count_nonzero(selections[partition_index])
-                if not selected_count:
-                    selections_by_object.append(None)
-                    continue
-                if selected_count != transfer_record_count:
-                    selected_transfer_record_indices = np.flatnonzero(selections[partition_index])
-            if selected_transfer_record_indices is None:
-                if shared_ids is None:
-                    shared_ids = ids.copy()
-                    shared_ids.flags.writeable = False
-                selected_block_ids = shared_ids
-                selected_object_keys = tuple(object_keys)
-            else:
-                selected_block_ids = ids[selected_transfer_record_indices]
-                selected_block_ids.flags.writeable = False
-                selected_object_keys = tuple(object_keys[row] for row in selected_transfer_record_indices)
-                selected_transfer_record_indices.flags.writeable = False
-            selected_transfer_record_indices = (
-                range(transfer_record_count)
-                if selected_transfer_record_indices is None
-                else selected_transfer_record_indices
-            )
-            selections_by_object.append(
-                _ObjectSelection(selected_object_keys, selected_block_ids, selected_transfer_record_indices)
-            )
-            selected_transfer_count += len(selected_block_ids)
-        return LayerwiseSelection(tuple(selections_by_object), selected_transfer_count)
-
-    def arguments(self, selection: LayerwiseSelection, *, layer_id: int) -> LayerTransferArguments:
+        layer_id: int,
+    ) -> LayerTransferArguments:
         """Combine selected keys/block IDs with this layer's cached transfer layouts.
 
-        The caller supplies the selection prepared for this group's key axes.
+        The caller supplies the selected keys, block IDs and matching partition slices.
         Absent or empty layers and unselected objects produce no arguments.
         Each returned Python row is independently mutable; cached layouts and
         prepared selections remain unchanged across Load/Store and repeated calls.
         """
         layer = self.layer_layouts.get(layer_id)
-        if not selection.selected_transfer_count or layer is None:
+        if not selected_keys or layer is None:
             return [], [], [], []
         keys: list[str] = []
         addresses: list[list[int]] = []
         lengths: list[list[int]] = []
         offsets: list[list[int]] = []
         for layout in layer:
-            selected = selection.by_partition[layout.partition_index]
-            if selected is None:
+            local_block_ids = selected_local_block_ids_by_partition[layout.partition_index]
+            if not len(local_block_ids):
                 continue
+            partition_keys = selected_keys[selected_transfer_slices_by_partition[layout.partition_index]]
             segments = layout.local_segments
             local = (
-                selected.local_block_ids[:, None] * segments.group_block_strides_bytes
-                + segments.block_zero_segment_addresses
+                local_block_ids[:, None] * segments.group_block_strides_bytes + segments.block_zero_segment_addresses
             )
             sizes = np.broadcast_to(
                 segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
             ).tolist()
             positions = layout.remote_segment_offsets_bytes.tolist()
-            keys.extend(selected.keys)
+            keys.extend(partition_keys)
             addresses.extend(local.tolist())
-            lengths.extend(sizes.copy() for _ in selected.keys)
-            offsets.extend(positions.copy() for _ in selected.keys)
+            lengths.extend(sizes.copy() for _ in partition_keys)
+            offsets.extend(positions.copy() for _ in partition_keys)
         return keys, addresses, lengths, offsets

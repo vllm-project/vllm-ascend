@@ -353,17 +353,11 @@ KeyRange Worker 将这些偏移作为范围参数传给 Backend。GVA Worker 则
 
 ### 5.9 批次选择
 
-静态布局不包含本次的具体 key 和 block ID。`LayerwiseMapping.prepare()` 将本次 key、block ID 与掩码整理为 `LayerwiseSelection`，按本地对象顺序保存入选行；随后各层调用 `arguments(selection, layer_id=...)`，复用这份选择，只读取该层相关的布局。
+静态布局不包含本次的具体 key 和 block ID。Worker 在 Session 准入后构造 `LayerTransferGroup`，按分片固定选中的 Key、本地 Block ID 和原始记录位置。各层复用这些选择，不再调用 Mapping 执行选择。
 
-| 数据 | 何时形成 | 是否跨层复用 | 是否包含具体本地地址矩阵 |
-| --- | --- | --- | --- |
-| `LayerPartitionLayout` | Mapping 绑定时 | 是，按物理层索引 | 否，只有 block 0 段起点、步长等描述 |
-| `LayerwiseSelection` | 本次批次准备时 | 是，同一 Mapping 的各层共享本次选择 | 否，保存具体 key 与 block ID |
-| 本层传输参数 | 本层执行准备时 | 不作为永久布局缓存 | 是，并带长度与对象内偏移 |
+`selected_transfer_slices_by_partition` 将每个分片对应到平铺的 `selected_keys` 与远端基址数组。Load 另保存原候选编号与请求位置，用于结果归属；Store 不生成这份 Load 信息。全选分片共享只读 Block ID 快照与 `range`，部分选择只计算一次记录索引。重复 Key 或 Block ID 保留原始传输项。
 
-假设一个对象下选择 key A、B，对应物理块 3、7。每层可以复用这两个配对，不必再扫描一次掩码。不同对象 仍可能选择不同的行；掩码按“对象优先、输入行其次”的顺序排列，不能仅按 block ID 去重。重复输入行在 Mapping 中保持重复，是否允许重复写入由 Worker 的准入逻辑决定。
-
-准备阶段对 key / block ID 做快照，避免调用者后续改动输入破坏跨层复用。Selection 保存对象轴与输入行位置，由调用者保证它和使用它的 Mapping 布局一致。当前类型没有 owner 标记，也不自动检查来自另一份 Mapping 的选择。空选择、不存在的层和没有入选行的对象 可以直接返回，不生成无用地址矩阵。
+每层通过绑定布局确定参与分片，再取对应切片。只有 group 与分片集合都相同的层才共享同一份 Key 列表。空选择和没有本地段的层不产生地址参数；压紧或重新构造批次后必须重新准备 plan。
 
 ### 5.10 Backend 格式
 

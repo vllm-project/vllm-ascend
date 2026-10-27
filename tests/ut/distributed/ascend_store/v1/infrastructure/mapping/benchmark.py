@@ -30,6 +30,7 @@ import time
 import numpy as np
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 
 _WARMUP_CALLS = 5
 
@@ -106,33 +107,56 @@ def bulk_workload(bound, transfer_record_count, mask_kind):
 
 
 def selection_signature(selection):
-    selections = getattr(selection, "by_partition", getattr(selection, "by_key_prefix", None))
+    if hasattr(selection, "selected_keys"):
+        return tuple(
+            None if not len(ids) else (selection.selected_keys[part], ids.tolist())
+            for part, ids in zip(
+                selection.selected_transfer_slices_by_partition,
+                selection.selected_local_block_ids_by_partition,
+                strict=True,
+            )
+        )
+    selections = getattr(
+        selection, "by_partition", getattr(selection, "by_object", getattr(selection, "by_key_prefix", None))
+    )
     if selections is None:
         selections = selection.partitions
-    return tuple(None if item is None else (item.keys, item.local_block_ids.tolist()) for item in selections)
+    return tuple(
+        None
+        if item is None
+        else (item.keys, getattr(item, "local_block_ids", getattr(item, "block_ids", None)).tolist())
+        for item in selections
+    )
 
 
 def layer_workload(layer_mapping, bulk_work):
     transfer, hashes, ids, mask, _, _ = bulk_work
     naming = getattr(transfer, "key_namer", getattr(transfer, "naming", transfer))
     if hasattr(layer_mapping, "local_layout") or hasattr(layer_mapping, "local"):
-        layer_ids = layer_mapping.local_layout.physical_layer_ids
+        layer_ids = getattr(layer_mapping, "local_layout", getattr(layer_mapping, "local", None)).physical_layer_ids
     elif hasattr(layer_mapping, "binding"):
         layer_ids = layer_mapping.binding.local_layout.physical_layer_ids
     else:
         layer_ids = layer_mapping.bulk.physical_layer_ids
 
+    if hasattr(layer_mapping, "prepare"):
+        prepare = layer_mapping.prepare
+        arguments = layer_mapping.arguments
+    else:
+        prepare = lambda keys, ids, **options: prepare_layer_group(layer_mapping, keys, ids, **options)
+        arguments = lambda group, **options: layer_arguments(layer_mapping, group, **options)
+
     def keys_and_prepare():
-        return layer_mapping.prepare(naming.keys(hashes), ids, selected_keys=mask)
+        return prepare(naming.keys(hashes), ids, selected_keys=mask)
 
     prepared = keys_and_prepare()
 
     def prepared_layers():
-        return [layer_mapping.arguments(prepared, layer_id=layer_id) for layer_id in layer_ids]
+        return [arguments(prepared, layer_id=layer_id) for layer_id in layer_ids]
 
     def keys_prepare_all_layers():
         selection = keys_and_prepare()
-        return [layer_mapping.arguments(selection, layer_id=layer_id) for layer_id in layer_ids]
+        return [arguments(selection, layer_id=layer_id) for layer_id in layer_ids]
 
     return keys_and_prepare, prepared_layers, keys_prepare_all_layers
 

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import PoolKey
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.naming import BoundLayerwiseKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping import (
@@ -44,9 +45,9 @@ def test_custom_names_bind_once_to_coordinates_without_encoding_default_prefixes
         for _ in range(2):
             assert mapping.key_namer.lookup_keys((b"a", "b")) == keys
             if mapping_type is LayerwiseMapping:
-                selection = mapping.prepare(keys, (0, 2))
+                selection = prepare_layer_group(mapping, keys, (0, 2))
                 for layer_id in mapping.local_layout.physical_layer_ids:
-                    mapping.arguments(selection, layer_id=layer_id)
+                    layer_arguments(mapping, selection, layer_id=layer_id)
             else:
                 mapping.arguments(keys, (0, 2))
     assert coordinates == [(0, 0), (0, 1), (1, 0), (1, 1)]
@@ -81,10 +82,10 @@ def test_custom_object_layout_replaces_default_and_is_not_rebound_during_traffic
         local = layers.local_layout.partitions[0]
         offsets = layers.remote_object_layouts[0].segment_boundary_offsets_bytes
         lengths = local.local_segments.segment_lengths_bytes
-        selection = layers.prepare(layers.key_namer.keys(("a",)), (2,))
+        selection = prepare_layer_group(layers, layers.key_namer.keys(("a",)), (2,))
         for _ in range(2):
             for index, layer_id in enumerate(local.physical_layer_ids):
-                _, addresses, sizes, positions = layers.arguments(selection, layer_id=layer_id)
+                _, addresses, sizes, positions = layer_arguments(layers, selection, layer_id=layer_id)
                 start, end = local.layer_segment_index_boundaries[index : index + 2]
                 assert positions == [offsets[start:end].tolist()]
                 assert sizes == [lengths[start:end].tolist()]

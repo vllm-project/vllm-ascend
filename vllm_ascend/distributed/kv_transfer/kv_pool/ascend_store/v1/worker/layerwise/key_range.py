@@ -140,7 +140,12 @@ def materialize_store_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in groups:
-        _, local, group_sizes, group_offsets = mappings[group.group_id].arguments(group.selection, layer_id=layer_id)
+        _, local, group_sizes, group_offsets = mappings[group.group_id].arguments(
+            group.selected_keys,
+            group.selected_local_block_ids_by_partition,
+            group.selected_transfer_slices_by_partition,
+            layer_id=layer_id,
+        )
         addresses.extend(local)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
@@ -159,7 +164,10 @@ def materialize_load_layer_ranges(
     offsets: list[list[int]] = []
     for group in plan.groups_by_layer[layer_id]:
         _, group_addresses, group_sizes, group_offsets = mappings[group.group_id].arguments(
-            group.selection, layer_id=layer_id
+            group.selected_keys,
+            group.selected_local_block_ids_by_partition,
+            group.selected_transfer_slices_by_partition,
+            layer_id=layer_id,
         )
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tests.ut.distributed.ascend_store.v1.infrastructure.mapping.fixtures import make_case
+from tests.ut.distributed.ascend_store.v1.worker.layerwise.plan_fixtures import layer_arguments, prepare_layer_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache import layout as memcache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.backend.memcache.layout import (
@@ -80,15 +81,15 @@ def test_runtime_reuses_layout_and_does_not_mutate_bulk():
             object_shard_index=1,
         ),
     )
-    selection = mapping.prepare(keys, [1])
+    selection = prepare_layer_group(mapping, keys, [1])
     assert tuple(obj.size_bytes for obj in mapping.remote_object_layouts) == (4 * 1024 * 1024,)
     with (
         patch.object(memcache_layout, "bind_layer_object_span", side_effect=AssertionError("rebind PP")),
         patch.object(memcache_layout, "bind_context_object_span", side_effect=AssertionError("rebind CP")),
     ):
-        first = mapping.arguments(selection, layer_id=3)
-        mapping.arguments(selection, layer_id=4)
-        assert mapping.arguments(selection, layer_id=3) == first
+        first = layer_arguments(mapping, selection, layer_id=3)
+        layer_arguments(mapping, selection, layer_id=4)
+        assert layer_arguments(mapping, selection, layer_id=3) == first
     assert bulk.arguments(keys, [1]) == before
     assert all(
         not layout.remote_segment_offsets_bytes.flags.writeable
@@ -131,15 +132,15 @@ def test_head_then_stage_then_context_changes_only_remote_coordinates(layout, he
     keys = partitioned.key_namer.keys((b"a", b"b"))
     assert keys == local.key_namer.keys((b"a", b"b"))
     assert partitioned.key_namer.lookup_keys((b"a",)) == bulk.key_namer.lookup_keys((b"a",))
-    before = local.prepare(keys, (2, 0))
-    after = partitioned.prepare(keys, (2, 0))
+    before = prepare_layer_group(local, keys, (2, 0))
+    after = prepare_layer_group(partitioned, keys, (2, 0))
     layer_bytes = tuple(obj.payload_bytes for obj in bulk.local_layout.partitions)[0] // 2
     stride = ((layer_bytes * 7 + 1023) // 1024) * 1024
     origin = shard_index * stride + 3 * layer_bytes
     assert tuple(obj.size_bytes for obj in partitioned.remote_object_layouts) == (stride * 2,) * head_slices
     for layer_id in (3, 4):
-        old_keys, old_addresses, old_lengths, old_offsets = local.arguments(before, layer_id=layer_id)
-        new_keys, new_addresses, new_lengths, new_offsets = partitioned.arguments(after, layer_id=layer_id)
+        old_keys, old_addresses, old_lengths, old_offsets = layer_arguments(local, before, layer_id=layer_id)
+        new_keys, new_addresses, new_lengths, new_offsets = layer_arguments(partitioned, after, layer_id=layer_id)
         assert (new_keys, new_addresses, new_lengths) == (old_keys, old_addresses, old_lengths)
         assert new_offsets == [[offset + origin for offset in row] for row in old_offsets]
         for layer in partitioned.layer_layouts[layer_id]:
