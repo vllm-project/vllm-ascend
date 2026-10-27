@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -67,7 +66,6 @@ class KVPoolConfig:
     align_state_group_ids: frozenset[int]
     cache_transfer_granularity: int
     hash_block_size: int
-    engine_hash_block_size: int
     tp_partition: TPPartitionSpec
     pp_partition: PPPartitionSpec
     cp_partition: CPPartitionSpec
@@ -132,7 +130,7 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
     pp_partition, cp_partition = resolve_object_partitions(
         vllm_config, backend_name, use_layerwise=use_layerwise, put_step=put_step, target_layer_counts=partitions
     )
-    cache_transfer_granularity, engine_hash_block_size, hash_block_size = _resolve_kv_pool_block_sizes(
+    cache_transfer_granularity, hash_block_size = _resolve_kv_pool_block_sizes(
         vllm_config, kv_cache_config, group_specs, transfer_group_ids
     )
     config = KVPoolConfig(
@@ -150,7 +148,6 @@ def resolve_kv_pool_config(vllm_config: VllmConfig, kv_cache_config: KVCacheConf
         align_state_group_ids=align_state_group_ids,
         cache_transfer_granularity=cache_transfer_granularity,
         hash_block_size=hash_block_size,
-        engine_hash_block_size=engine_hash_block_size,
         tp_partition=tp_partition,
         pp_partition=pp_partition,
         cp_partition=cp_partition,
@@ -291,35 +288,20 @@ def _resolve_kv_pool_block_sizes(
     kv_cache_config: KVCacheConfig,
     group_specs: tuple[KVCacheSpec, ...],
     transfer_group_ids: tuple[int, ...],
-) -> tuple[int, int, int]:
-    """Resolve scheduling, engine hashing, and v1 object hashing separately."""
+) -> tuple[int, int]:
+    """Consume vLLM scheduling and request-hash geometry without deriving another hash grain."""
 
-    scheduler_block_size, engine_hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    )
-    if scheduler_block_size <= 0 or engine_hash_block_size <= 0 or scheduler_block_size % engine_hash_block_size:
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    if scheduler_block_size <= 0 or hash_block_size <= 0 or scheduler_block_size % hash_block_size:
         raise ValueError("AscendStore scheduler block size must be a positive multiple of the hash block size")
-    hash_block_size = engine_hash_block_size
-    cacheable_specs = tuple(
-        group.kv_cache_spec for group in kv_cache_config.kv_cache_groups if group.kv_cache_spec.prefix_cacheable
-    )
-    if (
-        len(cacheable_specs) > 1
-        and vllm_config.parallel_config.decode_context_parallel_size > 1
-        and not vllm_config.cache_config.enable_prefix_caching
-    ):
-        # Ascend's resolver uses scheduler-sized hashes when prefix caching is
-        # off. Keep v1 object identities at the same grain as the prefix-on
-        # route; the Scheduler generates these hashes without changing Request.
-        hash_block_size = min(engine_hash_block_size, math.gcd(*(spec.block_size for spec in cacheable_specs)))
     for group_id in transfer_group_ids:
         block_size = group_specs[group_id].block_size
-        if block_size <= 0 or hash_block_size <= 0 or block_size % hash_block_size or scheduler_block_size % block_size:
+        if block_size <= 0 or block_size % hash_block_size or scheduler_block_size % block_size:
             raise ValueError(
                 f"AscendStore transfer group {group_id} block size ({block_size}) must be a positive multiple "
                 f"of hash block size ({hash_block_size}) and divide scheduler block size ({scheduler_block_size})"
             )
-    return scheduler_block_size, engine_hash_block_size, hash_block_size
+    return scheduler_block_size, hash_block_size
 
 
 def _resolve_transfer_group_ids(kv_cache_config: KVCacheConfig) -> tuple[int, ...]:

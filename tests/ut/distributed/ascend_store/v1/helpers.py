@@ -68,7 +68,6 @@ def make_pool_config(topology, backend_name="mooncake", **changes):
         align_state_group_ids=frozenset(group.group_id for group in topology.groups if group.uses_align_state),
         cache_transfer_granularity=topology.cache_transfer_granularity,
         hash_block_size=topology.hash_block_size,
-        engine_hash_block_size=topology.hash_block_size,
         tp_partition=topology.tp_partition,
         pp_partition=topology.pp_partition,
         cp_partition=topology.cp_partition,

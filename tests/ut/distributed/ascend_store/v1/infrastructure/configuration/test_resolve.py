@@ -189,28 +189,25 @@ def test_invalid_block_geometry(configuration_case, monkeypatch, scheduler_size,
         resolve.resolve_kv_pool_config(config, cache)
 
 
-@pytest.mark.parametrize("prefix_caching,hash_size", ((False, 64), (True, 16), (False, 8)))
-@pytest.mark.parametrize("raw_sizes", ((16, 32), (32, 32)))
-def test_multigroup_dcp_keeps_v1_hash_granularity_when_prefix_caching_is_disabled(
-    configuration_case, monkeypatch, prefix_caching, hash_size, raw_sizes
-):
+@pytest.mark.parametrize("prefix_caching", (False, True))
+@pytest.mark.parametrize("hash_size", (8, 16, 32))
+def test_request_hash_granularity_comes_from_vllm(configuration_case, monkeypatch, prefix_caching, hash_size):
     config, cache = configuration_case
     config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.prefix_match_unit = 4
     config.parallel_config.decode_context_parallel_size = 2
     original = cache.kv_cache_groups[0].kv_cache_spec
-    specs = tuple(replace(original, block_size=size) for size in raw_sizes)
+    specs = tuple(replace(original, block_size=size) for size in (16, 32))
     cache.kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec) for spec in specs]
     effective_specs = tuple(resolve.resolve_dcp_kv_cache_spec(spec, 2) for spec in specs)
-    engine_resolver = Mock(return_value=(64, hash_size))
-    monkeypatch.setattr(resolve.kv_cache_utils, "resolve_kv_cache_block_sizes", engine_resolver)
-    expected_hash_size = hash_size if prefix_caching else min(hash_size, raw_sizes[0])
-    assert resolve._resolve_kv_pool_block_sizes(config, cache, effective_specs, (0, 1)) == (
-        64,
-        hash_size,
-        expected_hash_size,
-    )
+    upstream_resolver = Mock(return_value=(64, hash_size))
+    monkeypatch.setattr(resolve.kv_cache_utils, "resolve_kv_cache_block_sizes", upstream_resolver)
+
+    # Neither prefix caching nor local group sizes override the API's result.
+    assert resolve._resolve_kv_pool_block_sizes(config, cache, effective_specs, (0, 1)) == (64, hash_size)
+    upstream_resolver.assert_called_once_with(cache, config)
     assert config.cache_config.enable_prefix_caching is prefix_caching
-    engine_resolver.assert_called_once_with(cache, config)
+    assert config.cache_config.prefix_match_unit == 4
 
 
 @pytest.mark.parametrize("role,peer", (("kv_producer", "decode"), ("kv_consumer", "prefill")))
