@@ -72,6 +72,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Shard DeepSeek-V4.1 prefill indexer query rows across TP ranks (see
+    # vllm_ascend/attention/dsa_v41_indexer_shard.py). Each rank scores only
+    # its work-balanced slice and the group exchanges final top-k indices.
+    # "1": enable, "0": disable (default). Requires TP > 1, PCP/DCP/DSA-CP
+    # off, non-FULL cudagraphs and the A2/A3 (non packed-cache) indexer path.
+    "VLLM_ASCEND_DSV41_PREFILL_INDEXER_TP_SHARD": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSV41_PREFILL_INDEXER_TP_SHARD", "0"))
+    ),
 }
 
 # end-env-vars-definition
