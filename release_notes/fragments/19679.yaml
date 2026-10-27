@@ -1,9 +1,0 @@
-pr: 19679
-entries:
-  - category: performance
-    text: >-
-      Reduced DeepSeek V4.1 hash-routing overhead by reusing replicated input IDs
-      across layers with model-level sequence parallelism and fixed all-gather
-      communication under DP1/PCP1.
-    model: deepseek-v4.1
-    hardware: [A2]
