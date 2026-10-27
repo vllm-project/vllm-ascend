@@ -57,12 +57,23 @@ def test_aux_blocks_use_correct_rotation_once_and_keep_owned_vocab(monkeypatch):
         qwen3_dflash.align_dflash_weights(model, config)
 
 
-@pytest.mark.parametrize("failure", ["no_aux", "packed_weight", "loader_error"])
+def test_nonaux_retains_original_loading_path(monkeypatch):
+    monkeypatch.setattr(qwen3_dflash, "get_rotation_path", lambda config: Path("rotation.safetensors"))
+    forbidden = Mock(side_effect=AssertionError("Nonaux loading must keep its original path"))
+    monkeypatch.setattr(qwen3_dflash, "align_draft_weights", forbidden)
+    model = SimpleNamespace(model=SimpleNamespace(use_aux_hidden_state=False))
+    qwen3_dflash.align_dflash_weights(model, SimpleNamespace())
+    assert vars(model.model) == {"use_aux_hidden_state": False}
+    assert not hasattr(model, "_ascend_dflash_quarot_alignment")
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing_projection", "packed_weight", "loader_error"])
 def test_invalid_or_failed_alignment_never_marks_success(monkeypatch, failure):
     monkeypatch.setattr(qwen3_dflash, "get_rotation_path", lambda config: Path("rotation.safetensors"))
     model = SimpleNamespace(model=SimpleNamespace(use_aux_hidden_state=True, fc=nn.Linear(4, 2, bias=False)))
-    if failure == "no_aux":
-        model.model.use_aux_hidden_state = False
+    if failure == "missing_projection":
+        del model.model.fc
     elif failure == "packed_weight":
         model.model.fc.weight = nn.Parameter(torch.ones(2, 4, dtype=torch.int8), requires_grad=False)
     else:

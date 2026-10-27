@@ -19,9 +19,13 @@ def align_dflash_weights(model: torch.nn.Module, vllm_config: VllmConfig) -> Non
     and Q.T to missing target vocab shards. It leaves the target's shared
     layers untouched. This hook changes neither auxiliary-layer selection
     nor Window policy and does no work for a non-QuaRot target.
+    Drafts without an auxiliary projection retain their original loading
+    path; this hook does not adapt their distinct hidden-state contract.
     """
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is None:
+        return
+    if not model.model.use_aux_hidden_state:
         return
     binding = str(Path(rotation_path).resolve())
     previous = getattr(model, "_ascend_dflash_quarot_alignment", None)
@@ -30,7 +34,7 @@ def align_dflash_weights(model: torch.nn.Module, vllm_config: VllmConfig) -> Non
             raise ValueError("A DFlash model cannot reuse alignment from a different QuaRot target")
         return
     projection = getattr(model.model, "fc", None)
-    if not model.model.use_aux_hidden_state or projection is None:
+    if projection is None:
         raise ValueError("DFlash with a QuaRot target requires an auxiliary-hidden-state projection")
     if projection.weight.ndim != 2 or projection.weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError("QuaRot DFlash alignment requires an unquantized floating-point fc weight")
