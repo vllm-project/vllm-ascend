@@ -25,6 +25,9 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--load-format"
   - "sharded_state"
+  # This legacy shard predates visual.input_norm buffers. Keep the original
+  # CPU rescale/normalize pipeline instead of requiring new device-norm state.
+  - "--no-mm-device-do-normalize"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,16]}'
   - "--allowed-local-media-path"
