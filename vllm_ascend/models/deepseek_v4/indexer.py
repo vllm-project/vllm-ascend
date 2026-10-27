@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -119,16 +118,19 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     up front, instead of failing later with a cryptic ACLNN dtype mismatch.
     """
     if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-        supported, default_kv_dtype = _A5_INDEXER_KV_DTYPES, "fp8"
+        supported, default_kv_dtype, expected_dtype = _A5_INDEXER_KV_DTYPES, "fp8", torch.float8_e4m3fn
     else:
-        supported, default_kv_dtype = _A3_INDEXER_KV_DTYPES, "int8"
+        supported, default_kv_dtype, expected_dtype = _A3_INDEXER_KV_DTYPES, "int8", torch.int8
     indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
     if indexer_kv_dtype not in supported:
         raise ValueError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
             f"indexer on this platform (expected one of {supported})."
         )
-    return kv_cache_dtype_str_to_dtype(indexer_kv_dtype, vllm_config.model_config)
+    # The compute dtype the indexer kernels expect. Do not derive it from
+    # upstream's ``STR_DTYPE_TO_TORCH_DTYPE``: that table maps ``"fp8"`` to the
+    # storage dtype ``torch.uint8``, not ``torch.float8_e4m3fn``.
+    return expected_dtype
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
