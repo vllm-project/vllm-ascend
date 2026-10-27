@@ -92,7 +92,8 @@ def _entropy_verify_calls(worker, start):
 
 
 @pytest.mark.parametrize("enforce_eager,logprobs_mode", [(True, "raw_logprobs"), (False, "processed_logprobs")])
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+# collective_rpc serializes the trusted test callback sent to the worker.
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_entropy_verify(enforce_eager, logprobs_mode):
     """Exercise random verification, ragged completions and reuse of request state.
