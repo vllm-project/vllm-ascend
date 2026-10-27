@@ -100,9 +100,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # pg bind signature: send(tensors: Sequence[Tensor], dst, tag)
         self._hccl_backend().send([tensor], dst, 0).wait()
 
-    def recv(
-        self, size: torch.Size, dtype: torch.dtype, src: int | None = None
-    ) -> torch.Tensor:
+    def recv(self, size: torch.Size, dtype: torch.dtype, src: int | None = None) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
         if src is None:
@@ -154,6 +152,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
             elif op.op is torch.distributed.irecv:
                 op_types.append("irecv")
                 # Never copy recv buffers: data must land in op.tensor.
+                assert op.tensor.is_contiguous(), "Recv buffer must be contiguous"
                 tensors.append(op.tensor)
             else:
                 raise ValueError(f"Unsupported p2p op: {op.op}")
