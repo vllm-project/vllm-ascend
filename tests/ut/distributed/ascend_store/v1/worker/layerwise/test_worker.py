@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     resolve_group_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.protocol.messages import (
+    CheckpointStoreCommand,
     KVTransferStep,
     LoadCommand,
     LookupRequest,
@@ -724,11 +725,15 @@ def test_layerwise_escaped_preparation_error_skips_copies_releases_sources_and_n
     assert bool(worker._backend_sessions.pending_store_keys) == use_gva
 
 
-def test_layerwise_non_leader_discards_store_rows_in_worker_business_path() -> None:
+def test_layerwise_non_leader_skips_candidate_construction_and_completes_job(monkeypatch) -> None:
     topology = make_topology(tp_rank=1, tp_size=2, put_step=2)
     worker, resources, backend = make_worker(topology=topology, layerwise=True)
     command = RangeStoreCommand("request", 0, 4, ((1,),), (b"a",), 4, 17)
 
+    monkeypatch.setattr(worker, "_store_transfer_records", Mock(side_effect=AssertionError("non-writer rows")))
+    monkeypatch.setattr(
+        type(worker._mappings[0].key_namer), "keys", Mock(side_effect=AssertionError("non-writer keys"))
+    )
     begin_step(worker, store=(command,))
     worker.save_layer("layers.0.group.0")
     worker.save_layer("layers.1.group.0")
@@ -736,6 +741,8 @@ def test_layerwise_non_leader_discards_store_rows_in_worker_business_path() -> N
     assert not any(call[0] in ("batch_put_start", "batch_copy_put", "batch_commit") for call in backend.calls)
     assert worker.take_released_store_job_ids() == {17}
 
+    with pytest.raises(ValueError, match="does not support state checkpoint Store"):
+        worker._build_store_candidates((CheckpointStoreCommand("invalid", ((1,),), (b"a",), 0, (), 18),))
     worker.close()
     assert resources.closed
 
@@ -913,7 +920,7 @@ def test_all_successful_session_admission_reuses_batch_without_reselecting_objec
     try:
         assert worker._submit_load(batch) == ()
         assert worker._load_plan.batch is batch
-        assert worker._load_plan.groups[0].request_indices == (0, 1)
+        assert not hasattr(worker._load_plan.groups[0], "request_indices")
         assert worker._load_initial_completions == ()
         select.assert_not_called()
     finally:

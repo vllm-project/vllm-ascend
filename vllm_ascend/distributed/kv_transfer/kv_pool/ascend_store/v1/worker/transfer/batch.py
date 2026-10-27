@@ -1,6 +1,6 @@
 """Carry transfer records from Worker selection to Backend I/O.
 
-The batch values retain dynamic Block IDs, token counts, keys, request
+The batch values retain dynamic Block IDs, keys, request
 ownership, and current object selection together with the minimal bound facts
 needed to interpret them: physical layers and remote object size. Reusable
 layout formulas remain in the Infrastructure Mapping; session progress and
@@ -33,7 +33,6 @@ class KVGroupBatch:
 
     group_id: int
     local_block_ids: UInt64Array
-    token_counts: UInt64Array
     keys_by_partition: KeysByPartition
     request_transfer_record_boundaries: IndexArray
     physical_layer_ids: tuple[int, ...]
@@ -69,18 +68,16 @@ class KVGroupBatch:
         )
 
     def select_keys(self, accepted: set[str], claimed: set[str] | None = None) -> KVGroupBatch:
-        current: BoolArray = (
-            np.ones(self.transfer_candidate_count, dtype=np.bool_)
-            if self.transfer_candidate_mask is None
-            else self.transfer_candidate_mask
-        )
+        current = self.transfer_candidate_mask
         selected: BoolArray = np.zeros(self.transfer_candidate_count, dtype=np.bool_)
         selected_keys: list[str] = []
         for partition_index, axis in enumerate(self.keys_by_partition):
             partition_candidate_start = partition_index * self.transfer_record_count
             for transfer_record_index, key in enumerate(axis):
                 index = partition_candidate_start + transfer_record_index
-                if not current[index] or key not in accepted or (claimed is not None and key in claimed):
+                if (current is not None and not current[index]) or key not in accepted:
+                    continue
+                if claimed is not None and key in claimed:
                     continue
                 selected[index] = True
                 selected_keys.append(key)

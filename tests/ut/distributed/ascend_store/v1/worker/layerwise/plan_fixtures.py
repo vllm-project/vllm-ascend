@@ -3,6 +3,7 @@
 import numpy as np
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.key_range import (
+    bind_key_range_layouts,
     materialize_group_layer_ranges,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
@@ -17,7 +18,6 @@ def prepare_layer_group(mapping, keys, local_block_ids, *, selected_keys=None):
     batch = KVGroupBatch(
         local.group_id,
         ids,
-        np.full(len(ids), local.group_block_size, dtype=np.uint64),
         tuple(tuple(partition_keys) for partition_keys in keys),
         np.array([0, len(ids)], dtype=np.intp),
         local.physical_layer_ids,
@@ -25,13 +25,15 @@ def prepare_layer_group(mapping, keys, local_block_ids, *, selected_keys=None):
         None if selected_keys is None else np.asarray(selected_keys, dtype=np.bool_),
         physical_layer_ids_by_partition=local.physical_layer_ids_by_partition,
     )
-    return make_layer_transfer_group(batch)
+    return make_layer_transfer_group(batch, selected_keys=batch.selected_keys())
 
 
-def layer_arguments(mapping, group, *, layer_id):
+def layer_arguments(mapping, group, *, layer_id, layouts=None):
     keys = [
         key
         for layout in mapping.layer_layouts.get(layer_id, ())
         for key in group.selected_keys[group.selected_transfer_slices_by_partition[layout.partition_index]]
     ]
-    return keys, *materialize_group_layer_ranges(mapping, group, layer_id)
+    if layouts is None:
+        layouts = bind_key_range_layouts({group.group_id: mapping})
+    return keys, *materialize_group_layer_ranges(layouts[group.group_id].get(layer_id, ()), group)

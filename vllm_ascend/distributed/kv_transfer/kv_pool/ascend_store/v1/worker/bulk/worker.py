@@ -45,8 +45,9 @@ from .transfer import (
     _empty_store_completions,
     _failed_store_completions,
     _store_completions,
+    bind_bulk_sizes,
+    bind_store_writer_selection,
     materialize_bulk_arguments,
-    select_store_writer_records,
 )
 
 
@@ -67,6 +68,12 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         self._companion_group_ids = tuple(
             group.group_id for group in topology.transfer_groups if not group.uses_align_state
         )
+        self._store_writer_selection = {
+            group.group_id: bind_store_writer_selection(
+                topology, tp_mismatch=topology.tp_partition.tp_mismatch, align_state=group.uses_align_state
+            )
+            for group in topology.transfer_groups
+        }
         self._store_executor = Executor("KVPoolStoreExecutor", resources.backend.set_device) if store_enabled else None
         self._load_executor = Executor("KVPoolLoadExecutor", resources.backend.set_device) if load_async else None
         self._pending_loads: deque[Future[tuple[LoadCompletion, ...]]] = deque()
@@ -98,6 +105,8 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
             )
             for group_id in self._groups
         }
+
+        self._bulk_sizes = bind_bulk_sizes(self._mappings)
 
     def _submit_load(self, batch: KVTransferBatch) -> tuple[LoadCompletion, ...]:
         if self._load_executor is None:
@@ -194,9 +203,9 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                         start_token=command.start_token,
                         mask=mask,
                     )
-                    rows = select_store_writer_records(
-                        self._topology, rows, tp_mismatch=self._topology.tp_partition.tp_mismatch
-                    )
+                    selection = self._store_writer_selection[group_id]
+                    if selection is not None:
+                        rows = (rows[0][selection], rows[1][selection], rows[2][selection])
                 transfer_records_by_group[group_id].append(rows)
                 keys_by_group[group_id].append(mapping.key_namer.keys(rows[1]))
         return StoreTransferCandidates(
@@ -236,11 +245,9 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                 continue
             accepted_state_groups.append(group)
             rows = ([group.block_size], [checkpoint_hash], [source.block_id])
-            transfer_records_by_group[group.group_id] = select_store_writer_records(
-                self._topology,
-                rows,
-                tp_mismatch=False,
-                align_state=True,
+            selection = self._store_writer_selection[group.group_id]
+            transfer_records_by_group[group.group_id] = (
+                rows if selection is None else (rows[0][selection], rows[1][selection], rows[2][selection])
             )
 
         if accepted_state_groups and any(boundary % group.block_size for group in accepted_state_groups):
@@ -262,11 +269,11 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
                     counts.append(group.block_size)
                     hashes.append(boundary_hash(block_end, command.block_hashes, self._topology.hash_block_size))
                     selected_block_ids.append(block_id)
-                transfer_records_by_group[group_id] = select_store_writer_records(
-                    self._topology,
-                    (counts, hashes, selected_block_ids),
-                    tp_mismatch=False,
-                    align_state=False,
+                selection = self._store_writer_selection[group_id]
+                transfer_records_by_group[group_id] = (
+                    (counts, hashes, selected_block_ids)
+                    if selection is None
+                    else (counts[selection], hashes[selection], selected_block_ids[selection])
                 )
         return transfer_records_by_group
 
@@ -339,4 +346,4 @@ class BulkWorker(KVPoolWorker[BulkMapping]):
         return _store_completions(selected, evidence)
 
     def _materialize_bulk_arguments(self, batch: KVTransferBatch) -> BulkBackendArguments:
-        return materialize_bulk_arguments(self._mappings, batch)
+        return materialize_bulk_arguments(self._mappings, batch, self._bulk_sizes)

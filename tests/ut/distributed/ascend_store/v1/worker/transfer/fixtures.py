@@ -12,7 +12,6 @@ def make_group(group_id, request_transfer_record_boundaries, partition_count=2):
     return KVGroupBatch(
         group_id,
         np.arange(transfer_record_count, dtype=np.uint64) + 10,
-        np.full(transfer_record_count, 128, dtype=np.uint64),
         tuple(
             tuple(f"g{group_id}-axis{axis}-row{row}" for row in range(transfer_record_count))
             for axis in range(partition_count)

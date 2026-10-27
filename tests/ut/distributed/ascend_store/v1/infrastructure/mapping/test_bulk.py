@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     head_slicing,
     layer_partitioning,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.bulk.transfer import bind_bulk_sizes
 
 
 class MappingTests(unittest.TestCase):
@@ -514,14 +515,18 @@ class MappingTests(unittest.TestCase):
         for head_slices, pp_layer_counts in itertools.product((None, 2), (None, (1, 3))):
             bound = make_case(head_slices=head_slices, pp_layer_counts=pp_layer_counts).bind()
             keys = bound.key_namer.keys(["a", "b"])
+            sizes = bind_bulk_sizes({bound.local_layout.group_id: bound})
             with (
                 patch.object(np, "broadcast_to", side_effect=AssertionError("unused segment lengths")),
                 patch.object(np, "flatnonzero", side_effect=AssertionError("unused selected indices")),
                 patch.object(np, "empty", side_effect=AssertionError("unused address allocation")),
             ):
-                self.assertEqual(bulk_arguments(bound, bound.key_namer.keys([]), []), ([], [], []))
                 self.assertEqual(
-                    bulk_arguments(bound, keys, [0, 1], selected_keys=[False] * (len(keys) * 2)), ([], [], [])
+                    bulk_arguments(bound, bound.key_namer.keys([]), [], sizes_by_group=sizes), ([], [], [])
+                )
+                self.assertEqual(
+                    bulk_arguments(bound, keys, [0, 1], selected_keys=[False] * (len(keys) * 2), sizes_by_group=sizes),
+                    ([], [], []),
                 )
 
     def test_hybrid_groups_bind_original_ids_and_independent_rows(self):

@@ -204,19 +204,18 @@ def make_gva_binding(local_block_ids: tuple[int, ...] = (1, 3)):
     )
     # Exercise Worker copy methods without starting background executors.
     worker = GVALayerwiseWorker(topology, resources, reachability=make_reachability(topology))
-    worker._mappings = {0: mapping}
+    worker._bind_mappings(registration)
+    mapping = worker._mappings[0]
     sessions = worker._backend_sessions
 
     hashes = tuple(f"h{index}" for index in range(len(local_block_ids)))
     ids = np.asarray(local_block_ids, dtype=np.uint64)
-    counts: np.ndarray = np.full(len(local_block_ids), 4, dtype=np.uint64)
     request_transfer_record_boundaries = np.asarray([0, len(local_block_ids)], dtype=np.intp)
-    for values in (ids, counts, request_transfer_record_boundaries):
+    for values in (ids, request_transfer_record_boundaries):
         values.flags.writeable = False
     group = KVGroupBatch(
         0,
         ids,
-        counts,
         mapping.key_namer.keys(hashes),
         request_transfer_record_boundaries,
         (0, 1),

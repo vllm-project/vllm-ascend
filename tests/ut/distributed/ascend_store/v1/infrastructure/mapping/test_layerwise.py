@@ -22,6 +22,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.
     layerwise,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.infrastructure.mapping.local_layout import head_slicing
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.key_range import (
+    bind_key_range_layouts,
+)
 
 
 def assemble_layers(mapping, selection, object_sizes):
@@ -288,6 +291,7 @@ class LayerwiseMappingTests(unittest.TestCase):
             only_pp0 = prepare_layer_group(
                 mapping, keys, [0], selected_keys=[p < case.head_slices for p in range(len(keys))]
             )
+            layouts = bind_key_range_layouts({mapping.local_layout.group_id: mapping})
             with (
                 patch.object(np, "broadcast_to", side_effect=AssertionError("unused segments")),
                 patch.object(np, "empty", side_effect=AssertionError("unused allocation")),
@@ -299,7 +303,9 @@ class LayerwiseMappingTests(unittest.TestCase):
                     (empty_rows, 0),
                     (only_pp0, 2),
                 ):
-                    self.assertEqual(layer_arguments(mapping, selection, layer_id=layer_id), ([], [], [], []))
+                    self.assertEqual(
+                        layer_arguments(mapping, selection, layer_id=layer_id, layouts=layouts), ([], [], [], [])
+                    )
 
     def test_preparation_snapshots_inputs_and_outputs_do_not_alias(self):
         case = make_case(head_slices=2)

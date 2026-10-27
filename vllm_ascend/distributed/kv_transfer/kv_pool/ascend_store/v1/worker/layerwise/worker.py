@@ -44,11 +44,10 @@ from ..transfer.completion import (
 )
 from ..transfer.rows import (
     StoreTransferRecords,
-    empty_store_transfer_records,
     merge_keys_by_partition,
     store_transfer_records,
 )
-from .transfer import LayerStoreResult, LayerTransferPlan
+from .transfer import LayerStoreResult, LayerTransferPlan, bind_layer_memberships
 
 
 @dataclass(slots=True)
@@ -135,6 +134,8 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
             )
             for group_id in self._groups
         }
+
+        self._layer_memberships = bind_layer_memberships(self._mappings)
 
     def _group_object_layout(self, group_id: int) -> tuple[int, tuple[tuple[int, ...], ...]]:
         mapping = self._mappings[group_id]
@@ -225,6 +226,10 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         return self._session
 
     def _build_store_candidates(self, commands: tuple[StoreCommand, ...]) -> StoreTransferCandidates:
+        if any(isinstance(command, CheckpointStoreCommand) for command in commands):
+            raise ValueError("Layerwise transfer does not support state checkpoint Store")
+        if not self._layerwise_store_leader:
+            return StoreTransferCandidates(())
         transfer_records_by_group: list[list[StoreTransferRecords]] = [
             [] for _group_id in self._topology.transfer_group_ids
         ]
@@ -247,11 +252,6 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         )
 
     def _store_transfer_records(self, command: StoreCommand) -> tuple[StoreTransferRecords, ...]:
-        if isinstance(command, CheckpointStoreCommand):
-            raise ValueError("Layerwise transfer does not support state checkpoint Store")
-
-        if not self._layerwise_store_leader:
-            return tuple(empty_store_transfer_records() for _group_id in self._topology.transfer_group_ids)
         masks = self._reachability.select_for_store(command.block_hashes, command.end_token, command.num_prompt_tokens)
         return tuple(
             store_transfer_records(

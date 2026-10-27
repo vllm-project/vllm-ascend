@@ -106,10 +106,15 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
     count = request_count * _BLOCKS_PER_REQUEST
     keys = tuple(f"key-{index:064x}" for index in range(count))
     remote_object_size_bytes = 2 * _LAYERS * _SEGMENT_BYTES
+    legacy_counts = (
+        (np.full(count, _BLOCK_SIZE, dtype=np.uint64),)
+        if "token_counts" in batches.KVGroupBatch.__dataclass_fields__
+        else ()
+    )
     group = batches.KVGroupBatch(
         0,
         np.arange(count, dtype=np.uint64),
-        np.full(count, _BLOCK_SIZE, dtype=np.uint64),
+        *legacy_counts,
         (keys,),
         np.arange(0, count + 1, _BLOCKS_PER_REQUEST, dtype=np.intp),
         tuple(range(_LAYERS)),
@@ -128,8 +133,15 @@ def make_case(request_count, route="key_range", package=_PACKAGE):
         worker_type = layerwise.GVALayerwiseWorker if route == "gva" else layerwise.KeyRangeLayerwiseWorker
     worker = worker_type(topology, resources, reachability=make_reachability(topology), store_enabled=False)
     if "topology" in inspect.signature(mapping.LayerwiseMapping).parameters:
-        mapping_type = mapping.BulkMapping if route == "bulk" else mapping.LayerwiseMapping
-        worker._mappings = {0: mapping_type(topology, *registration_arrays)}
+        worker._bind_mappings(
+            dict(
+                zip(
+                    ("base_addresses", "block_lengths", "block_strides", "layer_entry_offsets"),
+                    registration_arrays,
+                    strict=True,
+                )
+            )
+        )
     else:
         # Historical snapshots bind their Bulk view first. This compatibility
         # belongs to the paired benchmark, never to the production Mapping API.
@@ -227,8 +239,17 @@ def phase_operations(worker, batch, route, package):
     module = importlib.import_module(package + module_name)
     materialize = module.materialize_layer_gva if route == "gva" else module.materialize_load_layer_ranges
 
-    def all_layer_arguments():
-        return tuple(materialize(worker._mappings, worker._load_plan, layer) for layer in range(_LAYERS))
+    if route == "key_range" and hasattr(worker, "_load_key_merges"):
+
+        def all_layer_arguments():
+            return tuple(
+                materialize(worker._key_range_layouts, worker._load_plan, layer, worker._load_key_merges[layer])
+                for layer in range(_LAYERS)
+            )
+    else:
+
+        def all_layer_arguments():
+            return tuple(materialize(worker._mappings, worker._load_plan, layer) for layer in range(_LAYERS))
 
     return {
         "plan_preparation": partial(worker._prepare_load_layers, batch),

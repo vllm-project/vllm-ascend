@@ -14,6 +14,7 @@ from ....attention_fence import reset_attention_compute_start_gate
 from ...backend import KeyRangeBackend
 from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import LayerwiseMapping
+from ...infrastructure.mapping.layerwise import LayerPartitionLayout
 from ...infrastructure.mapping.object_layout import RemoteObjectLayoutFactory
 from ...infrastructure.mapping.object_naming import KeyBuilder
 from ...infrastructure.reachability import HybridReachability, UnitaryReachability
@@ -25,8 +26,7 @@ from .transfer import (
     LayerTransferGroup,
     LayerTransferPlan,
     _layer_load_completions,
-    prepare_layer_load,
-    prepare_layer_store,
+    prepare_layer_transfer,
 )
 from .worker import LayerwiseWorker, _attention_store_layer_ids
 
@@ -51,6 +51,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         backend = cast(KeyRangeBackend, resources.backend)
         sessions = backend.create_sessions()
         self._key_range_backend = backend
+        self._load_key_merges: dict[int, KeyRangeKeyMerge | None] = {}
         super().__init__(
             topology,
             resources,
@@ -67,18 +68,29 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
 
         self._attention_store_layers = _attention_store_layer_ids(topology) if store_enabled else frozenset()
 
+    def _bind_mappings(self, registration: dict[str, Any]) -> None:
+        super()._bind_mappings(registration)
+        self._key_range_layouts = bind_key_range_layouts(self._mappings)
+
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._load_plan = prepare_layer_load(batch, self._mappings)
+        self._load_plan = prepare_layer_transfer(batch, self._layer_memberships)
+        self._load_key_merges = prepare_load_key_merges(self._load_plan)
         return self._load_plan.selected_keys_by_layer
 
     def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._store_plan = prepare_layer_store(batch, self._mappings)
+        self._store_plan = prepare_layer_transfer(batch, self._layer_memberships)
         return self._store_plan.selected_keys_by_layer
+
+    def _finish_load(self) -> None:
+        self._load_key_merges.clear()
+        super()._finish_load()
 
     def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:
         plan = self._prepared_load_plan()
         try:
-            arguments = materialize_load_layer_ranges(self._mappings, plan, layer_id)
+            arguments = materialize_load_layer_ranges(
+                self._key_range_layouts, plan, layer_id, self._load_key_merges[layer_id]
+            )
             if not arguments.keys:
                 return _layer_load_completions(plan, layer_id, {})
             result_codes = self._key_range_backend.copy_key_range_load(
@@ -101,7 +113,7 @@ class KeyRangeLayerwiseWorker(LayerwiseWorker):
         source_handed_off = False
         groups, keys = self._prepared_store_layer(layer_id)
         try:
-            addresses, sizes, offsets = materialize_store_layer_ranges(self._mappings, groups, layer_id)
+            addresses, sizes, offsets = materialize_store_layer_ranges(self._key_range_layouts, groups, layer_id)
             if source_ready_event is not None:
                 source_ready_event.synchronize()
             source_handed_off = True
@@ -131,26 +143,84 @@ class KeyRangeArguments:
     offsets: list[list[int]]
 
 
+@dataclass(frozen=True, slots=True)
+class KeyRangeLayout:
+    """Worker-owned native scalar templates for a bound layer partition."""
+
+    layout: LayerPartitionLayout
+    sizes: tuple[int, ...]
+    offsets: tuple[int, ...]
+
+
+KeyRangeLayouts = dict[int, dict[int, tuple[KeyRangeLayout, ...]]]
+
+
+def bind_key_range_layouts(mappings: dict[int, LayerwiseMapping]) -> KeyRangeLayouts:
+    return {
+        group_id: {
+            layer_id: tuple(
+                KeyRangeLayout(
+                    layout,
+                    tuple(
+                        np.broadcast_to(
+                            layout.local_segments.segment_lengths_bytes,
+                            layout.local_segments.block_zero_segment_addresses.shape,
+                        ).tolist()
+                    ),
+                    tuple(layout.remote_segment_offsets_bytes.tolist()),
+                )
+                for layout in layouts
+            )
+            for layer_id, layouts in mapping.layer_layouts.items()
+        }
+        for group_id, mapping in mappings.items()
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class KeyRangeKeyMerge:
+    """Duplicate-key destinations, shared by layers with the same participating partitions."""
+
+    keys: list[str]
+    merge_indices: tuple[int, ...]
+
+
+def prepare_load_key_merges(plan: LayerTransferPlan) -> dict[int, KeyRangeKeyMerge | None]:
+    by_membership: dict[int, KeyRangeKeyMerge | None] = {}
+    by_layer = {}
+    for layer_id, keys in plan.selected_keys_by_layer.items():
+        membership = id(keys)  # The plan shares this list exactly when participating partitions match.
+        if membership not in by_membership:
+            if len(set(keys)) == len(keys):
+                selection = None
+            else:
+                indices: dict[str, int] = {}
+                merge_indices = tuple(indices.setdefault(key, len(indices)) for key in keys)
+                selection = KeyRangeKeyMerge(list(indices), merge_indices)
+            by_membership[membership] = selection
+        by_layer[layer_id] = by_membership[membership]
+    return by_layer
+
+
 def materialize_group_layer_ranges(
-    mapping: LayerwiseMapping, group: LayerTransferGroup, layer_id: int
+    layouts: tuple[KeyRangeLayout, ...], group: LayerTransferGroup
 ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
     """Combine the Worker's partition selection with independent byte layouts."""
     addresses, sizes, offsets = [], [], []
-    for layout in mapping.layer_layouts.get(layer_id, ()):
+    for native in layouts:
+        layout = native.layout
         ids = group.selected_local_block_ids_by_partition[layout.partition_index]
         if not len(ids):
             continue
         segments = layout.local_segments
         addresses.extend(segments.addresses(ids).tolist())
-        lengths = np.broadcast_to(segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape).tolist()
-        positions = layout.remote_segment_offsets_bytes.tolist()
-        sizes.extend(lengths.copy() for _ in repeat(None, len(ids)))
-        offsets.extend(positions.copy() for _ in repeat(None, len(ids)))
+        sizes.extend(list(native.sizes) for _ in repeat(None, len(ids)))
+        offsets.extend(list(native.offsets) for _ in repeat(None, len(ids)))
     return addresses, sizes, offsets
 
 
 def materialize_store_layer_ranges(
-    mappings: dict[int, LayerwiseMapping],
+    layouts: KeyRangeLayouts,
     groups: tuple[LayerTransferGroup, ...],
     layer_id: int,
 ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
@@ -160,7 +230,9 @@ def materialize_store_layer_ranges(
     sizes: list[list[int]] = []
     offsets: list[list[int]] = []
     for group in groups:
-        local, group_sizes, group_offsets = materialize_group_layer_ranges(mappings[group.group_id], group, layer_id)
+        local, group_sizes, group_offsets = materialize_group_layer_ranges(
+            layouts[group.group_id].get(layer_id, ()), group
+        )
         addresses.extend(local)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
@@ -168,9 +240,10 @@ def materialize_store_layer_ranges(
 
 
 def materialize_load_layer_ranges(
-    mappings: dict[int, LayerwiseMapping],
+    layouts: KeyRangeLayouts,
     plan: LayerTransferPlan,
     layer_id: int,
+    merge: KeyRangeKeyMerge | None,
 ) -> KeyRangeArguments:
     """Evaluate one KeyRange Load layer from cross-layer reusable rows."""
 
@@ -179,26 +252,21 @@ def materialize_load_layer_ranges(
     offsets: list[list[int]] = []
     for group in plan.groups_by_layer[layer_id]:
         group_addresses, group_sizes, group_offsets = materialize_group_layer_ranges(
-            mappings[group.group_id], group, layer_id
+            layouts[group.group_id].get(layer_id, ()), group
         )
         addresses.extend(group_addresses)
         sizes.extend(group_sizes)
         offsets.extend(group_offsets)
-    keys = plan.selected_keys_by_layer[layer_id]
-    if len(set(keys)) == len(keys):
-        return KeyRangeArguments(keys, addresses, sizes, offsets)
+    if merge is None:
+        return KeyRangeArguments(plan.selected_keys_by_layer[layer_id], addresses, sizes, offsets)
 
-    # Keep the common path in bulk list operations; only duplicate keys need per-object merging.
-    key_indices: dict[str, int] = {}
-    merged_keys: list[str] = []
     merged_addresses: list[list[int]] = []
     merged_sizes: list[list[int]] = []
     merged_offsets: list[list[int]] = []
-    for key, row_addresses, row_sizes, row_offsets in zip(keys, addresses, sizes, offsets, strict=True):
-        index = key_indices.get(key)
-        if index is None:
-            key_indices[key] = len(merged_keys)
-            merged_keys.append(key)
+    for index, row_addresses, row_sizes, row_offsets in zip(
+        merge.merge_indices, addresses, sizes, offsets, strict=True
+    ):
+        if index == len(merged_addresses):
             merged_addresses.append(row_addresses)
             merged_sizes.append(row_sizes)
             merged_offsets.append(row_offsets)
@@ -206,4 +274,4 @@ def materialize_load_layer_ranges(
             merged_addresses[index].extend(row_addresses)
             merged_sizes[index].extend(row_sizes)
             merged_offsets[index].extend(row_offsets)
-    return KeyRangeArguments(merged_keys, merged_addresses, merged_sizes, merged_offsets)
+    return KeyRangeArguments(merge.keys, merged_addresses, merged_sizes, merged_offsets)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import repeat
 
 import numpy as np
 
@@ -10,7 +11,6 @@ from ...infrastructure.configuration.topology import KVPoolTopology
 from ...infrastructure.mapping import BulkMapping
 from ..transfer.batch import KVTransferBatch
 from ..transfer.completion import LoadCompletion, StoreCompletion, StoreEvidence, TransferEvidence, _load_completions
-from ..transfer.rows import StoreTransferRecords
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +22,24 @@ class BulkBackendArguments:
     sizes: list[list[int]]
 
 
-def materialize_bulk_arguments(mappings: dict[int, BulkMapping], batch: KVTransferBatch) -> BulkBackendArguments:
+def bind_bulk_sizes(mappings: dict[int, BulkMapping]) -> dict[int, tuple[tuple[int, ...], ...]]:
+    """Convert fixed segment lengths once; each Backend call gets independent lists."""
+    return {
+        group_id: tuple(
+            tuple(
+                np.broadcast_to(
+                    part.local_segments.segment_lengths_bytes, part.local_segments.block_zero_segment_addresses.shape
+                ).tolist()
+            )
+            for part in mapping.local_layout.partitions
+        )
+        for group_id, mapping in mappings.items()
+    }
+
+
+def materialize_bulk_arguments(
+    mappings: dict[int, BulkMapping], batch: KVTransferBatch, sizes_by_group: dict[int, tuple[tuple[int, ...], ...]]
+) -> BulkBackendArguments:
     """Select full local payloads and produce the Bulk Backend's final lists."""
     keys, addresses, lengths = [], [], []
     for group in batch.groups:
@@ -47,21 +64,18 @@ def materialize_bulk_arguments(mappings: dict[int, BulkMapping], batch: KVTransf
             keys.extend(partition_keys if indices is None else (partition_keys[i] for i in indices))
             segments = partition.local_segments
             addresses.extend(segments.addresses(ids).tolist())
-            sizes = np.broadcast_to(
-                segments.segment_lengths_bytes, segments.block_zero_segment_addresses.shape
-            ).tolist()
-            lengths.extend(sizes.copy() for _ in ids)
+            sizes = sizes_by_group[group.group_id][partition_index]
+            lengths.extend(list(sizes) for _ in repeat(None, len(ids)))
     return BulkBackendArguments(keys, addresses, lengths)
 
 
-def select_store_writer_records(
+def bind_store_writer_selection(
     topology: KVPoolTopology,
-    rows: StoreTransferRecords,
     *,
     tp_mismatch: bool,
     align_state: bool = False,
-) -> StoreTransferRecords:
-    """Partition rows only among ranks proven to publish the same key and bytes."""
+) -> slice | None:
+    """Bind row ownership among ranks proven to publish the same key and bytes."""
 
     if tp_mismatch or align_state:
         replica_count = 1
@@ -75,10 +89,8 @@ def select_store_writer_records(
     shard_rank = topology.pcp_rank * replica_count + topology.tp_rank % replica_count
     shard_count = topology.pcp_size * replica_count
     if shard_count <= 1:
-        return rows
-    counts, hashes, local_block_ids = rows
-    selection = slice(shard_rank, len(counts), shard_count)
-    return counts[selection], hashes[selection], local_block_ids[selection]
+        return None
+    return slice(shard_rank, None, shard_count)
 
 
 def _bulk_load_completions(batch: KVTransferBatch, result_codes: tuple[int, ...]) -> tuple[LoadCompletion, ...]:

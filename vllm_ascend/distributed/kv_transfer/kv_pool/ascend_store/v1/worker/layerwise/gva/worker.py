@@ -22,8 +22,7 @@ from ..transfer import (
     LayerStoreResult,
     LayerTransferPlan,
     _layer_load_completions,
-    prepare_layer_load,
-    prepare_layer_store,
+    prepare_layer_transfer,
 )
 from ..worker import LayerwiseWorker, _StoreState
 from .collective import StoreCollective
@@ -73,11 +72,11 @@ class GVALayerwiseWorker(LayerwiseWorker):
         return tuple(region is not None for region in self._gva_backend.query_gva_regions(keys))
 
     def _prepare_load_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._load_plan = prepare_layer_load(batch, self._mappings, self._resolve_load_bases)
+        self._load_plan = prepare_layer_transfer(batch, self._layer_memberships, self._resolve_load_bases)
         return self._load_plan.selected_keys_by_layer
 
     def _prepare_store_layers(self, batch: KVTransferBatch) -> dict[int, list[str]]:
-        self._store_plan = prepare_layer_store(batch, self._mappings, self._resolve_store_bases)
+        self._store_plan = prepare_layer_transfer(batch, self._layer_memberships, self._resolve_store_bases)
         return self._store_plan.selected_keys_by_layer
 
     def _copy_load_layer(self, layer_id: int) -> tuple[LoadCompletion, ...]:

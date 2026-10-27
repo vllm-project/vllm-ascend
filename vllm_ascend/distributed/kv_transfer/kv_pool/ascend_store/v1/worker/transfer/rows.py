@@ -37,15 +37,13 @@ def lookup_chunk_ranges(
         return _empty_lookup_chunk_ranges()
     grouped_hashes = get_block_hashes(block_hashes, block_size, hash_block_size)
     logical_count = min(len(grouped_hashes), _ceil_div(end_token, block_size))
-    aligned_start_token = start_token // block_size * block_size
+    first_block = max(start_token // block_size, 0)
     starts: list[int] = []
     counts: list[int] = []
     hashes: list[BlockHash | str] = []
-    for block_index in range(logical_count):
+    for block_index in range(first_block, logical_count):
         start = block_index * block_size
         end = min(start + block_size, end_token)
-        if start < aligned_start_token or end <= start:
-            continue
         if mask is not None and (block_index >= len(mask) or not mask[block_index]):
             continue
         starts.append(start)
@@ -113,20 +111,16 @@ def load_transfer_records(
         requested_block_count if tail_block_index is not None else min(len(grouped_hashes), requested_block_count)
     )
     block_offset = max(logical_count - len(local_block_ids), 0)
-    aligned_start_token = start_token // block_size * block_size
+    first_block = max(start_token // block_size, block_offset, 0)
     counts: list[int] = []
     hashes: list[BlockHash | str] = []
     selected_block_ids: list[int] = []
-    for block_index in range(logical_count):
+    for block_index in range(first_block, logical_count):
         start = block_index * block_size
         end = min(start + block_size, end_token)
-        if start < aligned_start_token or end <= start:
-            continue
         if mask is not None and (block_index >= len(mask) or not mask[block_index]):
             continue
         local_index = block_index - block_offset
-        if local_index < 0 or local_index >= len(local_block_ids):
-            continue
         block_id = local_block_ids[local_index]
         if block_id < minimum_block_id:
             continue
@@ -242,10 +236,9 @@ def compact_single_partition_records(
     transfer_records_by_request: tuple[StoreTransferRecords, ...],
     partition_keys: tuple[str, ...],
     selected_transfer_record_indices: tuple[bool, ...],
-) -> tuple[list[int], list[int], list[int], tuple[str, ...]]:
+) -> tuple[list[int], list[int], tuple[str, ...]]:
     """Compact a one-axis Store batch while preserving request splits."""
 
-    token_counts: list[int] = []
     local_block_ids: list[int] = []
     selected_keys: list[str] = []
     request_transfer_record_boundaries = [0]
@@ -256,14 +249,13 @@ def compact_single_partition_records(
             transfer_record_start : transfer_record_start + request_transfer_record_count
         ]
         keys = partition_keys[transfer_record_start : transfer_record_start + request_transfer_record_count]
-        for count, block_id, key, keep in zip(counts, ids, keys, selection, strict=True):
+        for block_id, key, keep in zip(ids, keys, selection, strict=True):
             if keep:
-                token_counts.append(count)
                 local_block_ids.append(block_id)
                 selected_keys.append(key)
         request_transfer_record_boundaries.append(len(local_block_ids))
         transfer_record_start += request_transfer_record_count
-    return token_counts, local_block_ids, request_transfer_record_boundaries, tuple(selected_keys)
+    return local_block_ids, request_transfer_record_boundaries, tuple(selected_keys)
 
 
 def empty_store_transfer_records() -> StoreTransferRecords:

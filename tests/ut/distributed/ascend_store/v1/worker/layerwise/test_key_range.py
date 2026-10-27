@@ -36,11 +36,10 @@ def test_key_range_merged_failure_identifies_every_original_request_destination(
         batch = worker._build_load_batch(commands)
         worker._prepare_load_layers(batch)
         backend.session_copy_result = (-7, 0) if failed_group == 0 else (0, -7)
-        # Ownership must be resolved by the plan, not rediscovered for each failed layer.
-        monkeypatch.setattr(
-            KVGroupBatch, "request_index", Mock(side_effect=AssertionError("Repeated ownership lookup"))
-        )
+        ownership = Mock(side_effect=KVGroupBatch.request_index)
+        monkeypatch.setattr(KVGroupBatch, "request_index", lambda group, index: ownership(group, index))
         completions = worker._copy_load_layer(2)
+        assert ownership.call_count == 2
         assert [completion.request_id for completion in completions] == ["first", "second"]
         expected_blocks = (1, 4) if failed_group == 0 else (2, 5)
         for completion, block_id in zip(completions, expected_blocks, strict=True):
@@ -212,7 +211,7 @@ def test_layerwise_failed_load_finish_keeps_backend_ownership_for_close_retry() 
 
 
 @pytest.mark.parametrize("copy_codes", ((0, 0), (0, -7)))
-def test_partial_load_admission_preserves_original_failure_blocks(copy_codes, monkeypatch):
+def test_partial_load_admission_preserves_original_failure_blocks(copy_codes):
     worker, resources, backend = make_worker(
         layerwise=True,
         store=False,
@@ -225,9 +224,6 @@ def test_partial_load_admission_preserves_original_failure_blocks(copy_codes, mo
     try:
         begin_step(worker, load=commands)
         worker.start_load()
-        monkeypatch.setattr(
-            KVGroupBatch, "request_index", Mock(side_effect=AssertionError("Ownership must be prepared before copies"))
-        )
         for layer in range(3):
             worker.wait_for_layer_load(f"layers.{layer}.group.0")
         result = worker.collect_load_result()

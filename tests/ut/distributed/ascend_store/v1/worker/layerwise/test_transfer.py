@@ -17,7 +17,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwis
     materialize_layer_gva,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.key_range import (
+    bind_key_range_layouts,
     materialize_load_layer_ranges,
+    prepare_load_key_merges,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.layerwise.transfer import (
     LayerTransferGroup,
@@ -33,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.v1.worker.transfer
 )
 
 
-def prepare_test_plan(batch, *, load=True):
+def prepare_test_plan(batch):
     mappings = {}
     for group in batch.groups:
         case = make_case(layers=group.physical_layer_ids, head_slices=len(group.keys_by_partition))
@@ -42,8 +44,7 @@ def prepare_test_plan(batch, *, load=True):
         for entries in case.registration_arrays:
             entries[group.group_id] = entries.pop(original_id)
         mappings[group.group_id] = case.bind_layers()
-    prepare = layer_transfer.prepare_layer_load if load else layer_transfer.prepare_layer_store
-    return prepare(batch, mappings)
+    return layer_transfer.prepare_layer_transfer(batch, layer_transfer.bind_layer_memberships(mappings))
 
 
 @pytest.mark.parametrize("code", (-9, None))
@@ -67,7 +68,7 @@ def test_layer_failure_only_expands_selected_rows_of_participating_groups(code):
 
 
 @pytest.mark.parametrize("selected", (None, (0, 3, 5, 8, 9), (3, 4), ()))
-def test_load_plan_resolves_selected_ownership_once_across_layers(selected, monkeypatch):
+def test_load_plan_resolves_ownership_only_for_failed_destinations(selected, monkeypatch):
     groups = (make_group(2, (0, 0, 2, 2, 5)), make_group(7, (0, 1, 1, 4, 5)))
     batch = KVTransferBatch(("empty-or-first", "second", "empty-or-third", "last"), groups)
     if selected is not None:
@@ -86,11 +87,12 @@ def test_load_plan_resolves_selected_ownership_once_across_layers(selected, monk
     lookup = Mock(side_effect=KVGroupBatch.request_index)
     monkeypatch.setattr(KVGroupBatch, "request_index", lambda group, index: lookup(group, index))
     plan = prepare_test_plan(batch)
-    assert lookup.call_count == sum(len(group.selected_keys) for group in plan.groups)
-    lookup.side_effect = AssertionError("A layer must reuse the Load plan's request ownership")
+    lookup.assert_not_called()
+    for layer in (2, 5, 9):
+        if plan.groups:
+            assert all(not c.failures for c in _layer_load_completions(plan, layer, {}))
+    lookup.assert_not_called()
     for group in plan.groups:
-        assert isinstance(group.request_indices, tuple)
-        assert group.request_indices == tuple(source.request_index for source in expected[group.group_id, 2])
         for layer in group.physical_layer_ids:
             assert next(item for item in plan.groups_by_layer[layer] if item.group_id == group.group_id) is group
     for layer in (2, 5, 9):
@@ -98,6 +100,7 @@ def test_load_plan_resolves_selected_ownership_once_across_layers(selected, monk
         observed = [item.source for completion in completions for item in completion.failures]
         expected_sources = [source for group in plan.groups for source in expected[group.group_id, layer]]
         assert observed == sorted(expected_sources, key=lambda source: source.request_index)
+    assert lookup.call_count == 3 * sum(len(group.selected_keys) for group in plan.groups)
 
 
 def test_new_load_plan_does_not_reuse_previous_batch_ownership():
@@ -105,10 +108,10 @@ def test_new_load_plan_does_not_reuse_previous_batch_ownership():
     second = replace(first, request_transfer_record_boundaries=np.array((0, 2, 3), dtype=np.intp))
     first_plan = prepare_test_plan(KVTransferBatch(("a", "b"), (first,)))
     second_plan = prepare_test_plan(KVTransferBatch(("a", "b"), (second,)))
-    assert first_plan.groups[0].request_indices == (0, 1, 1)
-    assert second_plan.groups[0].request_indices == (0, 0, 1)
     completions = _layer_load_completions(first_plan, 2, None)
     assert tuple(item.source.request_index for completion in completions for item in completion.failures) == (0, 1, 1)
+    second_completions = _layer_load_completions(second_plan, 2, None)
+    assert tuple(item.source.request_index for c in second_completions for item in c.failures) == (0, 0, 1)
 
 
 def test_partition_slices_align_layer_keys_gva_bases_and_failure_ownership():
@@ -121,11 +124,16 @@ def test_partition_slices_align_layer_keys_gva_bases_and_failure_ownership():
     batch = KVTransferBatch(("first", "second"), (group,))
     mappings = {group.group_id: mapping}
     bases = {key: 100000 + i * 1000 for i, key in enumerate(dict.fromkeys(key for part in keys for key in part))}
-    plan = layer_transfer.prepare_layer_load(
-        batch, mappings, lambda _group, ordered_keys: np.array([bases[key] for key in ordered_keys], dtype=np.uint64)
+    plan = layer_transfer.prepare_layer_transfer(
+        batch,
+        layer_transfer.bind_layer_memberships(mappings),
+        lambda _group, ordered_keys: np.array([bases[key] for key in ordered_keys], dtype=np.uint64),
     )
     assert plan.selected_keys_by_layer[5] is plan.selected_keys_by_layer[9]
     assert plan.selected_keys_by_layer[2] != plan.selected_keys_by_layer[5]
+    native_layouts = bind_key_range_layouts(mappings)
+    key_merges = prepare_load_key_merges(plan)
+    assert key_merges[5] is key_merges[9]
     for layer_id in (2, 5, 9):
         participating = [
             partition_index * 3 + record_index
@@ -154,7 +162,7 @@ def test_partition_slices_align_layer_keys_gva_bases_and_failure_ownership():
                 )
                 expected_lengths.extend(sizes.tolist())
         assert (remote, local, lengths) == (expected_remote, expected_local, expected_lengths)
-        arguments = materialize_load_layer_ranges(mappings, plan, layer_id)
+        arguments = materialize_load_layer_ranges(native_layouts, plan, layer_id, key_merges[layer_id])
         assert arguments.keys == list(dict.fromkeys(expected_keys))
         completions = _layer_load_completions(plan, layer_id, None)
         sources = [item.source for completion in completions for item in completion.failures]
@@ -171,24 +179,29 @@ def test_plan_omits_physical_layers_with_no_local_segments():
     mapping = case.bind_layers()
     group = prepare_layer_group(mapping, mapping.key_namer.keys(("a",)), (0,)).batch
     batch = KVTransferBatch(("request",), (group,))
-    plan = layer_transfer.prepare_layer_load(batch, {group.group_id: mapping})
+    plan = layer_transfer.prepare_layer_transfer(
+        batch, layer_transfer.bind_layer_memberships({group.group_id: mapping})
+    )
     assert tuple(plan.groups_by_layer) == (0, 2, 3)
     assert tuple(plan.selected_keys_by_layer) == (0, 2, 3)
 
 
-def test_store_plan_does_not_prepare_load_ownership(monkeypatch):
+def test_plan_does_not_prepare_failure_provenance(monkeypatch):
     group = make_group(0, (0, 2, 5))
-    monkeypatch.setattr(KVGroupBatch, "request_index", Mock(side_effect=AssertionError("Store must remain unchanged")))
+    monkeypatch.setattr(
+        KVGroupBatch,
+        "request_index",
+        Mock(side_effect=AssertionError("Plan preparation must not resolve failure provenance")),
+    )
     batch = KVTransferBatch(("a", "b"), (group,))
-    plan = prepare_test_plan(batch, load=False)
-    assert plan.groups[0].request_indices is None
-    assert plan.groups[0].selected_transfer_candidate_indices is None
+    plan = prepare_test_plan(batch)
+    assert not hasattr(plan.groups[0], "request_indices")
+    assert not hasattr(plan.groups[0], "selected_transfer_candidate_indices")
 
 
-@pytest.mark.parametrize("load", (False, True), ids=("store", "load"))
 @pytest.mark.parametrize("gva", (False, True), ids=("key_range", "gva"))
 @pytest.mark.parametrize("selected", (False, True))
-def test_preparation_constructs_each_group_and_final_plan_once(load, gva, selected, monkeypatch):
+def test_preparation_constructs_each_group_and_final_plan_once(gva, selected, monkeypatch):
     topology = make_topology(group_ids=(0, 3), physical_layers=(2, 5, 9))
     worker, _, _ = make_worker(topology=topology, layerwise=True)
     try:
@@ -214,23 +227,19 @@ def test_preparation_constructs_each_group_and_final_plan_once(load, gva, select
         monkeypatch.setattr(LayerTransferGroup, "__init__", create_group)
         monkeypatch.setattr(LayerTransferPlan, "__init__", create_plan)
         regions = Mock(side_effect=lambda group, keys: np.arange(len(keys), dtype=np.uint64) + group.group_id * 1000)
-        prepare = layer_transfer.prepare_layer_load if load else layer_transfer.prepare_layer_store
-        plan = prepare(batch, worker._mappings, regions if gva else None)
+        prepare = layer_transfer.prepare_layer_transfer
+        plan = prepare(batch, worker._layer_memberships, regions if gva else None)
 
         assert len(constructed_groups) == (1 if selected else len(batch.groups))
         assert constructed_plans == [plan]
         assert all(any(group is built for built in constructed_groups) for group in plan.groups)
         assert all(group.selected_transfer_slices_by_partition for group in constructed_groups)
-        assert all((group.request_indices is not None) is load for group in constructed_groups)
+        assert all(not hasattr(group, "request_indices") for group in constructed_groups)
         assert regions.call_count == (len(plan.groups) if gva else 0)
         assert tuple(plan.groups_by_layer) == (2, 5, 9)
         assert plan.selected_keys_by_layer[2] is plan.selected_keys_by_layer[5] is plan.selected_keys_by_layer[9]
         for group in plan.groups:
             assert all(any(item is group for item in plan.groups_by_layer[layer]) for layer in (2, 5, 9))
-            if load:
-                assert group.request_indices == tuple(
-                    group.batch.request_index(int(i)) for i in group.selected_transfer_candidate_indices
-                )
             if gva:
                 np.testing.assert_array_equal(
                     plan.remote_object_bases_by_group[group.group_id],
@@ -240,9 +249,8 @@ def test_preparation_constructs_each_group_and_final_plan_once(load, gva, select
         worker.close()
 
 
-@pytest.mark.parametrize("load", (False, True))
 @pytest.mark.parametrize("selection", ("partial", "full", "none", "zero_rows"))
-def test_plan_reuses_mapping_rows_and_skips_empty_groups(load, selection, monkeypatch):
+def test_plan_reuses_mapping_rows_and_skips_empty_groups(selection, monkeypatch):
     topology = make_topology(physical_layers=(2, 5, 9))
     worker, _, _ = make_worker(topology=topology, layerwise=True)
     try:
@@ -258,10 +266,10 @@ def test_plan_reuses_mapping_rows_and_skips_empty_groups(load, selection, monkey
         flatnonzero = Mock(side_effect=np.flatnonzero)
         monkeypatch.setattr(np, "flatnonzero", flatnonzero)
         regions = Mock(side_effect=lambda _group, keys: np.arange(len(keys), dtype=np.uint64))
-        lower = layer_transfer.prepare_layer_load if load else layer_transfer.prepare_layer_store
+        lower = layer_transfer.prepare_layer_transfer
         if selection in ("none", "zero_rows"):
             monkeypatch.setattr(LayerTransferGroup, "__init__", Mock(side_effect=AssertionError("empty Group wrapper")))
-        plan = lower(batch, worker._mappings, regions)
+        plan = lower(batch, worker._layer_memberships, regions)
         if selection in ("none", "zero_rows"):
             assert not plan.groups and not plan.groups_by_layer and not plan.selected_keys_by_layer
             prepare.assert_not_called()
@@ -272,18 +280,17 @@ def test_plan_reuses_mapping_rows_and_skips_empty_groups(load, selection, monkey
         assert flatnonzero.call_count == (1 if selection == "partial" else 0)
         (group,) = plan.groups
         assert not hasattr(group, "local_block_ids") and not hasattr(group, "token_counts")
-        if load and selection == "partial":
-            assert group.selected_transfer_candidate_indices is group.selected_transfer_record_indices_by_partition[0]
-            assert not group.selected_transfer_candidate_indices.flags.writeable
-        elif load:
-            assert isinstance(group.selected_transfer_candidate_indices, range)
+        indices = group.selected_transfer_record_indices_by_partition[0]
+        if selection == "partial":
+            assert not indices.flags.writeable
         else:
-            assert group.selected_transfer_candidate_indices is None and group.request_indices is None
+            assert isinstance(indices, range)
+        assert group.selected_keys is group.batch.selected_key_values
+        key_merges = prepare_load_key_merges(plan)
         flatnonzero.side_effect = AssertionError("layer execution must not rescan selection")
         for layer in group.physical_layer_ids:
-            materialize_load_layer_ranges(worker._mappings, plan, layer)
-            if load:
-                completion = _layer_load_completions(plan, layer, None)
-                assert len(completion[0].failures) == len(group.selected_keys)
+            materialize_load_layer_ranges(worker._key_range_layouts, plan, layer, key_merges[layer])
+            completion = _layer_load_completions(plan, layer, None)
+            assert len(completion[0].failures) == len(group.selected_keys)
     finally:
         worker.close()
