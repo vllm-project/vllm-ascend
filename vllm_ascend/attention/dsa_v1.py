@@ -324,7 +324,8 @@ class AscendDSABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8, 16, 32, 64, 128]
+        # Block size 1 is used by the C4 compressor state cache at --block-size 16.
+        return [1, 2, 4, 8, 16, 32, 64, 128]
 
 
 @dataclass

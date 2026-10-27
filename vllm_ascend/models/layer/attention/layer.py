@@ -41,7 +41,6 @@ def get_dsv4_block_sizes():
         128: [[128, 128, 8, 16], [16896, 81920]],
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
-        16: [[16, 16, 1, 2], [2112, 10240]],
     }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
         return _DSV4_BLOCK_SIZES_A5
