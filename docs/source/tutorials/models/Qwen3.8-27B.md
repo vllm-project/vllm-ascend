@@ -619,7 +619,7 @@ The following optimizations are enabled by default and require no additional con
 | Optimization Technique | Technical Principle | Performance Benefit |
 | --- | --- | --- |
 | Chunked Prefill | The vLLM V1 scheduler splits long prefill inputs into chunks, with each step processing at most `--max-num-batched-tokens` tokens. | Reduces per-step memory peaks, enabling larger batch sizes and higher throughput. |
-| Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
+| Full Decode ACL Graph | Captures and replays the entire decode graph at once using `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`. | Reduces per-step operator dispatch overhead, stabilizing decode latency. |
 | CPU Binding | Binds worker threads to dedicated CPU cores via `--additional-config '{"enable_cpu_binding":true}'`. | Reduces CPU scheduling jitter and stabilizes decode latency. |
 
 ##### Optimizations That Require Explicit Enabling
