@@ -128,9 +128,14 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
     esac && \
 # Install flash-linear-attention-npu
-    wget --quiet "${GIT_PROXY:-}https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a2/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
+    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a2/${FLA_WHL}" && \
+    if [[ -n "${GIT_PROXY}" ]]; then \
+      wget --quiet --proxy="${GIT_PROXY}" "${URL}" -O "/tmp/${FLA_WHL}"; \
+    else \
+      wget --quiet "${URL}" -O "/tmp/${FLA_WHL}"; \
+    fi && \
     # echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
-    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL}
+    python3 -m pip install --force-reinstall --no-deps "/tmp/${FLA_WHL}"
 # Install torch-npu
     # mkdir -p /tmp/torch_npu && \
     # wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
