@@ -32,7 +32,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
-    SFAForwardContext,
     _view_cache_as_operator_pages,
     needs_pcp_kv_gather,
 )
@@ -124,19 +123,8 @@ class AscendSFAPCPImpl(AscendSFAImpl):
         with self._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        context = super()._get_parallel_forward_context(
-            attn_metadata,
-            num_input_tokens,
-            hidden_states,
-        )
+    def _prepare_o_proj_weights(self) -> None:
         self._parallel_o_proj.all_gather_weights()
-        return context
 
     def _finalize_o_proj(self, attn_output: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         return self._parallel_o_proj.forward(attn_output, output)

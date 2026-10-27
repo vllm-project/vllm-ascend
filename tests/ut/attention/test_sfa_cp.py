@@ -29,7 +29,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
-    SFAForwardContext,
 )
 from vllm_ascend.quantization.methods import AscendLinearScheme, AscendW8A8DynamicLinearMethod
 from vllm_ascend.weight_switch import (
@@ -953,6 +952,8 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     metadata.uses_pcp_sharded_layout = True
     metadata.num_input_tokens = num_input_tokens
     metadata.num_actual_tokens = len(local)
+    metadata.cum_query_lens = [len(local)]
+    metadata.seq_lens = [len(local)]
     metadata.slot_mapping = expanded_slots[:num_input_tokens]
     metadata.pcp_slot_mapping = expanded_slots
     metadata.cos = metadata.sin = torch.empty(len(local), rope_dim) if rope_dim else None
@@ -974,15 +975,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl.layer_name = "layer"
     impl._compose_sfa_kv_cache = Mock(return_value=(cache,))
     impl._get_indexer_attn_metadata = Mock(return_value=object())
-    impl._get_parallel_forward_context = Mock(
-        side_effect=lambda *_args: SimpleNamespace(
-            actual_seq_lengths_query=[len(local)],
-            actual_seq_lengths_key=[len(local)],
-            kv_slot_mapping=impl._get_sfa_kv_slot_mapping(metadata),
-            topk_num_tokens=len(local),
-            gather_full_o_proj=False,
-        )
-    )
+    impl._prepare_o_proj_weights = Mock()
     impl.fused_qkv_a_proj = Mock(return_value=(torch.cat((hidden, local), dim=-1),))
     impl.q_a_layernorm = lambda values: values
     impl._q_proj_and_k_up_proj = Mock(return_value=(hidden.unsqueeze(1), hidden.unsqueeze(1)))
@@ -1323,12 +1316,6 @@ def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
     impl._parallel_o_proj.enabled = weight_switch_enabled
     impl._parallel_o_proj._weight_switch_enabled = weight_switch_enabled
     impl.o_proj.quant_method.all_gather_weight = MagicMock()
-    base_context = SFAForwardContext(
-        actual_seq_lengths_query=torch.empty(0),
-        actual_seq_lengths_key=torch.empty(0),
-        kv_slot_mapping=torch.empty(0),
-        topk_num_tokens=0,
-    )
     expected_mode = (
         OProjectionMode.LOCAL_WEIGHT
         if not weight_switch_enabled
@@ -1344,16 +1331,13 @@ def test_sfa_pcp_forward_selects_mode_and_gathers_weight_for_global_prefill(
         assert owner._parallel_o_proj.mode is expected_mode
         assert owner._parallel_o_proj.uses_full_weight is expected_gather
         owner.o_proj.quant_method.all_gather_weight.assert_not_called()
-        assert owner._get_parallel_forward_context(metadata, hidden.shape[0], hidden) is base_context
+        owner._prepare_o_proj_weights()
         return output
 
     hidden = torch.empty(1, 4)
     output = torch.empty(1, 3)
     metadata = SimpleNamespace(attn_state=attn_state, pcp_has_global_prefill=global_has_prefill)
-    with (
-        patch.object(AscendSFAImpl, "forward", forward),
-        patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context),
-    ):
+    with patch.object(AscendSFAImpl, "forward", forward):
         assert impl.forward("layer", hidden, (), metadata, output) is output
     assert impl._parallel_o_proj.mode is OProjectionMode.LOCAL_WEIGHT
     if expected_gather:

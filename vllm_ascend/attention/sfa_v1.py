@@ -490,16 +490,6 @@ def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
     return cached[1]
 
 
-@dataclass
-class SFAForwardContext:
-    """Parallel-layout inputs consumed by the shared SFA forward template."""
-
-    actual_seq_lengths_query: torch.Tensor
-    actual_seq_lengths_key: torch.Tensor
-    kv_slot_mapping: torch.Tensor
-    topk_num_tokens: int
-
-
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -1693,18 +1683,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         return k_pe, k_nope
 
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        return SFAForwardContext(
-            actual_seq_lengths_query=attn_metadata.cum_query_lens,
-            actual_seq_lengths_key=attn_metadata.seq_lens,
-            kv_slot_mapping=self._get_sfa_kv_slot_mapping(attn_metadata),
-            topk_num_tokens=num_input_tokens or hidden_states.shape[0],
-        )
+    def _prepare_o_proj_weights(self) -> None:
+        """Allow parallel backends to prepare projection weights before attention."""
+        return
 
     def _finalize_o_proj(
         self,
@@ -1863,13 +1844,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
-        parallel_context = self._get_parallel_forward_context(
-            attn_metadata,
-            num_input_tokens,
-            hidden_states,
-        )
-        actual_seq_lengths_query = parallel_context.actual_seq_lengths_query
-        actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
+        self._prepare_o_proj_weights()
+        actual_seq_lengths_query = attn_metadata.cum_query_lens
+        actual_seq_lengths_key = attn_metadata.seq_lens
+        topk_num_tokens = num_input_tokens or hidden_states.shape[0]
 
         fused_type: PreprocessType = self.preprocess_type
         # PROLOG_V3 serves every attention state (decode, spec decoding and
@@ -1951,7 +1929,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 cos,
                 sin,
                 kv_cache,
-                parallel_context.kv_slot_mapping,
+                slot_mapping_sfa,
                 attn_metadata,
             )
             k_pe, k_nope = kv_outputs[:2]
@@ -1999,13 +1977,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                 compute_topk=not self.skip_topk and has_local_query,
             )
             if self.skip_topk:
-                topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+                topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
             elif self.use_index_cache and has_local_query:
                 self._update_indexcache_topk_indices(topk_indices)
         elif self.skip_topk:
             # Static shared-index layers keep no runtime indexer cache and
             # only reuse the shared top-k indices.
-            topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+            topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 

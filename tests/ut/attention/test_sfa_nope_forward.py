@@ -466,6 +466,8 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
         sin=None,
         num_actual_tokens=actual_tokens,
         num_input_tokens=4,
+        cum_query_lens=torch.tensor([actual_tokens]),
+        seq_lens=torch.tensor([actual_tokens]),
         uses_pcp_sharded_layout=True,
         slot_mapping=torch.tensor([0, 1, 2, -1]),
         pcp_has_global_prefill=global_prefill,
@@ -475,14 +477,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
-    impl._get_parallel_forward_context = MagicMock(
-        return_value=SimpleNamespace(
-            actual_seq_lengths_query=torch.tensor([actual_tokens]),
-            actual_seq_lengths_key=torch.tensor([actual_tokens]),
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=4,
-        )
-    )
+    impl._prepare_o_proj_weights = MagicMock()
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
@@ -505,8 +500,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     ):
         output = torch.empty_like(hidden)
         assert impl.forward("layer", hidden, (), metadata, output) is output
-    impl._get_parallel_forward_context.assert_called_once()
-    assert impl._get_parallel_forward_context.call_args.args[1] == 4
+    impl._prepare_o_proj_weights.assert_called_once_with()
     assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
     impl._store_parallel_kv.assert_called_once()
     impl._finalize_o_proj.assert_called_once()
