@@ -164,7 +164,7 @@ a3-560t:
     test_config:
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
-        pytest_workers: 8
+        pytest_workers: auto
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
@@ -336,7 +336,7 @@ a5:
     test_config:
       - name: singlecard-ops-a5
         os: linux-aarch64-a5-8
-        pytest_workers: 8
+        pytest_workers: auto
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
       - name: Qwen3_235b_w8a8_A5
         os: linux-aarch64-a5-8

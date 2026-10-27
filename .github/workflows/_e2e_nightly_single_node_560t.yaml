@@ -32,9 +32,9 @@ on:
         type: string
       pytest_workers:
         required: false
-        type: number
-        default: 1
-        description: One pytest process per allocated NPU
+        type: string
+        default: '1'
+        description: '1 runs pytest serially; auto or a positive integer enables singlecard sharding'
       config_file_path:
         required: false
         type: string
@@ -377,6 +377,8 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          TEST_IMAGE: ${{ inputs.image }}
+          TEST_SOC_VERSION: ${{ inputs.soc_version }}
           TEST_PATH: ${{ inputs.tests }}
           PYTEST_WORKERS: ${{ inputs.pytest_workers }}
         working-directory: /vllm-workspace/vllm-ascend
@@ -385,9 +387,18 @@ jobs:
           echo "Running pytest with tests path: $TEST_PATH"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          if [ "$PYTEST_WORKERS" -gt 1 ]; then
+          if [ "$PYTEST_WORKERS" != '1' ]; then
+            case "$TEST_PATH" in
+              tests/e2e/nightly/single_node/ops/singlecard_ops|tests/e2e/nightly/single_node/ops/singlecard_ops/)
+                ;;
+              *)
+                echo "Sharding requires tests/e2e/nightly/single_node/ops/singlecard_ops directory" >&2
+                exit 1
+                ;;
+            esac
             python3 .github/workflows/scripts/run_singlecard_shards.py \
               --tests "$TEST_PATH" --workers "$PYTEST_WORKERS" \
+              --runner "$VLLM_CI_RUNNER" --image "$TEST_IMAGE" --soc-version "$TEST_SOC_VERSION" \
               --output-dir /tmp/test-logs/singlecard-shards \
               2>&1 | tee /tmp/test-logs/pytest-driven.log
           else
@@ -662,7 +673,7 @@ jobs:
           include-hidden-files: true
 
       - name: Upload singlecard shard logs
-        if: ${{ always() && inputs.pytest_workers > 1 }}
+        if: ${{ always() && inputs.tests != '' && inputs.pytest_workers != '1' }}
         uses: actions/upload-artifact@v7
         with:
           name: singlecard-shards-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}

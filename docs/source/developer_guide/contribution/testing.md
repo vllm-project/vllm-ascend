@@ -247,22 +247,38 @@ You can run tests with `pytest` as well. Typical examples:
 
 ##### Parallel single-card operator tests
 
-The A3 560T and A5 `singlecard-ops` nightly entries use one eight-NPU runner
-with `pytest_workers: 8`. A runner label ending in `-8` reserves resources;
-the explicit worker setting starts eight independent pytest processes, each
-bound to one container-visible NPU. Other entries default to one process.
+The A3 560T and A5 `singlecard-ops` nightly entries use
+`pytest_workers: auto`. Auto mode derives the expected worker count from the
+runner's allocated resources, requires `--runner`, and strictly checks that
+the container-visible NPU count equals that capacity. The number of pytest
+processes is capped at the number of discovered test files, so a smaller test
+set does not start idle workers. A manual positive integer may be used for
+`pytest_workers` when it does not exceed the runner's resource allocation; `1`
+keeps the legacy serial `pytest -sv` path. Workflow sharding accepts only the
+exact `tests/e2e/nightly/single_node/ops/singlecard_ops` path, optionally with
+one trailing slash.
 
 The shard runner assigns each complete test file once, including files under
-`triton/`. It preserves parametrization, assertions, skip conditions, and
-existing conftest fixtures. It runs all shards even when one fails and returns
-a failure if any shard fails, cannot collect, or lacks a valid report.
+`triton/`, and preserves parametrization, assertions, skip conditions, and
+existing conftest fixtures. With no timing data it assigns equal weight to
+each file and greedily balances shards. A supplied `--timings
+/path/to/summary.json` must be a successful complete run with exactly matching
+environment metadata (including package versions such as vLLM-Ascend) and the
+same complete test file list; its recorded file durations drive the greedy
+assignment. It does not automatically fetch historical timing data. The
+runner continues remaining shards after a test failure and returns failure if
+a shard fails, cannot collect, or lacks a valid report. If interrupted or a
+worker cannot start, it saves a partial summary; workers may be marked
+`interrupted`, `aborted`, or `not_started` to make incomplete execution clear.
 
 To reproduce inside an already provisioned multi-NPU test container:
 
 ```bash
 python3 .github/workflows/scripts/run_singlecard_shards.py \
     --tests tests/e2e/nightly/single_node/ops/singlecard_ops/ \
-    --workers 8 --output-dir /tmp/singlecard-run
+    --workers auto --runner linux-aarch64-a3-800i-8 \
+    --image "$TEST_IMAGE" --soc-version a3-560t \
+    --output-dir /tmp/singlecard-run
 ```
 
 Use a new output directory for each run. The script respects an existing
@@ -271,18 +287,18 @@ devices inside the container. Each worker has a separate Triton cache namespace
 under the existing cache root; these namespaces may be reused on later runs.
 It does not force recompilation or install dependencies.
 
-The uploaded `singlecard-shards-*` artifact contains a file/device manifest,
-per-worker logs and JUnit reports, and `summary.json`. The summary separates
-passed, skipped, failed, and error results. Skips include expected failures as
-represented by JUnit. `cumulative_case_seconds` sums setup, call, and teardown
-durations; `wall_seconds` measures the parallel test phase, including pytest
-startup, collection, and reporting. Neither includes the earlier build/install
-steps. These two durations should not be added together.
-
-Initial scheduling uses file size as an estimate, not a measured runtime.
-For a manual repeat, `--timings /path/to/previous/summary.json` can use recorded
-file durations from the same hardware, versions, test scope, and cache policy.
-The scheduled workflow does not automatically download timings from old jobs.
+The uploaded `singlecard-shards-*` artifact contains run metadata, a
+file/device manifest, per-worker logs and JUnit reports, and `summary.json`.
+Metadata records the tested Git commit separately from the workflow commit,
+the runner and image reference, hardware, Python and package versions,
+effective worker count, device assignment, and Triton cache settings.
+The GitHub step summary reports whether execution completed, per-worker
+durations, aggregate durations, and the failed test list. The JSON summary
+separates passed, skipped, failed, and error results. Skips include expected
+failures as represented by JUnit. `cumulative_case_seconds` sums setup, call,
+and teardown durations; `wall_seconds` measures the parallel test phase,
+including pytest startup, collection, and reporting. Neither includes the
+earlier build/install steps. These two durations should not be added together.
 
 For running nightly single-node model test cases locally, refer to the following example.
 
