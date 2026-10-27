@@ -303,6 +303,7 @@ class TestAscendModelSlimConfig(TestBase):
                 self.calls.append(weight_name)
                 return True
 
+        MoELayer.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
         layer = MoELayer()
         mapped_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
 
@@ -310,6 +311,7 @@ class TestAscendModelSlimConfig(TestBase):
         # attribute is a bound method of that same layer.
         self.assertIsInstance(mapped_loader, MethodType)
         self.assertIs(mapped_loader.__self__, layer)
+        self.assertIs(mapped_loader.supports_moe_loading, True)
         # `functools.wraps` would store the bound method back in `__wrapped__`.
         self.assertFalse(hasattr(mapped_loader, "__wrapped__"))
 
