@@ -35,6 +35,10 @@ def init_speculator(
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if speculative_config.method == "eagle4":
+        from vllm_ascend.worker.v2.spec_decode.eagle4.speculator import AscendEagle4Speculator
+
+        return AscendEagle4Speculator(vllm_config, device)
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.

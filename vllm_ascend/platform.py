@@ -367,6 +367,9 @@ class NPUPlatform(Platform):
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
+        from vllm_ascend.spec_decode.eagle4 import register_eagle4_method
+
+        register_eagle4_method()
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
@@ -550,6 +553,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+        from vllm_ascend.spec_decode.eagle4 import validate_eagle4_runtime
 
         sync_v2_extra_kwargs(vllm_config)
 
@@ -587,6 +591,7 @@ class NPUPlatform(Platform):
                         config.compress_ratios = list(ratios)
 
         _validate_model_runner_config(vllm_config)
+        validate_eagle4_runtime(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)

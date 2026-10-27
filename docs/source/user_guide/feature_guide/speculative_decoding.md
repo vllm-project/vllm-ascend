@@ -18,6 +18,7 @@ The following speculative decoding methods are supported:
 | `medusa` | Medusa heads embedded in the target model |
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
+| `eagle4` | [EAGLE-4 fixed-chain draft on Model Runner V2](eagle4.md) (requires companion vLLM hooks and eagle-harness) |
 | `mtp` | Multi-Token Prediction with shared embedding head |
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
