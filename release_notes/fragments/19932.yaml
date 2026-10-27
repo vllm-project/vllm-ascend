@@ -1,0 +1,9 @@
+pr: 19932
+entries:
+  - category: bugfix
+    text: >-
+      Guarded the muls_add_triton kernel entry (used by the fuse_muls_add
+      pass and DeepSeek V4/V4.1 MoE scaling) with an explicit contiguity
+      check, so non-contiguous inputs raise a clear error instead of
+      silently computing on the wrong elements through linear pointer
+      offsets.
