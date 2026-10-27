@@ -293,13 +293,13 @@ Run the selected command inside the container. Replace the weight-path placehold
       --safetensors-load-strategy prefetch > "${LOG_PATH}" 2>&1 &
     ```
 
-**Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+**Note**: In the scripts above, `max-num-seqs` limits the number of sequences scheduled in one iteration. Tune this limit using the expected input/output lengths and request concurrency, and measure throughput and latency after each change. Increase it only when additional sequences fit in the available KV cache; a higher limit does not guarantee higher throughput and can increase latency or KV-cache preemption.
 
 For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
+Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
 === "A3 series (BF16)"
 
@@ -456,6 +456,15 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
+
+Start both nodes before waiting for initialization to complete, and inspect the log file configured by `LOG_PATH` on each node for errors. Node 1 uses `--headless` and does not expose an HTTP API. After node 0 logs `Application startup complete`, run the following checks inside the node 0 container:
+
+```bash
+curl --noproxy '*' -fsS -i http://127.0.0.1:11223/health
+curl --noproxy '*' -fsS http://127.0.0.1:11223/v1/models
+```
+
+Expected result: `/health` returns HTTP 200, and `/v1/models` lists `minimax-m3`. If startup fails or either check fails, inspect both nodes' logs before sending inference requests.
 
 ### 5.3 Sub-1M-Token Context Deployment
 
