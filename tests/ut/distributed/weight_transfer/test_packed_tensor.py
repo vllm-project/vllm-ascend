@@ -33,7 +33,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.distributed.weight_transfer import packed_tensor as upstream_packed
 
+from vllm_ascend.distributed.weight_transfer import packed_tensor as packed_module
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_broadcast_consumer,
@@ -99,9 +101,7 @@ def _stub_torch_npu():
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    from vllm_ascend.distributed.weight_transfer import packed_tensor
-
-    packed_tensor._get_npu_streams.cache_clear()
+    packed_module._get_npu_streams.cache_clear()
     with (
         patch.object(torch, "npu", fake_npu, create=True),
         patch.object(torch, "empty", _fake_empty),
@@ -109,7 +109,7 @@ def _stub_torch_npu():
         patch.object(torch.Tensor, "record_stream", return_value=None),
     ):
         yield
-    packed_tensor._get_npu_streams.cache_clear()
+    packed_module._get_npu_streams.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -129,16 +129,14 @@ def test_cpu_fixture_redirects_all_npu_device_forms(device):
 
 @pytest.mark.parametrize("producer", [True, False])
 def test_reuses_upstream_code_with_isolated_npu_bindings(producer):
-    from types import FunctionType
-
-    from vllm.distributed.weight_transfer import packed_tensor as upstream
-
-    function = upstream.packed_nccl_broadcast_producer if producer else upstream.packed_nccl_broadcast_consumer
+    function = (
+        upstream_packed.packed_nccl_broadcast_producer if producer else upstream_packed.packed_nccl_broadcast_consumer
+    )
     original_globals = dict(function.__globals__)
     bound_functions = []
 
     def bind(*args):
-        bound = FunctionType(*args)
+        bound = types.FunctionType(*args)
         bound_functions.append(bound)
         return bound
 
@@ -156,7 +154,7 @@ def test_reuses_upstream_code_with_isolated_npu_bindings(producer):
 
 
 def test_packed_slots_are_cached_per_device_and_buffer_count():
-    from vllm_ascend.distributed.weight_transfer.packed_tensor import _get_npu_streams
+    _get_npu_streams = packed_module._get_npu_streams
 
     first = _get_npu_streams(0, 2)
     assert _get_npu_streams(0, 2) is first
