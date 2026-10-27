@@ -4,8 +4,8 @@
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. The packed producer/consumer
-and the layerwise cross-chunk behaviour are unchanged.
+legacy per-update packed wire parameters are local. Packed transfers use the
+upstream orchestration with Ascend stream and owning-storage adaptations.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -91,6 +91,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
+        self._last_update_info.clear()
         # Preserve the parent's handshake attributes, resetting omitted values
         # on re-init. _wire_params still supports legacy per-update overrides.
         self.packed = init_info.packed if init_info.packed is not None else False
@@ -142,6 +143,12 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
         params = self._wire_params(update_info)
+        # Upstream trainers omit unchanged metadata after the first round.
+        # Keep the per-update wire parameters separate from cached metadata.
+        if update_info.names:
+            self._last_update_info[self.model] = update_info
+        else:
+            update_info = self._last_update_info.get(self.model, update_info)
 
         from vllm.model_executor.model_loader.mtp_validation import (
             disable_mtp_completeness_check,
