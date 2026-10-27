@@ -135,6 +135,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         "_cache_requires_prolog_v3_writer",
         "mla_preprocess_prolog_v3",
         "_get_dcp_current_kv_workspace",
+        "_reorg_decode_q_with_current",
         "forward",
     ):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
@@ -205,8 +206,14 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         # from local history; the complete current chunk remains available.
         torch.testing.assert_close(consumed.current_k_nope[:, 0, 0], torch.arange(tokens).float() + 2)
         torch.testing.assert_close(consumed.current_k_pe[:, 0, 0], torch.arange(tokens).float() + 12)
+        assert consumed.current_q_nope.shape == (tokens, heads, 512)
+        assert consumed.current_q_pe.shape == (tokens, heads, 64)
+        torch.testing.assert_close(consumed.current_q_nope, torch.ones_like(consumed.current_q_nope))
+        torch.testing.assert_close(consumed.current_q_pe, torch.full_like(consumed.current_q_pe, 2.0))
+        assert not consumed.current_q_nope.is_contiguous() and not consumed.current_q_pe.is_contiguous()
     else:
         assert consumed.current_k_nope is None and consumed.current_k_pe is None
+        assert consumed.current_q_nope is None and consumed.current_q_pe is None
     torch.testing.assert_close(history[:2, 0, 0, 0], torch.tensor([2.0, 3.0]))
     changed = torch.zeros_like(raw, dtype=torch.bool)
     for block in (0, 1):
