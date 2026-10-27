@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from typing import Any
 
 import pytest
 import requests
@@ -18,7 +19,7 @@ SOFTMAX_ATOL = 0.03
 # startup when it is reused.
 NO_MEDIA = {"image": 0, "video": 0}
 STATE = "A customer reports a damaged delivery and asks for a replacement."
-QUESTIONS = {
+QUESTIONS: dict[str, dict[str, Any]] = {
     "route": {
         "type": "choice",
         "instructions": "Which team should handle the request?",
