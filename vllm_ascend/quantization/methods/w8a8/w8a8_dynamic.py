@@ -35,7 +35,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     cumsum_group_list,
 )
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor, maybe_trans_nz, transpose_weight_to_runtime
 
 from ..base import (
     AscendLinearScheme,
@@ -55,6 +55,11 @@ def scale_from_float_to_int64(scale):
         np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)
     ).to(scale.device)
     return scale
+
+
+def flatten_expert_dims(tensor: torch.Tensor) -> torch.Tensor:
+    """Flatten each expert's weights into a single dim, keeping the expert axis."""
+    return tensor.view(tensor.shape[0], -1)
 
 
 @register_scheme("W8A8_DYNAMIC", "linear")
@@ -277,17 +282,17 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         return weights
 
     def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        layer.w13_weight.data = transpose_weight_to_runtime(layer.w13_weight.data)
+        layer.w2_weight.data = transpose_weight_to_runtime(layer.w2_weight.data)
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
         if self.quant_type == QuantType.W8A8:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
+        layer.w13_weight_scale.data = flatten_expert_dims(layer.w13_weight_scale.data)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
+        layer.w2_weight_scale.data = flatten_expert_dims(layer.w2_weight_scale.data)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         if get_ascend_config().enable_fused_mc2 == 1:
