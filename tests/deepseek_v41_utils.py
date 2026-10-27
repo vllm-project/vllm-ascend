@@ -292,7 +292,8 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             block_size=block_size,
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
-        )
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
     specs = build_v41_cache_specs(config, runtime)
     for stage in range(draft_layers):
@@ -318,9 +319,16 @@ def allocate_cache_views(config, device="cpu"):
 
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     backings, caches = [], {}
+    backing = None
+    if any(allocation.offset for allocation in config.kv_cache_tensors):
+        backing = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.uint8, device=device)
+        backings.append(backing)
     for allocation in config.kv_cache_tensors:
-        raw = torch.zeros(allocation.size, dtype=torch.uint8, device=device)
-        backings.append(raw)
+        if backing is None:
+            raw = torch.zeros(allocation.size, dtype=torch.uint8, device=device)
+            backings.append(raw)
+        else:
+            raw = backing[allocation.offset : allocation.offset + config.num_blocks * allocation.block_stride]
         for name in allocation.layers:
             spec = specs[name]
             shape = (config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.head_size)

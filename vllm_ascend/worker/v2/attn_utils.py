@@ -1180,10 +1180,23 @@ def _allocate_kv_cache(
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
         )
     if is_deepseek_v41_cache(layer_kv_cache_spec):
+        descriptors = kv_cache_config.kv_cache_tensors
+        backing = None
+        if any(descriptor.offset for descriptor in descriptors):
+            sizes = {descriptor.size for descriptor in descriptors}
+            if len(sizes) != 1:
+                raise ValueError("DeepSeek V4.1 PP cache regions must share one backing allocation.")
+            backing = _allocate_int8_cache_tensor(sizes.pop(), alignment, device)
         for allocation in kv_cache_config.kv_cache_tensors:
-            backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
+            if backing is None:
+                region = _allocate_int8_cache_tensor(allocation.size, alignment, device)
+            else:
+                end = allocation.offset + kv_cache_config.num_blocks * allocation.block_stride
+                if end > backing.numel():
+                    raise ValueError("DeepSeek V4.1 PP cache region exceeds its backing allocation.")
+                region = backing[allocation.offset : end]
             for name in get_kv_cache_tensor_layers(allocation):
-                kv_cache_raw_tensors[name] = backing
+                kv_cache_raw_tensors[name] = region
         return kv_cache_raw_tensors
     uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
     has_shared_slot_descriptors = any(descriptor.layer_stride == 0 for descriptor in kv_cache_config.kv_cache_tensors)
