@@ -93,9 +93,31 @@ def _make_stub_config(rank: int, dp_size: int, coord_store_port: int):
         all2all_backend=None,
         distributed_timeout_seconds=None,
         cpu_distributed_timeout_seconds=None,
+        # real ParallelConfig derives these properties from the *_seconds
+        # fields; SimpleNamespace needs them spelled out.
+        distributed_timeout=None,
+        cpu_distributed_timeout=None,
+        # attrs read by initialize_model_parallel / standby creation on
+        # current vllm main (added after this fixture was first written).
+        use_all2all=False,
+        master_addr="127.0.0.1",
+        master_port=0,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_index=rank,
+        data_parallel_rank_local=rank,
+        data_parallel_master_port=0,
+        data_parallel_rpc_port=0,
+        data_parallel_external_lb=False,
+        elastic_ep_max_dp_size=8,
+        eplb_config=None,
     )
     model_config = SimpleNamespace(is_moe=True)
-    return SimpleNamespace(parallel_config=parallel_config, model_config=model_config)
+    return SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=model_config,
+        engram_config=None,
+    )
 
 
 class _DummyModel:
@@ -248,6 +270,7 @@ def _worker(rank: int, ports: dict, result_path: str) -> None:
                 new_world_size_across_dp=NEW_DP_SIZE,
                 master_ip="127.0.0.1",
                 coord_store_port=ports["store_b"],
+                use_all2all=False,
                 enable_eplb=False,
             )
             from vllm.distributed.elastic_ep.standby_state import (
