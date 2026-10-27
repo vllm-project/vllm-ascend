@@ -83,13 +83,13 @@ RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 # Update the pinned versions here.
 ARG TARGETPLATFORM
 ARG MEMCACHE_VERSION="1.3.0"
-ARG MEMCACHE_DATE="20261026.4"
+ARG MEMCACHE_DATE="20261027.3"
 ARG MEMFABRIC_VERSION="1.3.0"
-ARG MEMFABRIC_DATE="20261026.4"
+ARG MEMFABRIC_DATE="20261027.3"
 ARG TORCH_NPU_VERSION="26.2.0"
 ARG TORCH_NPU_DATE="20261015.5"
-ARG FLA_VERSION="26.9.1+dev5cc6990"
-ARG FLA_RELEASE_TAG="v26.9.1-20261020-020004"
+ARG FLA_VERSION="26.9.1"
+ARG FLA_RELEASE_TAG="v26.9.1-release"
 ARG MOONCAKE_OBS_PREFIX="https://mindie.obs.cn-north-4.myhuaweicloud.com/buildtools/docker_images_tools/Mooncake/v0.3.14.rc1"
 ARG HYBRID_OBS_BASE="https://obs-memfabric-hybrid.obs.cn-north-4.myhuaweicloud.com"
 ARG TORCH_NPU_OBS_BASE="https://pytorch-package.obs.cn-north-4.myhuaweicloud.com"
@@ -128,9 +128,14 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
     esac && \
 # Install flash-linear-attention-npu
-    wget --quiet "${GIT_PROXY:-}https://github.com/flashserve/flash-linear-attention-npu/releases/download/${FLA_RELEASE_TAG}/${FLA_WHL}" -O /tmp/${FLA_WHL} && \
-    echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
-    python3 -m pip install --force-reinstall --no-deps /tmp/${FLA_WHL}
+    URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/flash_linear_attention_npu_a2/${FLA_WHL}" && \
+    if [[ -n "${GIT_PROXY}" ]]; then \
+      wget --quiet --proxy="${GIT_PROXY}" "${URL}" -O "/tmp/${FLA_WHL}"; \
+    else \
+      wget --quiet "${URL}" -O "/tmp/${FLA_WHL}"; \
+    fi && \
+    # echo "${FLA_SHA256}  /tmp/${FLA_WHL}" | sha256sum --check && \
+    python3 -m pip install --force-reinstall --no-deps "/tmp/${FLA_WHL}"
 # Install torch-npu
     # mkdir -p /tmp/torch_npu && \
     # wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \

@@ -83,7 +83,7 @@ Use one of the following hardware configurations:
   with 8 NPUs and 96GB memory per NPU, using DP8/TP1/EP8.
 - **950DT products 1P1D, with or without pooling**: two such servers, using
   DP8/TP1/EP8 on both Prefill and Decode. For optional PCP Prefill and
-  wider Decode EP groups, see Section 5.2.1.3.
+  wider Decode EP groups, see [Section 5.2.1.3](#5213-deployment-extensions).
 
 Reserve host memory for Engram offloading and, when enabled, the DRAM KV
 Cache Pool.
@@ -269,7 +269,7 @@ use the matching vLLM revision recorded in
     ```bash
     #!/usr/bin/env bash
 
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in Section 3.1.
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -429,7 +429,7 @@ use the matching vLLM revision recorded in
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in Section 3.1.
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -510,7 +510,7 @@ use the matching vLLM revision recorded in
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in Section 3.1.
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -644,7 +644,7 @@ use the matching vLLM revision recorded in
     ```
 
     Check `http://<PROXY_IP>:1999/healthcheck`, then send the text request in
-    Section 6.1 to the proxy. Check the P/D logs for successful KV transfer.
+    [Section 6.1](#61-text-request) to the proxy. Check the P/D logs for successful KV transfer.
 
     ##### 5.2.1.3 Deployment Extensions
 
@@ -1488,7 +1488,7 @@ Select the tab for the target hardware.
     #### 5.3.1 Memcache KV Cache Pool
 
     This example adds a DRAM KV Cache Pool to the two-server DP8 Prefill / DP8
-    Decode deployment in Section 5.2.1. The model layout, ports, and proxy are
+    Decode deployment in [Section 5.2.1](#521-dp8-prefill-and-dp8-decode). The model layout, ports, and proxy are
     the same as ordinary PD deployment.
 
     `MultiConnector` combines `MooncakeHybridConnector` for P-to-D transfer with
@@ -1564,7 +1564,7 @@ Select the tab for the target hardware.
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in Section 3.1.
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1668,7 +1668,7 @@ Select the tab for the target hardware.
 
     nic_name="<NETWORK_INTERFACE>"
     local_ip="<LOCAL_IP>"
-    # Replace <YOUR_MODEL_PATH> with the actual path recorded in Section 3.1.
+    # Replace <YOUR_MODEL_PATH> with the actual path recorded in [Section 3.1](#31-model-weights-and-hardware).
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -1777,7 +1777,7 @@ Select the tab for the target hardware.
         --vllm-start-port 7100
     ```
 
-    Wait for all Decode `/health` endpoints as in Section 5.2.1, then start
+    Wait for all Decode `/health` endpoints as in [Section 5.2.1](#521-dp8-prefill-and-dp8-decode), then start
     Prefill on the other server:
 
     ```bash
@@ -1794,7 +1794,7 @@ Select the tab for the target hardware.
     ```
 
     Wait for all eight Prefill `/health` endpoints, then start the proxy from
-    Section 5.2.1 with the same endpoints. Send a long prompt to populate the
+    [Section 5.2.1](#521-dp8-prefill-and-dp8-decode) with the same endpoints. Send a long prompt to populate the
     pool, then reuse its prefix with a different suffix.
 
     Check Prefill external prefix-cache hits and MetaService DRAM get hits:
@@ -1822,7 +1822,7 @@ Select the tab for the target hardware.
 
     #### 5.3.2 Memcache KV Cache Pool
 
-    This configuration extends the A3 1P1D deployment in Section 5.2.2 with a
+    This configuration extends the A3 1P1D deployment in [Section 5.2.2](#522-a3-deployment) with a
     Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
@@ -1838,7 +1838,7 @@ Select the tab for the target hardware.
     `meta.conf`, `mmc-local.conf`, and `mmc-local-standalone.conf`, and start the
     Memcache MetaService. The
     Prefill and Decode nodes must use the same MetaService endpoint. Keep the
-    `/etc/hccn.conf` container mount from Section 4.1.
+    `/etc/hccn.conf` container mount from [Section 4.1](#41-docker-image-installation).
 
     This example uses separated Memcache deployment so that the pool reserves host
     memory before vLLM loads the model. Prepare one MetaService configuration and
@@ -1929,7 +1929,7 @@ Select the tab for the target hardware.
     For additional parameters and capacity constraints, refer to
     [Memcache and vLLM separated deployment](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#Memcache-and-vLLM-Separated-Deployment).
 
-    Reuse `launch_online_dp.py` from Section 5.2.2.1. Set `MEMCACHE_INSTALL_PATH` to
+    Reuse `launch_online_dp.py` from [Section 5.2.2.1](#5221-prepare-the-dp-launcher). Set `MEMCACHE_INSTALL_PATH` to
     the `Location` reported by `pip show memcache_hybrid`, and set
     `MEMCACHE_CONFIG_DIR` to the absolute directory containing the configuration
     files above on both nodes.
@@ -2031,7 +2031,7 @@ Select the tab for the target hardware.
         }'
     ```
 
-    Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.2.2 after all Decode engines are ready.
+    Start the four DP4/TP4 Prefill engines with the launcher command from [Section 5.2.2.2](#5222-start-the-prefill-node) after all Decode engines are ready.
 
     ##### 5.3.2.3 Start the Decode Node with Pooling
 
@@ -2132,8 +2132,8 @@ Select the tab for the target hardware.
         }'
     ```
 
-    Start the eight DP8/TP2 Decode engines with the launcher command from Section
-    5.2.2.3.
+    Start the eight DP8/TP2 Decode engines with the launcher command from [Section
+    5.2.2.3](#5223-start-the-decode-node).
 
     ##### 5.3.2.4 Startup and Verification
 
@@ -2144,7 +2144,7 @@ Select the tab for the target hardware.
     Wait until both standalone Memcache processes report successful initialization
     before starting the Decode engines. Then wait until every Decode engine reports
     `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-    same endpoint mapping described in Section 5.2.2.4.
+    same endpoint mapping described in [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
 
     Send the same request twice with a reusable prefix. Confirm that Prefill logs
     show Memcache lookup, get, put, and hit activity, and that Decode logs still
@@ -2165,7 +2165,7 @@ Select the tab for the target hardware.
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
-This configuration extends the A2 1P1D deployment in Section 5.2.3 with a
+This configuration extends the A2 1P1D deployment in [Section 5.2.3](#523-a2-deployment) with a
 Mooncake KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
 cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
 cache in Mooncake. Both connectors are configured as children of
@@ -2311,7 +2311,7 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the four DP4/TP4 Prefill engines with the launcher command from Section 5.2.3.2 after all Decode engines are ready.
+Start the four DP4/TP4 Prefill engines with the launcher command from [Section 5.2.3.2](#5232-start-the-prefill-nodes) after all Decode engines are ready.
 
 #### 5.4.3 Start the Decode Node with Pooling
 
@@ -2419,12 +2419,12 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 
-Start the eight DP8/TP2 Decode engines with the launcher command from Section 5.2.3.3.
+Start the eight DP8/TP2 Decode engines with the launcher command from [Section 5.2.3.3](#5233-start-the-decode-nodes).
 
 #### 5.4.4 Startup and Verification
 
 Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
-Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in Section 5.2.3.4.
+Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in [Section 5.2.3.4](#5234-deploy-the-pd-proxy).
 
 Send the same request twice with a reusable prefix. Confirm that Prefill logs show Mooncake lookup, get, put, and hit activity, and that Decode logs still show normal Prefill-to-Decode KV transfer.
 
@@ -2542,7 +2542,7 @@ both A3 and 950DT products.
 
 The following example checks a colocated service. For PD, use the proxy URL
 and `healthcheck` from the table instead. Reuse `SERVICE_URL` for the requests
-in Section 6.
+in [Section 6](#6-functional-verification).
 
 ```shell
 export SERVICE_URL="http://<SERVICE_IP>:8000"
@@ -2572,7 +2572,7 @@ The response must contain a model entry whose `id` is `dsv41`, matching
 
 ### 6.1 Text Request
 
-Use `SERVICE_URL` from Section 5.6.
+Use `SERVICE_URL` from [Section 5.6](#56-service-verification).
 
 ```shell
 curl -sS "$SERVICE_URL/v1/chat/completions" \
@@ -2638,7 +2638,7 @@ No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 
-The values in Sections 5.1 and 5.2 are starting points rather than globally
+The values in [Section 5.1](#51-single-node-colocated-deployment) and [Section 5.2](#52-1p1d-pd-disaggregated-deployment) are starting points rather than globally
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target input length, image sizes,
 output length, and concurrency. Keep DP4/TP4 for A3 single-node deployment,
@@ -2648,7 +2648,7 @@ alternative configuration has been validated.
 The 950DT products starting configurations are summarized below. `max-num-seqs` and
 `max-num-batched-tokens` apply per DP engine. The recommended 1P1D layout
 uses eight DP ranks on each node; PCP and wider Decode EP groups are optional
-extensions in Section 5.2.1.3.
+extensions in [Section 5.2.1.3](#5213-deployment-extensions).
 
 | Deployment / role | NPUs | DP / TP / PCP | Max sequences | Batch tokens | Memory utilization | Execution |
 | ----------------- | ---- | ------------- | ------------- | ------------ | ------------------ | --------- |

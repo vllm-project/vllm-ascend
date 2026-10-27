@@ -297,7 +297,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     For W8A8 deployment, 2 Atlas 800I A2 (64 GB x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
 
 **Key parameters:**
 
@@ -1093,7 +1093,7 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in Section 5.6.3 to the HTTP ports passed as argument 2 to the respective scripts.
+Run the two scripts on their respective hosts after filling in each host's NIC and IP. The examples use seven argument positions: visible devices, HTTP port, global DP size, DP rank, DP master address, DP RPC port, and TP size. P reads only positions 1–3 and 7; positions 4–6 are unused and retained for invocation compatibility. D uses all seven positions; its argument 5 is the D host's service IP. Use DP1/TP8 to match the fixed KV topology; changing topology also requires updating the connector JSON and device allocation. Set the A2 proxy's `--prefiller-ports` and `--decoder-ports` in [Section 5.6.3](#563-proxy) to the HTTP ports passed as argument 2 to the respective scripts.
 
 ```shell
 # On P:
@@ -1133,8 +1133,8 @@ Use the proxy paired with the actual connector, rather than choosing it by hardw
 
 | Connector | Request Order | Proxy | Scope |
 |-----------|---------------|-------|-------|
-| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in Sections 5.4 and 5.6 |
-| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in Section 5.5 |
+| `MooncakeConnectorV1` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | A3 and A2 PD recipes in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.6](#56-prefill-decode-disaggregation-a2) |
+| `MooncakeConnectorV2` | Proxy calls P, then D; D pulls KV | `load_balance_proxy_server_example.py` | 950DT W4A8C8 unequal-TP recipe in [Section 5.5](#55-prefill-decode-disaggregation-950dt-products) |
 
 Equal TP sizes do not make these connectors interchangeable. For unequal TP, verify the direction, divisibility, replicated KV heads, hybrid state layout, and quantization support of the selected implementation. The TP8-to-TP4 example does not imply arbitrary TP ratios or reverse-direction support. Use scripts from the same vLLM-Ascend revision as the serving stack.
 
@@ -1144,7 +1144,7 @@ Use the complete proxy command for the selected deployment:
 - [950DT two-host 1P1D](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
 - [A2 two-host 1P1D](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
 
-Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in Section 6.
+Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in [Section 6](#6-functional-verification).
 
 ## 6 Functional Verification
 
@@ -1235,7 +1235,7 @@ generation_kwargs = dict(
 )
 ```
 
-Set `max_out_len` so that the input length plus output budget does not exceed the service's `--max-model-len`. The A3 PD example in Section 5.4 is configured with `--max-model-len 133120`; keep the prompt length and output budget within that limit.
+Set `max_out_len` so that the input length plus output budget does not exceed the service's `--max-model-len`. The A3 PD example in [Section 5.4](#54-prefill-decode-disaggregation-a3) is configured with `--max-model-len 133120`; keep the prompt length and output budget within that limit.
 
 Run the evaluation:
 
@@ -1302,7 +1302,7 @@ After several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-The table summarizes the deployment examples in Chapter 5. Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
+The table summarizes the deployment examples in [Section 5](#5-online-service-deployment). Follow the linked scripts for the complete configuration, and tune the values for your workload. NPUs are allocated to the listed role on each host; the A3 PD roles share one host with 8 NPUs each. DP is shown as global/local. `Max Num Seqs` and `Max Num Batched Tokens` apply to each DP group.
 
 | Deployment Example | Node Role | NPUs | TP | DP (global/local) | Max Model Len | Max Num Seqs | Max Num Batched Tokens | MTP Tokens | Prefix Cache |
 | ------------------ | --------- | ---- | -- | ----------------- | ------------- | ------------ | ---------------------- | ---------- | ------------ |
@@ -1320,7 +1320,7 @@ The table summarizes the deployment examples in Chapter 5. Follow the linked scr
 
 Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general methods and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature support.
 
-1. Choose a Chapter 5 deployment example and fix the input/output lengths and test concurrency before comparing performance.
+1. Choose a [Section 5](#5-online-service-deployment) deployment example and fix the input/output lengths and test concurrency before comparing performance.
 2. Set `--max-model-len` for the workload, then balance `--max-num-seqs` and `--gpu-memory-utilization` against KV cache capacity and runtime memory usage.
 3. Tune `--max-num-batched-tokens` separately for Prefill and Decode. Compare throughput, TTFT, and TPOT using the methods in [Section 8](#8-performance-evaluation).
 4. Compare MTP, ACLGraph, and the optimizations below one at a time, checking output correctness as well as performance.
@@ -1331,11 +1331,11 @@ Use the settings in the selected deployment script as a starting point. Merge th
 
 | Optimization | Configuration | Usage |
 | ------------ | ------------- | ----- |
-| MTP | `--speculative-config` with `method=qwen3_5_mtp` | Use the token count in Section 9.1, tuning Prefill and Decode together for PD deployment. |
+| MTP | `--speculative-config` with `method=qwen3_5_mtp` | Use the token count in [Section 9.1](#91-recommended-configurations), tuning Prefill and Decode together for PD deployment. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Used for single-node, MP, and PD Decode examples; PD Prefill uses eager mode. |
 | Fused MC2 | `enable_fused_mc2` | `1`: dispatch-FFN-combine; `2`: CANN MegaMoe with matching operators. `0` disables fusion. The A3 PD performance case uses `2`; the 950DT W4A8C8 and A2 PD examples use `0` or do not enable it. |
 | MoE sequence parallelism | `enable_flashcomm1=true` | Requires `--enable-expert-parallel` and TP greater than 1. |
-| Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in Sections 5.4 and 5.5, and on Prefill in Section 5.6. Requires EP and TP greater than 1; increases weight memory usage. |
+| Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.5](#55-prefill-decode-disaggregation-950dt-products), and on Prefill in [Section 5.6](#56-prefill-decode-disaggregation-a2). Requires EP and TP greater than 1; increases weight memory usage. |
 | Shared expert overlap | `multistream_overlap_shared_expert=true` | Used by the [MP example](#52-multi-node-deployment-with-mp-recommended). |
 | Recompute scheduler | `scheduler_config.recompute_scheduler_enable=true` | Enabled on PD Decode, where `kv_role=kv_consumer`; keep it nested under `scheduler_config`. |
 | CPU binding | `enable_cpu_binding=true` | Explicitly enabled in the single-node, MP, A3 PD, and 950DT W4A8C8 PD scripts. |
