@@ -6255,11 +6255,19 @@ class NPUModelRunner(GPUModelRunner):
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
+                    _oscar_cdt = getattr(
+                        self.vllm_config.cache_config, "cache_dtype", "auto")
+                    _shape_kwargs = {}
+                    # OSCAR INT2: only the Ascend backend accepts the dtype
+                    # hint (packed INT2 derives head_size // 4); pass it solely
+                    # when INT2 is requested, matching the kernel-block path.
+                    if _oscar_cdt == "int2_per_token_head":
+                        _shape_kwargs["cache_dtype_str"] = _oscar_cdt
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks, get_storage_block_size(current_kv_cache_spec),
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size,
-                        cache_dtype_str=self.vllm_config.cache_config.cache_dtype)
+                        **_shape_kwargs)
                     kv_cache_shape_list = [kv_cache_shape]
                     kv_cache_dtype_list = [current_kv_cache_spec.dtype]
                     overlap_full_kv_cache = False
@@ -6291,7 +6299,7 @@ class NPUModelRunner(GPUModelRunner):
                                                 num_blocks, get_storage_block_size(current_kv_cache_spec),
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim,
-                                                cache_dtype_str=self.vllm_config.cache_config.cache_dtype
+                                                **_shape_kwargs
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = attn_backend.get_kv_cache_shape(
@@ -6300,7 +6308,7 @@ class NPUModelRunner(GPUModelRunner):
                                 current_kv_cache_spec.head_size
                                 + current_kv_cache_spec.scale_dim
                                 * get_dtype_size(current_kv_cache_spec.scale_dtype),
-                                cache_dtype_str=self.vllm_config.cache_config.cache_dtype)
+                                **_shape_kwargs)
                             kv_cache_shape_list = [
                                 indexer_k_shape, indexer_scale_shape, indexer_full_shape
                             ]
