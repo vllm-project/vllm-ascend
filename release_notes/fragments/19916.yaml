@@ -1,0 +1,5 @@
+pr: 19916
+entries:
+  - category: bugfix
+    text: Fixed MRv1 AllGather redundant expert routing and load accounting on A2, including dynamic replica reassignment and graph replay after expert weight migration.
+    hardware: [A2]
