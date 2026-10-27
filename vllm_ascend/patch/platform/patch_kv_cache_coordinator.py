@@ -514,6 +514,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_prefill_lookahead: int = 0,
+    num_hash_lookahead_tokens: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
@@ -569,6 +570,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+        orig_kwargs["num_hash_lookahead_tokens"] = num_hash_lookahead_tokens
         orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
