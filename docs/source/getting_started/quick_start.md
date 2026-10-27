@@ -1,6 +1,6 @@
 # Quick Start
 
-This guide uses Qwen3-0.6B as an example to help you run your first offline inference workload or deploy an online service on a prepared Ascend host using a prebuilt vLLM Ascend container.
+This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example to help you run your first offline inference workload or deploy an online service on a prepared Ascend host using a prebuilt vLLM Ascend container.
 
 ## Requirements {: #quick-start-requirements }
 
@@ -52,6 +52,7 @@ The following sections provide offline inference and online serving examples. Ch
     If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to ModelScope:
 
     <!-- doctest: quickstart-modelscope -->
+
     ```bash
     export VLLM_USE_MODELSCOPE=True
     pip install "modelscope>=1.18.1,<1.38"
@@ -95,8 +96,8 @@ The following sections provide offline inference and online serving examples. Ch
 
 ## Next steps {: #quick-start-next-steps }
 
-- See [Supported Models](../user_guide/support_matrix/supported_models.md) to choose another model.
+- See [Supported Models](../user_guide/support_matrix/supported_models.md) for choosing another model.
 - See [Model Tutorials](../tutorials/models/index.md) for deployment instructions for specific models.
 - See [Installation Guide > Set up the software environment](installation.md#installation-software-environment) for pip, CANN, and source installation methods.
 - See [Feature Tutorials](../tutorials/features/index.md) for distributed deployment and advanced features.
-- See [FAQ](../faqs.md) to troubleshoot common deployment issues.
+- See [FAQ](../faqs.md) for troubleshooting common deployment issues.

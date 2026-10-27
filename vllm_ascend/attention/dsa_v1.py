@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
@@ -271,6 +272,38 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int
 
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
+    # What the two Ascend parts can store between them; which one applies is decided
+    # per device in ``supports_kv_cache_dtype``. Everything else -- fp8_e4m3,
+    # fp8_e5m2, mxfp8, nvfp4 -- has no Ascend build.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "int8",
+        "turboquant_4bit_nc",
+    ]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        """Accept the KV cache dtypes this part has an implementation for.
+
+        A5 builds the compressed cache as fp8 and selects the plan from the literal
+        ``cache_config.cache_dtype``: ``bfloat16`` takes the SparseFlashMla path and
+        skips the compress epilog (``dsa_attn_kv_plan.is_a5_bf16_kv_enabled``), fp8
+        takes the epilog. ``auto`` means the model dtype, bfloat16, and is resolved to
+        that literal before this is asked, so it accepts the same layout.
+
+        A3 runs no compressed cache, stores the MLA cache as int8, and still runs
+        turboquant.
+
+        Only the dtype and the device decide this; the per-device split is why the
+        base class's flat list is not enough.
+        """
+        if kv_cache_dtype is None:
+            return True
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            return kv_cache_dtype in ("auto", "bfloat16", "fp8")
+        return kv_cache_dtype in ("auto", "bfloat16", "int8", "turboquant_4bit_nc")
 
     @staticmethod
     def get_name() -> str:

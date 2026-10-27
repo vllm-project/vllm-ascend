@@ -168,13 +168,11 @@ def test_dspark_draft_names_are_filtered_to_local_cache_specs():
 
 
 @pytest.mark.parametrize("method", ["mtp", "dspark"])
-@pytest.mark.parametrize("v2", [False, True])
-def test_loader_names_override_numeric_ranges(method, v2):
+def test_loader_names_override_numeric_ranges(method):
     config, specs, drafts = make_dspark_kvpp_case(
         draft_names=("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")
     )
     config.speculative_config.method = method
-    config.use_v2_model_runner = v2
     context = config.compilation_config.static_forward_context
     for layer in context.values():
         del layer._kvpp_is_draft
@@ -182,7 +180,6 @@ def test_loader_names_override_numeric_ranges(method, v2):
         placement.find_draft_layers(config, specs)
     names = set(drafts) | {"draft.on_another_stage"}
     runner = SimpleNamespace(
-        drafter=SimpleNamespace(_draft_attn_layer_names=names),
         speculator=SimpleNamespace(draft_attn_layer_names=names),
     )
     placement.register_kvpp_draft_layers(config, runner, specs, is_last_pp_rank=True)
@@ -193,10 +190,8 @@ def test_loader_names_override_numeric_ranges(method, v2):
     assert all(plan.layer_bundles[name] == (name,) for name in drafts)
 
 
-@pytest.mark.parametrize("v2", [False, True])
-def test_missing_proposer_is_only_valid_on_non_draft_pp_stage(v2):
+def test_missing_proposer_is_only_valid_on_non_draft_pp_stage():
     config, specs, _ = make_dspark_kvpp_case()
-    config.use_v2_model_runner = v2
     with pytest.raises(ValueError, match="loaded proposer"):
         placement.register_kvpp_draft_layers(config, SimpleNamespace(), specs, is_last_pp_rank=True)
     placement.register_kvpp_draft_layers(config, SimpleNamespace(), specs, is_last_pp_rank=False)
@@ -207,7 +202,7 @@ def test_missing_proposer_is_only_valid_on_non_draft_pp_stage(v2):
 def test_cross_model_shared_cache_is_rejected_before_marking(via_runner):
     config, specs, drafts = make_dspark_kvpp_case()
     alias = "draft.shared.attn"
-    runner = SimpleNamespace(drafter=SimpleNamespace(_draft_attn_layer_names=set(drafts) | {alias}))
+    runner = SimpleNamespace(speculator=SimpleNamespace(draft_attn_layer_names=set(drafts) | {alias}))
     context = config.compilation_config.static_forward_context
     context[alias] = SimpleNamespace()
     if via_runner:
