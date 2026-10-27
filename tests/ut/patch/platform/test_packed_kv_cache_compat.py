@@ -69,3 +69,25 @@ def test_packed_groups_skip_eagle_annotation_on_main():
 
     annotator.assert_not_called()
     warning.assert_not_called()
+
+
+def test_main_builder_uses_ascend_pool_accounting():
+    builder_cls = getattr(
+        cache_patch._kv_cache_planning,
+        "DefaultKVCacheConfigBuilder",
+        None,
+    )
+    if builder_cls is None:
+        pytest.skip("vLLM lane predates KVCacheConfigBuilder")
+
+    builder = builder_cls()
+    config = SimpleNamespace()
+    groups = [object()]
+    with patch.object(
+        cache_patch,
+        "_ascend_pool_bytes_per_block",
+        return_value=123,
+    ) as pool_bytes:
+        assert builder._get_pool_bytes_per_block(config, groups) == 123
+
+    pool_bytes.assert_called_once_with(config, groups)
