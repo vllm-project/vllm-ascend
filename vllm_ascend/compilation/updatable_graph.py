@@ -66,7 +66,11 @@ class GraphUpdateTask:
     event: Any
 
     def bind(self, params: Params) -> "GraphUpdateTask":
-        runtime_kwargs = {**self.kwargs, **params}
+        # Params are collected per layer and shared by every op that layer
+        # captured, but v1 FIA (`actual_seq_lengths*`) and FIA-v2
+        # (`actual_seq_kvlen`) name the same inputs differently. Only refresh
+        # the args this task's op was captured with.
+        runtime_kwargs = {**self.kwargs, **{k: v for k, v in params.items() if k in self.kwargs}}
         return replace(self, kwargs=runtime_kwargs)
 
     def apply(self, update_stream) -> None:
@@ -151,7 +155,8 @@ class UpdatableGraph(torch.npu.NPUGraph):
         params_by_provider = {provider: source.get(provider) for provider in self.provider_sizes}
         for provider, size in self.provider_sizes.items():
             assert len(params_by_provider[provider]) == size
-        return tuple(task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
+        resolved = tuple(task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
+        return resolved
 
     def update(
         self,
