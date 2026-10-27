@@ -3075,7 +3075,7 @@ This section verifies basic inference functionality for all deployment modes. Fo
 
 Once your server is started, you can query the model with input prompts:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+Replace `<node0_ip>` and `<port>` with the IP address and port of the API server. For Prefill/Decode (PD) disaggregated deployments, use the proxy's IP address and port instead.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
