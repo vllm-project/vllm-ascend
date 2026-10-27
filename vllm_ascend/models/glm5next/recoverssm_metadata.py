@@ -135,7 +135,15 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         return torch.cat((torch.zeros(1, dtype=lengths.dtype), non_spec_lengths.cumsum(0)))
 
     def _stage_spec(self, metadata, batch_size):
-        if not self.use_full_cuda_graph or metadata.num_prefills or metadata.num_decodes:
+        if (
+            not self.use_full_cuda_graph
+            or metadata.num_prefills
+            or metadata.num_decodes
+            # Eager fallback may exceed the captured token capacity.
+            or metadata.num_spec_decode_tokens > self.decode_cudagraph_max_bs
+            # State rows use max_num_seqs; offset/acceptance rows use the capture limit.
+            or batch_size > min(self.spec_state_indices_tensor.shape[0], self.decode_cudagraph_max_bs)
+        ):
             return
         # TODO: Fuse staging with an Ascend Triton kernel; upstream currently requires CUDA tensors.
         count = metadata.num_spec_decodes

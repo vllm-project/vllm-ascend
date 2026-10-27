@@ -82,9 +82,10 @@ def test_graph_padding_is_excluded_from_sampler_commit_rows(monkeypatch):
 def test_graph_staging_reuses_addresses_and_clears_prior_rows():
     builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
     builder.use_full_cuda_graph = True
+    builder.decode_cudagraph_max_bs = 8
     builder.spec_state_indices_tensor = torch.full((4, 1), 99, dtype=torch.int32)
-    builder.spec_query_start_loc = torch.full((5,), 99, dtype=torch.int32)
-    builder.num_accepted_tokens = torch.full((4,), 99, dtype=torch.int32)
+    builder.spec_query_start_loc = torch.full((builder.decode_cudagraph_max_bs + 1,), 99, dtype=torch.int32)
+    builder.num_accepted_tokens = torch.full((builder.decode_cudagraph_max_bs,), 99, dtype=torch.int32)
     addresses = [
         t.data_ptr()
         for t in (builder.spec_state_indices_tensor, builder.spec_query_start_loc, builder.num_accepted_tokens)
@@ -94,6 +95,7 @@ def test_graph_staging_reuses_addresses_and_clears_prior_rows():
         indices = torch.tensor(blocks, dtype=torch.int32).reshape(-1, 1)
         metadata = SimpleNamespace(
             num_spec_decodes=len(blocks),
+            num_spec_decode_tokens=sum(lengths),
             num_prefills=0,
             num_decodes=0,
             spec_state_indices_tensor=indices,
@@ -110,6 +112,50 @@ def test_graph_staging_reuses_addresses_and_clears_prior_rows():
             t.data_ptr()
             for t in (metadata.spec_state_indices_tensor, metadata.spec_query_start_loc, metadata.num_accepted_tokens)
         ]
+
+
+@pytest.mark.parametrize(
+    "batch,count,state_capacity,capture_capacity",
+    [
+        (64, 64, 64, 24),
+        (32, 3, 64, 24),
+        (5, 5, 64, 24),
+        (4, 3, 3, 18),
+    ],
+)
+def test_eager_fallback_keeps_metadata_when_graph_staging_does_not_fit(batch, count, state_capacity, capture_capacity):
+    builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.use_full_cuda_graph = True
+    builder.decode_cudagraph_max_bs = capture_capacity
+    builder.spec_state_indices_tensor = torch.full((state_capacity, 1), 99, dtype=torch.int32)
+    builder.spec_query_start_loc = torch.full((capture_capacity + 1,), 99, dtype=torch.int32)
+    builder.num_accepted_tokens = torch.full((capture_capacity,), 99, dtype=torch.int32)
+    states = torch.arange(1, count + 1, dtype=torch.int32).reshape(-1, 1)
+    starts = torch.arange(count + 1, dtype=torch.int32) * 6
+    accepted = torch.full((count,), 2, dtype=torch.int32)
+    commit = KDARecoverSSMCommitMetadata(states, starts, None, None)
+    metadata = SimpleNamespace(
+        num_spec_decodes=count,
+        num_spec_decode_tokens=count * 6,
+        num_prefills=0,
+        num_decodes=0,
+        spec_state_indices_tensor=states,
+        spec_query_start_loc=starts,
+        num_accepted_tokens=accepted,
+        recoverssm_commit=commit,
+    )
+
+    builder._build_conv_metadata(SimpleNamespace(num_reqs=batch), metadata, None)
+
+    assert metadata.spec_state_indices_tensor is states
+    assert metadata.spec_query_start_loc is starts
+    assert metadata.num_accepted_tokens is accepted
+    assert metadata.recoverssm_commit is commit
+    conv = metadata.spec_decode_metadata.spec_causal_conv1d
+    assert conv.query_start_loc is starts and conv.num_accepted_tokens is accepted
+    assert torch.equal(conv.cache_indices, states[:, 0])
+    for buffer in (builder.spec_state_indices_tensor, builder.spec_query_start_loc, builder.num_accepted_tokens):
+        assert bool((buffer == 99).all())
 
 
 @pytest.mark.parametrize("actual_reqs", [0, 1, 2, 3])
