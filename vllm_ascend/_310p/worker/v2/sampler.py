@@ -19,10 +19,6 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
-from vllm_ascend._310p.worker.v2.sample_utils import (
-    _prepare_cpu_generators_310p,
-    _random_sample_310p,
-)
 from vllm_ascend._310p.worker.v2.sample import (
     apply_min_p,
     apply_temperature,
@@ -39,6 +35,10 @@ from vllm_ascend._310p.worker.v2.sample.penalties import (
     apply_penalties,
     build_penalty_token_tensors,
     use_penalty,
+)
+from vllm_ascend._310p.worker.v2.sample_utils import (
+    _prepare_cpu_generators_310p,
+    _random_sample_310p,
 )
 
 # UT / callers may still import these historical names.
