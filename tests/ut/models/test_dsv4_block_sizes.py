@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from types import SimpleNamespace
+
 import pytest
 from vllm.v1.worker.utils import select_common_block_size
 
+from vllm_ascend import utils
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.models.layer.attention import layer
 from vllm_ascend.utils import AscendDeviceType
@@ -41,3 +44,17 @@ def test_a5_layout_is_not_extended(monkeypatch):
 def test_block16_cache_groups_have_supported_kernel_sizes(block_size):
     # C4 state, C128 state, and SWA/MLA each pass through kernel selection.
     assert select_common_block_size(block_size, [AscendDSABackend]) == block_size
+
+
+@pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("requested", [8, 16, 32, 64, 128])
+def test_dsv4_platform_preserves_supported_block_size(monkeypatch, device, requested):
+    monkeypatch.setattr(utils, "get_ascend_device_type", lambda: device)
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=requested),
+        scheduler_config=SimpleNamespace(),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v4")),
+    )
+    utils.refresh_block_size(config)
+    supported = requested in (32, 64, 128) or (device == AscendDeviceType.A3 and requested == 16)
+    assert config.cache_config.block_size == (requested if supported else 32)
