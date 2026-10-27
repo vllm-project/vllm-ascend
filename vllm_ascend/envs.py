@@ -42,6 +42,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    # Fuse the GDN decode gating kernel with the two Q/K l2norm kernels
+    # into a single Triton launch (vllm_ascend/ops/triton/
+    # fused_gdn_gating_l2norm.py). Bit-identical to the unfused path.
+    # Off by default.
+    "VLLM_ASCEND_ENABLE_GDN_GATE_NORM_FUSION": lambda: _strict_binary_env(
+        "VLLM_ASCEND_ENABLE_GDN_GATE_NORM_FUSION"
+    ),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
