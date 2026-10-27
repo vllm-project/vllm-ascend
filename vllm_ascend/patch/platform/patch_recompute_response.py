@@ -14,13 +14,15 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logger import logger
 
+from vllm_ascend.core.recompute_protocol import RECOMPUTE_STOP_REASON
+
 
 class RecomputeErrorResponse(ErrorResponse):
     partial_response: dict[str, Any]
 
 
 def _error(serving, payload):
-    if not any(choice.get("stop_reason") == "recomputed" for choice in payload.get("choices", [])):
+    if not any(choice.get("stop_reason") == RECOMPUTE_STOP_REASON for choice in payload.get("choices", [])):
         return None
     error = serving.create_error_response(
         "Generation interrupted; prefill recomputation is required",
@@ -35,7 +37,7 @@ async def _stream(serving, source):
     async with aclosing(source):
         async for frame in source:
             # Native serving yields complete events, before HTTP fragmentation.
-            if frame.startswith("data: ") and "recomputed" in frame:
+            if frame.startswith("data: ") and str(RECOMPUTE_STOP_REASON) in frame:
                 error = _error(serving, json.loads(frame[6:]))
                 if error is not None:
                     break
@@ -45,21 +47,15 @@ async def _stream(serving, source):
         yield "data: [DONE]\n\n"
 
 
-def _user_stop(request):
-    return request.stop == "recomputed" or (isinstance(request.stop, list) and "recomputed" in request.stop)
-
-
 def _wrap_response(original, *, guard_stream=True):
     @wraps(original)
     async def wrapped(self, request, *args, **kwargs):
         response = await original(self, request, *args, **kwargs)
-        if _user_stop(request):
-            return response
         if isinstance(response, ErrorResponse):
             return response
         if inspect.isasyncgen(response):
             return _stream(self, response) if guard_stream else response
-        if any(choice.stop_reason == "recomputed" for choice in response.choices):
+        if any(choice.stop_reason == RECOMPUTE_STOP_REASON for choice in response.choices):
             return _error(self, response.model_dump(mode="json"))
         return response
 
@@ -90,8 +86,8 @@ def _wrap_chat_stream(original):
             source = self.chat_completion_stream_generator_raw(request, result_generator, *args, **kwargs)
             async with aclosing(result_generator), aclosing(source):
                 async for chunk in source:
-                    if not isinstance(chunk, ErrorResponse) and not _user_stop(request):
-                        if any(choice.stop_reason == "recomputed" for choice in chunk.choices):
+                    if not isinstance(chunk, ErrorResponse):
+                        if any(choice.stop_reason == RECOMPUTE_STOP_REASON for choice in chunk.choices):
                             error = _error(self, chunk.model_dump(mode="json", exclude_unset=True))
                             break
                     data = (

@@ -577,9 +577,11 @@ async def _handle_completions(api: str, request: Request):
                             logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
                             continue
+                        recompute = False
                         match chunk_json:
                             case {"error": {"type": "RecomputeRequiredError"}, "partial_response": partial}:
                                 chunk_json = partial
+                                recompute = True
                         choices = chunk_json.get("choices", [])
                         if not choices:
                             yield chunk
@@ -591,14 +593,13 @@ async def _handle_completions(api: str, request: Request):
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
                             else (completion_tokens + usage.get("completion_tokens"))
                         )
-                        if stop_reason == "recomputed":
+                        if recompute:
                             retry = True
                             retry_count += 1
                             if chat_flag:
