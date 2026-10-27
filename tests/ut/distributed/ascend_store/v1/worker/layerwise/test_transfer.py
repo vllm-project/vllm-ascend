@@ -145,7 +145,9 @@ def test_partition_slices_align_layer_keys_gva_bases_and_failure_ownership():
         expected_keys = [keys[index // 3][index % 3] for index in participating]
         assert plan.selected_keys_by_layer[layer_id] == expected_keys
         remote, local, lengths = materialize_layer_gva(mappings, plan, layer_id)
-        expected_remote, expected_local, expected_lengths = [], [], []
+        expected_remote: list[int] = []
+        expected_local: list[int] = []
+        expected_lengths: list[int] = []
         for layout in mapping.layer_layouts[layer_id]:
             segments = layout.local_segments
             strides = np.broadcast_to(segments.group_block_strides_bytes, segments.block_zero_segment_addresses.shape)

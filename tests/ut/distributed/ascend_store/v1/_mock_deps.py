@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, Mock
 
 from tests.ut.distributed.ascend_store import _mock_deps as shared
@@ -242,19 +243,21 @@ class _FakeKVCacheSpecRegistry:
 
 
 if shared._MOCK_VLLM_DEPS:
-    _FakeKVCacheSpec.prefix_cacheable = True
+    cast(Any, _FakeKVCacheSpec).prefix_cacheable = True
     managers = sys.modules["vllm.v1.core.single_type_kv_cache_manager"]
-    managers.SingleTypeKVCacheManager = _FakeSingleTypeKVCacheManager
-    managers.FullAttentionManager = _FakeFullAttentionManager
-    managers.SlidingWindowManager = _FakeSlidingWindowManager
-    managers.MambaManager = _FakeMambaManager
-    managers.spec_manager_map = {
-        _FakeFullAttentionSpec: _FakeFullAttentionManager,
-        _FakeSlidingWindowSpec: _FakeSlidingWindowManager,
-        _FakeMambaSpec: _FakeMambaManager,
-    }
-    sys.modules["vllm.v1.kv_cache_interface"].CircularBufferSpec = _FakeCircularBufferSpec
-    sys.modules["vllm.v1.kv_cache_spec_registry"].KVCacheSpecRegistry = _FakeKVCacheSpecRegistry
+    managers.__dict__.update(
+        SingleTypeKVCacheManager=_FakeSingleTypeKVCacheManager,
+        FullAttentionManager=_FakeFullAttentionManager,
+        SlidingWindowManager=_FakeSlidingWindowManager,
+        MambaManager=_FakeMambaManager,
+        spec_manager_map={
+            _FakeFullAttentionSpec: _FakeFullAttentionManager,
+            _FakeSlidingWindowSpec: _FakeSlidingWindowManager,
+            _FakeMambaSpec: _FakeMambaManager,
+        },
+    )
+    sys.modules["vllm.v1.kv_cache_interface"].__dict__["CircularBufferSpec"] = _FakeCircularBufferSpec
+    sys.modules["vllm.v1.kv_cache_spec_registry"].__dict__["KVCacheSpecRegistry"] = _FakeKVCacheSpecRegistry
 
 # Legacy tests mock the shared module wholesale. v1 uses its real initialization
 # policy, while the legacy global_te mock must remain available to legacy tests.

@@ -108,7 +108,8 @@ def make_layer_transfer_group(
     slices_by_partition = []
     selected_count_total = 0
     for partition_index in range(len(group.keys_by_partition)):
-        selected_count = record_count if masks is None else np.count_nonzero(masks[partition_index])
+        indices: range | IndexArray
+        selected_count = record_count if masks is None else int(np.count_nonzero(masks[partition_index]))
         if selected_count == record_count:
             indices = shared_indices
             if shared_ids is None:
@@ -116,6 +117,7 @@ def make_layer_transfer_group(
                 shared_ids.flags.writeable = False
             ids = shared_ids
         elif selected_count:
+            assert masks is not None
             indices = np.flatnonzero(masks[partition_index])
             indices.flags.writeable = False
             ids = group.local_block_ids[indices]
@@ -125,7 +127,7 @@ def make_layer_transfer_group(
             ids = group.local_block_ids[:0].view()
             ids.flags.writeable = False
         start = selected_count_total
-        selected_count_total += int(selected_count)
+        selected_count_total += selected_count
         slices_by_partition.append(slice(start, selected_count_total))
         indices_by_partition.append(indices)
         ids_by_partition.append(ids)
@@ -161,7 +163,7 @@ def make_layer_transfer_plan(
         groups_by_layer[layer_id] = tuple(layer_groups)
         membership = tuple(members_by_layer[layer_id])
         if membership not in keys_by_membership:
-            keys = []
+            keys: list[str] = []
             for group, (_, partitions) in zip(layer_groups, membership, strict=True):
                 for partition_index in partitions:
                     keys.extend(group.selected_keys[group.selected_transfer_slices_by_partition[partition_index]])

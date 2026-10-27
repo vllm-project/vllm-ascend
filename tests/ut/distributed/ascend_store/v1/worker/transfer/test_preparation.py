@@ -109,7 +109,7 @@ def test_select_keys_uses_implicit_full_selection_without_allocating_all_true_ma
 
 @pytest.mark.parametrize("start", (0, 997 * 128, 998 * 128 + 1))
 def test_load_range_starts_at_local_window_or_requested_prefix(start, monkeypatch):
-    visited = []
+    visited: list[int] = []
 
     def record_range(*args):
         indices = range(*args)

@@ -135,7 +135,7 @@ def selection_signature(selection):
     return tuple(
         None
         if item is None
-        else (item.keys, getattr(item, "local_block_ids", getattr(item, "block_ids", None)).tolist())
+        else (item.keys, (item.local_block_ids if hasattr(item, "local_block_ids") else item.block_ids).tolist())
         for item in selections
     )
 
@@ -143,8 +143,10 @@ def selection_signature(selection):
 def layer_workload(layer_mapping, bulk_work):
     transfer, hashes, ids, mask, _, _ = bulk_work
     naming = getattr(transfer, "key_namer", getattr(transfer, "naming", transfer))
-    if hasattr(layer_mapping, "local_layout") or hasattr(layer_mapping, "local"):
-        layer_ids = getattr(layer_mapping, "local_layout", getattr(layer_mapping, "local", None)).physical_layer_ids
+    if hasattr(layer_mapping, "local_layout"):
+        layer_ids = layer_mapping.local_layout.physical_layer_ids
+    elif hasattr(layer_mapping, "local"):
+        layer_ids = layer_mapping.local.physical_layer_ids
     elif hasattr(layer_mapping, "binding"):
         layer_ids = layer_mapping.binding.local_layout.physical_layer_ids
     else:

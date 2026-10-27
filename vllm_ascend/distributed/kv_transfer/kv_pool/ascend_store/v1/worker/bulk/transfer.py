@@ -41,7 +41,9 @@ def materialize_bulk_arguments(
     mappings: dict[int, BulkMapping], batch: KVTransferBatch, sizes_by_group: dict[int, tuple[tuple[int, ...], ...]]
 ) -> BulkBackendArguments:
     """Select full local payloads and produce the Bulk Backend's final lists."""
-    keys, addresses, lengths = [], [], []
+    keys: list[str] = []
+    addresses: list[list[int]] = []
+    lengths: list[list[int]] = []
     for group in batch.groups:
         record_count = group.transfer_record_count
         if not record_count:

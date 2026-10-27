@@ -252,6 +252,7 @@ class LayerwiseWorker(KVPoolWorker[LayerwiseMapping]):
         )
 
     def _store_transfer_records(self, command: StoreCommand) -> tuple[StoreTransferRecords, ...]:
+        assert not isinstance(command, CheckpointStoreCommand)
         masks = self._reachability.select_for_store(command.block_hashes, command.end_token, command.num_prompt_tokens)
         return tuple(
             store_transfer_records(

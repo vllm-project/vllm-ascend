@@ -206,7 +206,9 @@ def materialize_group_layer_ranges(
     layouts: tuple[KeyRangeLayout, ...], group: LayerTransferGroup
 ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
     """Combine the Worker's partition selection with independent byte layouts."""
-    addresses, sizes, offsets = [], [], []
+    addresses: list[list[int]] = []
+    sizes: list[list[int]] = []
+    offsets: list[list[int]] = []
     for native in layouts:
         layout = native.layout
         ids = group.selected_local_block_ids_by_partition[layout.partition_index]
