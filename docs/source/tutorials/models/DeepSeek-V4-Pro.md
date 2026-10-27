@@ -2601,12 +2601,12 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 2. After execution, you can get the result.
 
-| dataset | metric | mode | vllm-api-general-chat | note |
-| ----- | ----- | ----- | ----- | ----- |
-| GPQA | accuracy | gen | 89.90 | 2 Atlas 800I A3 (128GB × 8) |
-| GPQA | accuracy | gen | 92.93 | 8 Ascend 950DT nodes (96GB × 8) |
-| GSM8K | accuracy | gen | 96.21 | 2 Atlas 800I A3 (128GB × 8) |
-| GSM8K | accuracy | gen | 97.54 | 950PR&950DT products, w4a4c8 |
+| dataset | version | metric | mode | vllm-api-general-chat | note |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800I A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 92.93 | 8 Ascend 950DT nodes (96GB × 8) |
+| GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800I A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 97.54 | 950PR&950DT products, w4a4c8 |
 
 > **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
