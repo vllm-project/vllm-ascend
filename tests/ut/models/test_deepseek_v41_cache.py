@@ -13,7 +13,6 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-import inspect
 
 import torch
 import torch_npu
@@ -59,29 +58,22 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
-from vllm_ascend.patch.platform import patch_kv_cache_utils as cache_patch
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 # vLLM #61183 moved the KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.31.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.31.0"):
+# main; the v0.32.0 lane still ships them in `kv_cache_utils`.
+if vllm_version_is("0.32.0"):
     from vllm.v1.core import kv_cache_utils as kv_cache_planning
 else:
     from vllm.v1.core import kv_cache_planning
 
-# vLLM #42309 gives the upstream admission helper a leading `builder` argument;
-# v0.31.0 and older main checkouts keep the two-argument form. `vllm_version_is`
-# cannot tell two main dev builds apart, so probe the live upstream signature.
-_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = (
-    "builder" in inspect.signature(cache_patch._orig_max_memory_usage_bytes_from_groups).parameters
-)
+# v0.32.0 keeps the two-argument admission API; verified main requires a builder.
+_UPSTREAM_MAX_MEMORY_TAKES_BUILDER = not vllm_version_is("0.32.0")
 
 
 def _pool_bytes_per_block(runtime, groups):
     """vLLM #57169 added a leading ``vllm_config`` argument on main."""
-    if vllm_version_is("0.31.0"):
-        return kv_cache_planning._pool_bytes_per_block(groups)
     return kv_cache_planning._pool_bytes_per_block(runtime, groups)
 
 
@@ -1934,8 +1926,8 @@ def test_only_the_sliding_window_group_carries_the_length(runtime):
             dtype=torch.bfloat16,
             tokens_per_state=2,
             model_version="deepseek_v41",
-            # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-            **({"storage_block_size": 64} if vllm_version_is("0.31.0") else {}),
+            # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+            **{},
         ),
         [],
         runtime,

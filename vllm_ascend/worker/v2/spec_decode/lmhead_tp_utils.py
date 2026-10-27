@@ -61,7 +61,7 @@ class LmheadTPDraftSamplingMixin:
                 "read the request mapping and write those buffers out of bounds."
             )
 
-    if vllm_version_is("0.31.0"):
+    if vllm_version_is("0.32.0"):
 
         def sample_draft(
             self,

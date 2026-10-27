@@ -302,9 +302,30 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    # vLLM main (#59554) forwards these watermarking kwargs when a watermark
+    # key is configured; the NPU kernels do not implement watermarking.
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
+    # mode. Accept the kwargs so the shared call site keeps working, but reject
+    # the mode itself.
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+    if fly_window_size > 0:
+        raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
+    if (
+        contexts is not None
+        or watermarking is not None
+        or watermarking_skip_mask is not None
+        or watermark_key is not None
+    ):
+        raise NotImplementedError("Watermarking is not supported in the NPU rejection sampler.")
     if use_block_verification:
         assert synthetic_conditional_rates is None, (
             "Block verification is incompatible with synthetic acceptance rates."
@@ -319,9 +340,9 @@ def rejection_sample(
     # `_is_bonus_logit`, which masks its look-ahead load with the total logit
     # count. Passing `num_speculative_steps` there makes the kernels treat every
     # logit after the first one as a bonus token and return early, leaving the
-    # `new_empty` block-statistics buffers uninitialized. v0.31.0 still expects
+    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
     # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.31.0") else num_logits
+    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton

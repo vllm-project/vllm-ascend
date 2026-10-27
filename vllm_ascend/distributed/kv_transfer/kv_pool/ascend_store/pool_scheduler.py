@@ -7,6 +7,11 @@ import vllm.envs as envs
 import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (
+    LOOKUP_MSG,
+    RESET_MSG,
+    RESP_OK,
+)
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.block_pool import BlockPool
@@ -401,7 +406,9 @@ class KVPoolScheduler:
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
         if self.cache_coordinator is not None:
-            return self._lookup_layerwise_with_coordinator(request, token_len)
+            return self._lookup_layerwise_with_coordinator(
+                request, token_len, 0 if self.layerwise_offload else num_computed_tokens
+            )
         return self._lookup_layerwise_contiguous(request, token_len, num_computed_tokens)
 
     def _query_layerwise_block_hits(self, keys_by_block: list[list[str]]) -> list[bool]:
@@ -435,6 +442,7 @@ class KVPoolScheduler:
         self,
         request: "Request",
         token_len: int,
+        num_computed_tokens: int = 0,
     ) -> int:
         """Reachability-aware hit check for hybrid models.
 
@@ -454,7 +462,10 @@ class KVPoolScheduler:
         ) -> list[BlockHash]:
             keys_by_block: list[list[str]] = []
             allowed_hashes: list[BlockHash] = []
+            local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
             for block_idx, block_hash in enumerate(group_block_hashes):
+                if block_idx < local_blocks:
+                    continue
                 if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
                     continue
                 keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
@@ -467,6 +478,7 @@ class KVPoolScheduler:
             token_len,
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
+            hbm_hit_tokens=num_computed_tokens,
         )
 
     def _lookup_layerwise_contiguous(
@@ -475,8 +487,8 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
-        # In layerwise mode, always query from block 0 because the remote
-        # pool stores per-layer data that may not match local prefix cache.
+        # Layer reuse can evict earlier layers from HBM. Otherwise, only
+        # probe blocks beyond the complete local prefix to avoid rewarming it.
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
         hits_per_group: list[int] = []
@@ -485,10 +497,13 @@ class KVPoolScheduler:
             effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
             query_start_block = (
-                0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
+                0
+                if self.layerwise_offload
+                else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
             )
             group_block_hashes = group_block_hashes[query_start_block:]
             if not group_block_hashes:
+                hits_per_group.append(query_start_block * effective_block_size)
                 continue
 
             # Deliberately no cross-request hit cache: in a tiered (DRAM+SSD)
@@ -609,6 +624,9 @@ class KVPoolScheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        # A waiting request can be looked up again before it is admitted.
+        # Never retain a load plan from an earlier hit across a miss/early return.
+        self.load_specs.pop(request.request_id, None)
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -1179,6 +1197,45 @@ class KVPoolScheduler:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
 
+    def reset_store(self) -> bool:
+        """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
+        if self.sending_events or self.sending_blocks:
+            logger.error(
+                "AscendStore reset_store refused; in-flight saves still track sending_events=%s sending_blocks=%s",
+                list(self.sending_events),
+                list(self.sending_blocks),
+            )
+            return False
+
+        stale_ids = bool(self._loading_req_ids)
+        # True when any block besides the null block is still held.
+        if self._block_pool is None:
+            blocks_still_referenced = True
+        else:
+            used = self._block_pool.num_gpu_blocks - self._block_pool.get_num_free_blocks()
+            blocks_still_referenced = used != 1
+        if stale_ids and blocks_still_referenced:
+            logger.error(
+                "AscendStore reset_store refused; blocks still referenced loading_req_ids=%s",
+                self._loading_req_ids,
+            )
+            return False
+        if stale_ids:
+            self._loading_req_ids.clear()
+
+        if self.client is None:
+            self.client = LookupKeyClient(self.vllm_config)
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("AscendStore reset via remove_all succeeded.")
+            else:
+                logger.warning("AscendStore reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("AscendStore reset_store RPC failed: %s", e)
+            return False
+
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         return None
 
@@ -1212,6 +1269,7 @@ class LookupKeyClient:
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
+            LOOKUP_MSG,
             token_len.to_bytes(4, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
@@ -1226,6 +1284,12 @@ class LookupKeyClient:
             return 0
 
         return int.from_bytes(resp, "big")
+
+    def reset(self) -> bool:
+        """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
+        self.socket.send(RESET_MSG)
+        resp = self.socket.recv()
+        return bytes(resp) == RESP_OK
 
     def close(self):
         if self._closed:

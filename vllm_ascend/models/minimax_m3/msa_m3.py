@@ -51,7 +51,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 # Use CANN MsaIndexScore for prefill on all devices and decode on A2/A3.
 # A5 decode keeps its lower-latency Triton path.
@@ -120,8 +120,8 @@ class AscendMiniMaxM3IndexerBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3IndexerImpl]:
@@ -592,8 +592,8 @@ class AscendMiniMaxM3SparseBackend(AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_impl_cls() -> type[AscendMiniMaxM3SparseImpl]:

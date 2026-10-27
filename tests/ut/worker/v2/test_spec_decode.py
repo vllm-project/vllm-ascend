@@ -52,6 +52,7 @@ def _make_config(
         uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
+        use_multi_module_mtp=MagicMock(return_value=False),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
     )
     return SimpleNamespace(speculative_config=speculative_config)
@@ -64,6 +65,39 @@ def _mock_speculator_module(monkeypatch, module_name, class_name):
     setattr(module, class_name, speculator_cls)
     monkeypatch.setitem(sys.modules, module_name, module)
     return speculator_cls
+
+
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_init_speculator_ngram_uses_current_request_state(monkeypatch, method, enforce_eager):
+    config = _make_config(method)
+    config.speculative_config.enforce_eager = enforce_eager
+    config.compilation_config = SimpleNamespace(mode=CompilationMode.VLLM_COMPILE)
+    device = torch.device("cpu")
+    req_states = object()
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm.v1.worker.gpu.spec_decode.ngram.speculator",
+        "NgramGPUSpeculator",
+    )
+    result = init_speculator(config, device, req_states)
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once()
+    draft_config, draft_device, draft_states = speculator_cls.call_args.args
+    assert draft_device == device
+    assert draft_states is req_states
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    if enforce_eager:
+        assert draft_config is not config
+        assert draft_config.compilation_config is not config.compilation_config
+        assert draft_config.compilation_config.mode == CompilationMode.NONE
+    else:
+        assert draft_config is config
+
+
+def test_init_speculator_ngram_requires_request_state():
+    with pytest.raises(ValueError, match="requires request states"):
+        init_speculator(_make_config("ngram_gpu"), torch.device("cpu"))
 
 
 def test_init_speculator_extract_hidden_states(monkeypatch):
