@@ -87,7 +87,8 @@ templates:
       - --additional-config
       - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}}}'
+#      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
 
   - node_index: 1
     envs:
@@ -131,7 +132,8 @@ templates:
       - --additional-config
       - '{"enable_cpu_binding":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}}}'
+      #- '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30300", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 8, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 1}},"ascend_local_comm_res_path":"vllm-ascend/hixlep"}'
 
 benchmarks:
   per_TPOT50_128k_1_prefie_warmup:
