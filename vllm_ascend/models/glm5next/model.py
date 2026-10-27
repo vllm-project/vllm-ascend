@@ -78,6 +78,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import pad_sequence_parallel_tokens
+
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
 from .multimodal import (
@@ -109,17 +111,6 @@ def _is_linear_attn(config: Glm5NextTextConfig) -> bool:
 def _validate_supported_config(config: Glm5NextTextConfig) -> None:
     if config.index_topk is not None and not config.index_kpool_always_select_tail:
         raise NotImplementedError("GLM-5.3 sparse indexer requires index_kpool_always_select_tail=True")
-
-
-def _pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
-    # MRV1 pads SP tokens in the runner; MRV2 can pass unaligned prefills.
-    # Filtering capture sizes does not pad runtime tensors. Keep padding
-    # symbolic so tracing an aligned input cannot remove it from a graph
-    # later reused without guards for non-aligned tokens.
-    tp_size = get_tensor_model_parallel_world_size()
-    padding = (-hidden_states.shape[0]) % tp_size
-    pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
-    return torch.nn.functional.pad(hidden_states, pad)
 
 
 class Glm5NextMLP(nn.Module):
@@ -492,7 +483,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         if self.is_sequence_parallel:
-            x = sp_reduce_scatter(_pad_sequence_parallel_tokens(x))
+            x = sp_reduce_scatter(pad_sequence_parallel_tokens(x))
 
         # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
         residual, post, comb, x = self.hc_post_pre(
@@ -725,7 +716,7 @@ class Glm5NextModel(nn.Module):
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
-            hidden_states = sp_shard(_pad_sequence_parallel_tokens(hidden_states))
+            hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         for layer in self._active_layers:
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
