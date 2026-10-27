@@ -522,7 +522,6 @@ class NPUModelRunner310(NPUModelRunner):
             logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
             num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
             for (
                 req_id,
@@ -531,12 +530,9 @@ class NPUModelRunner310(NPUModelRunner):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (self.is_kv_consumer and req_id in new_schedule_reqs) or (
-                    self.input_batch.num_computed_tokens_cpu[req_idx] >= self.input_batch.num_prompt_tokens[req_idx]
-                ):
+                # Match GPUModelRunner, including padded cached prompt tails.
+                if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
-                else:
-                    num_decode_draft_tokens[req_idx] = -1
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens,
