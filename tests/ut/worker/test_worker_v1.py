@@ -35,10 +35,17 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
         pp_group.return_value.is_first_rank = False
         pp_group.return_value.is_last_rank = False
         pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
-        for sp_enabled, use_v2 in ((False, False), (True, False), (False, True), (True, True)):
+        for sp_enabled, use_v2, dsa_cp in (
+            (False, False, False),
+            (True, False, False),
+            (False, True, False),
+            (True, True, False),
+            (True, False, True),
+        ):
             for forward_pass in (False, True):
-                with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
+                with self.subTest(sp=sp_enabled, v2=use_v2, dsa_cp=dsa_cp, forward=forward_pass):
                     pp_group.return_value.reset_mock()
+                    ascend_config.return_value.enable_dsa_cp = dsa_cp
                     worker = NPUWorker.__new__(NPUWorker)
                     worker.vllm_config = SimpleNamespace(
                         parallel_config=SimpleNamespace(
@@ -58,7 +65,7 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
 
                     self.assertIsNone(worker.execute_model(scheduler_output))
 
-                    group = None if use_v2 and sp_enabled else tp_group.return_value
+                    group = None if (use_v2 and sp_enabled) or dsa_cp else tp_group.return_value
                     if forward_pass:
                         pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
                     else:
