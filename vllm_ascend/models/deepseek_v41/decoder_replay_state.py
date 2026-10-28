@@ -51,6 +51,14 @@ class DecoderReplayState:
         local_reqs = num_reqs * (2 if getattr(config.parallel_config, "prefill_context_parallel_size", 1) > 1 else 1)
         capacity = round_up(config.scheduler_config.max_num_batched_tokens, config.parallel_config.tensor_parallel_size)
         self.keeps_rows = np.zeros(num_reqs, dtype=np.bool_)
+        self.skipped_tail_np = np.zeros(num_reqs, dtype=np.bool_)
+        self._kv_floor: CpuGpuBuffer | None = None
+        if (
+            config.parallel_config.prefill_context_parallel_size == 1
+            and not enable_dsa_cp()
+            and config.compilation_config.cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+        ):
+            self._kv_floor = CpuGpuBuffer(num_reqs, dtype=torch.int32, device=device, pin_memory=False)
         self.rows = torch.zeros(capacity, dtype=torch.int64, device=device)
         self.positions = torch.zeros_like(self.rows)
         self.offsets = torch.zeros(local_reqs + 1, dtype=torch.int32, device=device)
@@ -170,8 +178,12 @@ class DecoderReplayState:
                         builder.prepare_source_rope()
                         self.builders.append((group_id, group.layer_names, builder))
         self._gather(inputs, warmup=True)
+        if self._kv_floor is not None:
+            self._gather(inputs, kv_floor=self._kv_floor.gpu, warmup=True)
 
-    def _gather(self, inputs: DecoderReplayInputs, *, warmup: bool = False) -> None:
+    def _gather(
+        self, inputs: DecoderReplayInputs, *, kv_floor: torch.Tensor | None = None, warmup: bool = False
+    ) -> None:
         batch = inputs.batch
         assert self.slots is not None
         source_slots = inputs.slot_mappings
@@ -192,6 +204,7 @@ class DecoderReplayState:
             self.replay_start,
             self.num_tokens,
             self.layers.window,
+            kv_floor=kv_floor,
             warmup=warmup,
         )
 
@@ -211,6 +224,7 @@ class DecoderReplayState:
         num_reqs = batch.num_reqs
         query_lens = np.diff(batch.query_start_loc_np[: num_reqs + 1])
         pcp_replay = self._pcp_kept_lengths(inputs)
+        kv_floor = None
         if pcp_replay is None:
             trim_requests = batch.is_prefilling_np[:num_reqs] & ~self.keeps_rows[batch.idx_mapping_np[:num_reqs]]
             if batch.is_dummy or inputs.pcp_context is not None:
@@ -218,6 +232,24 @@ class DecoderReplayState:
             kept_lens = np.where(trim_requests, np.minimum(query_lens, self.layers.window), query_lens)
             trims = bool((kept_lens < query_lens).any())
             replay_inputs = inputs
+            if self._kv_floor is not None and batch.has_prefill and not batch.is_dummy:
+                idx_mapping = batch.idx_mapping_np[:num_reqs]
+                prefilling = batch.is_prefilling_np[:num_reqs]
+                computed = batch.num_computed_prefill_tokens_np[:num_reqs]
+                seq_lens = computed + query_lens
+                tail_reach = self.config.scheduler_config.max_num_batched_tokens + self.layers.window
+                one_row = trim_requests & (query_lens > 1) & (batch.prefill_len_np[:num_reqs] - seq_lens >= tail_reach)
+                kept_lens = np.where(one_row, 1, kept_lens)
+                follows = trim_requests & self.skipped_tail_np[idx_mapping]
+                needs_floor = follows & (kept_lens == query_lens)
+                # Trimmed chunks already read only their retained rows.
+                needs_floor_batch = bool(needs_floor.any())
+                trims = trims or bool(one_row.any()) or needs_floor_batch
+                if needs_floor_batch:
+                    self._kv_floor.np[:num_reqs] = np.where(follows, computed, 0)
+                    self._kv_floor.copy_to_gpu(num_reqs)
+                    kv_floor = self._kv_floor.gpu[:num_reqs]
+                self.skipped_tail_np[idx_mapping[prefilling]] = one_row[prefilling]
         else:
             kept_lens, num_padded, replay_start = pcp_replay
             trims = True
@@ -243,7 +275,7 @@ class DecoderReplayState:
         dropped = batch.query_start_loc_np[: num_reqs + 1] - offsets
         self.dropped_before.np[: num_reqs + 1] = dropped
         self.dropped_before.copy_to_gpu(num_reqs + 1)
-        self._gather(replay_inputs)
+        self._gather(replay_inputs, kv_floor=kv_floor)
         if pcp_replay is not None:
             assert inputs.pcp_context is not None
             global_batch = inputs.pcp_context.global_batch
@@ -341,3 +373,13 @@ class DecoderReplayState:
         finally:
             if saved_mask is not None:
                 mask.copy_(saved_mask)
+
+    def needs_eager_forward(
+        self,
+        idx_mapping: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> bool:
+        """Keep short chunks following a one-row replay out of decode graphs."""
+        if self._kv_floor is None:
+            return False
+        return bool((is_prefilling & self.skipped_tail_np[idx_mapping]).any())

@@ -13,6 +13,7 @@ def _gather_replay_batch_kernel(
     dropped_before,
     seq_lens,
     encoder_replay_start,
+    kv_floor,
     positions,
     slot_mappings,
     source_slot_stride: tl.constexpr,
@@ -24,6 +25,7 @@ def _gather_replay_batch_kernel(
     replay_start_out,
     num_tokens_padded,
     WINDOW: tl.constexpr,
+    HAS_KV_FLOOR: tl.constexpr,
     NUM_GROUPS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -40,6 +42,8 @@ def _gather_replay_batch_kernel(
     history = tl.where(kept_len < end - begin, 0, WINDOW - 1)
     replay_start = tl.maximum(tl.load(seq_lens + req) - kept_len - history, 0)
     replay_start = tl.maximum(replay_start, tl.load(encoder_replay_start + req))
+    if HAS_KV_FLOOR:
+        replay_start = tl.maximum(replay_start, tl.load(kv_floor + req))
     tl.store(replay_start_out + req, replay_start)
 
     first_row = end - kept_len
@@ -81,6 +85,7 @@ def gather_replay_batch(
     num_tokens_padded: int,
     window: int,
     *,
+    kv_floor: torch.Tensor | None = None,
     warmup: bool = False,
 ) -> None:
     """Gather an MRV2 replay batch into caller-owned buffers.
@@ -90,6 +95,7 @@ def gather_replay_batch(
     lengths adjusted by the runner. Slot mappings have shape [groups, tokens],
     with independent input and output row strides. Callers keep
     decode and prompt-logprob rows and handle empty/dummy batches separately.
+    ``kv_floor`` optionally bounds reads after the preceding one-row replay.
     ``warmup`` compiles the kernel without reading or writing the buffers.
     """
     _gather_replay_batch_kernel.run(
@@ -97,6 +103,7 @@ def gather_replay_batch(
         dropped_before,
         seq_lens,
         encoder_replay_start,
+        kv_floor,
         positions,
         slot_mappings,
         slot_mappings.stride(0),
@@ -108,6 +115,7 @@ def gather_replay_batch(
         replay_start_out,
         num_tokens_padded,
         WINDOW=window,
+        HAS_KV_FLOOR=kv_floor is not None,
         NUM_GROUPS=slot_mappings.shape[0],
         BLOCK=REPLAY_BLOCK_SIZE,
         grid=(query_start_loc.numel() - 1,),
