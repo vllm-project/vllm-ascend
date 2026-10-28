@@ -201,25 +201,88 @@ class _DirtyRows:
 
 
 class MonitoredNumPyArray:
-    """A wrapper around a NumPy array that monitors modifications."""
+    """A NumPy mirror that reports the rows a write touches.
+
+    ``__setitem__`` is the only write the dirty tracker can observe, so every
+    other way of writing is either refused or treated as a whole-buffer write.
+    Handing out a writable view would reach the mirror without a callback and
+    leave the device copy silently stale, and the tracker has no way to notice
+    afterwards.
+    """
 
     def __init__(self, array: np.ndarray, callback: Callable):
         self._array = array
         self._callback = callback
 
+    def _seal(self, array: np.ndarray) -> np.ndarray:
+        """Make a view read-only so a write cannot bypass ``__setitem__``."""
+        if not np.may_share_memory(array, self._array):
+            # An independent copy: writing to it cannot reach the mirror.
+            return array
+        if array is self._array:
+            # Never seal the mirror itself; it has to stay writable here.
+            array = array.view()
+        array.flags.writeable = False
+        return array
+
     def __setitem__(self, key, value):
         self._array[key] = value
         self._callback(key)
 
+    def __array__(self, dtype=None, copy=None):
+        # NumPy reaches a mirror through this path (``np.asarray``,
+        # ``np.copyto``, ``np.put``, ``out=``). Seal it like any other view;
+        # the protocol attributes are blocked in ``__getattr__`` so NumPy
+        # cannot take a writable shortcut around it.
+        array = np.asarray(self._array, dtype=dtype)
+        if copy:
+            array = array.copy()
+        return self._seal(array)
+
     def __getitem__(self, key):
-        return self._array[key]
+        result = self._array[key]
+        return self._seal(result) if isinstance(result, np.ndarray) else result
 
     def __getattr__(self, name):
-        return getattr(self._array, name)
+        if name in ("__array_struct__", "__array_interface__"):
+            # Either of these would hand NumPy a writable view of the mirror.
+            raise AttributeError(name)
+        attr = getattr(self._array, name)
+        if name in ("flat", "data", "ctypes", "base"):
+            # These expose the memory without a NumPy view we can seal, so the
+            # access itself has to publish the whole buffer.
+            self._callback(slice(None))
+        if isinstance(attr, np.ndarray):
+            return self._seal(attr)
+        if not callable(attr):
+            return attr
+
+        def _call(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            if result is None:
+                # ndarray's in-place methods (fill, put, sort, partition, ...)
+                # mutate the receiver and return None.
+                self._callback(slice(None))
+            elif isinstance(result, np.ndarray):
+                return self._seal(result)
+            return result
+
+        return _call
 
 
 class MonitoredTorchTensor:
-    """A wrapper around a torch tensor that monitors modifications."""
+    """A torch mirror that reports the rows a write touches.
+
+    ``__setitem__`` and the in-place methods (torch's trailing-underscore
+    convention) are the writes the tracker can observe. In-place methods mark
+    the whole buffer, which is slower but never stale; ``.numpy()`` hands out a
+    read-only array and ``.data`` is refused so neither can write behind the
+    tracker's back.
+
+    torch has no read-only views, so a write through a view (``t.cpu[0:2]``,
+    ``t.cpu.view(-1)``) still cannot be observed. Use ``.np`` or a
+    ``__setitem__`` on the mirror for writes; the in-repo readers only read.
+    """
 
     def __init__(self, tensor: torch.Tensor, callback: Callable):
         self._tensor = tensor
@@ -230,10 +293,36 @@ class MonitoredTorchTensor:
         self._callback(key)
 
     def __getitem__(self, key):
+        # See the class docstring: a view write is the one remaining way to
+        # reach the mirror unnoticed, and readers need a real tensor here.
         return self._tensor[key]
 
     def __getattr__(self, name):
-        return getattr(self._tensor, name)
+        if name == "data":
+            raise AttributeError("'.data' bypasses the UVA dirty tracking; write through '.np' or the tensor itself")
+        attr = getattr(self._tensor, name)
+        if name == "numpy":
+
+            def _numpy(*args, **kwargs):
+                array = attr(*args, **kwargs)
+                array.flags.writeable = False
+                return array
+
+            return _numpy
+        if name in ("storage", "untyped_storage"):
+            # Raw storage access can write any element; publish everything.
+            self._callback(slice(None))
+            return attr
+        if callable(attr) and name.endswith("_") and not name.startswith("__"):
+
+            def _inplace(*args, **kwargs):
+                # torch's in-place methods always mutate the receiver, so the
+                # whole buffer is dirty whichever rows they touch.
+                self._callback(slice(None))
+                return attr(*args, **kwargs)
+
+            return _inplace
+        return attr
 
 
 def _zeros_on_npu(cpu: torch.Tensor) -> torch.Tensor:

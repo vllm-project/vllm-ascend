@@ -282,6 +282,76 @@ def test_torch_view_write_reaches_the_device_shadow():
     assert buf._uva[4].tolist() == [0, 0]
 
 
+def test_numpy_view_writes_are_refused_instead_of_going_stale():
+    # A write through a view never reaches the callback, so the mirror hands
+    # out read-only views and lets the write fail here instead of leaving the
+    # device copy stale.
+    buf = _make_uva_buffer(8)
+
+    with pytest.raises(ValueError):
+        buf.np[0:2].fill(7)
+    with pytest.raises(ValueError):
+        buf.np[0:2] += 5
+    with pytest.raises(ValueError):
+        np.asarray(buf.np)[0, 0] = 1
+    with pytest.raises(ValueError):
+        buf.np.reshape(-1)[0] = 1
+
+    # The mirror itself must still be writable through __setitem__.
+    buf.np[0:2] = 7
+    buf.uva(8)
+    assert buf._uva[0:2].eq(7).all()
+
+
+def test_numpy_in_place_method_publishes_the_whole_buffer():
+    buf = _make_uva_buffer(8)
+
+    # ndarray's in-place methods mutate the receiver and return None, so the
+    # tracker cannot tell which rows changed and publishes all of them.
+    buf.np.fill(3)
+    buf.uva(8)
+
+    assert buf._uva.eq(3).all()
+
+
+def test_numpy_put_is_observed():
+    buf = _make_uva_buffer(8)
+
+    # np.put() dispatches to the mirror's own put(), which is intercepted.
+    # Flat indices 8 and 9 are the two columns of row 4.
+    np.put(buf.np, [8, 9], 6)
+    buf.uva(8)
+
+    assert buf._uva[4].eq(6).all()
+    assert buf._uva[5].eq(0).all()
+
+
+def test_torch_in_place_method_publishes_the_whole_buffer():
+    buf = _make_uva_buffer(8)
+
+    buf.cpu.copy_(torch.full((8, 2), 4, dtype=torch.int32))
+    buf.uva(8)
+
+    assert buf._uva.eq(4).all()
+
+
+def test_torch_numpy_bridge_is_read_only():
+    buf = _make_uva_buffer(8)
+
+    array = buf.cpu.numpy()
+
+    assert array.flags.writeable is False
+    with pytest.raises(ValueError):
+        array[0, 0] = 1
+
+
+def test_torch_data_handle_is_refused():
+    buf = _make_uva_buffer(8)
+
+    with pytest.raises(AttributeError, match="dirty tracking"):
+        _ = buf.cpu.data
+
+
 def test_uint64_shadow_copies_through_int64_storage():
     buf = _make_uva_buffer(4, cols=1, dtype=torch.uint64)
 
