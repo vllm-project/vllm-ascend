@@ -1,3 +1,4 @@
+import json
 import threading
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
@@ -49,6 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    LOOKUP_DETAILS_MSG,
     AscendStoreKVConnectorWorkerMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -252,6 +254,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
 
     def request_finished(
         self,
@@ -583,25 +594,33 @@ class LookupKeyServer:
 
                     try:
                         msg_type = bytes(all_frames[0])
-                        if msg_type == LOOKUP_MSG:
+                        if msg_type in (LOOKUP_MSG, LOOKUP_DETAILS_MSG):
                             token_len = int.from_bytes(all_frames[1], byteorder="big")
                             kv_group_ids = self.decoder.decode([all_frames[2]])
                             hbm_hit_tokens = int.from_bytes(all_frames[3], byteorder="big")
                             hashes_str = self.decoder.decode(all_frames[4:])
-                            result = self.pool_worker.lookup_scheduler(
-                                token_len,
-                                hashes_str,
-                                kv_group_ids,
-                                use_layerwise=False,
-                                hbm_hit_tokens=hbm_hit_tokens,
-                            )
-                            logger.debug(
-                                "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
-                                token_len,
-                                kv_group_ids,
-                                result,
-                            )
-                            response = result.to_bytes(4, "big")
+                            if msg_type == LOOKUP_DETAILS_MSG:
+                                result = self.pool_worker.lookup_details(
+                                    token_len, hashes_str, kv_group_ids, hbm_hit_tokens=hbm_hit_tokens
+                                )
+                                response = json.dumps(
+                                    [result.hit_tokens, result.tail_key_boundaries, result.store_skip_tokens]
+                                ).encode()
+                            else:
+                                hit_tokens = self.pool_worker.lookup_scheduler(
+                                    token_len,
+                                    hashes_str,
+                                    kv_group_ids,
+                                    use_layerwise=False,
+                                    hbm_hit_tokens=hbm_hit_tokens,
+                                )
+                                logger.debug(
+                                    "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
+                                    token_len,
+                                    kv_group_ids,
+                                    hit_tokens,
+                                )
+                                response = hit_tokens.to_bytes(4, "big")
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")

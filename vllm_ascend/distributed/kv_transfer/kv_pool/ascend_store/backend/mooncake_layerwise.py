@@ -332,6 +332,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if (
                 not worker.use_eagle
+                and not any(worker.group_uses_align_state)
                 and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups
                 and request.load_spec.kvpool_store_skip_tokens is not None
             ):

@@ -1,0 +1,24 @@
+pr: 19714
+entries:
+  - category: feature
+    text: >-
+      Extended fine-grained prefix reuse to sparse hybrid caches, including
+      checkpoint handoff and recovery through non-layerwise AscendStore.
+      Fine-grained Store recovery requires core-resolved hash geometry on vLLM
+      main; v0.31.0 keeps block-aligned external hits.
+  - category: bugfix
+    text: >-
+      Fixed incomplete cache-block copies when different tensor views share
+      storage, preventing incorrect outputs after prefix-cache reuse.
+  - category: bugfix
+    text: >-
+      Non-layerwise AscendStore now saves recurrent state from core-provided
+      boundary snapshots in both coarse and fine-grained hybrid cache modes,
+      keeping the source blocks alive until all workers finish saving.
+  - category: breaking
+    text: >-
+      AscendStore now uses the core-resolved hash size in every mode, which can
+      change Store key geometry under DCP; rebuild or isolate existing Store
+      contents when upgrading a deployment whose resolved geometry changes.
+      Scheduler and worker must use the same connector version for the new
+      structured tail-boundary lookup replies.

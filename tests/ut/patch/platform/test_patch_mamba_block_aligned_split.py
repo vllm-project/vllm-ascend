@@ -131,6 +131,28 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
+@pytest.mark.parametrize("prefix_source", ["request", "local", "external"])
+def test_kv_both_partial_prefill_still_materializes_fine_checkpoint(prefix_source):
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.hash_block_size = 64
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(
+        num_computed_tokens=1152 if prefix_source == "request" else 0,
+        num_prompt_tokens=1230,
+        num_tokens=1230,
+    )
+    result = _mamba_block_aligned_split(
+        scheduler,
+        request,
+        num_new_tokens=78,
+        num_new_local_computed_tokens=1152 if prefix_source == "local" else 0,
+        num_external_computed_tokens=1152 if prefix_source == "external" else 0,
+    )
+    assert result == 64  # Materialize 1216 before computing the remaining tail.
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
@@ -298,3 +320,31 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens, computed_tokens",
+    [(2175, 0), (4095, 2176), (9215, 8704)],
+)
+@pytest.mark.parametrize("fine_grained", [False, True])
+@pytest.mark.parametrize("hash_block_size", [32, 64, 128])
+def test_sparse_prefill_materializes_configured_checkpoint(
+    prompt_tokens, computed_tokens, fine_grained, hash_block_size
+):
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True, uses_sparse_index_kpool=True)
+    scheduler.block_size = scheduler.cache_config.block_size = 2176
+    scheduler.hash_block_size = hash_block_size
+    checkpoint = prompt_tokens // hash_block_size * hash_block_size
+    scheduler.mamba_partial_cache_hit = fine_grained
+    request = _request(
+        num_computed_tokens=computed_tokens,
+        num_prompt_tokens=prompt_tokens,
+        num_tokens=prompt_tokens,
+    )
+
+    scheduled = _mamba_block_aligned_split(scheduler, request, prompt_tokens - computed_tokens)
+
+    expected_end = checkpoint if fine_grained else prompt_tokens
+    assert computed_tokens + scheduled == expected_end
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True

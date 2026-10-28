@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import suppress
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 
 import numpy as np
 import torch
@@ -85,6 +85,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
+    StoreLookupResult,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -271,6 +272,12 @@ class KVPoolWorker:
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
         ) * self.dcp_size
+        # Request.block_hashes use the core-resolved geometry in every mode.
+        # DCP scales attention pages, but not recurrent-state pages, so the
+        # legacy min-page * DCP fallback cannot replace a resolved hash size.
+        resolved_hash_size = getattr(kv_cache_config, "hash_block_size", None)
+        if isinstance(resolved_hash_size, int) and resolved_hash_size > 0:
+            self.hash_block_size = resolved_hash_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
@@ -933,6 +940,13 @@ class KVPoolWorker:
             group_cache_families=self.kv_cache_group_families,
             use_eagle=use_eagle,
             retention_interval=retention_interval,
+            enable_partial_hash_hits=(
+                not self.use_layerwise
+                and self.dcp_size == 1
+                and isinstance(getattr(self.kv_cache_config, "cache_hit_alignment_tokens", None), int)
+                and self.kv_cache_config.cache_hit_alignment_tokens == self.hash_block_size
+                and self.hash_block_size < self.cache_transfer_granularity
+            ),
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -1409,7 +1423,9 @@ class KVPoolWorker:
             request.skip_null_blocks_by_group = self.group_uses_align_state
             load_group_ids = request.kv_cache_group_ids or [0]
             token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
+            if load_spec.tail_key_boundaries:
+                token_len = load_spec.kvpool_cached_tokens
+            elif (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
                 token_len = load_spec.kvpool_cached_tokens + 1
@@ -1478,6 +1494,10 @@ class KVPoolWorker:
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
                 ):
+                    if load_spec.tail_key_boundaries:
+                        key = self.token_database.resolve_load_tail_key(
+                            key, group_id, end, load_spec, request.block_hashes
+                        )
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
                         end,
@@ -1731,7 +1751,11 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not getattr(self, "use_eagle", False)
+                and not any(getattr(self, "group_uses_align_state", ()))
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)
@@ -2214,7 +2238,11 @@ class KVPoolWorker:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not getattr(self, "use_eagle", False)
+                and not any(getattr(self, "group_uses_align_state", ()))
+                and request.load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)
@@ -2670,7 +2698,11 @@ class KVPoolWorker:
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
-            if not self.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
+            if (
+                not self.use_eagle
+                and not any(getattr(self, "group_uses_align_state", ()))
+                and load_spec.kvpool_store_skip_tokens is not None
+            ):
                 cached_tokens = load_spec.kvpool_store_skip_tokens
             start_block = load_spec.vllm_cached_tokens // self.block_size
             cached_full_blocks = cached_tokens // self.block_size
@@ -3969,6 +4001,7 @@ class KVPoolWorker:
             return [key]
         return self._expand_lookup_keys_by_rank([key], group_id)
 
+    @overload
     def _lookup_with_coordinator(
         self,
         token_len: int,
@@ -3977,7 +4010,44 @@ class KVPoolWorker:
         use_layerwise: bool,
         include_all_ranks: bool,
         hbm_hit_tokens: int = 0,
-    ) -> int | None:
+        return_details: Literal[False] = False,
+    ) -> int | None: ...
+
+    @overload
+    def _lookup_with_coordinator(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        use_layerwise: bool,
+        include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
+        *,
+        return_details: Literal[True],
+    ) -> StoreLookupResult | None: ...
+
+    @overload
+    def _lookup_with_coordinator(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        use_layerwise: bool,
+        include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
+        return_details: bool = False,
+    ) -> int | StoreLookupResult | None: ...
+
+    def _lookup_with_coordinator(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        use_layerwise: bool,
+        include_all_ranks: bool,
+        hbm_hit_tokens: int = 0,
+        return_details: bool = False,
+    ) -> int | StoreLookupResult | None:
         if self.cache_coordinator is None or use_layerwise:
             return None
         if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
@@ -3996,13 +4066,23 @@ class KVPoolWorker:
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
             variant_counts: list[int] = []
-            for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
-                token_len,
-                block_hashes,
-                mask_num=lookup_start,
-                kv_cache_group_id=group_id,
-                chunk_mask=lookup_mask,
-            ):
+            if getattr(coordinator, "enable_partial_hash_hits", False) is True:
+                candidates = (
+                    (self.token_database._get_key_prefix(group_id) + block_hash_to_str(h), h)
+                    for h in group_block_hashes
+                )
+            else:
+                candidates = (
+                    (key, h)
+                    for _, _, key, h in self.token_database.process_token_key_strings(
+                        token_len,
+                        block_hashes,
+                        mask_num=lookup_start,
+                        kv_cache_group_id=group_id,
+                        chunk_mask=lookup_mask,
+                    )
+                )
+            for key_string, chunk_hash in candidates:
                 variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
                 keys.extend(variants)
                 chunk_hashes.append(chunk_hash)
@@ -4013,7 +4093,7 @@ class KVPoolWorker:
                 offset = 0
                 for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                     values = res[offset : offset + count]  # type: ignore[index]
-                    if values and all(value == 1 for value in values):
+                    if len(values) == count and all(value == 1 for value in values):
                         present.append(chunk_hash)
                     offset += count
 
@@ -4027,13 +4107,47 @@ class KVPoolWorker:
             )
             return present
 
+        if getattr(coordinator, "enable_partial_hash_hits", False) is True:
+            result = coordinator.find_partial_hit(
+                block_hashes, token_len, query_group_hits, hbm_hit_tokens=hbm_hit_tokens
+            )
+            return result if return_details else result.hit_tokens
         return coordinator.find_reachable_hit_tokens(
             block_hashes,
             token_len,
             query_group_hits,
             log_context="KV pool coordinator lookup",
             hbm_hit_tokens=hbm_hit_tokens,
+            return_details=return_details,
         )
+
+    def lookup_details(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+        hbm_hit_tokens: int = 0,
+    ) -> StoreLookupResult:
+        result = self._lookup_with_coordinator(
+            token_len,
+            block_hashes,
+            kv_cache_group_ids,
+            False,
+            True,
+            hbm_hit_tokens=hbm_hit_tokens,
+            return_details=True,
+        )
+        if result is None:
+            hit = self.lookup_scheduler(token_len, block_hashes, kv_cache_group_ids, hbm_hit_tokens=hbm_hit_tokens)
+            raw_hit = hit
+            if hit == token_len and any(self.group_uses_align_state[group_id] for group_id in kv_cache_group_ids):
+                # A subset lookup can bypass the coordinator. It still needs
+                # an actual earlier state checkpoint for final-token replay.
+                hit = self.lookup_scheduler(
+                    token_len - 1, block_hashes, kv_cache_group_ids, hbm_hit_tokens=hbm_hit_tokens
+                )
+            return StoreLookupResult(hit, store_skip_tokens=raw_hit)
+        return result
 
     def lookup_scheduler(
         self,

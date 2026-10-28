@@ -266,6 +266,27 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
         self.assertIsNone(request.load_last_block_key)
 
+    def test_recurrent_load_stops_at_replay_state_but_skips_existing_puts(self):
+        worker = self._make_worker()
+        worker.group_uses_align_state = [True]
+        request = ReqMeta(
+            "r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            block_ids=[1, 2, 3, 4],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            can_save=True,
+            load_spec=LoadSpec(0, 48, can_load=True, kvpool_store_skip_tokens=64),
+        )
+
+        slots = worker._prepare_layerwise_get_session(request)
+        worker._prepare_layerwise_put_session(request)
+
+        self.assertEqual([slot[2] for slot in slots], [0, 1, 2])
+        self.assertEqual(request.load_block_keys[-1], "model@6832@0")
+        worker.m_store.batch_put_start.assert_not_called()
+
     def test_next_chunk_reloads_committed_prefix_without_new_load_spec(self):
         worker = self._make_worker()
         worker._layerwise_session_tracker.register_put_keys(

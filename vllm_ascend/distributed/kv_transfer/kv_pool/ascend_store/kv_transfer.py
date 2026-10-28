@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
+    block_hash_to_str,
     get_block_hashes,
 )
 
@@ -1275,11 +1276,60 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.completed_events[req_meta.event_id] = 1
             self.request_queue.task_done()
 
+    def _store_boundary_states(self, req_meta: ReqMeta) -> bool:
+        """Save core-supplied snapshots after the step's CoW copies finish."""
+        keys, addrs, sizes = [], [], []
+        for put in req_meta.boundary_puts or ():
+            group_id, block_id, boundary = put
+            hash_size = self.token_database.hash_block_size
+            if block_id <= 0 or boundary <= 0 or boundary % hash_size:
+                raise ValueError(f"Invalid boundary-state handoff: {put}")
+            block_hash = req_meta.block_hashes[boundary // hash_size - 1]
+            key = self.token_database._make_key_by_hash(
+                block_hash_to_str(block_hash), kv_cache_group_id=group_id
+            ).to_string()
+            block_size = self._get_block_size(group_id)
+            # The hash names the valid prefix extent; the value retains the
+            # whole physical layout, as in upstream Mooncake Store.
+            addr, size, _ = self._prepare_value(0, block_size, [], kv_cache_group_id=group_id, block_id=block_id)
+            if not addr or not size:
+                return False
+            group_keys, group_addrs, group_sizes = [key], [addr], [size]
+            if self.kv_role == "kv_consumer":
+                group_keys, group_addrs, group_sizes = self._decode_adaptor_prefill_pp(
+                    group_keys, group_addrs, group_sizes, kv_cache_group_id=group_id
+                )
+            if not group_keys:
+                return False
+            keys.extend(group_keys)
+            addrs.extend(group_addrs)
+            sizes.extend(group_sizes)
+        if not keys:
+            return True
+        exists = self.m_store.exists(keys)
+        if exists is None or len(exists) != len(keys):
+            return False
+        missing = [index for index, state in enumerate(exists) if state != 1]
+        if not missing:
+            return True
+        if req_meta.current_event is not None:
+            req_meta.current_event.synchronize()
+        result = self.m_store.put(
+            [keys[index] for index in missing],
+            [addrs[index] for index in missing],
+            [sizes[index] for index in missing],
+        )
+        return (len(result) == len(missing) and all(result)) if isinstance(result, list) else result is True
+
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
         """Store missing KV chunks; log validation/PUT failures and return False."""
         if req_meta.can_save is False:
             return False
+        if not self._store_boundary_states(req_meta):
+            return False
         token_len = req_meta.token_len_chunk
+        if token_len == 0:
+            return True
         req_id = req_meta.req_id
         current_event = req_meta.current_event
         try:
@@ -1310,7 +1360,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return True
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
+        boundary_state_groups = {
+            put.group_id
+            for put in req_meta.boundary_puts or ()
+            if put.group_id < len(self.group_uses_align_state) and self.group_uses_align_state[put.group_id]
+        }
         for group_id in req_meta.kv_cache_group_ids or [0]:
+            if group_id in boundary_state_groups or group_id in req_meta.state_handoff_groups:
+                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1578,6 +1635,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     chunk_filter=chunk_filter,
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
+                    if load_spec.tail_key_boundaries:
+                        key = self.token_database.resolve_load_tail_key(
+                            key, group_id, end, load_spec, req_meta.block_hashes
+                        )
                     addr, size, block_id = self._prepare_value(
                         start,
                         end,
