@@ -1407,8 +1407,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Reserve sufficient DDR memory for the operating system and vLLM. For
     `device_sdma`, keep each non-zero size aligned to `1GB`.
 
-    `world_size` is the maximum number of LocalServices supported by Memcache;
-    keep it consistent across all workers and large enough for the 32 workers
+    `world_size` is the maximum number of LocalServices supported by Memcache.
+    Keep it consistent across all workers and large enough for the 32 workers
     in this deployment.
 
     ##### Add the Pool Environment Variables
@@ -1524,9 +1524,8 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     ##### Start the Services
 
-    Start the services in this order: Memcache MetaService, Decode, Prefill,
-    then the proxy. Each vLLM worker initializes its Memcache LocalService
-    during startup.
+    Start the services in this order: Memcache MetaService → Decode → Prefill → Proxy. 
+    Each vLLM worker initializes its Memcache LocalService during startup.
 
     1. In a separate terminal in the Prefill container, start MetaService.
        Ensure ports `5000` and `6000` are reachable from both nodes and port
@@ -1777,7 +1776,7 @@ curl http://<service_ip>:<service_port>/v1/completions \
 ```
 
 Expected Result:
-The expected result of this request is a JSON payload containing the model’s generated text in a text_completion format.
+The response is a JSON payload containing the model's generated text in a text_completion format.
 
 ```json
 {
@@ -1865,9 +1864,11 @@ and role-specific settings when reproducing the deployment.
 
 ## 10 FAQ
 
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
 - **Q: How to enable function calling for GLM-5.3-Flash?**
 
-  A: Please add following configurations in vLLM startup command
+  A: Please add following configurations in vLLM startup command.
 
   ```shell
   --tool-call-parser glm47 \
