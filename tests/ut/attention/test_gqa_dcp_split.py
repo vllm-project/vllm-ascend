@@ -381,7 +381,9 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
         for step in range(len(steps))
         for provider in providers
     ]
-    graph = SimpleNamespace(tasks=tasks, provider_sizes={provider: len(steps) for provider in providers})
+    graph = UpdatableGraph()
+    graph.tasks = tasks
+    graph.provider_sizes = {provider: len(steps) for provider in providers}
     with patch.object(
         AscendMetadataForDecode,
         "update_dcp_seq_lens_cpu",
