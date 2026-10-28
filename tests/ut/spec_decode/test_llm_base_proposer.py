@@ -635,3 +635,39 @@ def test_mla_dcp_draft_dummy_metadata_preserves_existing_layout(draft_index):
         assert getattr(common, key) is value
     for key, value in tensor_values.items():
         torch.testing.assert_close(getattr(common, key), value)
+
+
+class TestSamplingIndices:
+    """``_sampling_indices`` must not turn padded boundaries into indices.
+
+    ``query_start_loc`` carries padding entries for graph / DP execution. They
+    describe no real request, so they must never reach the hidden-state gather.
+    """
+
+    def test_no_padding_is_unchanged(self):
+        qsl = torch.tensor([0, 8184], dtype=torch.int32)
+        out = AscendSpecDecodeBaseProposer._sampling_indices(qsl, num_tokens=8184)
+        assert out.tolist() == [8183]
+
+    def test_two_real_requests_are_unchanged(self):
+        qsl = torch.tensor([0, 100, 8184], dtype=torch.int32)
+        out = AscendSpecDecodeBaseProposer._sampling_indices(qsl, num_tokens=8184)
+        assert out.tolist() == [99, 8183]
+
+    def test_dp_padding_entry_is_dropped(self):
+        # 8184 local tokens padded to 8188 by the cross-DP padding: the extra
+        # boundary used to become index 8187, i.e. past the forwarded tokens.
+        qsl = torch.tensor([0, 8184, 8188], dtype=torch.int32)
+        out = AscendSpecDecodeBaseProposer._sampling_indices(qsl, num_tokens=8184)
+        assert out.tolist() == [8183]
+
+    def test_graph_padding_entries_are_dropped(self):
+        # Zero-length padding entries repeat the previous boundary.
+        qsl = torch.tensor([0, 7, 12, 12, 12], dtype=torch.int32)
+        out = AscendSpecDecodeBaseProposer._sampling_indices(qsl, num_tokens=12)
+        assert out.tolist() == [6, 11]
+
+    def test_empty_batch(self):
+        qsl = torch.tensor([0], dtype=torch.int32)
+        out = AscendSpecDecodeBaseProposer._sampling_indices(qsl, num_tokens=0)
+        assert out.numel() == 0
