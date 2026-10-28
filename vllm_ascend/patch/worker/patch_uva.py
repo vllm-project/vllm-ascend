@@ -58,11 +58,12 @@ def is_uva_available() -> bool:
 class _DirtyRows:
     """Track which rows of the host shadow need a device refresh.
 
-    These buffers are sized like the flattened block table, so ``dim_size`` can
-    reach millions of rows. Recording the dirty rows as
-    ``set(range(dim_size))`` (what an arbitrary key used to do) and calling a
-    Python callback once per row made a single ``np[:n] = x`` cost hundreds of
-    milliseconds on the host.
+    A buffer has one row per request slot, so ``size`` follows ``max_num_reqs``
+    (``max_num_reqs * num_dims`` for the M-RoPE position table) and the mask
+    stays in the kilobyte range. Recording the dirty rows as ``set(range(n))``
+    and calling a Python callback once per row made a single ``np[:n] = x``
+    cost hundreds of milliseconds on the host, and that prefix write runs on
+    every step.
 
     The common write pattern is a contiguous prefix (``buf.np[:n] = x``), which
     is tracked in O(1). Anything scattered falls back to a vectorised boolean
@@ -78,10 +79,9 @@ class _DirtyRows:
         # is needed to prove the coverage.
         self._prefix = 0
         # The mask is allocated on the first scattered write and then kept, so
-        # that one scattered write does not make every later sync re-zero (and
-        # re-scan) one byte per row, which is up to 2 MB for the block table.
-        # This flag is what keeps the scan off the hot path: it is the only
-        # reason take() has to look at the mask at all.
+        # that one scattered write does not make every later sync re-zero the
+        # row buffer. This flag is what keeps the scan off the hot path: it is
+        # the only reason take() has to look at the mask at all.
         self._mask: np.ndarray | None = None
         self._mask_pending = False
 
