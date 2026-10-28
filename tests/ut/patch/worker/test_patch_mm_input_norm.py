@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -31,7 +31,10 @@ def norm(request, monkeypatch):
     patched_init = FusedMMInputNorm.__init__
     patch_mm_input_norm()
     assert FusedMMInputNorm.__init__ is patched_init
-    with set_current_vllm_config(VllmConfig()), torch.device("cpu"):
+    # Config construction must not initialize Ascend logging or device state.
+    with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
+        vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config), torch.device("cpu"):
         yield FusedMMInputNorm([0.2, 0.4, 0.6], [0.25, 0.5, 0.75], 1 / 255)
 
 
