@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import json
 from typing import Any
 
@@ -9,10 +10,11 @@ import torch
 from transformers import AutoModel
 
 from tests.e2e.conftest import RemoteOpenAIServer, VllmRunner, cleanup_dist_env_and_memory
-from vllm_ascend.utils import vllm_version_is
 
+# Probe for the feature instead of a version: native D3 (vLLM #61565, #61778) is in neither v0.31.0 nor v0.32.0.
 pytestmark = pytest.mark.skipif(
-    vllm_version_is("0.31.0"), reason="D3 needs a vLLM revision with native D3 support (not in v0.31.0)"
+    importlib.util.find_spec("vllm.model_executor.models.d3") is None,
+    reason="D3 needs a vLLM revision with native D3 support",
 )
 
 MODEL = "vllm-sr/d3-edge"
