@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""NPU KV-cache write path for the DFlash context prefix.
+"""NPU KV-cache write path used by the DFlash context prefix (PAD-slot check).
 
 Context rows whose slot is ``PAD_SLOT_ID`` must not write K/V into the cache.
 The Ascend context path calls ``DeviceOperator.reshape_and_cache`` once per
 layer with that layer's own physical slot table, so this drives the same
 wrapper (not a test-local copy) and checks negative slots are skipped.
+
+Graph replay and full-model context behaviour are validated by the GSM8K run,
+not here: this file only guards the write path.
 """
 
 import pytest
