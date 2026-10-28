@@ -62,6 +62,17 @@ def test_scattered_writes_stay_separate_runs():
     assert dirty.take() == [(0, 2), (7, 8)]
 
 
+def test_scattered_run_touching_the_prefix_is_coalesced():
+    dirty = _DirtyRows(16)
+
+    dirty.mark(4)
+    dirty.mark(5)
+    dirty.mark(slice(0, 4))
+
+    # Rows 0-5 are dirty and contiguous, so one H2D copy is enough.
+    assert dirty.take() == [(0, 6)]
+
+
 def test_fancy_index_writes_cover_exact_rows():
     dirty = _DirtyRows(16)
 
