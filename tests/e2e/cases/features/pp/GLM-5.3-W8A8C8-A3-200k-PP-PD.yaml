@@ -19,7 +19,7 @@ config:
     dp_size_local: 1
     dp_rank_start: 0
     tp_size: 1
-    cp_size: 8
+    cp_size: 16
     pp_size: 2
     nnodes: 2
     node_rank: 0
@@ -35,7 +35,7 @@ config:
     dp_size_local: 1
     dp_rank_start: 0
     tp_size: 1
-    cp_size: 8
+    cp_size: 16
     pp_size: 2
     nnodes: 2
     node_rank: 1
@@ -79,8 +79,8 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: true
 env_prefill: &env_prefill
   <<: *env_common
-  # Reserve for up to 16384 tokens at TP1: DispatchFFNCombine needs 2314 MiB.
-  HCCL_BUFFSIZE: "2560"
+  # DispatchFFNCombine needs 1162 MiB for 8192 tokens per TP rank.
+  HCCL_BUFFSIZE: "2048"
   VLLM_USE_FASTOKENS: "1"
   VLLM_PP_LAYER_PARTITION: "42,36"
 
@@ -123,12 +123,12 @@ templates:
       - "--max-model-len"
       - "200000"
       - "--max-num-batched-tokens"
-      - "8192"
+      - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
       - "64"
       - "--gpu-memory-utilization"
-      - "0.90"
+      - "0.92"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
@@ -184,12 +184,12 @@ templates:
       - "--max-model-len"
       - "200000"
       - "--max-num-batched-tokens"
-      - "8192"
+      - "16384"
       - "--trust-remote-code"
       - "--max-num-seqs"
       - "64"
       - "--gpu-memory-utilization"
-      - "0.90"
+      - "0.92"
       - "--quantization"
       - "ascend"
       - "--safetensors-load-strategy"
