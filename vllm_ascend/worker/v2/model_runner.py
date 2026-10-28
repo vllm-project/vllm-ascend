@@ -336,6 +336,25 @@ class NPUModelRunner(GPUModelRunner):
             join_nz_warm_thread()
             join_early_kernel_warmup("load_model")
 
+        if embedding_tp_enable():
+            # Eagerly create the fine-grained embedding exchange group's HCCL
+            # communicator. ProcessGroupHCCL creates communicators lazily on the
+            # first collective; left lazy, the first exchange happens on the
+            # request path, where the concurrent communicator creation can race
+            # across ranks (HCCL EI0019 endpoint collisions) or deadlock inside
+            # the collective. Every rank executes load_model, so one
+            # capacity-sized exchange here builds the communicator
+            # deterministically before any request traffic.
+            warmup_module = self._find_embed_tp_module()
+            if warmup_module is not None:
+                warmup_module(
+                    torch.zeros(
+                        warmup_module.embedding_tp_capacity,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                )
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).

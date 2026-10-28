@@ -462,6 +462,43 @@ def test_execute_model_real_run_skips_embedding_tp_join():
     assert embed_tp_module.join_inputs == []
 
 
+@pytest.mark.parametrize("embedding_tp", [True, False])
+def test_load_model_warms_up_embedding_tp_exchange(embedding_tp):
+    """The exchange group's communicator must exist before any request traffic."""
+    runner = _make_runner(need_timing=False)
+    embed_tp_module = _FakeEmbedTpModule()
+    runner.model = MagicMock()
+    runner.model.named_modules.return_value = [("language_model.model.embed_tokens", embed_tp_module)]
+    runner.device = "cpu"
+
+    with (
+        patch.object(GPUModelRunner, "load_model") as mock_load_model,
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=[]),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread"),
+        patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread"),
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup"),
+        patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.embedding_tp_enable",
+            return_value=embedding_tp,
+        ),
+        patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
+            _FakeEmbedTpModule,
+        ),
+    ):
+        runner.load_model()
+
+    mock_load_model.assert_called_once()
+    if embedding_tp:
+        assert len(embed_tp_module.join_inputs) == 1
+        warmup_ids = embed_tp_module.join_inputs[0]
+        assert warmup_ids.shape == (32,)
+        assert warmup_ids.dtype == torch.int64
+    else:
+        assert embed_tp_module.join_inputs == []
+
+
 def test_full_decode_only_keeps_graph_descriptor_request_count():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
