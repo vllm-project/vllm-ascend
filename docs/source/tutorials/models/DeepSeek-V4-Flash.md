@@ -361,7 +361,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         "multistream_overlap_shared_expert": true}'
     ```
 
-=== "A2 series with dspark"
+=== "A2 series with DSpark"
 
     Run the following script to execute online inference.
 
@@ -395,7 +395,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
-    tps more than 50+ ,its reach  2X speed of dsv4f with mtp
+
+    TPS is more than 50, reaching 2X the speed of DeepSeek-V4-Flash with MTP.
 
 Key Parameter Descriptions:
 
@@ -737,7 +738,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then deploy the P-D disaggregation proxy as described in [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
+        Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then deploy the P-D disaggregation proxy as described in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     Key Parameter Descriptions:
 
@@ -1066,7 +1067,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 === "A3 series with DSpark"
 
@@ -1355,7 +1356,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
         1. Prefill node
 
-            For DSpark (`A3 series with dspark`), use PCP8, DP2, and TP1:
+            For DSpark (`A3 series with DSpark`), use PCP8, DP2, and TP1:
 
             ```shell
             # change ip to your own
@@ -1371,7 +1372,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
+        Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy the P-D disaggregation proxy.
 
 === "A2 series"
 
@@ -1433,7 +1434,6 @@ The following sections describe multi-node PD separation deployment on Atlas 800
                 sys.exit(1)
 
             processes = []
-            num_cards = dp_size_local * tp_size
             for i in range(dp_size_local):
                 dp_rank = dp_rank_start + i
                 vllm_engine_port = vllm_start_port + i
@@ -1617,7 +1617,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
             python launch_online_dp.py --dp-size 8 --tp-size 1 --dp-size-local 8 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12321 --vllm-start-port 7100
             ```
 
-            For each P instance, only the `--dp-address` parameter differs and must be configured as the IP address of the service within the same subnet as the other instances.
+            For each P instance, only the `--dp-address` parameter differs and must be configured as the node IP address in the same subnet as the other instances.
 
         2. Decode node
 
@@ -1630,7 +1630,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     4. Deploy the P-D disaggregation proxy.
 
-        The proxy is also implemented by referring to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md).
+        The proxy is also implemented by referring to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
     Key Parameter Descriptions:
 
@@ -1649,7 +1649,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
     Deployment Verification:
 
-    After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
+    After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
     Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
@@ -2558,7 +2558,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         role; Prefill and Decode use separate DP groups.
 
         After every Prefill engine is ready, start the proxy from
-        [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)
+        [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md)
         with both Prefill endpoints and all sixteen Decode endpoints:
 
         ```shell
