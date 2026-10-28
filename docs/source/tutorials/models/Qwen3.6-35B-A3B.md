@@ -430,43 +430,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.6-35B-A3B-w8a8` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: benchmark the latency of a single batch of requests.
-- `serve`: benchmark online serving throughput.
-- `throughput`: benchmark offline inference throughput.
-
-Take `serve` as an example:
-
-```shell
-export VLLM_USE_MODELSCOPE=True
-
-vllm bench serve \
-  --model Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
-  --served-model-name qwen3.6 \
-  --dataset-name random \
-  --random-input-len 200 \
-  --num-prompts 200 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./
-```
-
-By default, `vllm bench serve` connects to `127.0.0.1:8000`. To target another deployment in [Section 5.1](#51-single-node-online-deployment), set `--host` to an address reachable from the benchmark client and `--port` to the service's API port. `--model` specifies the model for the benchmark. `--served-model-name qwen3.6` sets the model name sent in API requests and must match the running service.
-
-| Parameter | Meaning in this example |
-| --------- | ----------------------- |
-| `--dataset-name random` | Generate random input prompts for the benchmark. |
-| `--random-input-len 200` | Use 200 input tokens per request. |
-| `--num-prompts 200` | Process 200 benchmark prompts. |
-| `--request-rate 1` | Target an average arrival rate of 1 request per second; this does not specify the number of concurrent requests. |
-| `--save-result` and `--result-dir ./` | Save the result as a JSON file in the current directory. |
-
-When `--random-output-len` is omitted, vLLM uses the default output length for the random dataset. Specify this option if your benchmark requires a particular output length. See the [vLLM `bench serve` CLI reference](https://docs.vllm.ai/en/v0.30.0/cli/bench/serve/) for parameter types, defaults, valid values, and other workload options.
-
-When `vllm bench serve` completes, it displays a result summary in the terminal.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
