@@ -2117,7 +2117,7 @@ layerwise setting and topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 135000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 16384 \
       --max-num-seqs 64 \
       --gpu-memory-utilization 0.92 \
@@ -2205,7 +2205,7 @@ layerwise setting and topology.
       --enable-prefix-caching \
       --seed 1024 \
       --served-model-name glm \
-      --max-model-len 135000 \
+      --max-model-len 200000 \
       --max-num-batched-tokens 256 \
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.92 \
@@ -4840,8 +4840,8 @@ refer to their own deployment topologies in Sections 5.1.4 and 5.2.
 | 1M PD | A3 | Prefill | 16 | 1 | 1 | 2 | 16 | 64 | 16384 | 1048576 | 1 |
 | 1M PD | A3 | Decode | 4 | 8 | 4 | 1 | 4 | 8 | 48 | 1048576 | 5 |
 | Colocated | A2 | Shared | 8 | 4 | 1 | 1 | 1 | 128 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Prefill | 8 | 2 | 1 | 4 | 1 | 64 | 8192 | 135000 | 3 |
-| Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 135000 | 3 |
+| Ordinary PD | A2 | Prefill | 8 | 2 | 1 | 4 | 1 | 64 | 8192 | 200000 | 3 |
+| Ordinary PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 32 | 256 | 200000 | 3 |
 | Pooled PD | A2 | Prefill | 8 | 1 | 1 | 4 | 1 | 64 | 16384 | 200000 | 1 |
 | Pooled PD | A2 | Decode | 2 | 16 | 4 | 1 | 1 | 64 | 256 | 200000 | 5 |
 
