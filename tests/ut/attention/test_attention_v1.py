@@ -140,17 +140,17 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
@@ -161,14 +161,14 @@ class TestAscendAttentionBackend(TestBase):
         self.assertFalse(OtherAttentionBackend.supports_pcp())
 
     def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_impl_cls(),
                 AscendAttentionDCPImpl,
             )
 
     def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
+        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
             self.assertIs(
                 AscendAttentionBackend.get_builder_cls(),
                 AscendAttentionDCPMetadataBuilder,
@@ -225,13 +225,13 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(result)
 
     def test_pcp_mode_is_initialized_from_config(self):
-        self.assertFalse(self.builder.pcp_enabled)
+        self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
         pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
@@ -300,6 +300,7 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
     builder._finalize_pcp_metadata(metadata, expanded_slot_mapping)
 
+    assert metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping is expanded_slot_mapping
     assert metadata.pcp_local_num_input_tokens == 4
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
@@ -378,7 +379,7 @@ def test_pcp_cache_write_uses_gathered_inputs_and_restores_metadata(cache_write_
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
@@ -389,6 +390,25 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     )
 
     assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
+
+
+def test_pcp_replicated_draft_decode_writes_cache_locally() -> None:
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.use_pcp = True
+    impl.key_cache = object()
+    # A draft decode built without a PCP context has no PCP-local layout.
+    query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    metadata = AscendMetadata(model_runner_type="generate", slot_mapping=torch.tensor([3, 4]))
+    layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
+    written = (query, key, value, output)
+    with (
+        patch.object(impl, "_reshape_and_cache_pcp", return_value=written) as pcp_write,
+        patch.object(impl, "reshape_and_cache", return_value=written) as write,
+        patch.object(impl, "forward_impl", return_value=output),
+    ):
+        impl.forward(layer, query, key, value, (), metadata, output)
+    pcp_write.assert_not_called()
+    write.assert_called_once()
 
 
 class TestAscendAttentionBackendImpl(TestBase):
@@ -412,6 +432,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
         self.attn_metadata = MagicMock()
+        self.attn_metadata.uses_pcp_sharded_layout = False
         self.attn_metadata.return_value = "1"
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"

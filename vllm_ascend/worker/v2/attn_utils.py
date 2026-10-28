@@ -335,12 +335,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
         # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
-        # the spec while specs are built. The v0.31.0 lane has no ``is_draft``
+        # the spec while specs are built. The v0.32.0 lane has no ``is_draft``
         # field and annotates EAGLE groups through the packed hook, so only main
         # propagates the flag here; without it no group is flagged as the draft
         # model's and the coordinator fallback treats the target groups as
         # EAGLE groups too.
-        if not vllm_version_is("0.31.0") and getattr(attn_module, "is_draft_layer", False):
+        if not vllm_version_is("0.32.0") and getattr(attn_module, "is_draft_layer", False):
             spec = replace(spec, is_draft=True)
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec) and getattr(attn_module, "align_kv_cache_with_mamba", True):
@@ -967,7 +967,7 @@ def _uses_single_raw_mla_cache(
     if getattr(attn_module, "indexer", None) is not None:
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         # PCP gathers and sharded-decode writes still use the legacy
         # preprocessing contract. Keep their allocation compatible with it.
         return False

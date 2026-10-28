@@ -60,7 +60,7 @@ During engine initialization, the system profiles actual model performance:
 3. **Fitting**: Fit the quadratic model using least squares
 4. **Target Setting**: Calculate target per-chunk latency based on `base_chunk_size`
 
-In PP mode, all workers execute forward passes to stay synchronized, but only the first PP rank's timing results are used for scheduling decisions.
+In PP mode, all workers execute forward passes to stay synchronized, but scheduling consumes timing results only from the designated output rank, which is the first rank of the final PP stage.
 
 ### Runtime Phase: Dynamic Prediction
 
@@ -79,8 +79,8 @@ $$x = \frac{-(2aL + b) + \sqrt{(2aL + b)^2 + 4aT}}{2a}$$
 The result goes through post-processing:
 
 1. **Smoothing**: Blend predicted chunk size with `base_chunk_size` using `smooth_factor`
-2. **Alignment**: Round down to multiple of `page_size` (minimum 64)
-3. **Constraints**: Not exceeding `max_model_len - history_len` and `max_num_scheduled_tokens`
+2. **Alignment**: Round up to a multiple of `max(page_size, 64)`
+3. **Constraints**: Cap the aligned prediction by the remaining request length and the scheduler token budget
 
 ### Online Calibration
 
@@ -88,11 +88,11 @@ Since profiling only covers sequences up to `max_num_batched_tokens` (typically 
 
 **Extended Model (two variables):**
 
-$$f(C, H) = a \cdot C(C+H) + b \cdot (C+H) + c$$
+$$f(C, H) = a \cdot C(C+H) + b \cdot C + c$$
 
 Where $C$ is chunk size and $H$ is prefix history length.
 
-After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual execution time are recorded. Once enough data points accumulate (5-30), model parameters are updated using least squares.
+After each batch, the feature vector `[Σ C(C+H), Σ C, N]` and the actual execution time are recorded. From 5 through `max_fit_chunk` data points (30 by default), the model parameters are refitted using non-negative least squares.
 
 ## Architecture
 
@@ -105,7 +105,7 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 | **Scheduler** | `vllm_ascend/core/scheduler_profiling_chunk.py` | Integrate CPP scheduling |
 | **EngineCore** | `vllm_ascend/patch/platform/patch_profiling_chunk.py` | Startup profiling, record execution time |
 | **NPUWorker** | `vllm_ascend/worker/worker.py` | Execute real forward pass profiling |
-| **NPUModelRunner** | `vllm_ascend/worker/v1/model_runner.py` | `profile_cpp=True` mode |
+| **NPUModelRunner** | `vllm_ascend/worker/v2/model_runner.py` | Build and execute the CPP profiling dummy prefill |
 
 ### Workflow
 
@@ -150,7 +150,6 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 - **Incompatible with Balance Scheduling**: Cannot enable
   `additional_config.scheduler_config.enable_balance_scheduling`
 - **Startup Overhead**: Profiling phase adds tens of seconds to initialization
-- **Memory**: No additional runtime memory overhead; profiling reuses existing dummy_run mechanism
 
 ## References
 

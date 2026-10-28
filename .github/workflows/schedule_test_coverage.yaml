@@ -33,25 +33,24 @@ defaults:
   run:
     shell: bash -el {0}
 
+# Extra coverage branch collected with the main run.
+# latest = newest releases/v* branch. none = skip. Or a releases/v* branch name.
+env:
+  COVERAGE_BRANCH: latest
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm_ascend_ref || 'main' }}
   cancel-in-progress: true
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: github.event_name == 'workflow_dispatch'
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.full-scope.outputs.has_tests }}
-      test_groups: ${{ steps.full-scope.outputs.test_groups }}
-      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
-      csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
-      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
-      base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
-      main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
-      release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
+      has_tests: ${{ steps.plan.outputs.has_tests }}
+      targets: ${{ steps.plan.outputs.targets }}
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -59,65 +58,173 @@ jobs:
           ref: ${{ inputs.vllm_ascend_ref || 'main' }}
           fetch-depth: 0
 
-      - name: Resolve refs
-        id: resolve-refs
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git fetch origin main
-          echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
-            exit 1
-          }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+      - name: Checkout coverage helper from main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: workflow-src
+          fetch-depth: 1
+          sparse-checkout: .github/workflows/scripts/resolve_latest_release_branch.py
+          sparse-checkout-cone-mode: false
 
-      - name: Select all tests
-        id: full-scope
+      - name: Resolve refs and select tests
+        id: plan
+        env:
+          VLLM_ASCEND_REF: ${{ inputs.vllm_ascend_ref || 'main' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HELPER_SCRIPT: ${{ github.workspace }}/workflow-src/.github/workflows/scripts/resolve_latest_release_branch.py
         run: |
-          pip install regex pyyaml
+          set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          python3 .github/workflows/scripts/select_tests.py --all-tests
+          pip install regex pyyaml
+          python3 - << 'PY'
+          import importlib.util
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          workspace = os.environ["GITHUB_WORKSPACE"]
+          release_branch = re.compile(r"^releases/v[0-9][0-9A-Za-z._-]*$")
+          commit_re = re.compile(r"^[0-9a-f]{7,40}$")
+          tag_re = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$")
+
+          spec = importlib.util.spec_from_file_location(
+              "resolve_latest_release_branch",
+              os.environ["HELPER_SCRIPT"],
+          )
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+
+          def git(root, *args, check=True):
+              result = subprocess.run(
+                  ["git", "-C", root, *args],
+                  check=check,
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode != 0:
+                  raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
+              return result.stdout.strip()
+
+          def read_pin(root):
+              main_commit = open(os.path.join(root, ".github/vllm-main-verified.commit"), encoding="utf-8").read()
+              release_tag = open(os.path.join(root, ".github/vllm-release-tag.commit"), encoding="utf-8").read()
+              main_commit = "".join(main_commit.split())
+              release_tag = "".join(release_tag.split())
+              if commit_re.fullmatch(main_commit) is None:
+                  raise SystemExit(f"::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: {main_commit}")
+              if tag_re.fullmatch(release_tag) is None:
+                  raise SystemExit(f"::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: {release_tag}")
+              return main_commit, release_tag
+
+          def select_tests(root):
+              output_path = os.path.join(root, ".coverage-select-output.txt")
+              env = os.environ.copy()
+              env["GITHUB_OUTPUT"] = output_path
+              script = os.path.join(root, ".github/workflows/scripts/select_tests.py")
+              subprocess.run([sys.executable, script, "--all-tests"], cwd=root, env=env, check=True)
+              parsed = {}
+              for line in open(output_path, encoding="utf-8"):
+                  if "=" not in line:
+                      continue
+                  key, value = line.split("=", 1)
+                  parsed[key.strip()] = value.rstrip("\n")
+              return parsed
+
+          def plan_for(root, branch_name):
+              git(root, "config", "--global", "--add", "safe.directory", root)
+              if release_branch.fullmatch(branch_name):
+                  base_ref = branch_name
+                  base_sha = git(root, "rev-parse", "HEAD")
+                  suffix = helper.coverage_file_suffix(branch_name)
+              else:
+                  git(root, "fetch", "origin", "main")
+                  base_ref = "main"
+                  base_sha = git(root, "rev-parse", "FETCH_HEAD")
+                  suffix = ""
+              main_commit, release_tag = read_pin(root)
+              selected = select_tests(root)
+              print(f"Planned {branch_name or base_ref}: suffix={suffix or '(none)'} has_tests={selected.get('has_tests')}", file=sys.stderr)
+              return {
+                  "base_ref": base_ref,
+                  "base_sha": base_sha,
+                  "vllm_ascend_ref": git(root, "rev-parse", "HEAD"),
+                  "coverage_file_suffix": suffix,
+                  "main_commit": main_commit,
+                  "release_tag": release_tag,
+                  "has_tests": selected.get("has_tests", "false"),
+                  "test_groups": selected.get("test_groups", "[]"),
+                  "csrc_cache_target_ids": selected.get("csrc_cache_target_ids", "[]"),
+              }
+
+          def resolve_extra_branch():
+              requested = os.environ["COVERAGE_BRANCH"]
+              primary = os.environ["VLLM_ASCEND_REF"]
+              if requested in ("", "none") or requested == primary:
+                  return ""
+              if requested == "latest":
+                  listing = git(workspace, "ls-remote", "--heads", "origin", "refs/heads/releases/v*")
+                  names = [line.split()[1].removeprefix("refs/heads/") for line in listing.splitlines() if line.strip()]
+                  return helper.resolve_latest_release_branch(os.environ["GITHUB_REPOSITORY"], names, os.environ["GITHUB_TOKEN"])
+              if release_branch.fullmatch(requested):
+                  return requested
+              raise SystemExit(f"::error::COVERAGE_BRANCH must be latest, none, or a releases/v* branch: {requested}")
+
+          plans = [plan_for(workspace, git(workspace, "rev-parse", "--abbrev-ref", "HEAD"))]
+          extra = resolve_extra_branch()
+          if extra and extra != plans[0]["base_ref"]:
+              git(workspace, "fetch", "origin", extra)
+              extra_sha = git(workspace, "rev-parse", "FETCH_HEAD")
+              worktree = "/tmp/coverage-extra"
+              subprocess.run(["git", "-C", workspace, "worktree", "remove", "--force", worktree], check=False)
+              git(workspace, "worktree", "add", "--detach", worktree, extra_sha)
+              plans.append(plan_for(worktree, extra))
+
+          runnable = [plan for plan in plans if plan["has_tests"] == "true"]
+          payload = json.dumps(runnable, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"has_tests={'true' if runnable else 'false'}\n")
+              handle.write(f"targets={payload}\n")
+          print(f"Coverage targets: {[plan['base_ref'] for plan in runnable]}", file=sys.stderr)
+          PY
 
   ensure-csrc-cache:
     needs: select-full-tests
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
+    name: ensure-csrc-cache (${{ matrix.target.base_ref }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.select-full-tests.outputs.targets) }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     secrets:
       HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
       HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
-      target_ids: ${{ needs.select-full-tests.outputs.csrc_cache_target_ids }}
-      source_ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
-      base_ref: main
-      base_sha: ${{ needs.select-full-tests.outputs.base_sha }}
+      target_ids: ${{ matrix.target.csrc_cache_target_ids }}
+      source_ref: ${{ matrix.target.vllm_ascend_ref }}
+      base_ref: ${{ matrix.target.base_ref }}
+      base_sha: ${{ matrix.target.base_sha }}
 
   run-full-tests:
     needs: [select-full-tests, ensure-csrc-cache]
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
+    name: run-full-tests (${{ matrix.target.base_ref }})
     strategy:
       fail-fast: false
       matrix:
-        vllm_version:
-          - ${{ needs.select-full-tests.outputs.main_commit }}
+        target: ${{ fromJSON(needs.select-full-tests.outputs.targets) }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
-      ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
-      base_ref: main
-      base_sha: ${{ needs.select-full-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-full-tests.outputs.test_groups }}
+      vllm: ${{ matrix.target.main_commit }}
+      ref: ${{ matrix.target.vllm_ascend_ref }}
+      base_ref: ${{ matrix.target.base_ref }}
+      base_sha: ${{ matrix.target.base_sha }}
+      test_groups: ${{ matrix.target.test_groups }}
       enable-coverage: true
+      coverage-file-suffix: ${{ matrix.target.coverage_file_suffix }}
       timeout-minutes: 180
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}

@@ -28,7 +28,7 @@ def test_packed_groups_use_matching_eagle_annotation_api(use_fallback):
     )
     with (
         patch.object(cache_patch, "_kv_cache_planning", upstream),
-        patch.object(cache_patch, "vllm_version_is", lambda version: version == "0.31.0"),
+        patch.object(cache_patch, "vllm_version_is", lambda version: version == "0.32.0"),
         patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
         patch.object(cache_patch, "group_cache_specs", return_value=specs),
         patch.object(cache_patch, "make_cache_groups", return_value=groups),

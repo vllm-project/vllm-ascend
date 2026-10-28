@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
@@ -554,7 +555,7 @@ def test_sfa_pcp_dcp_empty_local_prefill_uses_global_kv_view(global_has_prefill:
     builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
     builder.device = torch.device("cpu")
     builder.decode_threshold = 1
-    builder.dcp_enabled = False
+    builder.use_dcp = False
     builder.dcp_local_seq_lens_buf = torch.empty(1, dtype=torch.int32)
     local_block_table = torch.tensor([[7]], dtype=torch.int32)
     global_block_table = torch.tensor([[7], [9]], dtype=torch.int32)
@@ -682,7 +683,14 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.is_pcp_decode_sharded = False
-    attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1)
+    impl.qk_rope_head_dim = 64
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_input_tokens=2,
+        uses_pcp_sharded_layout=True,
+        pcp_slot_mapping=torch.arange(4),
+    )
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
     sin = cos + 10
@@ -713,6 +721,154 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
         gathered_slots,
         attn_metadata,
     )
+
+
+def test_sfa_pcp_gathers_nope_kv_without_rope() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
+    impl.qk_rope_head_dim = 0
+    attn_metadata = SimpleNamespace(num_decode_tokens=1, num_prefills=1, num_input_tokens=2)
+    kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
+    slots = torch.tensor([0, 1, 0, 5], dtype=torch.int64)
+    attn_metadata.uses_pcp_sharded_layout = True
+    attn_metadata.pcp_slot_mapping = slots
+    gathered_prefill_kv = torch.tensor([[3.0, 4.0, 5.0], [9.0, 10.0, 11.0]])
+    gathered_kv = torch.cat((kv_no_split[:1], gathered_prefill_kv))
+    gathered_slots = torch.tensor([0, 1, 5])
+    kv_cache = (torch.empty(1),)
+
+    with (
+        patch(
+            "vllm.v1.attention.ops.pcp.get_pcp_group",
+            return_value=SimpleNamespace(world_size=2, all_gather=Mock(return_value=gathered_prefill_kv)),
+        ) as group,
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
+            wraps=_gather_prefill_cache_inputs,
+        ) as gather,
+        patch.object(AscendSFAImpl, "exec_kv", autospec=True, return_value="written") as base_exec_kv,
+    ):
+        result = impl.exec_kv(kv_no_split, None, None, kv_cache, slots, attn_metadata)
+
+    assert result == "written"
+    gather.assert_called_once_with((kv_no_split,), slots, 1)
+    group.return_value.all_gather.assert_called_once()
+    torch.testing.assert_close(group.return_value.all_gather.call_args.args[0], kv_no_split[1:])
+    base_exec_kv.assert_called_once()
+    args = base_exec_kv.call_args.args
+    assert args[0] is impl and args[3] is None and args[2] is None
+    assert args[4] is kv_cache and args[6] is attn_metadata
+    torch.testing.assert_close(args[1], gathered_kv)
+    torch.testing.assert_close(args[5], gathered_slots)
+
+
+@pytest.mark.parametrize("packed_cache", [False, True])
+@pytest.mark.parametrize("num_decode_tokens", [0, 1])
+def test_sfa_pcp_gathers_nope_kv_with_padded_rank_slots(packed_cache: bool, num_decode_tokens: int) -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = packed_cache
+    impl.enable_sparse_sfa_turboquant = False
+    attn_metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_prefills=1,
+        num_input_tokens=8,
+    )
+    kv_no_split = torch.arange(5, dtype=torch.float32).view(5, 1)
+    # Slot mapping keeps eight positions per PCP rank, while NoPE KV has five.
+    slots = torch.tensor([0, 1, 2, 3, 4, -1, -1, -1, 8, 9, 10, 11, 12, -1, -1, -1])
+    slots[8 : 8 + num_decode_tokens] = slots[:num_decode_tokens]
+    attn_metadata.uses_pcp_sharded_layout = True
+    attn_metadata.pcp_slot_mapping = slots
+    kv_cache = (torch.empty(1),)
+
+    def all_gather(tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
+        padded_kv = torch.tensor([0, 1, 2, 3, 4, 0, 0, 0]).view(8, 1).float()
+        torch.testing.assert_close(tensor, padded_kv[num_decode_tokens:])
+        remote_kv = torch.arange(10 + num_decode_tokens, 18, dtype=torch.float32).view(-1, 1)
+        return torch.cat((tensor, remote_kv), dim=dim)
+
+    group = SimpleNamespace(
+        world_size=2,
+        all_gather=all_gather,
+    )
+
+    with (
+        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch.object(AscendSFAImpl, "exec_kv", autospec=True, return_value="written") as base_exec_kv,
+    ):
+        result = impl.exec_kv(kv_no_split, None, None, kv_cache, slots, attn_metadata)
+
+    assert result == "written"
+    gathered_kv = base_exec_kv.call_args.args[1]
+    gathered_slots = base_exec_kv.call_args.args[5]
+    expected_kv = torch.tensor([0, 1, 2, 3, 4, 0, 0, 0, *range(10 + num_decode_tokens, 18)]).view(-1, 1).float()
+    torch.testing.assert_close(gathered_kv, expected_kv)
+    torch.testing.assert_close(gathered_slots, torch.cat((slots[:8], slots[8 + num_decode_tokens :])))
+
+
+def test_sfa_pcp_packed_kv_writes_gather_order_slots() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.enable_sparse_sfa_turboquant = False
+    impl.sfa_qsfa_packed_kv_head_dim = 4
+    metadata = SimpleNamespace(num_actual_tokens=1)
+    k_pe = torch.ones(2, 1, 1)
+    k_nope = torch.ones(2, 1, 2)
+    knope_scale = torch.ones(2, 1, 1)
+    kv_cache = (torch.empty(1, 1, 1, 4),)
+
+    with patch("vllm_ascend.attention.sfa_v1.DeviceOperator.scatter_cache") as scatter:
+        impl._store_parallel_kv(
+            k_pe,
+            k_nope,
+            knope_scale,
+            None,
+            [],
+            kv_cache,
+            torch.tensor([4, 8]),
+            metadata,
+            False,
+        )
+
+    scatter.assert_called_once()
+    torch.testing.assert_close(scatter.call_args.args[1], torch.tensor([[4], [8]]))
+    assert scatter.call_args.args[2].shape[0] == 2
+
+
+def test_sfa_pcp_gathers_nope_kv_when_local_rank_has_no_prefill() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.is_pcp_decode_sharded = False
+    impl.qk_rope_head_dim = 0
+    impl.enable_sparse_sfa_c8 = False
+    impl.enable_sparse_sfa_turboquant = False
+    metadata = SimpleNamespace(
+        num_decode_tokens=0,
+        num_prefills=0,
+        num_input_tokens=8,
+        pcp_has_global_prefill=True,
+    )
+    slots = torch.tensor([-1] * 8 + [8, 9, 10, -1, -1, -1, -1, -1])
+    metadata.uses_pcp_sharded_layout = True
+    metadata.pcp_slot_mapping = slots
+    group = SimpleNamespace(
+        world_size=2,
+        all_gather=lambda tensor, dim=0: torch.cat((tensor, torch.arange(10, 18).view(8, 1).float()), dim=dim),
+    )
+
+    with (
+        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
+        patch.object(AscendSFAImpl, "exec_kv", autospec=True, return_value="written") as base_exec_kv,
+    ):
+        result = impl.exec_kv(torch.empty(0, 1), None, None, (torch.empty(1),), slots, metadata)
+
+    assert result == "written"
+    gathered_kv = base_exec_kv.call_args.args[1]
+    gathered_slots = base_exec_kv.call_args.args[5]
+    assert gathered_kv.shape == (16, 1)
+    torch.testing.assert_close(gathered_slots, slots)
+    torch.testing.assert_close(gathered_kv[gathered_slots >= 0], torch.tensor([[10.0], [11.0], [12.0]]))
 
 
 def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
@@ -1099,7 +1255,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
         )
 
         with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp", return_value=True) as dcp,
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True) as dcp,
             patch.object(
                 DCPMetadataBuilderMixin,
                 "__init__",
@@ -1118,7 +1274,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
             )
 
         dcp.assert_called_once_with()
-        assert builder.dcp_enabled
+        assert builder.use_dcp
         assert builder.dcp_local_seq_lens_buf.shape == (expected_num_reqs,)
         assert builder.block_table_replicated_view_buf.shape == (
             expected_num_reqs,
@@ -1198,7 +1354,7 @@ def test_sfa_dcp_updates_dsa_cp_local_slot_mapping_with_padding() -> None:
 @pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
 def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, is_producer, recompute, query_lens):
     builder = _make_builder()
-    builder.dcp_enabled = True
+    builder.use_dcp = True
     builder.decode_threshold = 3
     builder.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
@@ -1227,7 +1383,7 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
             return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp",
+            "vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled",
             side_effect=AssertionError("use cached DCP state"),
         ),
         patch.object(builder, "_get_dcp_local_block_table", return_value=blocks),
@@ -1369,6 +1525,9 @@ def test_sfa_pcp_prolog_gathers_only_prefill_kv(cache_dtype, pcp_size, rank, num
     metadata = SimpleNamespace(
         num_decode_tokens=num_decode_tokens,
         num_prefills=int(rows > 0),
+        num_input_tokens=num_tokens,
+        uses_pcp_sharded_layout=True,
+        pcp_slot_mapping=slots.flatten(),
         pcp_has_global_prefill=False,
         pcp_prolog_local_slots=expected_local_slots if rows else None,
         pcp_prolog_global_slots=slots[:, num_decode_tokens:].reshape(-1) if rows else None,
@@ -1498,7 +1657,9 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
     builder = _make_sfa_split_builder(use_pcp=True)
     common = _make_sfa_split_common([1], [False], 1, 1, padded_tokens=2)
     common.slot_mapping = torch.tensor([0, -1, -1, -1])
-    context = SimpleNamespace(global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([global_has_prefill])))
+    context = SimpleNamespace(
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([global_has_prefill])),
+    )
     group = SimpleNamespace(world_size=2, rank_in_group=1)
     with (
         patch(
@@ -1511,6 +1672,8 @@ def test_sfa_pcp_metadata_keeps_global_prefill_when_local_rank_is_empty(global_h
         metadata = builder.build(0, common)
         draft_metadata = builder.build_for_drafting(common, draft_index=0)
     assert metadata.num_prefills == 0
+    assert metadata.uses_pcp_sharded_layout
+    assert not draft_metadata.uses_pcp_sharded_layout
     assert metadata.pcp_has_global_prefill is global_has_prefill
     assert not draft_metadata.pcp_has_global_prefill
     if global_has_prefill:
@@ -1544,11 +1707,15 @@ def test_sfa_pcp_builder_prepares_local_prolog_slots():
 def test_sfa_pcp_empty_local_prefill_joins_kv_gathers():
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
     impl.is_pcp_decode_sharded = False
+    impl.qk_rope_head_dim = 64
     impl.enable_sparse_sfa_c8 = False
     impl.enable_sparse_sfa_turboquant = False
     metadata = SimpleNamespace(
         num_decode_tokens=1,
         num_prefills=0,
+        num_input_tokens=2,
+        uses_pcp_sharded_layout=True,
+        pcp_slot_mapping=torch.tensor([0, 1, -1, -1], dtype=torch.int64),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=torch.tensor([0, -1], dtype=torch.int64),
         pcp_prolog_global_slots=torch.tensor([1, -1], dtype=torch.int64),
@@ -1596,6 +1763,9 @@ def test_sfa_pcp_empty_global_slots_skips_kv_gather():
     metadata = SimpleNamespace(
         num_decode_tokens=0,
         num_prefills=0,
+        num_input_tokens=1,
+        uses_pcp_sharded_layout=True,
+        pcp_slot_mapping=torch.full((2,), -1),
         pcp_has_global_prefill=True,
         pcp_prolog_local_slots=slots,
         pcp_prolog_global_slots=slots,
@@ -1625,7 +1795,44 @@ def test_sfa_pcp_padded_decode_skips_kv_gather():
     hidden = torch.zeros((num_input_tokens, 3))
     slots = torch.cat((torch.arange(num_decode_tokens), torch.full((num_decode_tokens,), -1)))
     cache = (torch.empty(0), torch.empty(0))
-    metadata = SimpleNamespace(num_decode_tokens=num_decode_tokens, num_prefills=0, pcp_has_global_prefill=False)
+    metadata = SimpleNamespace(
+        num_decode_tokens=num_decode_tokens,
+        num_prefills=0,
+        num_input_tokens=num_input_tokens,
+        uses_pcp_sharded_layout=True,
+        pcp_slot_mapping=torch.cat((slots, torch.full((num_input_tokens,), -1))),
+        pcp_has_global_prefill=False,
+    )
+    output = (hidden, hidden, hidden, None)
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs") as gather,
+        patch.object(AscendSFAImpl, "_sfa_preprocess_prolog_v3", return_value=output),
+        patch.object(AscendSFAImpl, "exec_kv", return_value="written") as base_write,
+    ):
+        assert impl._sfa_preprocess_prolog_v3(hidden, cache, hidden, hidden, slots, attn_metadata=metadata) is output
+        assert impl.exec_kv(hidden, hidden, hidden, cache, slots, metadata) == "written"
+    group.assert_not_called()
+    gather.assert_not_called()
+    torch.testing.assert_close(base_write.call_args.args[4], slots)
+
+
+def test_sfa_pcp_replicated_draft_decode_skips_kv_gather():
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    # Sharded-decode config, but a draft decode built without a PCP context
+    # keeps an unexpanded slot mapping and runs replicated on every rank.
+    impl.is_pcp_decode_sharded = True
+    hidden = torch.zeros((2, 3))
+    slots = torch.tensor([5, 7])
+    cache = (torch.empty(0), torch.empty(0))
+    metadata = SimpleNamespace(
+        num_decode_tokens=0,
+        num_prefills=0,
+        num_input_tokens=2,
+        uses_pcp_sharded_layout=False,
+        pcp_slot_mapping=slots,
+        pcp_has_global_prefill=False,
+    )
     output = (hidden, hidden, hidden, None)
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group") as group,

@@ -33,7 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
@@ -75,7 +75,7 @@ class _NullPatch:
 
 
 def _supports_multimodal_inputs_patch(vllm_config=None):
-    """Keep the proposer on the vLLM 0.31 text-only path.
+    """Keep the proposer on the text-only path for both supported vLLM lanes.
 
     Both supported lanes read ``ModelConfig.supports_multimodal_inputs``.
     Set the fixture flags when a ``vllm_config`` is provided.
@@ -2414,10 +2414,6 @@ class TestRunMergedDraft(TestBase):
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
         assert hasattr(vllm.config, "PassConfig"), "PassConfig not found"
-        # vLLM main (#60517) removed PassConfig.enable_sp with the torch.compile
-        # sequence-parallelism pass; v0.31.0 still declares it.
-        if vllm_version_is("0.31.0"):
-            assert "enable_sp" in vllm.config.PassConfig.__dataclass_fields__
 
         import vllm.forward_context
 

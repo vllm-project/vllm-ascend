@@ -36,7 +36,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
-from vllm_ascend.attention.utils import split_decodes_and_prefills
+from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -46,7 +46,6 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
@@ -85,6 +84,8 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Resolved by the builder; execution must not infer layout from tensor sizes.
+    uses_pcp_sharded_layout: bool = False
     # Optional selection supplied by the owning attention implementation.
     # Projection, rope and cache writes continue to use this backend.
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
@@ -149,8 +150,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @classmethod
     def supports_batch_invariance(cls) -> bool:
         # vLLM #60271 added the batch-invariance support check in
-        # `init_attn_backend` on main; the v0.31.0 lane has no such check.
-        return not vllm_version_is("0.31.0")
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -220,7 +221,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # non-replicated token across the CP group, DSA-CP all-gathers the
         # indexer k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
-        self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
         self._dsa_cp_active = enable_dsa_cp()
 
@@ -372,11 +373,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k across the TP group (its padded slot mapping already covers the
         gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
-        if self._pcp_active:
+        if self.use_pcp:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
             num_replicated_tokens = get_pcp_num_replicated_tokens(
                 indexer_metadata.num_decode_tokens, self._is_pcp_decode_sharded
             )
+            if not indexer_metadata.uses_pcp_sharded_layout:
+                # An unexpanded slot mapping (e.g. a replicated draft decode)
+                # means every rank holds the same tokens: write them locally.
+                num_replicated_tokens = indexer_metadata.num_actual_tokens
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_replicated_tokens)
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
@@ -1024,14 +1029,16 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        is_pcp_sharded = uses_pcp_sharded_layout(common_attn_metadata, self.use_pcp)
+        pcp_context = kwargs.get("pcp_context")
         if self.use_dcp:
             block_table, slot_mapping = self._build_dcp_cache_metadata(
                 common_attn_metadata,
-                kwargs.get("pcp_context"),
+                pcp_context,
                 kwargs.get("pcp_cache_group_idx"),
                 buffer_key,
             )
-        elif self.use_pcp:
+        elif is_pcp_sharded:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
@@ -1076,7 +1083,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if self.use_pcp:
+        if is_pcp_sharded:
             # Preserve the decode boundary for PCP's cache-write gather.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
@@ -1098,4 +1105,5 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
+            uses_pcp_sharded_layout=is_pcp_sharded,
         )

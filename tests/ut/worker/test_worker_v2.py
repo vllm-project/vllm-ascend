@@ -9,6 +9,18 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    def test_worker_imports_planning_helpers_from_supported_lane(self):
+        from vllm_ascend.utils import vllm_version_is
+        from vllm_ascend.worker import worker
+
+        if vllm_version_is("0.32.0"):
+            from vllm.v1.core import kv_cache_utils as planning
+        else:
+            from vllm.v1.core import kv_cache_planning as planning
+
+        self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
+        self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
+
     def test_get_encoder_cudagraph_stats_is_serializable(self):
         from vllm_ascend.worker.worker import NPUWorker
 

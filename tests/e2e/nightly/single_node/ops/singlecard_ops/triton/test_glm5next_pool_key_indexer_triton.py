@@ -5,6 +5,8 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton import glm5_next_lightning_indexer as indexer
 
 # GLM-5.3-Flash indexer parameters, including its actual top-k width.
@@ -51,6 +53,9 @@ def _assert_selection(result, query, cache, weights, ends, pool_lens, table, pos
 
 
 # Cover both sides of the 128-pool score tile, including replay with shorter visibility.
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("max_pool_seq_len", [0, 4, 127, 128, 129, 512, 2050])
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
@@ -111,6 +116,9 @@ def test_pool_selection_real_shape_paging_and_causal_tail(max_pool_seq_len, use_
         torch.testing.assert_close(cache.cpu(), backing[:, :CACHE_BLOCK_SIZE], rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 def test_empty_query():
     result = indexer.glm5_next_lightning_indexer_triton(
         torch.empty(0, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="npu"),

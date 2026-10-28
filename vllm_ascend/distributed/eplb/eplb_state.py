@@ -180,7 +180,7 @@ class AscendEplbState(_eplb_state.EplbState):
         """Whether the selected policy transforms temporal load samples."""
         return callable(getattr(getattr(self, "policy", None), "prepare_local_load_stats", None))
 
-    def add_model(self, model, model_config) -> None:
+    def add_model(self, model, model_config, model_name: str | None = None) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
         if self._hixl_session is not None:
             raise RuntimeError("Cannot add EPLB models after HIXL initialization")
@@ -190,7 +190,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 self.parallel_config.eplb_config.policy,
                 self._configured_policy,
             ):
-                super().add_model(model, model_config)
+                super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
