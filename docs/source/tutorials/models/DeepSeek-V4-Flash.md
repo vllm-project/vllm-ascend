@@ -219,7 +219,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
-        --api-server-count 1 \
         --kv-cache-dtype fp8 \
         --attention_config.indexer_kv_dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -247,7 +246,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --max-num-batched-tokens 10240 \
         --served-model-name dsv4 \
         --gpu-memory-utilization 0.9 \
-        --api-server-count 1 \
         --max-num-seqs 64 \
         --data-parallel-size 4 \
         --tensor-parallel-size 4 \
@@ -745,6 +743,8 @@ The following sections describe multi-node PD separation deployment on Atlas 800
     - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 
     - `--enforce-eager` forces eager execution on Prefill nodes instead of graph compilation.
+
+    - `--async-scheduling` enables asynchronous scheduling to overlap CPU scheduling work with model execution.
 
     - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
 
@@ -3075,7 +3075,7 @@ This section verifies basic inference functionality for all deployment modes. Fo
 
 Once your server is started, you can query the model with input prompts:
 
-In <node0_ip>:<port>, use the IP address and port number of the primary node. If the primary and standby nodes are separated, use the IP address and port number of the proxy node.
+Replace `<node0_ip>` and `<port>` with the IP address and port of the API server for the single-node deployment in Section 5.1. For the PD separation deployment in Section 5.2 or the KV Cache Pool deployment in Section 5.3, use the proxy's IP address and port, since requests are routed through the proxy to the Prefill and Decode instances.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
