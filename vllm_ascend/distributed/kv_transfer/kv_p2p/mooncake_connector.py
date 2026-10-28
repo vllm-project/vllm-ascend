@@ -1780,10 +1780,11 @@ class MooncakeConnectorScheduler:
             * vllm_config.parallel_config.pipeline_parallel_size
         )
 
-        # Handshake base port
+        # Use the serving index, which survives dense-engine DP rank reset.
+        # Keep scheduler metadata and worker handshake ports consistent.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
@@ -2209,10 +2210,11 @@ class MooncakeConnectorWorker:
         self._use_request_level_recv_errors = self._is_hma_required or len(kv_cache_config.kv_cache_groups) > 1
         self._layer_specs = self._build_layer_specs_from_kv_cache_config(kv_cache_config)
 
-        # Handshake base port
+        # Use the serving index, which survives dense-engine DP rank reset.
+        # Keep scheduler metadata and worker handshake ports consistent.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size

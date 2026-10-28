@@ -15,7 +15,7 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
     The prebuilt image includes a validated Python and Ascend user-space software stack, including CANN, NNAL, PyTorch, TorchNPU, vLLM, and vLLM Ascend.
 
-    A2, A3, and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
+    Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
 
     For the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 

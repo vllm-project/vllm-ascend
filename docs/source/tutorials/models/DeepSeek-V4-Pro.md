@@ -38,7 +38,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantization): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
-- `DeepSeek-V4-Pro-0813`: For Ascend 950DT products, use the original [`DeepSeek-V4-Pro-0813`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in Section 5.1 and the 2P1D example in Section 5.2 use Ascend 950DT products (96GB × 8) with this checkpoint.
+- `DeepSeek-V4-Pro-0813`: For Ascend 950DT products, use the original [`DeepSeek-V4-Pro-0813`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813) weights released by DeepSeek on Hugging Face. The Attention weights use MXFP8, while the MoE weights use MXFP4 with 4-bit weights and 8-bit activation computation (W4A8). No Ascend-specific quantization or weight conversion is required. Both the mixed-deployment example in [Section 5.1](#51-multi-node-online-deployment) and the 2P1D example in [Section 5.2](#52-multi-node-pd-separation-deployment) use Ascend 950DT products (96GB × 8) with this checkpoint.
 
 - `DeepSeek-V4-Pro-0813-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
@@ -2560,7 +2560,7 @@ Select the tab that matches the deployment hardware.
 
 Once your server is started, you can query the model with input prompts:
 
-Replace `<node0_ip>:<port>` with the IP address and port of the node that serves requests: for the mixed deployment in Section 5.1, use the primary node (Node0) that exposes the API server; for the PD separation deployment in Section 5.2, use the proxy node instead, since all requests are routed to the Prefill and Decode pools through the proxy.
+Replace `<node0_ip>:<port>` with the IP address and port of the node that serves requests: for the mixed deployment in [Section 5.1](#51-multi-node-online-deployment), use the primary node (Node0) that exposes the API server; for the PD separation deployment in [Section 5.2](#52-multi-node-pd-separation-deployment), use the proxy node instead, since all requests are routed to the Prefill and Decode pools through the proxy.
 
 ```shell
 curl http://<node0_ip>:<port>/v1/chat/completions \
@@ -2613,7 +2613,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ### 9.1 Recommended Configurations
 
-> **Note**: The following configurations are based on the Chapter 5 deployment examples and specific test environments. They are for reference only and are not globally optimal. In particular, the long-context configuration is a suggested starting point for inputs around 1M tokens and must be validated against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment. Refer to Section 9.2 for further tuning.
+> **Note**: The following configurations are based on the [Section 5](#5-online-service-deployment) deployment examples and specific test environments. They are for reference only and are not globally optimal. In particular, the long-context configuration is a suggested starting point for inputs around 1M tokens and must be validated against the actual input/output length, prefix cache hit rate, concurrency, memory usage, and deployment environment. Refer to [Section 9.2](#92-tuning-guidelines) for further tuning.
 
 #### Table 1: Scenario Overview
 

@@ -1828,6 +1828,7 @@ class MockVllmConfig:
         self.model_config.get_num_layers = MagicMock(return_value=32)
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
+        self.parallel_config.data_parallel_index = 0
         self.parallel_config.data_parallel_size = 1
         self.parallel_config.data_parallel_size_local = 1
         self.parallel_config.pipeline_parallel_size = 1
@@ -3431,6 +3432,25 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
+
+    def test_dp_replica_handshake_ports_are_distinct_and_match_scheduler(self):
+        module = MooncakeConnectorWorker.__module__
+        with patch(f"{module}.init_ascend_config"):
+            for independent_dp in (True, False):
+                with self.subTest(independent_dp=independent_dp):
+                    ports = []
+                    for dp_index in range(2):
+                        config = MockVllmConfig()
+                        config.parallel_config.data_parallel_size = 1 if independent_dp else 2
+                        config.parallel_config.data_parallel_size_local = 1 if independent_dp else 2
+                        config.parallel_config.data_parallel_rank = 0 if independent_dp else dp_index
+                        config.parallel_config.data_parallel_index = dp_index
+                        config.parallel_config.data_parallel_rank_local = dp_index
+                        worker = MooncakeConnectorWorker(config, f"engine-{dp_index}", MockKVCacheConfig())
+                        scheduler = MooncakeConnectorScheduler(config, f"engine-{dp_index}", MockKVCacheConfig())
+                        self.assertEqual(worker.side_channel_port, scheduler.side_channel_port)
+                        ports.append(worker.handshake_port)
+                    self.assertEqual(len(set(ports)), 2)
 
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
