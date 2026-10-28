@@ -5,7 +5,7 @@
 - **Function**: identifies finite logits for active requests, packs the boolean
   keep mask into bytes, and counts the kept vocabulary entries.
 - **Python entry point**: `sampling_mask_from_logits_npu` in
-  `vllm_ascend/ops/triton/v2/sample/sampling_mask.py`.
+  `vllm_ascend/ops/triton/sample/sampling_mask.py`.
 - **Triton kernel**: `_pack_sampling_mask_kernel_ascend`.
 - **Integration**: `vllm_ascend/patch/worker/patch_v2/patch_triton.py` binds the
   wrapper directly as `SamplingMaskTensors.from_logits`.

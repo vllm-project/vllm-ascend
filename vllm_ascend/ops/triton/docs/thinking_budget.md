@@ -11,7 +11,7 @@ thinking token budget:
   recent reasoning start and natural-end markers in committed token history.
 
 The Ascend implementations live in
-`vllm_ascend/ops/triton/v2/sample/thinking_budget.py`. They are rebound onto the
+`vllm_ascend/ops/triton/sample/thinking_budget.py`. They are rebound onto the
 upstream module by `vllm_ascend/patch/worker/patch_v2/patch_triton.py`; the
 upstream `ThinkingBudgetState`, `apply_thinking_budget`, and
 `_thinking_budget_kernel` remain unchanged.

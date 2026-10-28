@@ -11,7 +11,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 ACCURACY_CASES = [

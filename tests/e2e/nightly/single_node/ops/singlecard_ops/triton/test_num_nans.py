@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Kernel source: vllm_ascend/ops/triton/v2/metrics/num_nans.py
+# Kernel source: vllm_ascend/ops/triton/metrics/num_nans.py
 # Coverage: _num_nans_kernel
 """
 Extended precision test for the Ascend-specific _num_nans_kernel.
@@ -52,8 +52,8 @@ os.environ.setdefault("VLLM_VERSION", "0.32.0")
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.triton.metrics.num_nans import _num_nans_kernel  # noqa: E402
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
-from vllm_ascend.ops.triton.v2.metrics.num_nans import _num_nans_kernel  # noqa: E402
 
 BLOCK_SIZE = 8192
 SEED = 42

@@ -4,7 +4,7 @@
 """Greedy verification of draft tokens, as plain PyTorch.
 
 Hardware- and runner-neutral: the Triton variant used on standard hardware lives
-in ``vllm_ascend.ops.triton.reject_sample``, while these PyTorch ones are the
+in ``vllm_ascend.ops.triton.v1.reject_sample``, while these PyTorch ones are the
 fallback for 310P MRv2 and for the MRv1 rejection sampler. They live under the
 MRv2 worker because MRv1 is scheduled for removal and must not own shared code.
 """

@@ -5,11 +5,11 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.spec_decode.utils import (
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.v1.spec_decode.utils import (
     copy_and_expand_dflash_and_dspark_inputs_kernel,
     prepare_inputs_padded_kernel,
 )
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import (
     _COPY_EXPAND_TILE_SIZE,
     _compute_num_programs,

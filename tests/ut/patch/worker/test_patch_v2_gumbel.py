@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
+from vllm_ascend.ops.triton.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
 
 
