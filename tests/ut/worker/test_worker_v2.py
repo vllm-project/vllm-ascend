@@ -23,10 +23,15 @@ class TestNPUWorkerV2(TestBase):
 
         if vllm_version_is("0.32.0"):
             from vllm.v1.core import kv_cache_utils as planning
+
+            self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
         else:
             from vllm.v1.core import kv_cache_planning as planning
+            from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
-        self.assertIs(worker.get_kv_cache_groups, planning.get_kv_cache_groups)
+            # On main the grouping is resolved through the platform's
+            # pluggable KVCacheConfigBuilder, installed in worker.py.
+            self.assertIs(worker.get_kv_cache_config_builder, get_kv_cache_config_builder)
         self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
 
     def test_get_encoder_cudagraph_stats_is_serializable(self):
