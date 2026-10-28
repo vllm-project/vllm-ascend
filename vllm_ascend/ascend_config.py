@@ -1106,10 +1106,6 @@ class AscendConfig:
             for architecture in model_architectures
         )
         hf_text_config = vllm_config.model_config.hf_text_config
-        is_deepseek_v4 = any(
-            architecture in ("DeepseekV4ForCausalLM", "DeepseekV4ForConditionalGeneration")
-            for architecture in model_architectures
-        )
         # K3 projects the residual stream before the routed FFN. Other models
         # retain the existing hidden-size lookup and supported dimensions.
         hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None

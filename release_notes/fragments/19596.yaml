@@ -1,0 +1,4 @@
+pr: 19596
+entries:
+  - category: bugfix
+    text: Fixed MegaMoe expert-parallel detection for DSpark speculative decoding with prefill context parallelism on A5.
